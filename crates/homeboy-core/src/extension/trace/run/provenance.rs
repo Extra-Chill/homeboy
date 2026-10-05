@@ -137,7 +137,7 @@ pub(super) fn git_provenance(path: &Path, source: Option<&str>) -> TraceGitProve
         .unwrap_or(probe_path);
     TraceGitProvenance {
         path: git_root.to_string_lossy().to_string(),
-        sha: git_stdout(&git_root, &["rev-parse", "HEAD"]),
+        sha: homeboy_core::git::output_optional(&git_root, &["rev-parse", "HEAD"]),
         branch: homeboy_core::git::current_branch(&git_root),
         dirty: git_dirty_state(&git_root),
         source: source.map(ToString::to_string),
@@ -153,13 +153,6 @@ fn homeboy_git_provenance() -> TraceGitProvenance {
         .filter(|provenance| provenance.sha.is_some());
 
     provenance.unwrap_or_else(|| git_provenance(Path::new(manifest_dir), Some("homeboy")))
-}
-
-fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
-    homeboy_core::git::run_git(path, args, "trace provenance git probe")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 pub(super) fn git_dirty_state(path: &Path) -> Option<bool> {

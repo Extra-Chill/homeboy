@@ -436,9 +436,10 @@ fn checkout_hygiene_snapshot(
 ) -> Result<CheckoutHygieneSnapshot> {
     let path = checkout.path;
     let managed_snapshot = is_managed_extension_snapshot(&path);
-    let mut head = git_output(&path, &["rev-parse", "HEAD"]);
-    let branch = git_output(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    let upstream = git_output(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    let mut head = crate::git::output_allow_empty(&path, &["rev-parse", "HEAD"]);
+    let branch = crate::git::output_allow_empty(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let upstream =
+        crate::git::output_allow_empty(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     if upstream.is_some() {
         let _ = crate::git::fetch_remote_tracking_refs_until(
             &path,
@@ -448,7 +449,8 @@ fn checkout_hygiene_snapshot(
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
     }
-    let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
+    let dirty = crate::git::output_allow_empty(&path, &["status", "--porcelain=v1"])
+        .map(|value| !value.is_empty());
     let (mut behind, mut ahead) = git_ahead_behind(&path);
     let allowed = allowed || (managed_snapshot && dirty == Some(false) && ahead.unwrap_or(0) == 0);
     let refreshable = !managed_snapshot
@@ -459,10 +461,11 @@ fn checkout_hygiene_snapshot(
         && behind.unwrap_or(0) > 0
         && (checkout.role == "validation_dependency" || is_managed_extension_cache(&path));
     if refreshable && git_status(&path, &["merge", "--ff-only", "@{upstream}"]) {
-        head = git_output(&path, &["rev-parse", "HEAD"]);
+        head = crate::git::output_allow_empty(&path, &["rev-parse", "HEAD"]);
         (behind, ahead) = git_ahead_behind(&path);
     }
-    let dirty = git_output(&path, &["status", "--porcelain=v1"]).map(|value| !value.is_empty());
+    let dirty = crate::git::output_allow_empty(&path, &["status", "--porcelain=v1"])
+        .map(|value| !value.is_empty());
 
     let mut snapshot = CheckoutHygieneSnapshot {
         id: checkout.id,
@@ -581,7 +584,7 @@ fn apply_lab_source_evidence(snapshot: &mut CheckoutHygieneSnapshot) {
 }
 
 fn git_ahead_behind(path: &Path) -> (Option<u32>, Option<u32>) {
-    git_output(
+    crate::git::output_allow_empty(
         path,
         &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
     )
@@ -618,20 +621,6 @@ fn hygiene_failure_message(snapshot: &CheckoutHygieneSnapshot) -> String {
         problems.join(" and "),
         snapshot.path
     )
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn git_status(path: &Path, args: &[&str]) -> bool {
@@ -1144,7 +1133,7 @@ mod tests {
             assert_eq!(snapshots[0].behind, Some(0));
             assert_eq!(
                 snapshots[0].head,
-                git_output(writer.path(), &["rev-parse", "HEAD"])
+                crate::git::output_allow_empty(writer.path(), &["rev-parse", "HEAD"])
             );
         });
     }
@@ -1186,8 +1175,8 @@ mod tests {
 
             assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
             assert_ne!(
-                git_output(&extension, &["rev-parse", "HEAD"]),
-                git_output(writer.path(), &["rev-parse", "HEAD"])
+                crate::git::output_allow_empty(&extension, &["rev-parse", "HEAD"]),
+                crate::git::output_allow_empty(writer.path(), &["rev-parse", "HEAD"])
             );
         });
     }
@@ -1223,7 +1212,7 @@ mod tests {
             git(writer.path(), &["add", "."]);
             git(writer.path(), &["commit", "-m", "remote update"]);
             git(writer.path(), &["push", "origin", "HEAD:main"]);
-            let snapshot_head = git_output(&snapshot, &["rev-parse", "HEAD"]);
+            let snapshot_head = crate::git::output_allow_empty(&snapshot, &["rev-parse", "HEAD"]);
 
             let snapshots = require_checkout_hygiene_without_lifecycle(
                 vec![DependencyCheckout {
@@ -1236,7 +1225,10 @@ mod tests {
             .expect("managed immutable snapshot remains valid when upstream advances");
 
             assert_eq!(snapshots[0].behind, Some(1));
-            assert_eq!(git_output(&snapshot, &["rev-parse", "HEAD"]), snapshot_head);
+            assert_eq!(
+                crate::git::output_allow_empty(&snapshot, &["rev-parse", "HEAD"]),
+                snapshot_head
+            );
 
             fs::write(snapshot.join("dirty.txt"), "dirty\n").unwrap();
             let err = require_checkout_hygiene_without_lifecycle(
@@ -1250,7 +1242,10 @@ mod tests {
             .expect_err("dirty managed snapshot must be repaired through its owning lifecycle");
 
             assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
-            assert_eq!(git_output(&snapshot, &["rev-parse", "HEAD"]), snapshot_head);
+            assert_eq!(
+                crate::git::output_allow_empty(&snapshot, &["rev-parse", "HEAD"]),
+                snapshot_head
+            );
         });
     }
 
@@ -1285,7 +1280,8 @@ mod tests {
             git(writer.path(), &["add", "."]);
             git(writer.path(), &["commit", "-m", "remote update"]);
             git(writer.path(), &["push", "origin", "HEAD:main"]);
-            let source_head = git_output(developer_source.path(), &["rev-parse", "HEAD"]);
+            let source_head =
+                crate::git::output_allow_empty(developer_source.path(), &["rev-parse", "HEAD"]);
 
             let err = require_checkout_hygiene_without_lifecycle(
                 vec![DependencyCheckout {
@@ -1299,7 +1295,7 @@ mod tests {
 
             assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
             assert_eq!(
-                git_output(developer_source.path(), &["rev-parse", "HEAD"]),
+                crate::git::output_allow_empty(developer_source.path(), &["rev-parse", "HEAD"]),
                 source_head
             );
         });
@@ -1332,7 +1328,7 @@ mod tests {
             git(&extension, &["add", "."]);
             git(&extension, &["commit", "-m", "local update"]);
             fs::write(extension.join("dirty.txt"), "dirty\n").unwrap();
-            let head_before = git_output(&extension, &["rev-parse", "HEAD"]);
+            let head_before = crate::git::output_allow_empty(&extension, &["rev-parse", "HEAD"]);
 
             let err = require_checkout_hygiene_without_lifecycle(
                 vec![DependencyCheckout {
@@ -1347,7 +1343,10 @@ mod tests {
             assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
             assert_eq!(err.details["checkouts"][0]["ahead"].as_u64(), Some(1));
             assert_eq!(err.details["checkouts"][0]["behind"].as_u64(), Some(1));
-            assert_eq!(git_output(&extension, &["rev-parse", "HEAD"]), head_before);
+            assert_eq!(
+                crate::git::output_allow_empty(&extension, &["rev-parse", "HEAD"]),
+                head_before
+            );
         });
     }
 
@@ -1400,7 +1399,7 @@ mod tests {
 
         assert_eq!(
             snapshots[0].head,
-            git_output(source.path(), &["rev-parse", "HEAD"])
+            crate::git::output_allow_empty(source.path(), &["rev-parse", "HEAD"])
         );
         assert_eq!(snapshots[0].upstream.as_deref(), Some("origin/main"));
         assert_eq!(snapshots[0].dirty, Some(false));

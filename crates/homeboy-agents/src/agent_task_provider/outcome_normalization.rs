@@ -182,7 +182,8 @@ pub(crate) fn accept_verified_unchanged_empty_attempt(
     };
     let attempt_base = attempt_base.trim();
     if attempt_base.is_empty()
-        || git_output(workspace_root, &["rev-parse", "HEAD"]).as_deref() != Some(attempt_base)
+        || homeboy_core::git::output_allow_empty(workspace_root, &["rev-parse", "HEAD"]).as_deref()
+            != Some(attempt_base)
     {
         return;
     }
@@ -192,7 +193,9 @@ pub(crate) fn accept_verified_unchanged_empty_attempt(
             .iter()
             .copied(),
     );
-    if git_output(workspace_root, &status_args).is_none_or(|status| !status.is_empty()) {
+    if homeboy_core::git::output_allow_empty(workspace_root, &status_args)
+        .is_none_or(|status| !status.is_empty())
+    {
         return;
     }
     outcome.status = AgentTaskOutcomeStatus::Succeeded;
@@ -247,14 +250,14 @@ fn intentional_no_change_verdict(
                 .to_string(),
         );
     };
-    let head = git_output(workspace_root, &["rev-parse", "HEAD"]);
+    let head = homeboy_core::git::output_allow_empty(workspace_root, &["rev-parse", "HEAD"]);
     if head.as_deref() != Some(declaration.inspected_revision.as_str()) {
         return IntentionalNoChangeValidation::Invalid(
             "provider declared an intentional no-change verdict for a revision that does not match the workspace checkout; changes require recovery review"
                 .to_string(),
         );
     }
-    if git_output(
+    if homeboy_core::git::output_allow_empty(
         workspace_root,
         &["status", "--porcelain", "--untracked-files=all"],
     )
@@ -266,18 +269,6 @@ fn intentional_no_change_verdict(
         );
     }
     IntentionalNoChangeValidation::Verified
-}
-
-fn git_output(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Evidence that the executor did real work even though its change artifact is
