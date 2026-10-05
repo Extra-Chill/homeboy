@@ -956,11 +956,26 @@ fn recover(
     addr: &str,
 ) -> CmdResult<DaemonOutput> {
     let status = daemon::read_status()?;
+    let planned_status = status.clone();
     recover_from_status(
         status,
         dry_run,
         confirm_workload_processes_absent,
         |plan, lease_id, job_ids| {
+            let current = daemon::read_status()?;
+            if !recovery_authority_matches(&planned_status, &current, lease_id.as_deref(), job_ids)
+            {
+                let mut error = Error::validation_invalid_argument(
+                    "recovery_plan",
+                    "daemon authority or protected jobs changed after planning; no recovery steps were applied",
+                    Some("stale_daemon_recovery_plan".to_string()),
+                    Some(vec![
+                        "Re-run `homeboy daemon recover --dry-run` and review the current authority and protected jobs before applying.".to_string(),
+                    ]),
+                );
+                error.details["classification"] = json!("stale_daemon_recovery_plan");
+                return Err(error);
+            }
             execute_recovery_plan(
                 plan,
                 lease_id.as_deref(),
@@ -971,6 +986,21 @@ fn recover(
         },
         daemon::read_status,
     )
+}
+
+fn recovery_authority_matches(
+    planned: &DaemonStatus,
+    current: &DaemonStatus,
+    lease_id: Option<&str>,
+    job_ids: &[Uuid],
+) -> bool {
+    planned.state_identity == current.state_identity
+        && current.freshness.lease_id.as_deref() == lease_id
+        && current
+            .active_job_recovery_evidence
+            .iter()
+            .map(|evidence| evidence.job_id)
+            .eq(job_ids.iter().copied())
 }
 
 /// Resolve a recovery from one authoritative status report, execute it when
@@ -1090,6 +1120,11 @@ where
                 output.plan.reason
             ));
             output.next_command = rendered_plan(&output.plan);
+            return Ok((DaemonOutput::Recover(output), 1));
+        }
+        Err(error) if error.details["classification"] == "stale_daemon_recovery_plan" => {
+            output.blocked_on = Some(error.message);
+            output.next_command = "homeboy daemon recover --dry-run".to_string();
             return Ok((DaemonOutput::Recover(output), 1));
         }
         Err(error) => return Err(error),
@@ -1669,6 +1704,51 @@ mod tests {
             disposition:
                 homeboy::core::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable,
         }
+    }
+
+    #[test]
+    fn recovery_fence_requires_same_authority_store_lease_and_protected_jobs() {
+        let job_id = Uuid::new_v4();
+        let planned = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::PidDead),
+            Vec::new(),
+        );
+        let mut current = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::PidDead),
+            Vec::new(),
+        );
+        current.active_job_recovery_evidence = vec![pidless_job_evidence(job_id)];
+        assert!(!recovery_authority_matches(
+            &planned,
+            &current,
+            Some("lease-test"),
+            &[]
+        ));
+
+        current.active_job_recovery_evidence.clear();
+        current.state_identity = "different-generation-store".to_string();
+        assert!(!recovery_authority_matches(
+            &planned,
+            &current,
+            Some("lease-test"),
+            &[]
+        ));
+
+        current.state_identity = planned.state_identity.clone();
+        assert!(recovery_authority_matches(
+            &planned,
+            &current,
+            Some("lease-test"),
+            &[]
+        ));
+        assert!(!recovery_authority_matches(
+            &planned,
+            &current,
+            Some("other-lease"),
+            &[]
+        ));
     }
 
     #[test]
