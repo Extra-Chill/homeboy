@@ -234,6 +234,7 @@ pub(crate) fn resolve_dependency_providers(
     Ok(providers)
 }
 
+#[cfg(test)]
 /// Resolve the dependency providers a component/workspace exposes, returning an
 /// empty vector when none are detected instead of erroring.
 ///

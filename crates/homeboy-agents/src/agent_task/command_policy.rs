@@ -658,3 +658,19 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn agent_command_policy_mode_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                AgentCommandPolicyMode::DenyList,
+                AgentCommandPolicyMode::AllowList,
+            ]
+        );
+    }
+}

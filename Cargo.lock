@@ -754,6 +754,7 @@ dependencies = [
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "homeboy-runner-contract",
+ "homeboy-serde-pin",
  "homeboy-upgrade",
  "libc",
  "regex",
@@ -990,6 +991,7 @@ dependencies = [
  "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-release-contract",
+ "homeboy-serde-pin",
  "homeboy-version",
  "libc",
  "regex",
@@ -1009,6 +1011,7 @@ dependencies = [
  "fs4",
  "homeboy-error",
  "homeboy-paths",
+ "homeboy-serde-pin",
  "inventory",
  "libc",
  "regex",
@@ -1040,6 +1043,7 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "homeboy-refactor-contract",
+ "homeboy-serde-pin",
  "semver",
  "serde",
  "serde_json",
@@ -1090,6 +1094,7 @@ dependencies = [
  "homeboy-error",
  "homeboy-redaction",
  "homeboy-runner-contract",
+ "homeboy-serde-pin",
  "serde",
  "serde_json",
 ]
@@ -1236,7 +1241,9 @@ dependencies = [
 name = "homeboy-release-contract"
 version = "0.1.0"
 dependencies = [
+ "homeboy-serde-pin",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1275,6 +1282,7 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-rig-contract",
  "homeboy-runner-contract",
+ "homeboy-serde-pin",
  "homeboy-stack",
  "libc",
  "serde",
@@ -1298,6 +1306,7 @@ version = "0.1.0"
 dependencies = [
  "homeboy-error",
  "homeboy-redaction",
+ "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",

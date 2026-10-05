@@ -695,3 +695,21 @@ mod tests {
         assert_eq!(restored, decision);
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn agent_supervision_metric_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                AgentSupervisionMetric::ElapsedSeconds,
+                AgentSupervisionMetric::RssMib,
+                AgentSupervisionMetric::ChildProcesses,
+                AgentSupervisionMetric::NoProgressSeconds,
+            ]
+        );
+    }
+}

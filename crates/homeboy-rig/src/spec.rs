@@ -242,34 +242,21 @@ impl RigCleanupIntent {
     }
 }
 
-/// Rig cleanup configuration. Legacy string values remain supported while the
-/// object form records cleanup ownership and an optional explanatory reason.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RigCleanupSpec {
-    Legacy(ResourceCleanupIntent),
-    Object(RigCleanupObjectSpec),
-}
-
-impl RigCleanupSpec {
-    pub(crate) fn resource_cleanup_intent(&self) -> ResourceCleanupIntent {
-        match self {
-            Self::Legacy(intent) => *intent,
-            Self::Object(spec) => spec
-                .intent
-                .map(RigCleanupIntent::resource_cleanup_intent)
-                .unwrap_or(ResourceCleanupIntent::DryRun),
-        }
-    }
-}
-
-/// Object-form rig cleanup configuration.
+/// Rig cleanup ownership and an optional explanatory reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RigCleanupObjectSpec {
+pub struct RigCleanupSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent: Option<RigCleanupIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl RigCleanupSpec {
+    pub(crate) fn resource_cleanup_intent(&self) -> ResourceCleanupIntent {
+        self.intent
+            .map(RigCleanupIntent::resource_cleanup_intent)
+            .unwrap_or(ResourceCleanupIntent::DryRun)
+    }
 }
 
 /// Rig-level trace defaults.
@@ -1237,7 +1224,7 @@ mod tests {
                 "components": {
                     "wordpress-develop": { "path": "/tmp/wordpress-develop" }
                 },
-                "lifecycle": { "cleanup": "apply" },
+                "lifecycle": { "cleanup": { "intent": "apply" } },
                 "trace": { "default_component": "wordpress-develop" },
                 "fuzz": {
                     "default_component": "wordpress-develop",
@@ -1275,15 +1262,11 @@ mod tests {
     }
 
     #[test]
-    fn rig_lifecycle_cleanup_round_trips_legacy_string_forms() {
+    fn rig_lifecycle_cleanup_rejects_retired_string_forms() {
         for input in [r#""dry_run""#, r#""apply""#] {
-            let spec: RigLifecycleSpec = serde_json::from_str(&format!(r#"{{"cleanup":{input}}}"#))
-                .expect("parse lifecycle");
-
-            assert_eq!(
-                serde_json::to_value(&spec).expect("serialize lifecycle"),
-                serde_json::from_str::<serde_json::Value>(&format!(r#"{{"cleanup":{input}}}"#))
-                    .expect("expected lifecycle JSON")
+            assert!(
+                serde_json::from_str::<RigLifecycleSpec>(&format!(r#"{{"cleanup":{input}}}"#))
+                    .is_err()
             );
         }
     }
@@ -1325,26 +1308,11 @@ mod tests {
 
         assert_eq!(
             spec.lifecycle.cleanup,
-            Some(RigCleanupSpec::Object(RigCleanupObjectSpec {
+            Some(RigCleanupSpec {
                 intent: Some(RigCleanupIntent::Pipeline),
                 reason: Some("pipeline.down stops the Studio daemon...".to_string()),
-            }))
+            })
         );
-    }
-
-    #[test]
-    fn pipeline_and_external_cleanup_map_to_dry_run_resource_intents() {
-        for intent in [RigCleanupIntent::Pipeline, RigCleanupIntent::External] {
-            let cleanup = RigCleanupSpec::Object(RigCleanupObjectSpec {
-                intent: Some(intent),
-                reason: None,
-            });
-
-            assert_eq!(
-                cleanup.resource_cleanup_intent(),
-                ResourceCleanupIntent::DryRun
-            );
-        }
     }
 }
 
@@ -1689,3 +1657,20 @@ mod public_preview_spec_test;
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
 mod bench_default_baseline_spec_test;
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn filesystem_assertion_kind_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            label,
+            [
+                FilesystemAssertionKind::Path,
+                FilesystemAssertionKind::File,
+                FilesystemAssertionKind::Dir,
+            ]
+        );
+    }
+}

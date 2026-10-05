@@ -1321,12 +1321,7 @@ fn compile_batch_cooks_with_readiness_cache(
     plan.cooks
         .iter()
         .map(|cook| {
-            let invocation = cook.to_cook_invocation(plan)?;
-            let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
-                invocation.options,
-                invocation.dispatch,
-                readiness_cache,
-            )?;
+            let mut options = compile_batch_cook_with_readiness_cache(plan, cook, readiness_cache)?;
             if !cook.repository_identity.is_null() {
                 options.identity.initial_plan.metadata["cook_repository_identity"] =
                     cook.repository_identity.clone();
@@ -1366,6 +1361,63 @@ fn compile_batch_cooks_with_readiness_cache(
             Ok(options)
         })
         .collect()
+}
+
+fn compile_batch_cook_with_readiness_cache(
+    plan: &BatchCookFanoutPlan,
+    cook: &BatchCookSpec,
+    readiness_cache: &mut provider::ProviderRuntimeReadinessCache,
+) -> Result<CookRequest> {
+    let mut invocation = cook.to_cook_invocation(plan)?;
+    let provision = if cook.cwd.is_none()
+        && cook.workspace.is_none()
+        && !Path::new(&cook.to_worktree).is_dir()
+        && homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(
+            &cook.to_worktree,
+        )?
+        .is_none()
+    {
+        let required = |field: &str, value: Option<&str>| {
+            value
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    Error::validation_missing_argument(vec![format!(
+                        "{field} is required to create missing Cook worktree `{}`",
+                        cook.to_worktree
+                    )])
+                })
+        };
+        let provision = super::run::pending_cook_provision(
+            homeboy::core::worktree_provider::WorktreeProvisionIntent {
+                handle: cook.to_worktree.clone(),
+                repo: required(
+                    "repo",
+                    cook.repository_identity["repository_path"]
+                        .as_str()
+                        .or(cook.repo.as_deref()),
+                )?,
+                base: cook.base.clone(),
+                head: required("head", cook.head.as_deref())?,
+                task_url: cook.task_url.clone(),
+            },
+        )?;
+        // An inferred destination is creation intent, not an explicit source
+        // workspace. Dispatch compilation must not resolve it before admission.
+        invocation.dispatch.workspace = None;
+        Some(provision)
+    } else {
+        None
+    };
+    let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
+        invocation.options,
+        invocation.dispatch,
+        readiness_cache,
+    )?;
+    if let Some(provision) = provision {
+        super::run::record_cook_provision(&mut options.identity.initial_plan, provision);
+    }
+    Ok(options)
 }
 
 fn enforce_fanout_placement(options: &CookRequest) -> Result<()> {
@@ -2988,15 +3040,11 @@ fn preflight_batch_cook_recipes_with_readiness_cache(
     // Validate immutable recipe inputs without resolving that handle as a live
     // workspace; execution validates the materialized workspace separately.
     for cook in &plan.cooks {
-        let invocation = cook.to_cook_invocation(plan)?;
         // Preflight must construct the same initial plan that Cook persists.
         // Comparing the uncompiled invocation made existing recipes appear to
         // drift whenever their workspace-derived plan had already been stored.
-        let mut options = agent_task_service::compile_cook_attempt_with_readiness_cache(
-            invocation.options,
-            invocation.dispatch,
-            &mut readiness_cache,
-        )?;
+        let mut options =
+            compile_batch_cook_with_readiness_cache(plan, cook, &mut readiness_cache)?;
         options.harvest_context = batch_harvest_context()?;
         if let Some(dispatcher) = attempt_dispatcher {
             options.provider_transport.attempt_dispatcher = Some(dispatcher(&options));
@@ -5992,6 +6040,171 @@ mod tests {
             &args(),
         )
         .expect("test batch plan")
+    }
+
+    #[derive(Debug, Default)]
+    struct NativeDestinationProbe(AtomicUsize);
+
+    impl NativeDestinationProbe {
+        fn inspect(&self, plan: &AgentTaskPlan) {
+            let provision = &plan.metadata["cook_provision"];
+            let handle = provision["handle"].as_str().expect("declared handle");
+            let record =
+                worktree::resolve(handle).expect("native destination exists before dispatch");
+            let root = plan.tasks[0]
+                .workspace
+                .root
+                .as_deref()
+                .expect("bound provider root");
+            assert_eq!(root, record.worktree_path);
+            assert_eq!(
+                record.task_url.as_deref(),
+                provision["provision_intent"]["task_url"].as_str()
+            );
+            assert!(
+                record.run_id.is_some(),
+                "creation is bound to a durable child"
+            );
+            let branch = Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(root)
+                .output()
+                .expect("inspect real destination branch");
+            assert!(branch.status.success());
+            assert_eq!(
+                String::from_utf8_lossy(&branch.stdout).trim(),
+                record.branch
+            );
+            assert_eq!(provision["action"], "existing");
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter for NativeDestinationProbe {
+        fn execute(
+            &self,
+            request: homeboy::agents::agent_tasks::AgentTaskRequest,
+            context: homeboy::agents::agent_tasks::scheduler::AgentTaskExecutionContext,
+        ) -> homeboy::agents::agent_tasks::AgentTaskOutcome {
+            let store = test_lifecycle_store();
+            let plan = store
+                .read_controller_plan(context.run_id.as_deref().expect("durable child run"))
+                .expect("durable plan before provider");
+            self.inspect(&plan);
+            homeboy::agents::agent_tasks::AgentTaskOutcome {
+                task_id: request.task_id,
+                status: homeboy::agents::agent_tasks::AgentTaskOutcomeStatus::Failed,
+                summary: Some("destination probe completed; no coding requested".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    impl homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher
+        for NativeDestinationProbe
+    {
+        fn durable_recipe(&self) -> Result<Value> {
+            LabRecipeDispatcher.durable_recipe()
+        }
+
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            _run_id: &str,
+            _baseline: Option<&homeboy::agents::agent_task_service::DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            self.inspect(&plan);
+            Err(Error::internal_unexpected(
+                "destination probe completed; no coding requested",
+            ))
+        }
+    }
+
+    #[test]
+    fn manifest_fanout_provisions_absent_native_destinations_after_admission() {
+        for use_dispatcher in [false, true] {
+            with_isolated_home(|home| {
+                let _transport = EnvRestore::set(&[
+                    (
+                        homeboy::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                        None,
+                    ),
+                    (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+                    ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
+                ]);
+                install_fanout_agent_task_providers(home.path());
+                for repo in ["first", "second"] {
+                    let primary = home.path().join(repo);
+                    init_git_primary(&primary);
+                    write_component_registration(home.path(), repo, &primary);
+                }
+                let mut plan = test_batch_plan();
+                plan.fanout_id = "absent-native-wave".to_string();
+                for (cook, repo) in plan.cooks.iter_mut().zip(["first", "second"]) {
+                    cook.cook_id = format!("native-{repo}");
+                    cook.cwd = None;
+                    cook.workspace = None;
+                    cook.repo = Some(repo.to_string());
+                    cook.head = Some("fix/native-wave".to_string());
+                    cook.to_worktree = format!("{repo}@fix-native-wave");
+                    cook.task_url = Some(format!("https://example.test/{repo}/issues/1"));
+                    cook.backend = Some("test".to_string());
+                    cook.selector = Some("fixture".to_string());
+                    cook.no_finalize = true;
+                    cook.max_attempts = 1;
+                    cook.attempts = Some(1);
+                    cook.same_provider_retries = Some(0);
+                    cook.provider_rotations = Some(0);
+                }
+                let mut cache = provider::ProviderRuntimeReadinessCache::default();
+                preflight_batch_cook_recipes_with_readiness_cache(&plan, None, &mut cache)
+                    .expect("absent destinations are valid creation intent");
+                let compiled = compile_batch_cooks_with_readiness_cache(&plan, &mut cache, |_| {})
+                    .expect("compile without existing destinations");
+                for (cook, options) in plan.cooks.iter().zip(&compiled) {
+                    assert!(worktree::resolve_if_present(&cook.to_worktree)
+                        .unwrap()
+                        .is_none());
+                    assert!(options.identity.initial_plan.tasks[0]
+                        .workspace
+                        .root
+                        .is_none());
+                    assert_eq!(
+                        options.identity.initial_plan.metadata["cook_provision"]["action"],
+                        "lookup_pending"
+                    );
+                }
+                let probe = Arc::new(NativeDestinationProbe::default());
+                let result = if use_dispatcher {
+                    let dispatcher = probe.clone();
+                    run_batch_cook_fanout_plan_with_attempt_dispatcher_and_placement(
+                        plan.clone(),
+                        &move |_| dispatcher.clone(),
+                        Placement::Local,
+                    )
+                } else {
+                    run_batch_cook_fanout_plan_with_executor_claim(
+                        plan.clone(),
+                        probe.clone(),
+                        None,
+                        Placement::Local,
+                        cache,
+                    )
+                };
+                let (report, _) = result.expect("batch reaches destination probes");
+                assert_eq!(
+                    probe.0.load(Ordering::SeqCst),
+                    2,
+                    "both repository children dispatch after automatic creation: {report}"
+                );
+                for cook in &plan.cooks {
+                    let record =
+                        worktree::resolve(&cook.to_worktree).expect("retained native destination");
+                    assert_eq!(record.branch, "fix/native-wave");
+                    assert!(Path::new(&record.worktree_path).is_dir());
+                }
+            });
+        }
     }
 
     #[test]

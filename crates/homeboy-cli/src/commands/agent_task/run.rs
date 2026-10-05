@@ -5401,16 +5401,24 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
     // Preserve the native provisioning intent until Cook has durably admitted
     // its recipe and exact lifecycle owner. Ensure is forbidden before that
     // point.
-    preflight_missing_cook_provider_workspace(args, to_worktree)?;
+    pending_cook_provision(cook_provider_provision_intent(args, to_worktree)?)
+}
+
+/// Single and batch Cook retain the same validated creation intent. The Cook
+/// service owns the mutation only after it has persisted the child lifecycle.
+pub(crate) fn pending_cook_provision(
+    intent: homeboy::core::worktree_provider::WorktreeProvisionIntent,
+) -> homeboy::core::Result<Value> {
+    validate_pending_cook_provision(&intent)?;
     Ok(serde_json::json!({
         "action": "lookup_pending",
         "kind": "native",
-        "handle": to_worktree,
+        "handle": intent.handle,
         "provision_intent": {
-            "repo": cook_provision_repository(args),
-            "base": args.base,
-            "head": args.head,
-            "task_url": args.dispatch.task_url,
+            "repo": intent.repo,
+            "base": intent.base,
+            "head": intent.head,
+            "task_url": intent.task_url,
         },
         "lifecycle_intent": {
             "purpose": "agent_task_cook",
@@ -5427,12 +5435,21 @@ fn preflight_missing_cook_provider_workspace(
     handle: &str,
 ) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
     let intent = cook_provider_provision_intent(args, handle)?;
+    validate_pending_cook_provision(&intent)
+}
+
+fn validate_pending_cook_provision(
+    intent: &homeboy::core::worktree_provider::WorktreeProvisionIntent,
+) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
     if intent.task_url.is_none() {
         return Err(homeboy::core::Error::validation_missing_argument(vec![
-            format!("--task-url is required to create missing provider worktree `{handle}`"),
+            format!(
+                "--task-url is required to create missing provider worktree `{}`",
+                intent.handle
+            ),
         ]));
     }
-    homeboy::core::worktree_provider::plan_worktree_provision(&intent)
+    homeboy::core::worktree_provider::plan_worktree_provision(intent)
 }
 
 fn cook_provider_provision_intent(
@@ -6221,6 +6238,7 @@ pub(super) fn cook_repository_identity_for_name(
             "slug": component_id,
             "repository_name": repository_name,
             "component_id": component_id,
+            "component_registered": true,
             "component_cwd": component_cwd,
             "remote_identity": remote_identity,
             "provenance": if component_id == repo { "--repo:configured-component" } else { "--repo:configured-component-alias" },
@@ -6229,6 +6247,7 @@ pub(super) fn cook_repository_identity_for_name(
             "slug": component_id,
             "repository_name": repository_name,
             "component_id": component_id,
+            "component_registered": component.is_some(),
             "component_cwd": component_cwd,
             "provenance": "--repo:requested-repository",
         }),
