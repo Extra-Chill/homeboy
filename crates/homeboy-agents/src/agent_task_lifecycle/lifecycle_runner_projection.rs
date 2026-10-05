@@ -9,6 +9,105 @@
 
 use super::*;
 
+/// Reconcile terminal history from the trusted runner's durable run resource.
+/// Exact accepted run/job/plan identity is required; missing transport logs are
+/// neither absence proof nor a reason to discard a retained provider result.
+pub(crate) fn project_terminal_runner_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    source: &homeboy_core::observation::RunRecord,
+) -> Result<bool> {
+    if record.state.is_terminal() {
+        return Ok(false);
+    }
+    let Some(value) = source.metadata_json.get("agent_task_run") else {
+        return Ok(false);
+    };
+    let remote: AgentTaskRunRecord = serde_json::from_value(value.clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse terminal runner record".to_string()),
+        )
+    })?;
+    if !remote.state.is_terminal() || source.finished_at.is_none() {
+        return Ok(false);
+    }
+    let (Some(runner_id), Some(job_id)) = (record.runner_id(), record.runner_job_id()) else {
+        return Ok(false);
+    };
+    let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::from_evidence_record(
+        remote.metadata.get("runner_execution_context").ok_or_else(|| {
+            Error::internal_unexpected("terminal runner record has no durable execution context")
+        })?,
+    )?.assertion();
+    let identity_matches = source.id == record.run_id
+        && remote.run_id == record.run_id
+        && remote.plan_id == record.plan_id
+        && remote.runner_id() == Some(runner_id)
+        && remote.runner_job_id() == Some(job_id)
+        && context.controller_attempt_id == record.run_id
+        && context.runner_id == runner_id
+        && context.runner_job_id == job_id
+        && context.verification.state == "verified";
+    if !identity_matches || !record.has_accepted_lab_handoff() {
+        return Err(Error::validation_invalid_argument(
+            "runner_terminal_record",
+            "terminal run resource does not match the accepted handoff",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    let aggregate: AgentTaskAggregate = serde_json::from_value(
+        source
+            .metadata_json
+            .get("agent_task_aggregate")
+            .cloned()
+            .ok_or_else(|| {
+                Error::internal_unexpected("terminal runner record has no retained aggregate")
+            })?,
+    )
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse terminal runner aggregate".to_string()),
+        )
+    })?;
+    let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
+    if aggregate.plan_id != record.plan_id
+        || super::conversion::run_state_for_aggregate(&aggregate) != remote.state
+        || aggregate.outcomes.iter().any(|outcome| {
+            !plan
+                .tasks
+                .iter()
+                .any(|task| task.task_id == outcome.task_id)
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_terminal_record",
+            "retained aggregate does not match the controller plan",
+            Some(record.run_id.clone()),
+            None,
+        ));
+    }
+    let job_id = job_id.to_string();
+    let aggregate = projected_runner_aggregate(record, &aggregate);
+    record_verified_lab_placement_outcome(record)?;
+    record.ensure_metadata_object().insert(
+        "terminal_transport_recovery".to_string(),
+        json!({"source": "durable_runner_run_record", "run_id": source.id, "runner_job_id": job_id, "state": remote.state,
+            "source_finished_at": source.finished_at, "execution_context": remote.metadata["runner_execution_context"]}),
+    );
+    apply_aggregate_transition_in_store(
+        lifecycle_store,
+        AgentTaskAggregateTransition {
+            record,
+            plan: &plan,
+            aggregate: &aggregate,
+        },
+    )?;
+    Ok(true)
+}
+
 pub(crate) fn reconcile_runner_job_snapshot(
     record: &mut AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,

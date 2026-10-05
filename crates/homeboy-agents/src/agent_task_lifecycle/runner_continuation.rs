@@ -150,6 +150,16 @@ pub trait RunnerContinuationProvider: Send + Sync {
         job_id: &str,
     ) -> Result<RunnerJobLogSnapshot>;
 
+    /// Durable execution history survives pruning of the transport job. This
+    /// reads a run resource; it does not recreate a live claim or dispatch work.
+    fn runner_run_record(
+        &self,
+        _runner_id: &str,
+        _run_id: &str,
+    ) -> Result<Option<homeboy_core::observation::RunRecord>> {
+        Ok(None)
+    }
+
     /// Reconcile a job against the daemon generation that owns it and, when
     /// necessary, other known generations. Providers without generation
     /// ownership support retain the conservative snapshot-only behavior.
