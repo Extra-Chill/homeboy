@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.14] - 2026-10-05
+
+### Changed
+- check upload contract instead of step count
+
+### Fixed
+- retain exact retry outcome evidence
+
 ## [2.20.13] - 2026-10-04
 
 ### Fixed
