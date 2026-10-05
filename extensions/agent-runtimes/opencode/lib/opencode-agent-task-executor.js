@@ -594,7 +594,7 @@ function intentionalNoChangeDeclaration(context, structured, emptyPatch, capture
 	}
 	return {
 		schema: 'homeboy/intentional-no-change/v1',
-		verdict: 'no_change',
+		verdict: 'investigation_only',
 		inspected_revision: context.initialRevision.revision,
 	};
 }

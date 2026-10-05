@@ -1266,7 +1266,7 @@ process.exit(0);
 	// #2757: output-free Cook plans still need a revision-bound no-change result.
 	const quietNoChange = quietResult.outputs.opencode_run_result.intentional_no_change;
 	assert.equal(quietNoChange.schema, 'homeboy/intentional-no-change/v1');
-	assert.equal(quietNoChange.verdict, 'no_change');
+	assert.equal(quietNoChange.verdict, 'investigation_only');
 	assert.match(quietNoChange.inspected_revision, /^[0-9a-f]{40}$/);
 	assert.deepEqual(quietAgentResult.outputs.opencode_run_result.intentional_no_change, quietNoChange);
 	const failedNoChangeCliPath = path.join(root, 'mock-opencode-failed-no-change.cjs');
@@ -1800,7 +1800,7 @@ process.stdout.write(JSON.stringify({
 			used_for: 'Pull request review.',
 	});
 	assert.equal(reviewResult.outputs.opencode_run_result.intentional_no_change.schema, 'homeboy/intentional-no-change/v1');
-	assert.equal(reviewResult.outputs.opencode_run_result.intentional_no_change.verdict, 'no_change');
+	assert.equal(reviewResult.outputs.opencode_run_result.intentional_no_change.verdict, 'investigation_only');
 	assert.match(reviewResult.outputs.opencode_run_result.intentional_no_change.inspected_revision, /^[0-9a-f]{40}$/);
 	const reviewConfig = JSON.parse(fs.readFileSync(reviewCapturePath, 'utf8'));
 	// Read-only inspection is permitted within the workspace...
