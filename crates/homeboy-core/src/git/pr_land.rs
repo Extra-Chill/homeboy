@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 
 use super::gh_client::GhClient;
 use super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
-use super::github::classify_check;
+use super::github::{classify_check, parse_pr_view, pr_view_args};
 
 #[derive(Debug, Clone)]
 pub struct PrLandOptions {
@@ -152,33 +152,6 @@ enum PrReadiness {
     Blocked(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct RawPrView {
-    #[serde(flatten)]
-    common: PrCommon,
-    state: String,
-    #[serde(default, rename = "isDraft")]
-    is_draft: bool,
-    #[serde(default, rename = "mergeStateStatus")]
-    merge_state_status: Option<String>,
-    #[serde(default, rename = "statusCheckRollup")]
-    status_check_rollup: Vec<Value>,
-    #[serde(default, rename = "headRefOid")]
-    head_ref_oid: Option<String>,
-    #[serde(default, rename = "headRefName")]
-    head_ref_name: Option<String>,
-    #[serde(default, rename = "headRepository")]
-    head_repository: Option<RawHeadRepository>,
-    #[serde(default, rename = "mergedAt")]
-    merged_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RawHeadRepository {
-    #[serde(default, rename = "nameWithOwner")]
-    name_with_owner: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 struct PrView {
     common: PrCommon,
@@ -221,32 +194,28 @@ impl GhPrLandClient {
 
 impl PrLandClient for GhPrLandClient {
     fn view_pr(&mut self, _repo: &str, number: u64) -> Result<PrView> {
-        let raw = self.gh.run(&[
-            "pr".to_string(),
-            "view".to_string(),
-            number.to_string(),
-            "-R".to_string(),
-            self.repo.clone(),
-            "--json".to_string(),
-            "number,title,url,state,isDraft,mergeStateStatus,statusCheckRollup,headRefOid,headRefName,headRepository,mergedAt"
-                .to_string(),
-        ])?;
-        let parsed: RawPrView = serde_json::from_str(raw.trim()).map_err(|e| {
-            Error::internal_json(e.to_string(), Some(format!("parse gh pr view #{number}")))
-        })?;
+        let raw = self
+            .gh
+            .run(&pr_view_args(&number.to_string(), Some(&self.repo)))?;
+        let record = parse_pr_view(&raw)?;
+        let status_check_rollup = record.status_check_rollup;
         Ok(PrView {
-            common: parsed.common,
-            state: parsed.state,
-            draft: parsed.is_draft,
-            checks: summarize_checks(&parsed.status_check_rollup),
-            status_check_rollup: parsed.status_check_rollup,
-            merge_state: non_empty(parsed.merge_state_status),
-            head_sha: non_empty(parsed.head_ref_oid),
-            head: non_empty(parsed.head_ref_name),
-            head_repository: parsed
+            common: PrCommon {
+                number: record.number,
+                title: record.title.unwrap_or_default(),
+                url: record.url,
+            },
+            state: record.state,
+            draft: record.is_draft,
+            checks: summarize_checks(&status_check_rollup),
+            status_check_rollup,
+            merge_state: non_empty(record.merge_state_status),
+            head_sha: non_empty(record.head_ref_oid),
+            head: non_empty(Some(record.head_ref_name)),
+            head_repository: record
                 .head_repository
                 .and_then(|repo| non_empty(repo.name_with_owner)),
-            merged_at: parsed.merged_at,
+            merged_at: record.merged_at,
         })
     }
 

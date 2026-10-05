@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::error::{Error, Result};
 
+use super::github::{parse_pr_view, pr_view_args, PrViewRecord};
 use super::resolve_target;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,17 +69,6 @@ pub struct PrRefreshCheck {
     pub stdout: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub stderr: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhPrView {
-    number: u64,
-    url: String,
-    state: String,
-    base_ref_name: String,
-    head_ref_name: String,
-    merge_state_status: Option<String>,
 }
 
 pub fn pr_refresh(
@@ -240,16 +230,14 @@ fn effective_checks(checks: &[String]) -> Vec<String> {
     }
 }
 
-fn view_pr(root: &Path, pr: &str) -> Result<GhPrView> {
+/// View one PR from the worktree cwd, without `-R`.
+///
+/// The cwd transport is deliberate: the ref may be a foreign-repo PR URL, so
+/// `gh` must resolve the repository itself rather than being pinned with `-R`.
+fn view_pr(root: &Path, pr: &str) -> Result<PrViewRecord> {
     let pr_ref = normalize_pr_ref(pr)?;
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &pr_ref,
-            "--json",
-            "number,url,state,baseRefName,headRefName,mergeStateStatus",
-        ])
+        .args(pr_view_args(&pr_ref, None))
         .current_dir(root)
         .output()
         .map_err(|e| Error::git_command_failed(format!("gh pr view failed: {e}")))?;
@@ -259,14 +247,7 @@ fn view_pr(root: &Path, pr: &str) -> Result<GhPrView> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| {
-        Error::validation_invalid_argument(
-            "pr",
-            format!("failed to parse gh pr view output: {e}"),
-            None,
-            None,
-        )
-    })
+    parse_pr_view(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn checkout_pr_branch(root: &Path, number: u64) -> Result<()> {

@@ -27,6 +27,9 @@
 //!   wrappers, token discovery, shared parsing helpers.
 //! - [`issues`] — issue create/comment/close/edit/find.
 //! - [`pulls`] — PR create/edit/find/view/files/merge.
+//! - [`pr_view_record`] — the one `gh pr view` field superset, args builder,
+//!   and parser shared with the sibling `git::pr_land` / `git::pr_refresh`
+//!   consumers.
 //! - [`fleet`] — batch PR reporting and landing.
 //! - [`readiness`] — CI-check classification and merge-readiness reasoning.
 
@@ -35,6 +38,7 @@ mod checks;
 mod client;
 mod fleet;
 mod issues;
+mod pr_view_record;
 mod pulls;
 mod readiness;
 
@@ -58,6 +62,9 @@ pub use body_file::push_markdown_body_file_arg;
 // rollup, and the sibling PR-land merge gate (`crate::git::pr_land`).
 pub(in crate::git) use checks::{classify_check, CheckClass};
 pub(in crate::git) use client::resolve_component_github;
+// The single `gh pr view` request/parse contract shared by `pulls::pr_view`
+// and the sibling consumers `crate::git::pr_land` / `crate::git::pr_refresh`.
+pub(in crate::git) use pr_view_record::{parse_pr_view, pr_view_args, PrViewRecord};
 
 // Public probe/token helpers.
 pub use client::{gh_probe_succeeds, github_token_from_env_or_gh};
