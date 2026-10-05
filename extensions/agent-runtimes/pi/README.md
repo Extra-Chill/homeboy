@@ -7,14 +7,14 @@ Homeboy agent task requests (`homeboy/agent-task-request/v1` with
 ## How it runs
 
 ```sh
-pi --mode json [--session-dir <artifacts>/pi-session | --no-session] [--model <provider/model>] "<instructions>"
+pi --mode json [--session <artifacts>/<task>-pi-session.jsonl | --no-session] [--model <provider/model>] "<instructions>"
 ```
 
 - Runs in the request workspace, with stdin empty and only allowlisted environment.
 - The model comes from `executor.config.model`, `executor.model` or `model`.
 - Instructions over 100 KiB are written to a file in the artifacts directory and
   the agent is told to read it (one argv entry is limited to 128 KiB on Linux).
-- With an artifacts directory, the Pi session file is kept there as evidence.
+- With an artifacts directory, the Pi session file is written at its top level (`<task>-pi-session.jsonl`). It is evidence, and also Homeboy's liveness signal: Pi appends to it as it works, while process output only arrives when Pi exits.
 
 ## Outcome
 

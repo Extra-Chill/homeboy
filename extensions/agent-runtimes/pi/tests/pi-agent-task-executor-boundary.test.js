@@ -150,7 +150,7 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 		const { result, record } = run({ events: okStream, config: { model: 'anthropic/claude-test' } });
 		assert.equal(result.status, 'succeeded', JSON.stringify(result));
 		assert.equal(result.summary, 'Fixed the bug.');
-		assert.deepEqual(record.argv, ['--mode', 'json', '--session-dir', path.join(artifacts, 'pi-session'), '--model', 'anthropic/claude-test', 'Fix the failing test.']);
+		assert.deepEqual(record.argv, ['--mode', 'json', '--session', path.join(artifacts, 'pi-task-pi-session.jsonl'), '--model', 'anthropic/claude-test', 'Fix the failing test.']);
 		assert.equal(fs.realpathSync(record.cwd), fs.realpathSync(workspace));
 		assert.equal(record.stdin, '');
 		assert.equal(record.undeclaredSecret, null);

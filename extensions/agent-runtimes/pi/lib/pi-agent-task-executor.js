@@ -146,10 +146,19 @@ function promptArgument(request = {}, config = {}) {
 	return `Your full task instructions are in ${file}. Read that file first, then carry out the instructions exactly.`;
 }
 
-/** Pi session files go next to the run's artifacts when there is a place for them. */
+/**
+ * The Pi session file, written directly in the run's artifacts dir.
+ *
+ * It is also the run's liveness signal. Homeboy treats a provider as alive
+ * while a file at the top of its artifacts dir grows; the process output is
+ * only returned when Pi exits (spawnSync). Pi appends every event to its
+ * session file as it works, so keeping that file at the top level (not in a
+ * subdirectory Homeboy does not scan) stops a long read-only stretch from
+ * being killed as a stall.
+ */
 function sessionArgs(request = {}, config = {}) {
 	const dir = artifactDirectory(request, config);
-	return dir ? ['--session-dir', path.join(dir, 'pi-session')] : ['--no-session'];
+	return dir ? ['--session', path.join(dir, `${safeFileSegment(request.task_id)}-pi-session.jsonl`)] : ['--no-session'];
 }
 
 /**
