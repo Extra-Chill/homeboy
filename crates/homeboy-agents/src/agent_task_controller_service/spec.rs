@@ -63,10 +63,10 @@ pub struct ControllerPlanRequest {
 
 /// Generic repo-authored loop spec compiled into Homeboy controller state/actions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskRepoLoopSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
-    #[serde(alias = "controller_id")]
     pub loop_id: String,
     #[serde(default = "default_loop_spec_phase")]
     pub phase: String,
@@ -191,6 +191,7 @@ pub struct AgentTaskRepoLoopSpecAbility {
 
 /// Workflow declared by a repo loop spec and compiled by Homeboy into controller actions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskRepoLoopSpecWorkflow {
     pub workflow_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,7 +220,7 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
     pub gates: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<String>,
-    #[serde(default, alias = "execution", skip_serializing_if = "Value::is_null")]
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub runtime_execution: Value,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub inputs: Value,
@@ -227,6 +228,7 @@ pub struct AgentTaskRepoLoopSpecWorkflow {
 
 /// Generic fan-out declaration for a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskRepoLoopSpecFanOut {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -236,7 +238,7 @@ pub struct AgentTaskRepoLoopSpecFanOut {
     pub group_by: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requires_non_empty: bool,
-    #[serde(default, alias = "items", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<usize>,
@@ -257,11 +259,10 @@ pub struct AgentTaskRepoLoopSpecArtifact {
 
 /// Directed artifact edge declared by a repo loop spec.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskRepoLoopSpecArtifactGraphEdge {
     pub artifact_id: String,
-    #[serde(alias = "producer", alias = "producer_workflow_id")]
     pub from_workflow_id: String,
-    #[serde(alias = "consumer", alias = "consumer_workflow_id")]
     pub to_workflow_id: String,
     #[serde(default)]
     pub required: bool,
