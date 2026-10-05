@@ -1657,3 +1657,20 @@ mod public_preview_spec_test;
 #[cfg(test)]
 #[path = "../../../tests/core/rig/bench_default_baseline_spec_test.rs"]
 mod bench_default_baseline_spec_test;
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn filesystem_assertion_kind_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            label,
+            [
+                FilesystemAssertionKind::Path,
+                FilesystemAssertionKind::File,
+                FilesystemAssertionKind::Dir,
+            ]
+        );
+    }
+}

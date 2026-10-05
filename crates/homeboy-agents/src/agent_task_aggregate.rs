@@ -1208,3 +1208,22 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn agent_task_reconciliation_decision_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                AgentTaskReconciliationDecision::NoOp,
+                AgentTaskReconciliationDecision::ApplyCandidate,
+                AgentTaskReconciliationDecision::IssueReportCandidate,
+                AgentTaskReconciliationDecision::RetryCandidate,
+                AgentTaskReconciliationDecision::ReviewCandidate,
+            ]
+        );
+    }
+}
