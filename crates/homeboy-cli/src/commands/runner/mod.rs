@@ -15,6 +15,7 @@ mod controller_ancestry;
 mod dispatch;
 mod env;
 mod exec;
+mod exec_args;
 mod jobs;
 mod lifecycle;
 mod log_projection;
@@ -83,62 +84,9 @@ pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::Com
                 crate::commands::utils::response::map_cmd_result_to_json(dispatch::run(args));
             jobs::compact_list_command_run(stdout_result, exit_code)
         }
-        cli::RunnerCommand::Exec {
-            id,
-            cwd,
-            sync_workspace,
-            workspace_ref,
-            hydrate_deps,
-            workspace_sync_timeout,
-            project,
-            ssh,
-            capture_patch,
-            require_paths,
-            script_file,
-            env,
-            secret_env,
-            secret_env_plan,
-            secret_env_plan_file,
-            extension_env_providers,
-            dry_run,
-            run_id,
-            artifact_outputs,
-            artifact_dir_outputs,
-            summary_outputs,
-            read_only_artifact,
-            json: false,
-            raw: false,
-            command,
-            ..
-        } => dispatch::run_exec_command(
-            exec::RunnerExecInput {
-                runner_id: id,
-                command,
-                cwd,
-                sync_workspace,
-                workspace_ref,
-                hydrate_deps,
-                workspace_sync_timeout,
-                project_id: project,
-                allow_diagnostic_ssh: ssh,
-                capture_patch,
-                require_paths,
-                script_file,
-                env,
-                secret_env,
-                secret_env_plan,
-                secret_env_plan_file,
-                dry_run,
-                run_id,
-                artifact_outputs,
-                artifact_dir_outputs,
-                summary_outputs,
-                read_only_artifact,
-                raw: false,
-                extension_env_providers,
-            },
-            false,
-        ),
+        cli::RunnerCommand::Exec(args) if !args.json && !args.raw => {
+            dispatch::run_exec_command(args.into(), false)
+        }
         _ => super::output_runtime::CommandRun::from_raw_stdout(
             "runner",
             Err(homeboy::core::Error::validation_invalid_argument(
