@@ -227,7 +227,7 @@ fn stage_bootstrapped_changelog(component: &Component, changelog_path: &std::pat
 }
 
 /// Group component-scoped commits into durable product-history changelog sections.
-fn group_commits_for_changelog(
+pub(super) fn group_commits_for_changelog(
     commits: &[git::CommitInfo],
 ) -> std::collections::HashMap<String, Vec<String>> {
     let mut entries_by_type: std::collections::HashMap<String, Vec<String>> =

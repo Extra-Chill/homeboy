@@ -163,6 +163,80 @@ pub(crate) fn finalize_with_generated_entries(
     finalize_next_section(&content, aliases, new_version, false)
 }
 
+/// Add generated entries to an already finalized `## [version]` section.
+///
+/// Used when a release picks up commits after its changelog was finalized (the
+/// release commit replayed onto an advanced remote). The section keeps its
+/// heading and date; entries already covered by the section are skipped.
+pub fn append_to_finalized_section(
+    changelog_content: &str,
+    aliases: &[String],
+    version: &str,
+    entries_by_type: &std::collections::HashMap<&str, Vec<String>>,
+) -> Result<(String, bool)> {
+    if entries_by_type.values().all(|msgs| msgs.is_empty()) {
+        return Ok((changelog_content.to_string(), false));
+    }
+
+    let lines: Vec<&str> = changelog_content.lines().collect();
+    if find_next_section_start(&lines, aliases).is_some() {
+        return Err(Error::validation_invalid_argument(
+            "changelog",
+            "Changelog has an unreleased section; refusing to amend a finalized one",
+            None,
+            None,
+        ));
+    }
+    let is_version_heading = |line: &str| {
+        let trimmed = line.trim();
+        trimmed.starts_with("## ")
+            && normalize_heading_label::extract_version_from_heading(
+                trimmed.trim_start_matches("## ").trim(),
+            )
+            .as_deref()
+                == Some(version.trim())
+    };
+    let start = validation::require_with_hints(
+        lines.iter().position(|line| is_version_heading(line)),
+        "changelog",
+        &format!("No finalized changelog section found for {}", version),
+        Vec::new(),
+    )?;
+
+    // Reopen the section under the next-section label, reuse the generated-entry
+    // path (typed subsections, dedupe), then restore the original heading.
+    let label = aliases.first().map(String::as_str).unwrap_or("Unreleased");
+    let original_heading = lines[start].to_string();
+    let mut reopened: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
+    reopened[start] = format!("## {}", label);
+    let (finalized, _) =
+        finalize_with_generated_entries(&reopened.join("\n"), aliases, entries_by_type, version)?;
+
+    let mut restored = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in finalized.lines() {
+        if !restored && is_version_heading(line) {
+            out_lines.push(original_heading.clone());
+            restored = true;
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    let mut out = out_lines.join("\n");
+    if changelog_content.ends_with('\n') || !changelog_content.contains('\n') {
+        out.push('\n');
+    }
+    let changed = out.trim_end() != changelog_content.trim_end();
+    Ok((
+        if changed {
+            out
+        } else {
+            changelog_content.to_string()
+        },
+        changed,
+    ))
+}
+
 fn generated_entry_is_covered(existing_entries: &[String], generated: &str) -> bool {
     let generated_key = normalized_changelog_entry_key(generated);
     let generated_tokens = changelog_semantic_tokens(generated);
@@ -738,6 +812,67 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(out.matches("- Bug fix").count(), 1);
+    }
+
+    #[test]
+    fn append_to_finalized_section_adds_entries_and_keeps_heading() {
+        let content = "# Changelog\n\n## [1.24.4] - 2026-10-02\n\n### Fixed\n\n- preserve mapping plan shell type\n\n## [1.24.3] - 2026-10-01\n\n### Fixed\n\n- older fix\n";
+        let aliases = vec!["Unreleased".to_string(), "[Unreleased]".to_string()];
+        let mut entries = std::collections::HashMap::new();
+        entries.insert(
+            "added",
+            vec!["hand off validated ICO branding through native media".to_string()],
+        );
+        entries.insert(
+            "fixed",
+            vec!["preserve mapping plan shell type".to_string()],
+        );
+
+        let (out, changed) =
+            append_to_finalized_section(content, &aliases, "1.24.4", &entries).unwrap();
+
+        assert!(changed);
+        assert!(out.contains("## [1.24.4] - 2026-10-02\n"));
+        assert!(!out.contains("Unreleased"));
+        let section_end = out.find("## [1.24.3]").unwrap();
+        let section = &out[..section_end];
+        assert!(section.contains("### Added"), "{out}");
+        assert!(
+            section.contains("- hand off validated ICO branding through native media"),
+            "{out}"
+        );
+        assert_eq!(
+            section
+                .matches("- preserve mapping plan shell type")
+                .count(),
+            1
+        );
+        assert!(out[section_end..].contains("- older fix"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn append_to_finalized_section_is_a_noop_when_entries_are_covered() {
+        let content = "# Changelog\n\n## [0.2.0] - 2026-10-02\n\n### Fixed\n\n- existing fix\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("fixed", vec!["existing fix".to_string()]);
+
+        let (out, changed) =
+            append_to_finalized_section(content, &aliases, "0.2.0", &entries).unwrap();
+
+        assert!(!changed);
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn append_to_finalized_section_requires_the_version_section() {
+        let content = "# Changelog\n\n## [0.1.0] - 2026-10-01\n\n- first\n";
+        let aliases = vec!["Unreleased".to_string()];
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("fixed", vec!["late fix".to_string()]);
+
+        assert!(append_to_finalized_section(content, &aliases, "0.2.0", &entries).is_err());
     }
 
     #[test]

@@ -23,6 +23,8 @@ use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 
+use crate::release::changelog;
+
 /// Outcome of recovering a release push from an advanced remote branch.
 ///
 /// Carries the final push output plus the newly-included commit range that
@@ -195,6 +197,10 @@ pub(crate) fn rebase_onto_advanced_remote_and_push(
         return Ok(None);
     }
 
+    // The advanced commits now ship in this release, and the moved tag puts them
+    // before the next release's range, so this is their only changelog chance.
+    record_advanced_commits_in_changelog(component, component_id, head_commit);
+
     // A second remote advance can reject this bounded recovery push. Publish
     // the moved tag only after the branch accepts the rebased release commit;
     // otherwise the retry itself can strand a fresh tag off-branch (#14251).
@@ -206,6 +212,100 @@ pub(crate) fn rebase_onto_advanced_remote_and_push(
     }
 
     Ok(Some(AdvancedRemoteRecovery { push, advance }))
+}
+
+/// Add changelog entries for the releasable commits the rebase pulled into this
+/// release, amending them into the replayed release commit.
+///
+/// The changelog was generated before the remote advanced, and once the tag
+/// moves onto the rebased commit the next release starts after these commits,
+/// so without this they never reach the changelog (issue #15448). Uses the
+/// same release scope and entry rules as the planner. Best-effort: a failure
+/// is logged and the release still pushes.
+fn record_advanced_commits_in_changelog(
+    component: &Component,
+    component_id: &str,
+    pre_rebase_head: &str,
+) {
+    match amend_changelog_with_advanced_commits(component, pre_rebase_head) {
+        Ok(0) => {}
+        Ok(count) => homeboy_core::log_status!(
+            "release",
+            "Added {} changelog entr{} for commits auto-included from the advanced remote",
+            count,
+            if count == 1 { "y" } else { "ies" }
+        ),
+        Err(err) => homeboy_core::log_status!(
+            "release",
+            "Warning: could not add changelog entries for auto-included commits in {}: {}",
+            component_id,
+            err.message
+        ),
+    }
+}
+
+fn amend_changelog_with_advanced_commits(
+    component: &Component,
+    pre_rebase_head: &str,
+) -> Result<usize> {
+    // `pre_rebase_head..HEAD` is the advanced commits plus the replayed release
+    // commit, which is not releasable and drops out below.
+    let releasable: Vec<git::CommitInfo> =
+        git::get_component_changes_since_tag(component, Some(pre_rebase_head))?
+            .into_iter()
+            .filter(|commit| commit.category.to_changelog_entry_type().is_some())
+            .collect();
+    if releasable.is_empty() {
+        return Ok(0);
+    }
+    if component.changelog_target.is_none() {
+        return Ok(0);
+    }
+
+    let changelog_path = changelog::resolve_changelog_path(component)?;
+    let content = homeboy_core::engine::local_files::local().read(&changelog_path)?;
+    let Some(version) = changelog::get_latest_finalized_version(&content) else {
+        return Ok(0);
+    };
+    let settings = changelog::resolve_effective_settings(Some(component));
+    let grouped = super::planning_changelog::group_commits_for_changelog(&releasable);
+    let entries: std::collections::HashMap<&str, Vec<String>> = grouped
+        .iter()
+        .map(|(entry_type, messages)| (entry_type.as_str(), messages.clone()))
+        .collect();
+    let (updated, changed) = changelog::append_to_finalized_section(
+        &content,
+        &settings.next_section_aliases,
+        &version,
+        &entries,
+    )?;
+    if !changed {
+        return Ok(0);
+    }
+
+    homeboy_core::engine::local_files::local().write(&changelog_path, &updated)?;
+    let path = &component.local_path;
+    let changelog_arg = changelog_path.to_string_lossy().to_string();
+    run_git(path, &["add", "--", &changelog_arg])?;
+    run_git(path, &["commit", "--amend", "--no-edit", "--no-verify"])?;
+    Ok(releasable.len())
+}
+
+fn run_git(path: &str, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("git {}", args.join(" "))))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::internal_io(
+        String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        Some(format!("git {}", args.join(" "))),
+    ))
 }
 
 /// Resolve the commits that landed on the remote between the pre-rebase release
