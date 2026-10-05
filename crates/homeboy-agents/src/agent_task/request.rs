@@ -508,18 +508,18 @@ mod runner_execution_envelope_tests {
     }
 
     #[test]
-    fn extensions_shaped_runtime_fixture_compiles_without_losing_runtime_selection() {
+    fn canonical_runtime_selection_compiles_without_losing_explicit_routing() {
         let request: AgentTaskRequest = serde_json::from_value(json!({
             "schema": AGENT_TASK_REQUEST_SCHEMA,
             "task_id": "task-runtime-fixture",
             "executor": {
-                "backend": "legacy-backend",
-                "selector": "legacy-provider",
-                "runtime": {
+                "backend": "default-backend",
+                "selector": "default-provider",
+                "runtime_selection": {
                     "runtime_id": "runtime-1",
-                    "backend": "runtime-backend",
-                    "selector": "runtime-provider",
-                    "provider": "oauth-provider",
+                    "executor_backend": "runtime-backend",
+                    "executor_provider_id": "runtime-provider",
+                    "ai_provider_id": "oauth-provider",
                     "model": "model-a",
                     "substrate_ref": "sandbox://run/1"
                 },
@@ -542,7 +542,7 @@ mod runner_execution_envelope_tests {
                 }
             ]
         }))
-        .expect("decode extensions-shaped fixture");
+        .expect("decode canonical runtime fixture");
 
         let selection = request.executor.runtime_selection();
         let envelope = request.to_runner_execution_envelope();
