@@ -21,6 +21,7 @@ const {
 	safeFileSegment,
 } = require('../../lib/cli-agent-task-executor');
 const { cliRuntimeReadiness } = require('../../lib/cli-runtime-readiness');
+const { requiredOutputInstructions, structuredOutputsFromTexts } = require('../../lib/declared-outputs');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
 const PI_PROVIDER_LABEL = 'Pi agent task executor';
@@ -133,7 +134,8 @@ function requestedModel(request = {}, config = {}) {
  * a file the agent is told to read; the file lives with the run's artifacts.
  */
 function promptArgument(request = {}, config = {}) {
-	const instructions = request.instructions || '';
+	// Declared outputs (e.g. review_form) are asked for in the final answer.
+	const instructions = `${request.instructions || ''}${requiredOutputInstructions(request)}`;
 	if (Buffer.byteLength(instructions) <= MAX_INLINE_INSTRUCTIONS_BYTES) {
 		return instructions;
 	}
@@ -305,10 +307,22 @@ function successFromStream(context) {
 			metadata: piMetadata(context, stream, { exit_code: 0 }),
 		};
 	}
+	const structured = structuredOutputsFromTexts([stream.finalText], context.request, { runtime: 'pi', label: 'Pi' });
+	const missing = structured.missingRequiredOutputs || [];
 	return {
-		status: 'succeeded',
-		summary: finalTextSummary(stream.finalText) || 'Pi completed the task.',
-		diagnostics: [{ classification: 'provider', message: `Pi finished after ${stream.turns} turn(s) and ${stream.toolCalls} tool call(s).` }],
+		status: missing.length > 0 ? 'failed' : 'succeeded',
+		...(missing.length > 0 ? {
+			failure_classification: 'provider',
+			failure_code: 'agent_task.pi_required_outputs_missing',
+		} : {}),
+		summary: missing.length > 0
+			? `Pi completed without required structured output(s): ${missing.join(', ')}.`
+			: finalTextSummary(stream.finalText) || 'Pi completed the task.',
+		...(structured.outputs ? { outputs: structured.outputs } : {}),
+		diagnostics: [
+			{ classification: 'provider', message: `Pi finished after ${stream.turns} turn(s) and ${stream.toolCalls} tool call(s).` },
+			...(structured.diagnostics || []),
+		],
 		metadata: piMetadata(context, stream, { exit_code: 0 }),
 	};
 }

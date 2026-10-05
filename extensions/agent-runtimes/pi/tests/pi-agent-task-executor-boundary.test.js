@@ -223,6 +223,40 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 		assert.equal(fs.readFileSync(file, 'utf8'), long);
 	}
 
+	// Declared outputs (#2921): Pi is asked for them and returns them, so a cook
+	// requiring review_form can publish.
+	{
+		const declarations = [{ name: 'review_form', required: true }, { name: 'notes', required: false }];
+		const reviewForm = { verdict: 'ready', summary: 'Moved the gate.' };
+		const answer = `Done.\n\n\`\`\`json\n${JSON.stringify({ outputs: { review_form: reviewForm } })}\n\`\`\``;
+		const { result, record } = run({
+			events: [{ type: 'turn_end' }, { type: 'message_end', message: assistant({ content: [{ type: 'text', text: answer }] }) }],
+			request: { output_declarations: declarations },
+		});
+		assert.equal(result.status, 'succeeded', JSON.stringify(result));
+		assert.deepEqual(result.outputs, { review_form: reviewForm });
+		const prompt = record.argv.at(-1);
+		assert.match(prompt, /^Fix the failing test\.\n\nReturn one JSON object in your final answer with declared values under `outputs`/);
+		assert.equal(prompt.includes('"name":"review_form"'), true);
+	}
+	{
+		const { result } = run({
+			events: okStream,
+			request: { inputs: { required_outputs: [{ name: 'review_form', required: true }] } },
+		});
+		assert.equal(result.status, 'failed');
+		assert.equal(result.failure_code, 'agent_task.pi_required_outputs_missing');
+		assert.match(result.summary, /review_form/);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.class === 'pi.required_outputs_missing'), true);
+		assert.deepEqual(result.outputs ?? {}, {});
+	}
+	// No declarations: the prompt and outcome are unchanged.
+	{
+		const { result, record } = run({ events: okStream });
+		assert.equal(record.argv.at(-1), 'Fix the failing test.');
+		assert.deepEqual(result.outputs ?? {}, {});
+	}
+
 	// Missing binary.
 	{
 		const result = executePiAgentTask({

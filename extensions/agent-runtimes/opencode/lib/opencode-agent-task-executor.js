@@ -20,6 +20,11 @@ const {
 } = require('../../lib/cli-agent-task-executor');
 const { harvestDeclaredArtifacts } = require('../../lib/declared-artifact-harvester');
 const {
+	outputDeclarations,
+	requiredOutputInstructions,
+	structuredOutputsFromTexts,
+} = require('../../lib/declared-outputs');
+const {
 	createOpenCodeProgressAdapter,
 } = require('./opencode-progress-events');
 const { applyOpenCodeRuntimeTools } = require('../../lib/runtime-tool-adapter');
@@ -96,8 +101,6 @@ const OPENCODE_GIT_CAPTURE_OPTIONS = {
 	encoding: 'utf8',
 	maxBuffer: 16 * 1024 * 1024,
 };
-const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
-const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 const OPENCODE_SESSION_EXPORT_TIMEOUT_MS = 2_000;
 const OPENCODE_SESSION_EXPORT_MAX_BYTES = 1024 * 1024;
 const OPENCODE_SESSION_EXPORT_ATTEMPTS = 2;
@@ -736,70 +739,21 @@ function nonNegativeFinite(value) {
 }
 
 function structuredOpenCodeOutputs(context = {}) {
-	const declarations = outputDeclarations(context.request);
-	if (declarations.length === 0) {
+	if (outputDeclarations(context.request).length === 0) {
 		return {};
 	}
 	const textEvents = parseJsonObjectsFromText(context.spawnResult?.stdout)
 		.flatMap(openCodeTextParts);
 	const finalAnswers = textEvents.filter((event) => event.final_answer);
 	const candidates = finalAnswers.length > 0 ? finalAnswers : textEvents.slice(-1);
-	for (const event of candidates.reverse()) {
-		const envelope = parseStructuredAnswer(event.text);
-		const values = declaredOutputValues(envelope, declarations);
-		if (!values) {
-			continue;
-		}
-		const outputs = {};
-		const oversized = [];
-		for (const declaration of declarations) {
-			if (!Object.hasOwn(values, declaration.name)) {
-				continue;
-			}
-			if (boundedStructuredOutput(values[declaration.name])) {
-				// Core owns declaration-schema validation; retain bounded provider values.
-				outputs[declaration.name] = values[declaration.name];
-			} else {
-				oversized.push(declaration.name);
-			}
-		}
-		const missing = declarations.filter((declaration) => declaration.required && !Object.hasOwn(outputs, declaration.name));
-		return {
-			...(Object.keys(outputs).length > 0 ? { outputs } : {}),
-			missingRequiredOutputs: missing.map((declaration) => declaration.name),
-			diagnostics: outputDiagnostics(missing, oversized),
-		};
-	}
-	const missing = declarations.filter((declaration) => declaration.required);
-	return {
-		missingRequiredOutputs: missing.map((declaration) => declaration.name),
-		diagnostics: outputDiagnostics(missing, []),
-	};
+	return structuredOutputsFromTexts(
+		candidates.reverse().map((event) => event.text),
+		context.request,
+		{ runtime: 'opencode', label: 'OpenCode' }
+	);
 }
 
-function declaredOutputValues(envelope, declarations) {
-	if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
-		return null;
-	}
-	// OpenCode's current prompt contract is the canonical `outputs` envelope.
-	if (envelope.outputs && typeof envelope.outputs === 'object' && !Array.isArray(envelope.outputs)
-		&& declarations.some((declaration) => Object.hasOwn(envelope.outputs, declaration.name))) {
-		return envelope.outputs;
-	}
-	// Persisted pre-envelope recipes can only expose their explicitly declared names.
-	const legacy = Object.fromEntries(declarations
-		.filter((declaration) => Object.hasOwn(envelope, declaration.name))
-		.map((declaration) => [declaration.name, envelope[declaration.name]]));
-	return Object.keys(legacy).length > 0 ? legacy : null;
-}
 
-function boundedStructuredOutput(value) {
-	try {
-		return Buffer.byteLength(JSON.stringify(value)) <= MAX_STRUCTURED_OUTPUT_BYTES;
-	} catch {
-		return false;
-	}
-}
 
 function openCodeTextParts(frame = {}) {
 	const parts = Array.isArray(frame.parts) ? frame.parts : [frame.part || frame];
@@ -813,62 +767,8 @@ function openCodeTextParts(frame = {}) {
 		.filter((event) => event.text);
 }
 
-function parseStructuredAnswer(text = '') {
-	const candidates = [String(text).trim()];
-	for (const match of String(text).matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-		candidates.unshift(match[1].trim());
-	}
-	for (const candidate of candidates) {
-		if (Buffer.byteLength(candidate) > MAX_STRUCTURED_ANSWER_BYTES) {
-			continue;
-		}
-		try {
-			const parsed = JSON.parse(candidate);
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				return parsed;
-			}
-		} catch {
-			// Continue through the bounded final-answer candidates.
-		}
-	}
-	return null;
-}
 
-function outputDeclarations(request = {}) {
-	const direct = arrayValue(request.output_declarations);
-	const directNames = new Set(direct.map((declaration) => declaration?.name).filter(Boolean));
-	return [...arrayValue(request.inputs?.required_outputs).filter((declaration) => !directNames.has(declaration?.name)), ...direct]
-		.filter((declaration) => declaration && typeof declaration === 'object'
-			&& typeof declaration.name === 'string' && declaration.name.trim() !== '')
-		.map((declaration) => {
-			const { structural_schema: structuralSchema, ...normalized } = declaration;
-			return {
-				...normalized,
-				name: declaration.name.trim(),
-				required: declaration.required === true,
-				...(declaration.json_schema === undefined && structuralSchema !== undefined
-					? { json_schema: structuralSchema }
-					: {}),
-			};
-		});
-}
 
-function outputDiagnostics(missing, oversized) {
-	return [
-		...(missing.length > 0 ? [{
-			class: 'opencode.required_outputs_missing',
-			classification: 'provider',
-			message: `OpenCode completed without required structured output(s): ${missing.map((declaration) => declaration.name).join(', ')}.`,
-			data: { missing_outputs: missing.map((declaration) => declaration.name) },
-		}] : []),
-		...(oversized.length > 0 ? [{
-			class: 'opencode.declared_outputs_oversized',
-			classification: 'provider',
-			message: `OpenCode emitted structured output(s) exceeding the size limit: ${oversized.join(', ')}.`,
-			data: { oversized_outputs: oversized },
-		}] : []),
-	];
-}
 
 function opencodeFailureOutcome(context) {
 	return withPolicyDeniedOutcome(context, {
@@ -1479,13 +1379,6 @@ function opencodeRunArgs(request = {}, config = {}, commandSpec = {}, cwd = '') 
 	];
 }
 
-function requiredOutputInstructions(request = {}) {
-	const declarations = outputDeclarations(request);
-	if (declarations.length === 0) {
-		return '';
-	}
-	return `\n\nReturn one JSON object in your final answer with declared values under \`outputs\`. Include every required declaration and any optional declaration you produced. Output declarations: ${JSON.stringify(declarations)}.`;
-}
 
 function resolveOpenCodeCwd(request = {}, config = {}) {
 	const candidate = config.cwd
