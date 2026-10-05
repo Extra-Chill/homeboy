@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use crate::extension::resolve::ExtensionExecutionContext;
 use homeboy_core::component::Component;
@@ -265,7 +264,7 @@ fn check_extension_checkout(
     reasons: &mut Vec<String>,
 ) -> TraceCanonicalCheck {
     let target = format!("extension:{}", context.extension_id);
-    if git_output(
+    if crate::git::output_allow_empty(
         &context.extension_path,
         &["rev-parse", "--is-inside-work-tree"],
     )
@@ -330,7 +329,9 @@ fn check_git_checkout(
         ));
         return empty_check(target, path, "missing");
     }
-    if git_output(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+    if crate::git::output_allow_empty(path, &["rev-parse", "--is-inside-work-tree"]).as_deref()
+        != Some("true")
+    {
         if let Some(check) =
             check_managed_lab_snapshot(target, path, expected_remote_component_path, reasons)
         {
@@ -344,16 +345,16 @@ fn check_git_checkout(
         return empty_check(target, path, "not-git");
     }
 
-    let sha = git_output(path, &["rev-parse", "HEAD"]);
-    let branch = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    let upstream = git_output(path, &["rev-parse", "--abbrev-ref", "@{u}"]);
-    let dirty = git_output(path, &["status", "--porcelain=v1"])
+    let sha = crate::git::output_allow_empty(path, &["rev-parse", "HEAD"]);
+    let branch = crate::git::output_allow_empty(path, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let upstream = crate::git::output_allow_empty(path, &["rev-parse", "--abbrev-ref", "@{u}"]);
+    let dirty = crate::git::output_allow_empty(path, &["status", "--porcelain=v1"])
         .map(|status| !status.is_empty())
         .unwrap_or(true);
     let (ahead, behind) = upstream
         .as_ref()
         .and_then(|_| {
-            git_output(
+            crate::git::output_allow_empty(
                 path,
                 &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
             )
@@ -573,19 +574,6 @@ fn checkout_status(
     .to_string()
 }
 
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 fn parse_ahead_behind(value: &str) -> Option<(Option<u32>, Option<u32>)> {
     let mut parts = value.split_whitespace();
     let ahead = parts.next()?.parse::<u32>().ok()?;
@@ -599,6 +587,7 @@ mod tests {
     use crate::extension::trace::run::run_trace_workflow;
     use homeboy_core::engine::run_dir::RunDir;
     use homeboy_extension_contract::ExtensionCapability;
+    use std::process::Command;
 
     #[test]
     fn trace_canonical_policy_defaults_to_canonical() {
