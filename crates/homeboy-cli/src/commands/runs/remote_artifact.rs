@@ -67,7 +67,7 @@ fn runner_id_from_artifact_ref(path: &str) -> Option<&str> {
 }
 
 pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResult<RunsOutput> {
-    runs_service::require_run(store, &args.run_id)?;
+    let run = runs_service::require_run(store, &args.run_id)?;
     validate_artifact_name(&args.name)?;
     let runner = runner::load(&args.runner)?;
     // The root that authorizes the path and the root the bytes are copied under
@@ -75,12 +75,22 @@ pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResu
     // the store's would let a local runner authorize a path against one
     // installation and land the artifact in another (#7505).
     let artifact_root = store.artifact_root()?;
-    validate_runner_artifact_path(&runner, &args.path, &artifact_root)?;
+    let run_owned_runtime_evidence = is_run_owned_runtime_evidence(&run, &args.path);
+    if !run_owned_runtime_evidence {
+        validate_runner_artifact_path(&runner, &args.path, &artifact_root)?;
+    }
 
     // The bytes land under the root this store indexes, because the path is
     // recorded into that same store two lines below (#7505).
-    let source =
-        runner_artifact_attach::copy_runner_artifact_source(&artifact_root, &runner, &args.path)?;
+    let source = if run_owned_runtime_evidence {
+        RunnerAttachSource {
+            path: PathBuf::from(&args.path),
+            artifact_type: RunnerAttachArtifactType::File,
+            temporary: false,
+        }
+    } else {
+        runner_artifact_attach::copy_runner_artifact_source(&artifact_root, &runner, &args.path)?
+    };
     let metadata = runner_attach_metadata(&runner, &args.path, &source);
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
@@ -109,6 +119,27 @@ pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResu
         }),
         0,
     ))
+}
+
+fn is_run_owned_runtime_evidence(run: &homeboy::core::observation::RunRecord, path: &str) -> bool {
+    let Ok(requested) = Path::new(path).canonicalize() else {
+        return false;
+    };
+    run.metadata_json
+        .get("provider_executions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|execution| execution.get("runtime_evidence"))
+        .flat_map(|evidence| ["stdout", "stderr", "progress"].map(|key| evidence.get(key)))
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|uri| uri.strip_prefix("file://"))
+        .any(|owned| {
+            Path::new(owned)
+                .canonicalize()
+                .is_ok_and(|owned| owned == requested)
+        })
 }
 
 fn metadata_with_resource_lifecycle(
@@ -752,6 +783,61 @@ mod tests {
             assert!(err
                 .to_string()
                 .contains("allowed runner workspace/output root"));
+        });
+    }
+
+    #[test]
+    fn managed_runtime_evidence_authorization_is_exactly_run_owned() {
+        let _guard = artifact_root_test_lock();
+        with_isolated_home(|home| {
+            let artifact_root = home.path().join("artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
+            let workspace = home.path().join("runner-workspace");
+            fs::create_dir_all(&workspace).expect("workspace");
+            let runner: Runner = serde_json::from_value(serde_json::json!({
+                "kind": "ssh",
+                "server_id": "test-server",
+                "workspace_root": workspace,
+            }))
+            .expect("SSH runner");
+            let store = ObservationStore::open_initialized().expect("store");
+            let source = artifact_root.join("provider-runtime-stdout.log");
+            fs::create_dir_all(&artifact_root).expect("artifact root");
+            fs::write(&source, "bounded runtime evidence\n").expect("runtime evidence");
+            let owned = store
+                .start_run(
+                    NewRunRecord::builder("agent-task")
+                        .metadata(serde_json::json!({
+                            "provider_executions": [{
+                                "runtime_evidence": {
+                                    "stdout": format!("file://{}", source.display())
+                                }
+                            }]
+                        }))
+                        .build(),
+                )
+                .expect("owned run");
+            let unrelated = store
+                .start_run(NewRunRecord::builder("agent-task").build())
+                .expect("unrelated run");
+
+            let owned = runs_service::require_run(&store, &owned.id).expect("owned run");
+            let unrelated =
+                runs_service::require_run(&store, &unrelated.id).expect("unrelated run");
+            assert!(validate_runner_artifact_path(
+                &runner,
+                &source.display().to_string(),
+                &artifact_root
+            )
+            .is_err());
+            assert!(is_run_owned_runtime_evidence(
+                &owned,
+                &source.display().to_string()
+            ));
+            assert!(!is_run_owned_runtime_evidence(
+                &unrelated,
+                &source.display().to_string()
+            ));
         });
     }
 
