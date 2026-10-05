@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.41] - 2026-10-05
+
+### Fixed
+- stop the daemon sweep from retrying unrefreshable mirrored runs forever
+
 ## [0.399.40] - 2026-10-05
 
 ### Fixed
