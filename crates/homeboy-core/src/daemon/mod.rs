@@ -2278,10 +2278,7 @@ fn completion_notify_pass(tracker: &mut completion_tracker::CompletionTracker) {
     let Ok(store) = ObservationStore::open_initialized() else {
         return;
     };
-    let running = list_running_run_ids(&store);
-    for run_id in &running {
-        crate::observation::runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
-    }
+    crate::observation::runs_service::refresh_running_mirrored_daemon_evidence_best_effort(&store);
     let running_after = list_running_run_ids(&store);
     // Departure from the running set is only a *candidate* completion.
     // Confirm terminality against the record itself before reporting:

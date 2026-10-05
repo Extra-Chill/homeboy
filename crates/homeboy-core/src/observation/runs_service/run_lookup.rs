@@ -374,13 +374,9 @@ pub fn refresh_selected_mirrored_daemon_evidence(run: &RunRecord) -> Option<Erro
 /// observation store converge on the daemon's terminal state without requiring
 /// operators to know and run `runs show <mirror-run-id>` first.
 pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationStore) {
-    let statuses = runner_evidence::with_runner_evidence(|p| p.statuses());
-    for report in statuses {
-        for job in report.stale_runner_jobs {
-            finish_stale_runner_child_run(store, &job);
-        }
-    }
-
+    // This runs on every daemon completion pass, so it must stay cheap: no
+    // full generation-ledger reconcile (`statuses()` can take minutes), only
+    // one refresh per running mirrored run (#15438).
     let runs = store
         .list_runs(RunListFilter {
             status: Some(RunStatus::Running.as_str().to_string()),
@@ -390,10 +386,128 @@ pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationS
         .unwrap_or_default();
 
     for run in runs {
-        if runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(&run)).is_some()
-        {
-            refresh_mirrored_daemon_evidence_best_effort(&run.id);
+        let Some((runner_id, job_id)) =
+            runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(&run))
+        else {
+            continue;
+        };
+        // Labels such as `runner-exec:<runner>:daemon` or `…-lab-hydration-N`
+        // are not daemon job IDs; refreshing them can never succeed.
+        if !is_daemon_job_id(&job_id) {
+            continue;
         }
+        let Err(err) =
+            runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id))
+        else {
+            continue;
+        };
+        match unrecoverable_refresh_reason(&err) {
+            // The owning runner no longer has this job: the mirror can never
+            // converge, so close it with the reason instead of retrying forever.
+            Some(reason) => finish_stale_runner_child_run(
+                store,
+                &StaleRunnerJobInfo {
+                    durable_run_id: Some(run.id.clone()),
+                    runner_id,
+                    job_id,
+                    status: "stale".to_string(),
+                    stale_reason: Some(reason.to_string()),
+                },
+            ),
+            None => {
+                if first_sweep_warning(&run.id) {
+                    eprintln!(
+                        "Warning: could not refresh mirrored Lab runner evidence for `{}`: {}",
+                        run.id, err.message
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Whether a mirrored job identity names a daemon job (daemon job IDs are UUIDs).
+fn is_daemon_job_id(job_id: &str) -> bool {
+    uuid::Uuid::parse_str(job_id).is_ok()
+}
+
+/// Refresh failures that prove the mirrored job will never be found again.
+/// Anything else (transport, timeouts) is treated as transient.
+fn unrecoverable_refresh_reason(err: &crate::error::Error) -> Option<&'static str> {
+    if err.details.get("http_status").and_then(Value::as_u64) == Some(404)
+        || err.message.contains("job not found")
+    {
+        Some("mirrored_daemon_job_not_found")
+    } else if err.message.contains("no durable daemon generation binding") {
+        Some("missing_daemon_generation_binding")
+    } else {
+        None
+    }
+}
+
+/// A transient sweep failure is reported once per run for the life of this
+/// process; the sweep repeats every pass and must not flood the journal.
+fn first_sweep_warning(run_id: &str) -> bool {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(run_id.to_string())
+}
+
+#[cfg(test)]
+mod completion_sweep_tests {
+    use super::*;
+
+    #[test]
+    fn non_daemon_job_labels_are_not_refreshed() {
+        assert!(!is_daemon_job_id("runner-exec:homeboy-lab:daemon"));
+        assert!(!is_daemon_job_id(
+            "cook-detached-aa665a74-dc82-4673-9bd4-aa8b74dde3cf-attempt-1-a77c6c0f-lab-hydration-0"
+        ));
+        assert!(is_daemon_job_id("74641d5e-dcb5-4b6a-b7ea-291841e5fc28"));
+    }
+
+    #[test]
+    fn missing_jobs_and_bindings_are_unrecoverable() {
+        let not_found =
+            crate::error::Error::validation_invalid_argument("job_id", "job not found", None, None);
+        assert_eq!(
+            unrecoverable_refresh_reason(&not_found),
+            Some("mirrored_daemon_job_not_found")
+        );
+        let mut http_404 = crate::error::Error::internal_unexpected("daemon returned an error");
+        http_404.details = serde_json::json!({ "http_status": 404 });
+        assert_eq!(
+            unrecoverable_refresh_reason(&http_404),
+            Some("mirrored_daemon_job_not_found")
+        );
+        let unbound = crate::error::Error::validation_invalid_argument(
+            "runner",
+            "runner has no durable daemon generation binding for this job; run `homeboy runner connect <runner-id>` first",
+            None,
+            None,
+        );
+        assert_eq!(
+            unrecoverable_refresh_reason(&unbound),
+            Some("missing_daemon_generation_binding")
+        );
+        let transient = crate::error::Error::internal_io(
+            "connection refused".to_string(),
+            Some("GET runner job".to_string()),
+        );
+        assert_eq!(unrecoverable_refresh_reason(&transient), None);
+    }
+
+    #[test]
+    fn transient_failures_warn_once_per_run() {
+        let run = format!("sweep-warn-{}", uuid::Uuid::new_v4());
+        assert!(first_sweep_warning(&run));
+        assert!(!first_sweep_warning(&run));
+        assert!(!first_sweep_warning(&run));
+        assert!(first_sweep_warning(&format!("{run}-other")));
     }
 }
 
