@@ -24,11 +24,6 @@ use crate::runner_staging_operation::{
 /// id, so each attempt owns its own admission idempotence and finalization
 /// while the resolved mission stays grouping data on the record.
 const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v2";
-/// v1 keyed the same records by the resolved parent mission, which rejected a
-/// later attempt under the same mission after its runner had admitted it.
-/// [`ControllerFallbackProjectionStore::load`] normalizes v1 ledgers in
-/// memory; the owning layer persists the v2 layout at its next write.
-const STORE_SCHEMA_V1: &str = "homeboy/controller-fallback-projection/v1";
 const STARTUP_RECONCILIATION_BATCH_SIZE: usize = 8;
 const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -117,7 +112,6 @@ pub struct RunnerTerminalEvidence {
 pub struct ControllerMissionProjection {
     pub mission_id: String,
     pub runner_id: String,
-    #[serde(alias = "runner_staging_id")]
     pub runner_job_id: String,
     pub terminal_outcome: String,
     pub artifacts: RunnerStagingArtifacts,
@@ -136,61 +130,6 @@ struct State {
     /// Reconciliation observations keyed by exact handoff run id.
     #[serde(default)]
     reconciliation: BTreeMap<String, ReconciliationObservation>,
-}
-
-/// Re-key v1 evidence without choosing between conflicting or orphaned records.
-fn normalize_v1(state: State) -> Result<State> {
-    let State {
-        schema: _,
-        receipts,
-        projections,
-        reconciliation,
-    } = state;
-    let mut normalized = State::default();
-    let mut mission_to_run: BTreeMap<String, String> = BTreeMap::new();
-    let invalid = |key: &str| {
-        Error::validation_invalid_argument(
-            "controller_fallback_store",
-            "v1 ledger evidence does not identify one exact owning run",
-            Some(key.to_string()),
-            None,
-        )
-    };
-    for (legacy_key, mut receipt) in receipts {
-        let run_key = receipt.runner_receipt.handoff.run_id.clone();
-        if legacy_key != receipt.mission_id.as_str()
-            || mission_from_handoff_run_id(&run_key)? != receipt.mission_id
-            || normalized.receipts.contains_key(&run_key)
-        {
-            return Err(invalid(&legacy_key));
-        }
-        mission_to_run.insert(legacy_key, run_key.clone());
-        receipt.schema = STORE_SCHEMA.to_string();
-        normalized.receipts.insert(run_key, receipt);
-    }
-    for (legacy_key, projection) in projections {
-        let run_key = mission_to_run
-            .get(&legacy_key)
-            .ok_or_else(|| invalid(&legacy_key))?;
-        let receipt = &normalized.receipts[run_key];
-        if projection.mission_id != legacy_key
-            || projection.runner_id != receipt.runner_receipt.handoff.runner_id
-            || projection.runner_job_id != receipt.runner_receipt.handoff.runner_job_id
-            || projection.artifacts != receipt.runner_receipt.artifacts
-        {
-            return Err(invalid(&legacy_key));
-        }
-        normalized.projections.insert(run_key.clone(), projection);
-    }
-    for (legacy_key, observation) in reconciliation {
-        let run_key = mission_to_run
-            .get(&legacy_key)
-            .ok_or_else(|| invalid(&legacy_key))?;
-        normalized
-            .reconciliation
-            .insert(run_key.clone(), observation);
-    }
-    Ok(normalized)
 }
 
 impl Default for State {
@@ -242,16 +181,7 @@ impl ControllerFallbackProjectionStore {
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let store = Self { path: path.into() };
-        // v1 mission-keyed ledgers normalize to exact-run ownership in memory
-        // (see [`normalize_v1`]); only unknown schemas fail closed.
-        if store.load()?.schema != STORE_SCHEMA {
-            return Err(Error::validation_invalid_argument(
-                "controller_fallback_store",
-                "unsupported controller fallback projection store schema",
-                Some(store.path.display().to_string()),
-                None,
-            ));
-        }
+        store.load()?;
         Ok(store)
     }
 
@@ -553,9 +483,6 @@ impl ControllerFallbackProjectionStore {
         })?;
         if state.schema == STORE_SCHEMA {
             return Ok(state);
-        }
-        if state.schema == STORE_SCHEMA_V1 {
-            return normalize_v1(state);
         }
         Err(Error::validation_invalid_argument(
             "controller_fallback_store",
@@ -1264,101 +1191,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_mission_keyed_ledger_is_normalized_to_exact_run_ownership_without_loss() {
-        let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let envelope = envelope_for_run(FIRST_ATTEMPT_RUN);
-        let mut runner = Transport::compatible();
-        let runner_receipt =
-            crate::runner_staging_operation::submit_remote_runner_staging(&mut runner, &envelope)
-                .expect("runner admission for the v1-era attempt");
-        let v1_receipt = DeferredControllerReceipt {
-            schema: STORE_SCHEMA_V1.to_string(),
-            mission_id: mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("grouping mission"),
-            runner_receipt: runner_receipt.clone(),
-            controller_projection: "deferred".to_string(),
-        };
-        let v1_projection = ControllerMissionProjection {
-            mission_id: COOK_MISSION.to_string(),
-            runner_id: v1_receipt.runner_receipt.handoff.runner_id.clone(),
-            runner_job_id: v1_receipt.runner_receipt.handoff.runner_job_id.clone(),
-            terminal_outcome: "succeeded".to_string(),
-            artifacts: v1_receipt.runner_receipt.artifacts.clone(),
-            finalization_owner: "controller".to_string(),
-        };
-        let mut v1_state = State {
-            schema: STORE_SCHEMA_V1.to_string(),
-            receipts: BTreeMap::new(),
-            projections: BTreeMap::new(),
-            reconciliation: BTreeMap::new(),
-        };
-        v1_state
-            .receipts
-            .insert(COOK_MISSION.to_string(), v1_receipt.clone());
-        v1_state
-            .projections
-            .insert(COOK_MISSION.to_string(), v1_projection.clone());
-        v1_state.reconciliation.insert(
-            COOK_MISSION.to_string(),
-            ReconciliationObservation {
-                state: "pending".to_string(),
-                detail: "runner job remains running".to_string(),
-            },
-        );
-        ControllerFallbackProjectionStore { path: path.clone() }
-            .persist(&v1_state)
-            .expect("seed v1 ledger");
-
-        let store = ControllerFallbackProjectionStore::open(&path).expect("v1 ledger opens");
-        let normalized = store.load().expect("normalized state");
-        assert_eq!(normalized.schema, STORE_SCHEMA);
-        let migrated_receipt = normalized
-            .receipts
-            .get(FIRST_ATTEMPT_RUN)
-            .expect("receipt re-keyed to its exact run");
-        assert_eq!(migrated_receipt.mission_id.as_str(), COOK_MISSION);
-        assert_eq!(
-            migrated_receipt.runner_receipt, v1_receipt.runner_receipt,
-            "runner-owned receipt payload must survive the transition unchanged"
-        );
-        let migrated_projection = normalized
-            .projections
-            .get(FIRST_ATTEMPT_RUN)
-            .expect("projection re-keyed to its exact run");
-        assert_eq!(*migrated_projection, v1_projection);
-        assert!(normalized.reconciliation.contains_key(FIRST_ATTEMPT_RUN));
-
-        // The earlier attempt still replays exactly after the transition.
-        let mut restarted = Transport::compatible();
-        let replay = store
-            .submit_detached(&mut restarted, &envelope_for_run(FIRST_ATTEMPT_RUN))
-            .expect("earlier attempt replays after the transition");
-        assert_eq!(replay.runner_receipt, v1_receipt.runner_receipt);
-        // And a later attempt under the same Cook mission is admitted.
-        let retry = store
-            .submit_detached(&mut restarted, &envelope_for_run(RETRY_ATTEMPT_RUN))
-            .expect("retry attempt admitted after the transition");
-        assert_eq!(retry.mission_id.as_str(), COOK_MISSION);
-
-        // The first write after the transition persists the v2 layout with
-        // both attempts retained.
-        let reloaded = store.load().expect("reload persisted ledger");
-        assert_eq!(reloaded.schema, STORE_SCHEMA);
-        assert_eq!(reloaded.receipts.len(), 2);
-        assert!(reloaded.receipts.contains_key(FIRST_ATTEMPT_RUN));
-        assert!(reloaded.receipts.contains_key(RETRY_ATTEMPT_RUN));
-        assert_eq!(
-            reloaded
-                .projections
-                .get(FIRST_ATTEMPT_RUN)
-                .map(|projection| projection.runner_job_id.as_str()),
-            Some(v1_receipt.runner_receipt.handoff.runner_job_id.as_str())
-        );
-    }
-
-    #[test]
-    fn malformed_v1_ownership_is_rejected_without_changing_recorded_evidence() {
-        for malformed in ["empty_run", "wrong_job", "orphan_observation"] {
+    fn unsupported_ledger_schemas_are_rejected_without_rewriting_evidence() {
+        for schema in ["homeboy/controller-fallback-projection/v1", "unsupported"] {
             let directory = tempdir().expect("temp directory");
             let path = directory.path().join("controller.json");
             let mut runner = Transport::compatible();
@@ -1366,37 +1200,14 @@ mod tests {
                 submit_remote_runner_staging(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
                     .expect("admission");
             let mut state = State {
-                schema: STORE_SCHEMA_V1.to_string(),
+                schema: schema.to_string(),
                 ..State::default()
             };
             let mut receipt = DeferredControllerReceipt::new(
                 mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("mission"),
                 runner_receipt,
             );
-            receipt.schema = STORE_SCHEMA_V1.to_string();
-            if malformed == "empty_run" {
-                receipt.runner_receipt.handoff.run_id.clear();
-            } else if malformed == "wrong_job" {
-                state.projections.insert(
-                    COOK_MISSION.to_string(),
-                    ControllerMissionProjection {
-                        mission_id: COOK_MISSION.to_string(),
-                        runner_id: receipt.runner_receipt.handoff.runner_id.clone(),
-                        runner_job_id: Uuid::new_v4().to_string(),
-                        terminal_outcome: "succeeded".to_string(),
-                        artifacts: receipt.runner_receipt.artifacts.clone(),
-                        finalization_owner: "controller".to_string(),
-                    },
-                );
-            } else {
-                state.reconciliation.insert(
-                    "unowned-mission".to_string(),
-                    ReconciliationObservation {
-                        state: "pending".to_string(),
-                        detail: "retained evidence".to_string(),
-                    },
-                );
-            }
+            receipt.schema = schema.to_string();
             state.receipts.insert(COOK_MISSION.to_string(), receipt);
             let bytes = serde_json::to_vec(&state).expect("serialize evidence");
             fs::write(&path, &bytes).expect("seed ledger");
