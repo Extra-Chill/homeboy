@@ -12,3 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+homeboy-serde-pin = { version = "0.1.0", path = "../../homeboy-serde-pin" }
+serde_json = "1.0"
