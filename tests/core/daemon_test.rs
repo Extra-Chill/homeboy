@@ -3222,6 +3222,9 @@ fn routes_registered_artifact_downloads_and_sync_manifest() {
 
 #[test]
 fn routes_job_inspection_against_daemon_job_store() {
+    // Routing consults daemon state under HOME; hold the hermetic home so a
+    // concurrent test's registry cannot redirect `/jobs` (#15470).
+    let _home = HomeGuard::new();
     let store = JobStore::default();
     let job = store.create("lint");
 

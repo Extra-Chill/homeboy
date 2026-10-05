@@ -26,6 +26,13 @@ use crate::test_support::with_isolated_home;
 #[cfg(unix)]
 #[test]
 fn detached_daemon_owner_does_not_inherit_the_launcher_session() {
+    // HomeGuard holders set the keep-in-process-group test variable process
+    // wide, which makes `detach_from_launcher_session` skip the very detach
+    // this test proves. Hold the home lock and clear it for this test (#15470).
+    let _home = crate::test_support::HomeGuard::new();
+    let _keep = crate::test_support::EnvVarGuard::unset(
+        crate::test_support::TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV,
+    );
     let mut command = Command::new("sh");
     command.args(["-c", "printf '%s\\n' \"$$\"; sleep 30"]);
     super::detach_from_launcher_session(&mut command);
