@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.45] - 2026-10-05
+
+### Fixed
+- keep only the most recent Rust gate cache identities
+
 ## [0.399.44] - 2026-10-05
 
 ### Changed
