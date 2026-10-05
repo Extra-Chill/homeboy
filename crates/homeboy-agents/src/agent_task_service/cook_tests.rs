@@ -2535,7 +2535,7 @@ fn run_intentional_no_change_cook(
 #[test]
 fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, _) = run_intentional_no_change_cook(true, "no_change", false);
+        let (result, run_id, _) = run_intentional_no_change_cook(true, "investigation_only", false);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         assert_eq!(
@@ -2568,7 +2568,8 @@ fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_polic
 #[test]
 fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", true);
+        let (result, run_id, options) =
+            run_intentional_no_change_cook(false, "investigation_only", true);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         assert_eq!(
