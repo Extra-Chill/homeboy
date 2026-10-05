@@ -1228,6 +1228,16 @@ jobs:
           RETRY_MAX_ATTEMPTS: ${{ inputs.retry-introduced-test-attempts }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 
+      - name: Upload exact-test retry evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-retry-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: |
+            differential-artifacts/**/*.test-retry.json
+            differential-artifacts/**/*.test-retry/**
+          if-no-files-found: ignore
+
       - name: Generate GitHub App token
         id: app-token
         if: steps.final-pr-state.outputs.active != 'false' && always() && inputs.pr-comment != 'false'

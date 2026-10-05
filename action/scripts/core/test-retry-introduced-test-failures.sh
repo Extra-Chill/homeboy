@@ -196,7 +196,7 @@ case "${output}" in
   *) printf 'FAIL: flaky announcement missing identity\n%s\n' "${output}"; exit 1 ;;
 esac
 case "${output}" in
-  *"::warning::"*"remain introduced"*"${id_stuck}"*) printf 'PASS: the still-failing identity is announced by name\n' ;;
+  *"::warning::"*"remain unresolved"*"${id_stuck}"*) printf 'PASS: the still-failing identity is announced by name\n' ;;
   *) printf 'FAIL: still-failing announcement missing identity\n%s\n' "${output}"; exit 1 ;;
 esac
 
@@ -209,6 +209,19 @@ RETRY_TEST_STATE_DIR="${state_dir}" run_retry "${fake_nextest_dir}" MAX_RETRIES=
 assert_equals "{\"flaky\":[],\"still_failing\":[\"${id_stuck}\"]}" \
   "$(sidecar '{flaky,still_failing}')" \
   "a consistently failing identity is never classified flaky"
+assert_equals '"failed"' "$(sidecar '.attempts[0].outcome')" "real failure has an exact failed outcome"
+assert_equals '[]' "$(sidecar '.infrastructure_errors')" "executed failure is not retry infrastructure"
+[ -s "$(jq -r '.attempts[0].log' "${current_dir}/review-test.test-retry.json")" ] || exit 1
+
+# An absent target cannot be dressed up as a failed isolated test. Its runner
+# transcript survives alongside the sidecar for the authoritative gate.
+reset_fixtures
+write_outcomes "${current_dir}" 'review test' nextest "${id_other}" -- "${id_other}"
+write_outcomes "${base_dir}" 'review test' nextest -- "${id_other}"
+run_retry "${fake_nextest_dir}" >/dev/null 2>&1
+assert_equals "[\"${id_other}\"]" "$(sidecar '.infrastructure_errors')" "zero-test selection is explicit infrastructure evidence"
+assert_equals '"infrastructure_error"' "$(sidecar '.attempts[0].outcome')" "zero-test attempt is not a test failure"
+[ -s "$(jq -r '.attempts[0].log' "${current_dir}/review-test.test-retry.json")" ] || exit 1
 
 # --- cargo test fallback: real cargo, no nextest on PATH ---------------------
 # Uses the real system cargo against a minimal on-disk crate so the exact-
