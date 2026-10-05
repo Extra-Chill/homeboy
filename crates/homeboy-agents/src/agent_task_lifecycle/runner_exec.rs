@@ -1307,7 +1307,7 @@ pub fn record_lab_offload_submission_request(
     );
     handoff.submission_key = Some(submission_key.to_string());
     handoff.payload_fingerprint = Some(payload_fingerprint.clone());
-    record.lab_handoff = Some(handoff.clone());
+    record.lab_handoff = Some(handoff);
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "runner_submission_intent".to_string(),
@@ -1317,14 +1317,6 @@ pub fn record_lab_offload_submission_request(
             "payload_fingerprint": payload_fingerprint,
             "runner_id": replay_request.runner_id,
             "replay_request": replay_request,
-        }),
-    );
-    metadata.insert(
-        "handoff_acceptance".to_string(),
-        json!({
-            "state": "pending",
-            "started_at": handoff.submitted_at,
-            "deadline_at": handoff.acceptance_deadline_at,
         }),
     );
     lifecycle_store.write_record(&record)?;
@@ -1361,7 +1353,7 @@ pub fn record_lab_offload_submission_envelope(
     );
     handoff.submission_key = Some(request.submission_key.clone());
     handoff.payload_fingerprint = Some(payload_fingerprint.clone());
-    record.lab_handoff = Some(handoff.clone());
+    record.lab_handoff = Some(handoff);
     record.ensure_metadata_object().insert(
         "runner_submission_intent".to_string(),
         json!({
@@ -1370,14 +1362,6 @@ pub fn record_lab_offload_submission_envelope(
             "payload_fingerprint": payload_fingerprint,
             "runner_id": dispatch.runner_id,
             "replay_envelope_request": request,
-        }),
-    );
-    record.ensure_metadata_object().insert(
-        "handoff_acceptance".to_string(),
-        json!({
-            "state": "pending",
-            "started_at": handoff.submitted_at,
-            "deadline_at": handoff.acceptance_deadline_at,
         }),
     );
     lifecycle_store.write_record(&record)?;

@@ -38,6 +38,39 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
 }
 
 #[test]
+fn lifecycle_store_rejects_metadata_only_lab_acceptance() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut untyped = record(&store, "untyped-handoff", "unsupported");
+    store
+        .write_record(&untyped)
+        .expect("commit canonical record");
+    untyped.metadata = json!({
+        "lifecycle_store_owner": "controller",
+        "runner_id": "homeboy-lab",
+        "handoff_acceptance": {
+            "state": "pending",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "deadline_at": "2026-01-01T00:02:00+00:00"
+        }
+    });
+    for _ in 0..2 {
+        let error = store
+            .write_record(&untyped)
+            .expect_err("metadata must not manufacture typed handoff authority");
+        assert!(
+            format!("{error:?}").contains("Lab acceptance metadata has no typed handoff authority")
+        );
+        let persisted = store
+            .read_record(&untyped.run_id)
+            .expect("original record survives");
+        assert_eq!(persisted.metadata["store_marker"], "unsupported");
+        assert!(persisted.lab_handoff.is_none());
+        assert!(persisted.metadata.get("handoff_acceptance").is_none());
+    }
+}
+
+#[test]
 fn canonical_run_polls_do_not_reimport_unrelated_historical_cook_indexes() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

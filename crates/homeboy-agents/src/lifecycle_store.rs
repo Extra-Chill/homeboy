@@ -1918,6 +1918,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         rig_id: None,
         metadata_json,
     };
+    let record = normalize_decoded_record(&projected, record)?;
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
     let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
     let intents = work_intents_for_record(&record)?;
@@ -2817,9 +2818,8 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
 
 fn normalize_decoded_record(
     run: &RunRecord,
-    mut record: AgentTaskRunRecord,
+    record: AgentTaskRunRecord,
 ) -> Result<AgentTaskRunRecord> {
-    record.hydrate_legacy_lab_handoff();
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(
             problem,

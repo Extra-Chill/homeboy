@@ -761,14 +761,6 @@ pub(crate) fn record_detached_lab_run_with_submission_in_store(
         intent["runner_job_id"] = json!(input.runner_job_id);
         intent["accepted_at"] = json!(accepted_at);
     }
-    metadata.insert(
-        "handoff_acceptance".to_string(),
-        json!({
-            "state": "accepted",
-            "accepted_at": accepted_at,
-            "runner_job_id": input.runner_job_id,
-        }),
-    );
     metadata.insert("phase".to_string(), json!("awaiting_runner_result"));
     metadata.insert(
         "phase_activity".to_string(),

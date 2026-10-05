@@ -4285,7 +4285,11 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         let expired = reconcile_status("expired-handoff-late-acceptance")
             .expect("status reconciles the expired controller proxy");
         assert_eq!(expired.state, AgentTaskRunState::Cancelled);
-        assert_eq!(expired.metadata["handoff_acceptance"]["state"], "expired");
+        assert!(expired.metadata.get("handoff_acceptance").is_none());
+        assert_eq!(
+            expired.lab_handoff.as_ref().map(|handoff| handoff.state),
+            Some(AgentTaskLabHandoffState::Expired)
+        );
         assert_eq!(expired.metadata["retryable"], true);
         assert_eq!(
             expired.metadata["managed_recovery"]["command"],
@@ -4302,7 +4306,11 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         .expect("late acceptance supersedes only the synthetic expiry cancellation");
         assert_eq!(accepted.state, AgentTaskRunState::Running);
         assert!(accepted.has_accepted_lab_handoff());
-        assert_eq!(accepted.metadata["handoff_acceptance"]["state"], "accepted");
+        assert!(accepted.metadata.get("handoff_acceptance").is_none());
+        assert_eq!(
+            accepted.lab_handoff.as_ref().map(|handoff| handoff.state),
+            Some(AgentTaskLabHandoffState::Accepted)
+        );
         assert_eq!(
             accepted.metadata["runner_job_id"],
             "job-accepted-after-deadline"

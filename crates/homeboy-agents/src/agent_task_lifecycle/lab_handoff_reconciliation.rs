@@ -583,14 +583,6 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
         record.lab_handoff = Some(handoff.expired(expired_at.clone()));
     }
     let metadata = record.ensure_metadata_object();
-    metadata.insert(
-        "handoff_acceptance".to_string(),
-        json!({
-            "state": "expired",
-            "expired_at": expired_at,
-            "reason": EXPIRED_LAB_HANDOFF_REASON,
-        }),
-    );
     metadata.insert("phase".to_string(), json!("handoff_rejected"));
     metadata.insert("provider_executions_consumed".to_string(), json!(0));
     metadata.insert(

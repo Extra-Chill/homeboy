@@ -491,14 +491,6 @@ impl AgentTaskLatestExecutorEvidence {
 }
 
 impl AgentTaskRunRecord {
-    /// Hydrate only the established v1 Lab metadata shape. Invalid or
-    /// inconsistent legacy projections deliberately remain untrusted.
-    pub(crate) fn hydrate_legacy_lab_handoff(&mut self) {
-        if self.lab_handoff.is_none() {
-            self.lab_handoff = AgentTaskLabHandoff::from_legacy_metadata(&self.metadata);
-        }
-    }
-
     pub(crate) fn has_accepted_lab_handoff(&self) -> bool {
         self.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.is_valid() && handoff.state == AgentTaskLabHandoffState::Accepted
@@ -582,6 +574,14 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn lab_handoff_validation_error(&self) -> Option<&'static str> {
+        if self.lab_handoff.is_none()
+            && self
+                .metadata
+                .get("handoff_acceptance")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Some("Lab acceptance metadata has no typed handoff authority");
+        }
         self.lab_handoff
             .as_ref()
             .and_then(AgentTaskLabHandoff::validation_error)
@@ -1119,102 +1119,12 @@ impl AgentTaskLabHandoff {
             _ => None,
         }
     }
-
-    fn from_legacy_metadata(metadata: &Value) -> Option<Self> {
-        let object = metadata.as_object()?;
-        let runner_id = required_string(object.get("runner_id"))?;
-        let acceptance = object.get("handoff_acceptance")?.as_object()?;
-        match acceptance.get("state")?.as_str()? {
-            "pending"
-                if object.get("lifecycle_store_owner").and_then(Value::as_str)
-                    == Some("controller") =>
-            {
-                Some(Self::pending(
-                    &runner_id,
-                    required_timestamp(acceptance.get("started_at"))?,
-                    required_timestamp(acceptance.get("deadline_at"))?,
-                ))
-            }
-            "accepted" => {
-                let accepted_at = required_timestamp(acceptance.get("accepted_at"))?;
-                let runner_job_id = required_string(acceptance.get("runner_job_id"))?;
-                let handoff = object.get("runner_handoff")?.as_object()?;
-                let identity = handoff.get("identity")?.as_object()?;
-                if handoff.get("authority").and_then(Value::as_str) != Some("runner_daemon")
-                    || identity.get("runner_id").and_then(Value::as_str) != Some(runner_id.as_str())
-                    || identity.get("runner_job_id").and_then(Value::as_str)
-                        != Some(runner_job_id.as_str())
-                    || required_string(object.get("runner_job_id")).as_deref()
-                        != Some(runner_job_id.as_str())
-                {
-                    return None;
-                }
-                Some(Self {
-                    state: AgentTaskLabHandoffState::Accepted,
-                    authority: AgentTaskLabHandoffAuthority::RunnerDaemon,
-                    runner_id,
-                    submission_key: None,
-                    payload_fingerprint: None,
-                    runner_job_id: Some(runner_job_id),
-                    submitted_at: acceptance.get("started_at").and_then(optional_timestamp),
-                    acceptance_deadline_at: acceptance
-                        .get("deadline_at")
-                        .and_then(optional_timestamp),
-                    accepted_at: Some(accepted_at),
-                    expired_at: None,
-                    workspace_identity: None,
-                    workspace_lifecycle_revision: 0,
-                    workspace_owner_lease: None,
-                    workspace_claim: None,
-                })
-            }
-            "expired"
-                if object.get("lifecycle_store_owner").and_then(Value::as_str)
-                    == Some("controller") =>
-            {
-                Some(Self {
-                    state: AgentTaskLabHandoffState::Expired,
-                    authority: AgentTaskLabHandoffAuthority::Controller,
-                    runner_id,
-                    submission_key: None,
-                    payload_fingerprint: None,
-                    runner_job_id: None,
-                    submitted_at: None,
-                    acceptance_deadline_at: None,
-                    accepted_at: None,
-                    expired_at: required_timestamp(acceptance.get("expired_at")),
-                    workspace_identity: None,
-                    workspace_lifecycle_revision: 0,
-                    workspace_owner_lease: None,
-                    workspace_claim: None,
-                })
-            }
-            _ => None,
-        }
-    }
-}
-
-fn required_string(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
 }
 
 fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
-}
-
-fn required_timestamp(value: Option<&Value>) -> Option<String> {
-    let timestamp = required_string(value)?;
-    parse_rfc3339(&timestamp)?;
-    Some(timestamp)
-}
-
-fn optional_timestamp(value: &Value) -> Option<String> {
-    required_timestamp(Some(value))
 }
 
 #[cfg(test)]
@@ -1236,8 +1146,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pending_handoff_hydrates_and_round_trips() {
-        let mut record = legacy_record(json!({
+    fn metadata_acceptance_cannot_manufacture_handoff_authority() {
+        let record = legacy_record(json!({
             "lifecycle_store_owner": "controller",
             "runner_id": "homeboy-lab",
             "handoff_acceptance": {
@@ -1247,12 +1157,8 @@ mod tests {
             }
         }));
         assert!(record.lab_handoff.is_none());
-        record.hydrate_legacy_lab_handoff();
-        assert_eq!(
-            record.lab_handoff.as_ref().map(|handoff| handoff.state),
-            Some(AgentTaskLabHandoffState::Pending)
-        );
-        assert!(record.has_expired_pending_lab_handoff(
+        assert!(record.lab_handoff_validation_error().is_some());
+        assert!(!record.has_expired_pending_lab_handoff(
             chrono::DateTime::parse_from_rfc3339("2026-01-01T00:02:00+00:00")
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc)
@@ -1287,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_accepted_handoff_hydrates_but_inconsistent_metadata_fails_closed() {
+    fn untyped_acceptance_is_not_runner_ownership() {
         let metadata = json!({
             "runner_id": "homeboy-lab",
             "runner_job_id": "job-1",
@@ -1301,13 +1207,12 @@ mod tests {
                 "identity": { "runner_id": "homeboy-lab", "runner_job_id": "job-1" }
             }
         });
-        let mut accepted = legacy_record(metadata.clone());
-        accepted.hydrate_legacy_lab_handoff();
-        assert!(accepted.has_accepted_lab_handoff());
+        let accepted = legacy_record(metadata.clone());
+        assert!(!accepted.has_accepted_lab_handoff());
+        assert!(accepted.lab_handoff_validation_error().is_some());
 
         let mut inconsistent = legacy_record(metadata);
         inconsistent.metadata["runner_handoff"]["identity"]["runner_job_id"] = json!("other-job");
-        inconsistent.hydrate_legacy_lab_handoff();
         assert!(inconsistent.lab_handoff.is_none());
         assert!(!inconsistent.has_accepted_lab_handoff());
     }

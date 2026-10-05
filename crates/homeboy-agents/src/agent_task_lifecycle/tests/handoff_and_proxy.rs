@@ -831,7 +831,11 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     assert_eq!(running.state, AgentTaskRunState::Running);
     assert_eq!(running.metadata["runner_job_id"], "job-123");
     assert_eq!(running.metadata["lifecycle_store_owner"], "controller");
-    assert_eq!(running.metadata["handoff_acceptance"]["state"], "accepted");
+    assert!(running.metadata.get("handoff_acceptance").is_none());
+    assert_eq!(
+        running.lab_handoff.as_ref().map(|handoff| handoff.state),
+        Some(AgentTaskLabHandoffState::Accepted)
+    );
     assert_eq!(
         running.metadata["runner_execution_record"]["status"],
         "running"
@@ -1041,7 +1045,10 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
             record.runner_job_id(),
             Some("00000000-0000-0000-0000-000000000123")
         );
-        assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+        assert_eq!(
+            record.lab_handoff.as_ref().map(|handoff| handoff.state),
+            Some(AgentTaskLabHandoffState::Accepted)
+        );
         assert_eq!(
             reconcile_status("snapshot-accepted-handoff")
                 .expect("durable handoff")
@@ -1126,7 +1133,10 @@ fn preacceptance_snapshot_binds_replacement_job_from_planned_execution_record() 
 
     assert_eq!(record.state, AgentTaskRunState::Running);
     assert_eq!(record.runner_job_id(), Some(replacement_job_id.as_str()));
-    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
+    assert_eq!(
+        record.lab_handoff.as_ref().map(|handoff| handoff.state),
+        Some(AgentTaskLabHandoffState::Accepted)
+    );
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1458,8 +1468,8 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
         assert_eq!(recovered.runner_id(), Some("homeboy-lab"));
         assert_eq!(recovered.runner_job_id(), Some("accepted-runner-job-1"));
         assert_eq!(
-            recovered.metadata["handoff_acceptance"]["state"],
-            "accepted"
+            recovered.lab_handoff.as_ref().map(|handoff| handoff.state),
+            Some(AgentTaskLabHandoffState::Accepted)
         );
         assert!(recovered.metadata.get("stale_running").is_none());
         assert!(recovered.metadata.get("stale_running_reason").is_none());
@@ -1513,7 +1523,6 @@ fn preacceptance_snapshot_binds_planned_runner_job_before_validation() {
         record.lab_handoff.as_ref().expect("handoff").state,
         AgentTaskLabHandoffState::Accepted
     );
-    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -1561,7 +1570,6 @@ fn preacceptance_snapshot_binds_a_pre_claim_job_without_a_target_runner() {
         record.lab_handoff.as_ref().expect("handoff").state,
         AgentTaskLabHandoffState::Accepted
     );
-    assert_eq!(record.metadata["handoff_acceptance"]["state"], "accepted");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

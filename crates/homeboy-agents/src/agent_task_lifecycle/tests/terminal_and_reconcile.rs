@@ -623,6 +623,7 @@ fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
 
         let pending = record_lab_offload_submission_envelope(run_id, &submission)
             .expect("persist Runner API intent");
+        assert!(pending.metadata.get("handoff_acceptance").is_none());
         let intent = &pending.metadata["runner_submission_intent"];
         let expected_fingerprint =
             homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(&submission)
