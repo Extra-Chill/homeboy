@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.44] - 2026-10-05
+
+### Changed
+- retire parallel vacuity lexical helpers
+- provision the private upload parent explicitly
+- cover successful private evidence chunk uploads
+
+### Fixed
+- cap the filesystem-relative free-space reserve at 64 GiB
+- remove verified staging payload after publication
+- open private upload descriptors for verification
+
 ## [0.399.43] - 2026-10-05
 
 ### Changed
