@@ -20,8 +20,27 @@ impl Drop for DaemonGuard {
     }
 }
 
+struct LeasePublicationGuard {
+    published: std::path::PathBuf,
+    withheld: std::path::PathBuf,
+}
+
+impl LeasePublicationGuard {
+    fn publish(&self) {
+        std::fs::rename(&self.withheld, &self.published).expect("republish service lease");
+    }
+}
+
+impl Drop for LeasePublicationGuard {
+    fn drop(&mut self) {
+        if !self.published.exists() && self.withheld.exists() {
+            let _ = std::fs::rename(&self.withheld, &self.published);
+        }
+    }
+}
+
 #[test]
-fn runner_observation_and_watch_survive_client_loss_without_resubmission() {
+fn runner_service_lease_publication_race_retries_denial_and_preserves_job_identity() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let binary = env!("CARGO_BIN_EXE_homeboy");
         let root = home.path();
@@ -80,6 +99,154 @@ fn runner_observation_and_watch_survive_client_loss_without_resubmission() {
         assert_eq!(empty["active_runner_job_count"], 0);
         assert_eq!(empty["freshness"]["active_jobs"], 0);
         assert_eq!(empty["lease_id"], daemon["daemon"]["lease_id"]);
+
+        // Withhold the durable service lease while leaving its daemon process
+        // alive. This creates the publication gap the controller must treat as
+        // unavailable, not as a fresh service generation.
+        let lease_path = homeboy_core::paths::daemon_state_file().expect("isolated lease path");
+        let unpublished_lease = root.join("state.pending");
+        std::fs::rename(&lease_path, &unpublished_lease).expect("withhold service lease");
+        let lease_publication = LeasePublicationGuard {
+            published: lease_path.clone(),
+            withheld: unpublished_lease.clone(),
+        };
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let status_binary = binary;
+        let status_home = root.to_path_buf();
+        let status_gate = std::sync::Arc::clone(&gate);
+        let status_reader = std::thread::spawn(move || {
+            status_gate.wait();
+            let output = Command::new(status_binary)
+                .args(["daemon", "status"])
+                .env_clear()
+                .env("HOME", &status_home)
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .output()
+                .expect("read status during lease publication gap");
+            assert!(output.status.success());
+            let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
+            assert_eq!(status["data"]["fresh"], false, "{status:#}");
+            assert_eq!(
+                status["data"]["recovery"]["stale_reason_code"], "lease_missing",
+                "{status:#}"
+            );
+        });
+        let describe_client = client.clone();
+        let describe_url = url.clone();
+        let describe_gate = std::sync::Arc::clone(&gate);
+        let describe_reader = std::thread::spawn(move || {
+            describe_gate.wait();
+            for _ in 0..3 {
+                let response = describe_client
+                    .get(format!(
+                        "{describe_url}{}",
+                        homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH
+                    ))
+                    .send()
+                    .expect("read runner diagnostic during publication gap");
+                assert_eq!(response.status().as_u16(), 503);
+                let body: Value = response.json().expect("diagnostic error JSON");
+                assert_eq!(body["success"], false, "{body:#}");
+                assert!(body["data"]["message"].is_string(), "{body:#}");
+            }
+        });
+        let health_client = client.clone();
+        let health_url = url.clone();
+        let health_gate = std::sync::Arc::clone(&gate);
+        let health_reader = std::thread::spawn(move || {
+            health_gate.wait();
+            for _ in 0..3 {
+                let body: Value = health_client
+                    .get(format!("{health_url}/health"))
+                    .send()
+                    .expect("read health during publication gap")
+                    .json()
+                    .expect("health JSON");
+                assert_eq!(body["data"]["lease"], Value::Null, "{body:#}");
+                assert_eq!(body["data"]["freshness"]["fresh"], false, "{body:#}");
+            }
+        });
+        let admission_client = client.clone();
+        let admission_url = url.clone();
+        let admission_gate = std::sync::Arc::clone(&gate);
+        let retry_key = "lease-publication-gap-retry";
+        let denied_admission = std::thread::spawn(move || {
+            admission_gate.wait();
+            let request = json!({
+                "runner_id": "fixture-local",
+                "command": "publication-gap-regression",
+                "expected_daemon_lease_id": "expected-after-publication",
+                "idempotency_key": retry_key,
+                "admission_lease_protocol": 1,
+            });
+            let response = admission_client
+                .post(format!("{admission_url}/admissions"))
+                .json(&request)
+                .send()
+                .expect("denied zero-admission request");
+            assert!(response.status().is_client_error() || response.status().is_server_error());
+            response.json::<Value>().expect("denial JSON")
+        });
+        gate.wait();
+        status_reader.join().expect("status reader");
+        describe_reader.join().expect("diagnostic reader");
+        health_reader.join().expect("health reader");
+        let denial = denied_admission.join().expect("admission reader");
+        assert!(!denial["success"].as_bool().unwrap_or(true), "{denial:#}");
+        assert!(
+            denial["data"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("daemon lease is not fresh")),
+            "the denial must come from the unpublished daemon lease: {denial:#}"
+        );
+        assert_eq!(
+            std::fs::read(&lease_path)
+                .expect_err("lease remains unpublished")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        // Republish the exact same daemon generation. The denied request did
+        // not consume its idempotency key or create an admission reservation.
+        lease_publication.publish();
+        let admission_request = json!({
+            "runner_id": "fixture-local",
+            "command": "publication-gap-regression",
+            "expected_daemon_lease_id": daemon["daemon"]["lease_id"],
+            "idempotency_key": retry_key,
+            "admission_lease_protocol": 1,
+        });
+        let submit_admission = || -> Value {
+            let response: Value = client
+                .post(format!("{url}/admissions"))
+                .json(&admission_request)
+                .send()
+                .expect("retry denied admission with the same identity")
+                .json()
+                .expect("admission response JSON");
+            assert!(
+                response["success"].as_bool().unwrap_or(false),
+                "{response:#}"
+            );
+            response["data"]["body"].clone()
+        };
+        let admission = submit_admission();
+        let replayed_admission = submit_admission();
+        assert_eq!(admission["job"]["id"], replayed_admission["job"]["id"]);
+        assert_eq!(replayed_admission["idempotent_resubmission"], true);
+        let admission_id = admission["job"]["id"].as_str().expect("admission ID");
+        let released: Value = client
+            .post(format!("{url}/admissions/{admission_id}/release"))
+            .json(&json!({ "admission_token": admission["admission_token"] }))
+            .send()
+            .expect("release temporary admission")
+            .json()
+            .expect("release response JSON");
+        assert!(
+            released["success"].as_bool().unwrap_or(false),
+            "{released:#}"
+        );
 
         let marker = root.join("effect");
         let request = json!({"runner_id":"fixture-local", "cwd":root,
