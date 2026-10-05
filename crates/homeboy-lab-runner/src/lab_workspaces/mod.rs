@@ -919,13 +919,18 @@ pub(super) fn agent_task_plan_extra_workspaces(
     Ok(workspaces)
 }
 
-/// Sync a runtime root as its own plain snapshot.
+/// Sync a plan runtime root to the runner.
 ///
-/// Unlike provider-config inputs, this never climbs to a containing Git
-/// checkout: an agent runtime is a self-contained directory (often inside a
-/// much larger extensions checkout, reached through a symlink), and the runner
-/// needs only that directory. Missing or non-directory paths are skipped;
-/// admission reports them through readiness as before.
+/// An agent runtime is usually not self-contained: it requires siblings such
+/// as `../../lib` or `../../../agent-task-contracts` that live elsewhere in its
+/// extension checkout (#15290). When the runtime sits under one of the shared
+/// assets its extension root declares in `homeboy-extension-root.json`, the
+/// whole declared closure is synced from that root in its original layout, so
+/// those relative requires resolve on the runner. The plan remapper is
+/// prefix-based, so runtime paths under the synced root follow automatically.
+/// A runtime outside any declared closure is still shipped as its own plain
+/// snapshot, never its containing Git checkout. Missing or non-directory paths
+/// are skipped; admission reports them through readiness as before.
 fn add_runtime_root_extra_workspace(
     candidate: &str,
     source_canon: &Path,
@@ -939,18 +944,43 @@ fn add_runtime_root_extra_workspace(
     if !canon.is_dir() || canon == source_canon || canon.starts_with(source_canon) {
         return;
     }
-    if seen.iter().any(|existing| canon.starts_with(existing)) || !seen.insert(canon.clone()) {
+    let (workspace_path, snapshot_includes) =
+        runtime_extension_shared_assets(&canon).unwrap_or_else(|| (canon.clone(), Vec::new()));
+    if seen
+        .iter()
+        .any(|existing| workspace_path.starts_with(existing))
+        || !seen.insert(workspace_path.clone())
+    {
         return;
     }
     workspaces.push(ExtraLabWorkspace {
         role: "agent_task_plan_runtime".to_string(),
-        path: canon,
-        snapshot_includes: Vec::new(),
+        path: workspace_path,
+        snapshot_includes,
         git_fetch_refs: Vec::new(),
         allow_dirty_lab_workspace: true,
         source_provenance: None,
     });
 }
+
+/// The nearest extension root above `runtime` that declares shared assets, and
+/// those assets, when the runtime itself lies under one of them. A declaring
+/// root whose assets do not contain the runtime does not claim it.
+fn runtime_extension_shared_assets(runtime: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let mut root = runtime.parent()?;
+    loop {
+        if root.join(EXTENSION_ROOT_MANIFEST).is_file() {
+            let assets = homeboy_core::extension::lifecycle::shared_assets_for_root(root);
+            let covers_runtime = assets
+                .iter()
+                .any(|asset| runtime.starts_with(root.join(asset)));
+            return covers_runtime.then(|| (root.to_path_buf(), assets));
+        }
+        root = root.parent()?;
+    }
+}
+
+const EXTENSION_ROOT_MANIFEST: &str = "homeboy-extension-root.json";
 
 /// Controller-local runtime roots named by a run-plan's resolved runtime
 /// identities. Only `runtime_path` and local-path source locators count:
