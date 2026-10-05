@@ -203,12 +203,35 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     })?;
     let base = backend.resolve_verified_base(&options.path, verified_base_sha)?;
     let mut candidate = backend.candidate_state(&options.path, &base, &head)?;
-    if let AgentTaskPrCandidateState::BehindBase { .. } = &candidate {
+    let binds_promoted_candidate =
+        !options.manual_finalization || options.inherited_gate_evidence.is_some();
+    let mut lagging_promoted_parent = None;
+    if let AgentTaskPrCandidateState::BehindBase { behind, ahead, .. } = &candidate {
+        let (behind, ahead) = (*behind, *ahead);
         // A manually verified candidate asserts an immutable commit identity, and
         // merging would move HEAD out from under that proof. Those runs keep the
         // pre-#13695 refusal and stay a human decision.
         if options.verified_candidate_sha.is_none() {
-            if let AgentTaskPrBaseConvergence::Converged =
+            // The verified base is the live remote base observed at promotion,
+            // so a destination created before the base advanced holds its
+            // uncommitted candidate on an older ancestor of it. That parent is
+            // what the promotion fingerprint recorded and what the gates ran
+            // on. Merging the base here would fast-forward HEAD beneath the
+            // dirty candidate, and the fingerprint check below would then
+            // reject drift that finalization itself caused (#15473). Commit the
+            // candidate on its recorded parent instead; ahead == 0 proves that
+            // parent is base history, so the PR carries only candidate files.
+            let uncommitted = if binds_promoted_candidate && ahead == 0 {
+                backend.changed_files(&options.path)?
+            } else {
+                Vec::new()
+            };
+            if !uncommitted.is_empty() {
+                lagging_promoted_parent = Some(behind);
+                candidate = AgentTaskPrCandidateState::Dirty {
+                    changed_files: uncommitted,
+                };
+            } else if let AgentTaskPrBaseConvergence::Converged =
                 backend.converge_base(&options.path, &base)?
             {
                 candidate = backend.candidate_state(&options.path, &base, &head)?;
@@ -308,6 +331,17 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             url: None,
         },
     );
+    if let Some(behind) = lagging_promoted_parent {
+        options.review_dossier.evidence.push(
+            crate::agent_task_review_dossier::AgentTaskReviewEvidence {
+                summary: format!(
+                    "Candidate committed on its gate-verified promoted parent, {behind} commit(s) behind verified {} at {}; finalization did not advance the destination beneath it.",
+                    options.base, base.sha
+                ),
+                url: None,
+            },
+        );
+    }
     options.review_dossier.evidence.sort_by(|left, right| {
         left.summary
             .cmp(&right.summary)
@@ -351,7 +385,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         ));
     }
 
-    if !options.manual_finalization || options.inherited_gate_evidence.is_some() {
+    if binds_promoted_candidate {
         match lifecycle_store {
             Some(store) => backend.validate_candidate_in_store(store, &options)?,
             None => backend.validate_candidate(&options)?,

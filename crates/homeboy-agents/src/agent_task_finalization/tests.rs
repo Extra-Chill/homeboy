@@ -64,6 +64,9 @@ struct MockBackend {
     candidate_validation_calls: u8,
     rooted_candidate_validation_calls: u8,
     component_ids: Vec<Option<String>>,
+    /// Classify and converge the candidate against the real worktree, so a
+    /// test observes exactly what finalization would do to the destination.
+    real_git: bool,
 }
 
 impl MockBackend {
@@ -158,18 +161,24 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         })
     }
 
-    fn changed_files(&mut self, _path: &str) -> Result<Vec<String>> {
+    fn changed_files(&mut self, path: &str) -> Result<Vec<String>> {
         self.changed_files_calls += 1;
+        if self.real_git {
+            return RealAgentTaskPrFinalizationBackend.changed_files(path);
+        }
         Ok(self.changed_files.clone())
     }
 
     fn candidate_state(
         &mut self,
-        _path: &str,
+        path: &str,
         base: &AgentTaskPrResolvedBase,
-        _head: &str,
+        head: &str,
     ) -> Result<AgentTaskPrCandidateState> {
         self.candidate_base_sha = Some(base.sha.clone());
+        if self.real_git {
+            return RealAgentTaskPrFinalizationBackend.candidate_state(path, base, head);
+        }
         Ok(self.candidate_state.clone().unwrap_or_else(|| {
             if self.changed_files.is_empty() {
                 AgentTaskPrCandidateState::Equivalent
@@ -203,6 +212,17 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 reference: verified_base_sha.to_string(),
                 sha: verified_base_sha.to_string(),
             }))
+    }
+
+    fn converge_base(
+        &mut self,
+        path: &str,
+        base: &AgentTaskPrResolvedBase,
+    ) -> Result<AgentTaskPrBaseConvergence> {
+        if self.real_git {
+            return RealAgentTaskPrFinalizationBackend.converge_base(path, base);
+        }
+        Ok(AgentTaskPrBaseConvergence::Conflicted { paths: Vec::new() })
     }
 
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
@@ -2701,6 +2721,97 @@ fn head_drift_is_rejected_before_commit_and_push() {
         &mut backend
     )
     .is_err());
+    assert!(!backend.committed);
+    assert!(!backend.pushed);
+}
+
+/// #15473: the promotion records the live remote base as `verified_base`, so a
+/// destination created before the base advanced holds its uncommitted
+/// candidate on an older ancestor. Finalization used to fast-forward that
+/// destination beneath the dirty candidate and then reject its own move as
+/// "candidate changed after promotion". It must leave HEAD on the recorded
+/// parent and commit the gate-verified candidate there.
+#[test]
+fn uncommitted_candidate_on_lagging_parent_finalizes_without_advancing_destination() {
+    let repo = real_git_repo();
+    let path = repo.path().to_str().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let recorded_parent = git(&["rev-parse", "HEAD"]);
+    // origin/main advances to P' after the destination was created at P.
+    std::fs::write(repo.path().join("base-only"), "from main").unwrap();
+    git(&["add", "base-only"]);
+    git(&["commit", "-q", "-m", "advance main"]);
+    let advanced_base = git(&["rev-parse", "HEAD"]);
+    git(&["reset", "-q", "--hard", &recorded_parent]);
+
+    // The verified candidate is applied, uncommitted, on P.
+    std::fs::write(repo.path().join("candidate"), "candidate").unwrap();
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(path).unwrap();
+    let mut backend = real_git_backend(repo.path(), candidate);
+    backend.real_git = true;
+    let mut options = real_git_finalization_options(repo.path(), vec!["candidate".to_string()]);
+    options.verified_base_sha = Some(advanced_base.clone());
+
+    let report = finalize_pr_with_backend(options, &mut backend)
+        .expect("finalization accepts the candidate on its recorded parent");
+
+    assert_eq!(
+        git(&["rev-parse", "HEAD"]),
+        recorded_parent,
+        "finalization must not fast-forward the destination beneath the candidate"
+    );
+    assert!(!repo.path().join("base-only").exists());
+    assert_eq!(report.changed_files, vec!["candidate"]);
+    assert!(backend.committed);
+    assert!(backend.pushed);
+    assert!(backend.created);
+    assert!(backend.last_body.contains(&format!(
+        "Candidate committed on its gate-verified promoted parent, 1 commit(s) behind verified main at {advanced_base}"
+    )));
+}
+
+/// Real drift is still refused: a candidate whose content changed after
+/// promotion on a lagging parent keeps the exact-fingerprint rejection.
+#[test]
+fn lagging_parent_does_not_admit_candidate_content_drift() {
+    let repo = real_git_repo();
+    let path = repo.path().to_str().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let recorded_parent = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.path().join("base-only"), "from main").unwrap();
+    git(&["add", "base-only"]);
+    git(&["commit", "-q", "-m", "advance main"]);
+    let advanced_base = git(&["rev-parse", "HEAD"]);
+    git(&["reset", "-q", "--hard", &recorded_parent]);
+
+    std::fs::write(repo.path().join("candidate"), "verified").unwrap();
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(path).unwrap();
+    std::fs::write(repo.path().join("candidate"), "edited after gates").unwrap();
+    let mut backend = real_git_backend(repo.path(), candidate);
+    backend.real_git = true;
+    let mut options = real_git_finalization_options(repo.path(), vec!["candidate".to_string()]);
+    options.verified_base_sha = Some(advanced_base);
+
+    let error = finalize_pr_with_backend(options, &mut backend).expect_err("content drift");
+
+    assert!(error.message.contains("candidate changed"));
+    assert_eq!(git(&["rev-parse", "HEAD"]), recorded_parent);
     assert!(!backend.committed);
     assert!(!backend.pushed);
 }
