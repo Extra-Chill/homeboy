@@ -125,7 +125,6 @@ fn component_config_env_is_available_to_component_scripts_and_extra_env_wins() {
 }
 
 #[test]
-#[ignore = "homeboy#14984: shared-cargo-target admission requires 10% of the host's *total* disk free (FILESYSTEM_RESERVE_DIVISOR in capacity.rs), which this host does not have; not fixable without weakening a real capacity safety floor"]
 fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
     with_isolated_home(|_| {
         let manifest = homeboy_manifest();
@@ -197,13 +196,13 @@ fn homeboy_manifest_seeds_an_isolated_warm_cargo_target_per_checkout() {
                 .push(fs::read_to_string(checkout.join("cargo-target")).expect("resolved target"));
         }
 
-        assert!(resolved_targets[0].starts_with("shared:"));
-        assert!(resolved_targets[1].starts_with("shared:"));
+        assert!(resolved_targets[0].starts_with("isolated:"));
+        assert!(resolved_targets[1].starts_with("isolated:"));
         let primary_target = resolved_targets[0]
-            .strip_prefix("shared:")
+            .strip_prefix("isolated:")
             .expect("primary target path");
         let worktree_target = resolved_targets[1]
-            .strip_prefix("shared:")
+            .strip_prefix("isolated:")
             .expect("worktree target path");
 
         // A divergent worktree must not receive the literal same physical
