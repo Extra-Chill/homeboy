@@ -44,14 +44,62 @@ use crate::{Error, Result};
 /// The same relative free-space floor reported by [`disk_budget`].
 pub const FILESYSTEM_RESERVE_DIVISOR: u64 = 10;
 
+/// Upper bound on the relative part of the reserve. Ten percent protects a
+/// small disk, but on a multi-terabyte filesystem it becomes hundreds of
+/// gigabytes: a 3.6 TB runner with 369 GB free was refused every Rust gate for
+/// "being below the free-space reserve" (360 GB). Past this cap the reserve
+/// no longer grows with the disk.
+pub const FILESYSTEM_RESERVE_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
 /// Keep the configured absolute reserve, while scaling it to a filesystem that
 /// is substantially larger. This makes the existing disk-budget warning a
 /// protective admission floor without introducing a second policy vocabulary.
+/// The scaled part is capped at [`FILESYSTEM_RESERVE_MAX_BYTES`]; an explicitly
+/// configured absolute reserve above the cap is still honored.
 pub fn filesystem_relative_reserve_bytes(absolute: u64, total_bytes: Option<u64>) -> u64 {
     total_bytes
-        .map(|total| total / FILESYSTEM_RESERVE_DIVISOR)
+        .map(|total| (total / FILESYSTEM_RESERVE_DIVISOR).min(FILESYSTEM_RESERVE_MAX_BYTES))
         .unwrap_or(0)
         .max(absolute)
+}
+
+#[cfg(test)]
+mod relative_reserve_tests {
+    use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn small_filesystems_keep_the_ten_percent_floor() {
+        assert_eq!(
+            filesystem_relative_reserve_bytes(5 * GIB, Some(200 * GIB)),
+            20 * GIB
+        );
+        assert_eq!(
+            filesystem_relative_reserve_bytes(5 * GIB, Some(20 * GIB)),
+            5 * GIB
+        );
+    }
+
+    #[test]
+    fn large_filesystems_cap_the_relative_floor() {
+        let total = 3_600 * GIB;
+        assert_eq!(
+            filesystem_relative_reserve_bytes(5 * GIB, Some(total)),
+            FILESYSTEM_RESERVE_MAX_BYTES
+        );
+        // 369 GiB free on that disk now clears the reserve.
+        assert!(369 * GIB > filesystem_relative_reserve_bytes(5 * GIB, Some(total)));
+    }
+
+    #[test]
+    fn an_explicit_absolute_reserve_above_the_cap_is_honored() {
+        assert_eq!(
+            filesystem_relative_reserve_bytes(100 * GIB, Some(3_600 * GIB)),
+            100 * GIB
+        );
+        assert_eq!(filesystem_relative_reserve_bytes(5 * GIB, None), 5 * GIB);
+    }
 }
 
 /// Free capacity a caller wants left over after its write.
@@ -780,12 +828,21 @@ mod tests {
 
     #[test]
     fn relative_reserve_protects_large_filesystems_without_weakening_small_ones() {
+        // #12075: on a 926 GiB disk a 5 GiB floor only fired near exhaustion.
+        // The scaled floor still protects it, now capped (#15443 follow-up).
         assert_eq!(
             filesystem_relative_reserve_bytes(
                 5 * 1024 * 1024 * 1024,
                 Some(926 * 1024 * 1024 * 1024)
             ),
-            92 * 1024 * 1024 * 1024 + 6 * 1024 * 1024 * 1024 / 10,
+            FILESYSTEM_RESERVE_MAX_BYTES,
+        );
+        assert_eq!(
+            filesystem_relative_reserve_bytes(
+                5 * 1024 * 1024 * 1024,
+                Some(400 * 1024 * 1024 * 1024)
+            ),
+            40 * 1024 * 1024 * 1024,
         );
         assert_eq!(
             filesystem_relative_reserve_bytes(

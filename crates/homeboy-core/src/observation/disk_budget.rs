@@ -71,8 +71,19 @@ pub fn disk_budget(path: &Path, subject: &str, _unavailable_message: &str) -> Di
     };
 
     let byte_warning = match (available, total) {
-        (Some(available), Some(total)) if total > 0 && available < total / 10 => {
-            Some(format!("{subject} filesystem has less than 10% free space"))
+        // Same floor as admission (`capacity::filesystem_relative_reserve_bytes`):
+        // ten percent, capped so a multi-terabyte disk is not "low" with
+        // hundreds of gigabytes free.
+        (Some(available), Some(total))
+            if total > 0
+                && available
+                    < (total / crate::capacity::FILESYSTEM_RESERVE_DIVISOR)
+                        .min(crate::capacity::FILESYSTEM_RESERVE_MAX_BYTES) =>
+        {
+            Some(format!(
+                "{subject} filesystem is below its free-space reserve (10%, at most {} GiB)",
+                crate::capacity::FILESYSTEM_RESERVE_MAX_BYTES / (1024 * 1024 * 1024)
+            ))
         }
         (Some(available), _) if available < 5 * 1024 * 1024 * 1024 => Some(format!(
             "{subject} filesystem has less than 5 GiB free space"
