@@ -62,13 +62,13 @@ pub fn proof(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     runs_service::require_run(&store, run_id)?;
     runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
     let run = runs_service::require_run(&store, run_id)?;
-    Ok((RunsOutput::Proof(build_proof(&run)), 0))
+    Ok((RunsOutput::Proof(build_proof(&run)?), 0))
 }
 
 /// Project a loaded run into its compact proof signals. Pure over the run
 /// record so non-CLI callers and tests can reuse it without an observation
 /// store.
-fn build_proof(run: &RunRecord) -> RunsProofOutput {
+fn build_proof(run: &RunRecord) -> homeboy::core::Result<RunsProofOutput> {
     let failure = evidence_failure_summary(run);
     let passed = if failure.failed {
         Some(false)
@@ -81,7 +81,7 @@ fn build_proof(run: &RunRecord) -> RunsProofOutput {
     let mut signals = BTreeMap::new();
     collect_signals(&run.metadata_json, &mut signals);
 
-    RunsProofOutput {
+    Ok(RunsProofOutput {
         command: "runs.proof",
         run_id: run.id.clone(),
         kind: run.kind.clone(),
@@ -93,8 +93,8 @@ fn build_proof(run: &RunRecord) -> RunsProofOutput {
         signals,
         // Derived, never persisted: a read-only projection must not mutate
         // stored state, and freezing this derivation would stop it improving.
-        fuzz: derive_fuzz_proof(run),
-    }
+        fuzz: derive_fuzz_proof(run)?,
+    })
 }
 
 fn collect_signals(metadata: &Value, out: &mut BTreeMap<String, Value>) {
@@ -212,7 +212,7 @@ mod tests {
             }),
         );
 
-        let proof = build_proof(&run);
+        let proof = build_proof(&run).expect("valid proof");
 
         assert_eq!(proof.command, "runs.proof");
         assert_eq!(proof.status, "fail");
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn build_proof_marks_running_run_pending_with_no_signals() {
         let run = run_with("running", json!({ "phase": "warmup" }));
-        let proof = build_proof(&run);
+        let proof = build_proof(&run).expect("valid proof");
         assert_eq!(proof.passed, None);
         assert!(proof.gate_failures.is_empty());
         assert!(proof.signals.is_empty());
@@ -262,14 +262,14 @@ mod tests {
     #[test]
     fn build_proof_marks_pass() {
         let run = run_with("pass", json!({ "scenario_metrics": [] }));
-        let proof = build_proof(&run);
+        let proof = build_proof(&run).expect("valid proof");
         assert_eq!(proof.passed, Some(true));
     }
 
     #[test]
     fn build_proof_leaves_non_fuzz_runs_without_a_fuzz_projection() {
         let run = run_with("pass", json!({ "success": true }));
-        assert!(build_proof(&run).fuzz.is_none());
+        assert!(build_proof(&run).expect("non-fuzz proof").fuzz.is_none());
     }
 
     /// #10514: the reviewer-facing read command returned only
@@ -282,6 +282,7 @@ mod tests {
             json!({
                 "success": true,
                 "campaign_id": "import-db-dropin",
+                "evidence_contract": homeboy::fuzz::FuzzEvidenceContract::satisfied(),
                 "seed": "4356",
                 "rig_package": {
                     "rig_id": "studio",
@@ -301,7 +302,7 @@ mod tests {
         run.component_id = Some("studio".to_string());
         run.git_sha = Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0".to_string());
 
-        let proof = build_proof(&run);
+        let proof = build_proof(&run).expect("valid proof");
 
         let fuzz = proof.fuzz.expect("fuzz proof");
         assert_eq!(

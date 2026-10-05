@@ -166,12 +166,13 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         artifact_validation_error.as_deref(),
         &artifact_ref_validation,
     );
+    let artifact_ref_error = artifact_ref_validation.summary();
     let combined_results_error = results_error
         .as_deref()
         .or(postprocess_error.as_deref())
         .or(artifact_validation_error.as_deref())
         .or(expected_metric_error.as_deref())
-        .or(artifact_ref_validation.error.as_deref());
+        .or(artifact_ref_error.as_deref());
     let outcome = fuzz_run_outcome(
         runner_output.exit_code,
         runner_output.success,
@@ -237,8 +238,6 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         artifacts_dir: &artifacts_dir,
         results: results.as_ref(),
         expected_metric_gates: &expected_metric_gates,
-        results_error: combined_results_error,
-        missing_artifact_refs: &artifact_ref_validation.missing_refs,
         evidence_contract: &evidence_contract,
         component_revision: component_revision.as_deref(),
         postprocess: &postprocess,
@@ -890,8 +889,6 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) artifacts_dir: &'a Path,
     pub(super) results: Option<&'a FuzzCampaign>,
     pub(super) expected_metric_gates: &'a [super::types::FuzzGateEvaluation],
-    pub(super) results_error: Option<&'a str>,
-    pub(super) missing_artifact_refs: &'a [String],
     /// Classified evidence-contract verdict for this run. Persisted so a
     /// later reader does not have to re-sniff a collapsed error string.
     pub(super) evidence_contract: &'a FuzzEvidenceContract,
@@ -932,11 +929,6 @@ pub(super) fn persist_fuzz_run_evidence(
         "status": input.status,
         "requested_settings": fuzz_requested_settings(input.args),
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
-        "results_error": input.results_error,
-        "missing_artifact_refs": input.missing_artifact_refs,
-        // Classified companion to the collapsed `results_error` string above.
-        // Additive: older readers keep using `results_error` and
-        // `missing_artifact_refs`, which are unchanged.
         "evidence_contract": input.evidence_contract,
         "component_revision": input.component_revision,
         // Case and finding totals are already in the parsed campaign; the run
@@ -1022,7 +1014,6 @@ pub(super) fn persist_fuzz_run_evidence(
             artifacts_dir: input.artifacts_dir,
             campaign: input.results,
             envelope,
-            missing_artifact_refs: input.missing_artifact_refs,
             postprocess: generic_postprocess_outputs,
             payloads: input.payloads,
         })?;
@@ -1032,25 +1023,12 @@ pub(super) fn persist_fuzz_run_evidence(
     })
 }
 
-#[derive(Default)]
-pub(super) struct FuzzArtifactRefValidation {
-    /// Declared refs that resolved inside the artifact root but are absent.
-    /// Kept for the existing `missing_artifact_refs` metadata member.
-    pub(super) missing_refs: Vec<String>,
-    /// Every way the artifact side of the evidence contract was broken,
-    /// classified. Includes the missing refs plus refs that escape the root,
-    /// are the wrong kind, or cannot be read — three cases that used to be
-    /// silently discarded.
-    pub(super) violations: Vec<FuzzEvidenceViolation>,
-    pub(super) error: Option<String>,
-}
-
 pub(super) fn fuzz_artifact_ref_validation(
     results: Option<&FuzzCampaign>,
     artifacts_dir: &Path,
-) -> FuzzArtifactRefValidation {
+) -> FuzzEvidenceContract {
     let Some(campaign) = results else {
-        return FuzzArtifactRefValidation::default();
+        return FuzzEvidenceContract::satisfied();
     };
     let mut violations = Vec::new();
     for artifact in &campaign.artifacts {
@@ -1077,42 +1055,7 @@ pub(super) fn fuzz_artifact_ref_validation(
     });
     violations.dedup();
 
-    let mut missing_refs = violations
-        .iter()
-        .filter(|violation| violation.code == FuzzEvidenceViolationCode::ArtifactRefMissing)
-        .filter_map(|violation| violation.declared_ref.clone())
-        .collect::<Vec<_>>();
-    missing_refs.sort();
-    missing_refs.dedup();
-
-    // Preserve the exact legacy sentence for the missing case so operators and
-    // existing assertions keep recognizing it, and append the newly detected
-    // classes rather than replacing the message.
-    let mut messages = Vec::new();
-    if !missing_refs.is_empty() {
-        messages.push(format!(
-            "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: {}",
-            missing_refs.join(", ")
-        ));
-    }
-    let other = violations
-        .iter()
-        .filter(|violation| violation.code != FuzzEvidenceViolationCode::ArtifactRefMissing)
-        .map(FuzzEvidenceViolation::root_cause_line)
-        .collect::<Vec<_>>();
-    if !other.is_empty() {
-        messages.push(format!(
-            "fuzz campaign declared unusable artifact reference(s): {}",
-            other.join("; ")
-        ));
-    }
-    let error = (!messages.is_empty()).then(|| messages.join(" | "));
-
-    FuzzArtifactRefValidation {
-        missing_refs,
-        violations,
-        error,
-    }
+    FuzzEvidenceContract::from_violations(violations)
 }
 
 /// Assemble the campaign-level evidence contract from the channels that
@@ -1126,7 +1069,7 @@ pub(super) fn fuzz_evidence_contract(
     results_error: Option<&str>,
     postprocess_error: Option<&str>,
     required_artifact_error: Option<&str>,
-    artifact_refs: &FuzzArtifactRefValidation,
+    artifact_refs: &FuzzEvidenceContract,
 ) -> FuzzEvidenceContract {
     let mut violations = artifact_refs.violations.clone();
     if let Some(error) = results_error {

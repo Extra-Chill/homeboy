@@ -287,12 +287,12 @@ pub fn fuzz_campaign_finding_totals(campaign: &FuzzCampaign) -> FuzzProofFinding
 ///
 /// Returns `None` for runs that are not fuzz runs, so the generic
 /// `runs proof` projection stays generic.
-pub fn derive_fuzz_proof(run: &RunRecord) -> Option<FuzzProof> {
+pub fn derive_fuzz_proof(run: &RunRecord) -> homeboy_core::Result<Option<FuzzProof>> {
     if run.kind != "fuzz" {
-        return None;
+        return Ok(None);
     }
     let metadata = &run.metadata_json;
-    let evidence = FuzzEvidenceContract::from_run_metadata(metadata);
+    let evidence = FuzzEvidenceContract::from_run_metadata(metadata)?;
     let cases = case_totals(metadata);
     let findings = finding_totals(metadata);
     let gates = gate_totals(metadata);
@@ -357,7 +357,7 @@ pub fn derive_fuzz_proof(run: &RunRecord) -> Option<FuzzProof> {
     proof.gaps = derived_gaps;
     let rendered = render_markdown(&proof);
     proof.markdown = rendered;
-    Some(proof)
+    Ok(Some(proof))
 }
 
 fn string_member(metadata: &Value, key: &str) -> Option<String> {
@@ -762,6 +762,7 @@ mod tests {
 
     fn passing_metadata() -> Value {
         serde_json::json!({
+            "evidence_contract": FuzzEvidenceContract::satisfied(),
             "success": true,
             "status": "passed",
             "campaign_id": "import-db-dropin",
@@ -808,14 +809,16 @@ mod tests {
     fn a_non_fuzz_run_has_no_fuzz_proof() {
         let mut run = fuzz_run("pass", passing_metadata());
         run.kind = "bench".to_string();
-        assert!(derive_fuzz_proof(&run).is_none());
+        assert!(derive_fuzz_proof(&run).expect("non-fuzz run").is_none());
     }
 
     #[test]
     fn a_successful_campaign_projects_exact_revisions_cases_gates_and_coverage() {
         let run = fuzz_run("pass", passing_metadata());
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert_eq!(proof.schema, FUZZ_PROOF_SCHEMA);
         assert_eq!(proof.source, FuzzProofSource::RunMetadata);
@@ -866,7 +869,9 @@ mod tests {
     fn the_markdown_rendering_is_postable_and_bounded() {
         let run = fuzz_run("pass", passing_metadata());
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert!(proof
             .markdown
@@ -887,10 +892,19 @@ mod tests {
         let mut metadata = passing_metadata();
         metadata["success"] = serde_json::json!(false);
         metadata["status"] = serde_json::json!("failed");
-        metadata["missing_artifact_refs"] = serde_json::json!(["results.json"]);
+        metadata["evidence_contract"] =
+            serde_json::json!(FuzzEvidenceContract::from_violations(vec![
+                super::super::evidence_contract::FuzzEvidenceViolation::new(
+                    super::super::evidence_contract::FuzzEvidenceViolationCode::ArtifactRefMissing,
+                    "declared results.json is absent",
+                )
+                .with_declared_ref("results.json")
+            ]));
         let run = fuzz_run("fail", metadata);
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert!(!proof.verdict.overall);
         assert_eq!(proof.verdict.workload, FuzzWorkloadVerdict::Passed);
@@ -907,10 +921,17 @@ mod tests {
 
     #[test]
     fn unrecorded_facts_are_reported_as_gaps_rather_than_guessed() {
-        let mut run = fuzz_run("pass", serde_json::json!({ "success": true }));
+        let mut run = fuzz_run(
+            "pass",
+            serde_json::json!({
+                "success": true, "evidence_contract": FuzzEvidenceContract::satisfied()
+            }),
+        );
         run.git_sha = None;
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert!(proof.cases.is_none());
         assert!(proof.coverage.is_none());
@@ -931,7 +952,9 @@ mod tests {
         metadata["rig_package"]["source_content_hash"] = Value::Null;
         let run = fuzz_run("pass", metadata);
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         let rig = proof.rig.as_ref().expect("rig");
         assert!(rig.dirty);
@@ -948,7 +971,9 @@ mod tests {
         metadata["gates"][0]["observed"] = serde_json::json!(2.0);
         let run = fuzz_run("fail", metadata);
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert_eq!(proof.gates.failed, 1);
         assert_eq!(proof.gates.passed, 3);
@@ -973,7 +998,9 @@ mod tests {
         });
         let run = fuzz_run("fail", metadata);
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert_eq!(
             proof.verdict.failure_domain,
@@ -997,7 +1024,9 @@ mod tests {
         metadata["lab"] = serde_json::json!({ "remote_job_id": "job-7" });
         let run = fuzz_run("pass", metadata);
 
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         assert_eq!(proof.execution.placement.as_deref(), Some("lab"));
         assert_eq!(proof.execution.remote_job_id.as_deref(), Some("job-7"));
@@ -1006,7 +1035,9 @@ mod tests {
     #[test]
     fn the_projection_round_trips_through_json() {
         let run = fuzz_run("pass", passing_metadata());
-        let proof = derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
 
         let encoded = serde_json::to_string(&proof).expect("encode");
         let decoded: FuzzProof = serde_json::from_str(&encoded).expect("decode");

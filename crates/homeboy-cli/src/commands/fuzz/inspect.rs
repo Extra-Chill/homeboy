@@ -150,37 +150,21 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     } else {
         (None, None)
     };
-    let diagnostic_input = parsed
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({ "error": bounded(&text, 600) }));
-
     let envelope_summary = inspect_fuzz_result_envelope_artifact(selected)
         .filter(|inspection| inspection.valid)
         .and_then(|inspection| inspection.summary);
-    // The selected artifact can belong to a downstream Lab fuzz run rather than
-    // the runner-exec run used for lookup. Its record is the diagnostic source.
-    let diagnostic_run = runs_service::require_run(&store, &selected.run_id)?;
-    // Read-time reconstruction: prefer the classified contract the producer
-    // persisted, and fall back to the pre-taxonomy `missing_artifact_refs` /
-    // `results_error` members for runs recorded before it existed.
-    let evidence_contract = FuzzEvidenceContract::from_run_metadata(&diagnostic_run.metadata_json);
-    let recorded_gates = recorded_gate_evaluations(&diagnostic_run.metadata_json);
-
-    Ok(FuzzInspectOutput {
-        command: "fuzz.inspect".to_string(),
-        inspection_status: "ok".to_string(),
-        campaign_status: parsed.as_ref().and_then(campaign_status),
-        run_id: args.run_id.clone(),
-        source_run_id: selected.run_id.clone(),
-        artifact_id: selected.id.clone(),
-        artifact_kind: selected.kind.clone(),
-        artifact_path: selected.path.clone(),
-        canonical_ref: canonical_ref.clone(),
-        evidence_ref: evidence_ref.clone(),
-        fetch_command,
-        result,
-        raw,
-        diagnostic: Some(fuzz_failure_diagnostic(
+    let diagnostic = if args.raw {
+        None
+    } else {
+        // The producing fuzz run owns diagnosis, including downstream Lab results.
+        let diagnostic_input = parsed
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({ "error": bounded(&text, 600) }));
+        let diagnostic_run = runs_service::require_run(&store, &selected.run_id)?;
+        let evidence_contract =
+            FuzzEvidenceContract::from_run_metadata(&diagnostic_run.metadata_json)?;
+        let recorded_gates = recorded_gate_evaluations(&diagnostic_run.metadata_json);
+        Some(fuzz_failure_diagnostic(
             &diagnostic_run,
             Some(&selected.run_id),
             &diagnostic_input,
@@ -196,7 +180,24 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
                 .collect(),
             &evidence_contract,
             &recorded_gates,
-        )),
+        ))
+    };
+
+    Ok(FuzzInspectOutput {
+        command: "fuzz.inspect".to_string(),
+        inspection_status: "ok".to_string(),
+        campaign_status: parsed.as_ref().and_then(campaign_status),
+        run_id: args.run_id.clone(),
+        source_run_id: selected.run_id.clone(),
+        artifact_id: selected.id.clone(),
+        artifact_kind: selected.kind.clone(),
+        artifact_path: selected.path.clone(),
+        canonical_ref: canonical_ref.clone(),
+        evidence_ref: evidence_ref.clone(),
+        fetch_command,
+        result,
+        raw,
+        diagnostic,
         envelope_summary,
         candidates: candidate_index,
         next_steps: vec![
@@ -526,7 +527,16 @@ mod tests {
     use super::super::types::FuzzInspectArgs;
     use super::run_inspect;
 
-    fn sample_run(kind: &str, metadata: serde_json::Value) -> NewRunRecord {
+    fn sample_run(kind: &str, mut metadata: serde_json::Value) -> NewRunRecord {
+        if kind == "fuzz" {
+            metadata
+                .as_object_mut()
+                .expect("fixture metadata")
+                .entry("evidence_contract")
+                .or_insert_with(|| {
+                    serde_json::json!(homeboy::fuzz::FuzzEvidenceContract::satisfied())
+                });
+        }
         NewRunRecord::builder(kind)
             .component_id("homeboy")
             .command(format!("homeboy {kind} homeboy"))
@@ -846,8 +856,13 @@ mod tests {
                         "exit_code": 1,
                         "success": false,
                         "campaign_id": "sqlite-artifact-mask",
-                        "missing_artifact_refs": ["results.json"],
-                        "results_error": "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: results.json",
+                        "evidence_contract": homeboy::fuzz::FuzzEvidenceContract::from_violations(vec![
+                            homeboy::fuzz::FuzzEvidenceViolation::new(
+                                homeboy::fuzz::FuzzEvidenceViolationCode::ArtifactRefMissing,
+                                "declared results.json is absent",
+                            ).with_declared_ref("results.json")
+                                .with_producer_contract(homeboy::fuzz::FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT)
+                        ]),
                         "gates": [
                             { "gate_id": "no-open-findings", "status": "passed", "metric": "open_findings", "observed": 0.0, "expected": 0.0 },
                             { "gate_id": "has-case-evidence", "status": "passed", "metric": "case_evidence", "observed": 1.0, "expected": 1.0 },

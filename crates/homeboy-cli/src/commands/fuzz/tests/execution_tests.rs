@@ -1,7 +1,5 @@
 use super::*;
-use crate::commands::fuzz::execution::{
-    effective_fuzz_run_id, ensure_strict_rig_source_is_clean, FuzzArtifactRefValidation,
-};
+use crate::commands::fuzz::execution::{effective_fuzz_run_id, ensure_strict_rig_source_is_clean};
 
 fn install_fuzz_postprocess_helper(home: &std::path::Path) {
     let helper = home.join("fuzz-postprocess-helper");
@@ -195,8 +193,6 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             artifacts_dir: &artifacts_dir,
             results: None,
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -344,8 +340,6 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             artifacts_dir: &artifacts_dir,
             results: None,
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -633,8 +627,6 @@ fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
             artifacts_dir: &artifacts_dir,
             results: None,
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -737,8 +729,6 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -816,8 +806,6 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             artifacts_dir: &artifacts_dir,
             results: None,
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -871,8 +859,6 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
             expected_metric_gates: &[],
-            results_error: None,
-            missing_artifact_refs: &[],
             evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
             component_revision: None,
             postprocess: &[],
@@ -1449,11 +1435,12 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             artifacts_dir: &artifacts_dir,
             results: None,
             expected_metric_gates: &[],
-            results_error: Some(
-                "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
-            ),
-            missing_artifact_refs: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::from_violations(vec![
+                homeboy::fuzz::FuzzEvidenceViolation::new(
+                    homeboy::fuzz::FuzzEvidenceViolationCode::ResultsUnparseable,
+                    "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
+                )
+            ]),
             component_revision: None,
             postprocess: &[],
             payloads: &[],
@@ -1468,10 +1455,12 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             persisted.metadata_json["campaign_id"],
             serde_json::Value::Null
         );
-        assert!(persisted.metadata_json["results_error"]
-            .as_str()
-            .unwrap()
-            .contains("unsupported/fuzz-result/v1"));
+        assert!(
+            persisted.metadata_json["evidence_contract"]["violations"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported/fuzz-result/v1")
+        );
 
         let store = ObservationStore::open_initialized().expect("store");
         let artifacts = store
@@ -1524,11 +1513,15 @@ fn fuzz_artifact_ref_validation_reports_missing_local_refs() {
         let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
 
         assert_eq!(
-            validation.missing_refs,
+            validation
+                .violations
+                .iter()
+                .filter_map(|violation| violation.declared_ref.clone())
+                .collect::<Vec<_>>(),
             vec!["also-missing.json".to_string(), "missing.json".to_string()]
         );
         assert!(validation
-            .error
+            .summary()
             .as_deref()
             .unwrap_or_default()
             .contains("HOMEBOY_FUZZ_ARTIFACTS_DIR"));
@@ -1900,7 +1893,14 @@ fn a_missing_declared_artifact_is_classified_as_an_evidence_contract_violation()
 
         let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
 
-        assert_eq!(validation.missing_refs, vec!["results.json".to_string()]);
+        assert_eq!(
+            validation
+                .violations
+                .iter()
+                .filter_map(|violation| violation.declared_ref.clone())
+                .collect::<Vec<_>>(),
+            vec!["results.json".to_string()]
+        );
         assert_eq!(validation.violations.len(), 1);
         let violation = &validation.violations[0];
         assert_eq!(
@@ -1931,12 +1931,13 @@ fn a_traversal_escaping_artifact_ref_is_no_longer_discarded_silently() {
         let validation = fuzz_artifact_ref_validation(Some(&campaign), &artifacts_dir);
 
         // Not "missing" — it never resolved at all.
-        assert!(validation.missing_refs.is_empty());
+        assert!(!validation.violations.iter().any(|violation| violation.code
+            == homeboy::fuzz::FuzzEvidenceViolationCode::ArtifactRefMissing));
         assert_eq!(
             validation.violations[0].code,
             homeboy::fuzz::FuzzEvidenceViolationCode::ArtifactRefUnresolvable
         );
-        assert!(validation.error.is_some());
+        assert!(!validation.complete);
     });
 }
 
@@ -1990,7 +1991,7 @@ fn a_bare_string_ref_pointing_at_a_directory_is_not_a_wrong_kind_violation() {
         // A bare `artifact_refs` string declares no `artifact_type`, so there
         // is no promise to break.
         assert!(validation.violations.is_empty());
-        assert!(validation.error.is_none());
+        assert!(validation.complete);
     });
 }
 
@@ -2006,7 +2007,7 @@ fn an_absolute_ref_outside_the_artifact_root_stays_out_of_the_evidence_verdict()
 
         // Homeboy holds no contract over a base it did not hand the runner.
         assert!(validation.violations.is_empty());
-        assert!(validation.error.is_none());
+        assert!(validation.complete);
     });
 }
 
@@ -2014,7 +2015,12 @@ fn an_absolute_ref_outside_the_artifact_root_stays_out_of_the_evidence_verdict()
 fn an_expected_metric_gate_failure_is_not_folded_into_the_evidence_contract() {
     // The collapse this issue is about: a gate that did not hold is a
     // statement about declared pass criteria, not about undelivered evidence.
-    let contract = fuzz_evidence_contract(None, None, None, &FuzzArtifactRefValidation::default());
+    let contract = fuzz_evidence_contract(
+        None,
+        None,
+        None,
+        &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+    );
 
     assert!(contract.complete);
     assert!(contract.violations.is_empty());
@@ -2099,8 +2105,6 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
             artifacts_dir: &artifacts_dir,
             results: Some(&campaign),
             expected_metric_gates: &[],
-            results_error: artifact_refs.error.as_deref(),
-            missing_artifact_refs: &artifact_refs.missing_refs,
             evidence_contract: &contract,
             component_revision: Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0"),
             postprocess: &[],
@@ -2142,22 +2146,94 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
                 .and_then(serde_json::Value::as_u64),
             Some(1)
         );
-        // Additive: the legacy members a released extension may still read are
-        // untouched.
-        assert_eq!(
-            run.metadata_json
-                .pointer("/missing_artifact_refs/0")
-                .and_then(serde_json::Value::as_str),
-            Some("results.json")
-        );
-        assert!(run.metadata_json.get("results_error").is_some());
+        assert!(run.metadata_json.get("results_error").is_none());
+        assert!(run.metadata_json.get("missing_artifact_refs").is_none());
 
         // And the reviewer projection reads back the separated verdicts.
-        let proof = homeboy::fuzz::derive_fuzz_proof(&run).expect("fuzz proof");
+        let proof = homeboy::fuzz::derive_fuzz_proof(&run)
+            .expect("valid evidence")
+            .expect("fuzz proof");
         assert!(!proof.verdict.overall);
         assert_eq!(
             proof.verdict.failure_domain,
             Some(homeboy::fuzz::FuzzFailureDomain::ProductFinding)
         );
+        assert_eq!(proof.verdict.evidence.as_str(), "incomplete");
+        let inspected = crate::commands::fuzz::inspect::run_inspect(
+            crate::commands::fuzz::types::FuzzInspectArgs {
+                run_id: run.id.clone(),
+                raw: false,
+                full: true,
+            },
+        )
+        .expect("inspect canonical persisted evidence");
+        assert_eq!(
+            inspected.diagnostic.expect("diagnostic").failure_domain,
+            "product_finding"
+        );
+
+        let mut invalid = run.clone();
+        invalid.id = "invalid-evidence-producer".to_string();
+        invalid.metadata_json["evidence_contract"]["complete"] = serde_json::json!(true);
+        let error = homeboy::fuzz::persist_fuzz_run_evidence(homeboy::fuzz::FuzzRunEvidence {
+            run: invalid,
+            results_path: &results_path,
+            execution_request_path: None,
+            sequence_plan_path: None,
+            artifacts_dir: &artifacts_dir,
+            campaign: None,
+            envelope: None,
+            postprocess: Vec::new(),
+            payloads: &[],
+        })
+        .expect_err("contradictory evidence must not persist");
+        assert_eq!(error.details["valid"], false);
+        assert!(store
+            .get_run("invalid-evidence-producer")
+            .expect("no invalid row")
+            .is_none());
+
+        let mut unstructured = run.clone();
+        unstructured.id = "unstructured-evidence-run".to_string();
+        unstructured.metadata_json = serde_json::json!({ "success": true });
+        store
+            .upsert_imported_run(&unstructured)
+            .expect("import unsupported row");
+        let artifacts = store.list_artifacts(&run.id).expect("retained artifacts");
+        let raw = artifacts
+            .iter()
+            .find(|artifact| artifact.kind.contains("envelope"))
+            .expect("retained result envelope");
+        store
+            .record_artifact(
+                &unstructured.id,
+                "fuzz_results",
+                std::path::Path::new(&raw.path),
+            )
+            .expect("retain unsupported run's raw bytes");
+        let before = store.get_run(&unstructured.id).expect("row before");
+        let error = crate::commands::fuzz::inspect::run_inspect(
+            crate::commands::fuzz::types::FuzzInspectArgs {
+                run_id: unstructured.id.clone(),
+                raw: false,
+                full: true,
+            },
+        )
+        .err()
+        .expect("unstructured metadata must not become a proof");
+        assert_eq!(error.details["field"], "evidence_contract");
+        assert!(homeboy::fuzz::derive_fuzz_proof(&unstructured).is_err());
+        let raw_output = crate::commands::fuzz::inspect::run_inspect(
+            crate::commands::fuzz::types::FuzzInspectArgs {
+                run_id: unstructured.id.clone(),
+                raw: true,
+                full: false,
+            },
+        )
+        .expect("raw inspection remains a byte retrieval operation");
+        assert!(raw_output.raw.is_some());
+        assert!(raw_output.diagnostic.is_none());
+        assert_eq!(store.get_run(&unstructured.id).expect("row after"), before);
+        assert!(std::path::Path::new(&raw.path).is_file());
     });
 }

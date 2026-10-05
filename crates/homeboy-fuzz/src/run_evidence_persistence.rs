@@ -38,8 +38,6 @@ pub struct FuzzRunEvidence<'a> {
     pub campaign: Option<&'a FuzzCampaign>,
     /// Gated result envelope to persist (built by the caller from the campaign).
     pub envelope: Option<FuzzResultEnvelope>,
-    /// Artifact refs missing from the campaign, recorded on the artifacts dir.
-    pub missing_artifact_refs: &'a [String],
     /// Generic artifact post-process outputs to record.
     pub postprocess: Vec<ArtifactPostprocessOutput>,
     /// Content-addressed bodies externalized from the campaign before projection.
@@ -51,6 +49,7 @@ pub struct FuzzRunEvidence<'a> {
 pub fn persist_fuzz_run_evidence(
     evidence: FuzzRunEvidence<'_>,
 ) -> homeboy_core::Result<(String, Vec<EvidenceRef>)> {
+    crate::FuzzEvidenceContract::from_run_metadata(&evidence.run.metadata_json)?;
     let store = ObservationStore::open_initialized()?;
     let run_id = evidence.run.id.clone();
     store.upsert_imported_run(&evidence.run)?;
@@ -121,7 +120,6 @@ pub fn persist_fuzz_run_evidence(
             evidence.artifacts_dir,
             serde_json::json!({
                 "source": "HOMEBOY_FUZZ_ARTIFACTS_DIR",
-                "missing_artifact_refs": evidence.missing_artifact_refs,
             }),
         )?;
     }

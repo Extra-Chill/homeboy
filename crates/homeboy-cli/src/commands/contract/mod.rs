@@ -1328,7 +1328,7 @@ impl_contract_validation! {
     ResourceLifecycleIndex => RESOURCE_LIFECYCLE_INDEX_SCHEMA, |value| value.validate();
     HostMutationLifecycle => HOST_MUTATION_LIFECYCLE_SCHEMA, |value| value.validate();
     EvidenceManifest => EVIDENCE_MANIFEST_SCHEMA, |value| validate_evidence_manifest(&value);
-    FuzzEvidenceContract => FUZZ_EVIDENCE_CONTRACT_SCHEMA, |value| validate_fuzz_evidence_contract(&value);
+    FuzzEvidenceContract => FUZZ_EVIDENCE_CONTRACT_SCHEMA, |value| value.validate();
     FuzzProof => FUZZ_PROOF_SCHEMA, |value| validate_fuzz_proof(&value);
     Value => FUZZ_WORKLOAD_SCHEMA, |value| {
         FuzzWorkload::from_value(value).map_err(|message| {
@@ -1364,40 +1364,6 @@ fn validate_evidence_manifest(manifest: &EvidenceManifest) -> homeboy::core::Res
     })
 }
 
-/// Check a candidate fuzz evidence contract before a producer attaches it.
-///
-/// The one invariant that matters is that `complete` cannot disagree with the
-/// violation list: a payload claiming completeness while carrying violations
-/// is exactly the collapse this contract exists to prevent.
-fn validate_fuzz_evidence_contract(contract: &FuzzEvidenceContract) -> homeboy::core::Result<()> {
-    validate_schema_field(FUZZ_EVIDENCE_CONTRACT_SCHEMA, &contract.schema)?;
-    let error = if contract.complete && !contract.violations.is_empty() {
-        Some("complete is true but violations were declared")
-    } else if !contract.complete && contract.violations.is_empty() {
-        Some("complete is false but no violation was declared")
-    } else if contract
-        .violations
-        .iter()
-        .any(|violation| violation.message.trim().is_empty())
-    {
-        Some("every violation must carry a non-empty message")
-    } else {
-        None
-    };
-    match error {
-        None => Ok(()),
-        Some(error) => Err(homeboy::core::Error::new(
-            homeboy::core::ErrorCode::ValidationInvalidArgument,
-            "Contract validation failed",
-            serde_json::json!({
-                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
-                "valid": false,
-                "error": error,
-            }),
-        )),
-    }
-}
-
 /// Check a candidate fuzz reviewer proof.
 fn validate_fuzz_proof(proof: &FuzzProof) -> homeboy::core::Result<()> {
     validate_schema_field(FUZZ_PROOF_SCHEMA, &proof.schema)?;
@@ -1411,7 +1377,7 @@ fn validate_fuzz_proof(proof: &FuzzProof) -> homeboy::core::Result<()> {
         None
     };
     match error {
-        None => validate_fuzz_evidence_contract(&proof.evidence),
+        None => proof.evidence.validate(),
         Some(error) => Err(homeboy::core::Error::new(
             homeboy::core::ErrorCode::ValidationInvalidArgument,
             "Contract validation failed",
@@ -1632,6 +1598,7 @@ mod tests {
                 "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                 "complete": true,
                 "violations": [{
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                     "code": "artifact_ref_missing",
                     "message": "absent"
                 }]
