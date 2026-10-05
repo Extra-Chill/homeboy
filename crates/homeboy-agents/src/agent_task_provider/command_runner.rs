@@ -3121,16 +3121,6 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, None)
 }
 
-#[cfg(test)]
-pub(crate) fn run_provider_readiness_invocation_with_test_timeout_and_mode(
-    provider: &AgentTaskExecutorProvider,
-    effective_config: &Value,
-    timeout: Duration,
-    mode: Option<&str>,
-) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, mode)
-}
-
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);

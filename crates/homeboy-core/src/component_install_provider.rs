@@ -18,16 +18,13 @@ use crate::{Error, Result};
 #[derive(Debug, Clone)]
 pub struct InstalledExtensionResult {
     pub extension_id: String,
-    pub url: String,
     pub path: PathBuf,
-    pub manifest_path: PathBuf,
     pub source_revision: Option<String>,
 }
 
 /// Result of installing a component's extensions from a source.
 #[derive(Debug, Clone)]
 pub struct ComponentInstallResult {
-    pub component_id: String,
     pub source: String,
     pub installed: Vec<InstalledExtensionResult>,
     pub skipped: Vec<String>,
