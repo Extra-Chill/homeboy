@@ -4,8 +4,7 @@
 //! the field serializes — consumers (rig spec authors, downstream
 //! tooling) read this directly off disk.
 
-use crate::spec::{BenchMetricGateCondition, BenchSpec, RigSpec, WorkloadSpec};
-use homeboy_extension_contract::BenchGateOp;
+use crate::spec::{BenchSpec, RigSpec, WorkloadSpec};
 
 /// Parses a minimal RigSpec JSON via serde and returns the embedded
 /// `BenchSpec` (or panics).
@@ -215,41 +214,6 @@ fn test_trace_default_phase_preset() {
     let workload_without_default: WorkloadSpec =
         serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
     assert_eq!(workload_without_default.trace_default_phase_preset(), None);
-}
-
-#[test]
-fn test_to_gates() {
-    let condition = BenchMetricGateCondition {
-        equals: Some(1.0),
-        gte: Some(0.5),
-        lte: Some(2.0),
-    };
-
-    let gates = condition.to_gates("native_block_quality_pass");
-
-    assert_eq!(gates.len(), 3);
-    assert!(gates.iter().any(|gate| {
-        gate.metric == "native_block_quality_pass"
-            && gate.op == BenchGateOp::Eq
-            && gate.value == 1.0
-    }));
-    assert!(gates.iter().any(|gate| {
-        gate.metric == "native_block_quality_pass"
-            && gate.op == BenchGateOp::Gte
-            && gate.value == 0.5
-    }));
-    assert!(gates.iter().any(|gate| {
-        gate.metric == "native_block_quality_pass"
-            && gate.op == BenchGateOp::Lte
-            && gate.value == 2.0
-    }));
-    assert!(BenchMetricGateCondition {
-        equals: None,
-        gte: None,
-        lte: None,
-    }
-    .to_gates("metric")
-    .is_empty());
 }
 
 #[test]

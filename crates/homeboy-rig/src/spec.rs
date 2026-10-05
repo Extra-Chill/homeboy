@@ -981,43 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trace_phase_preset() {
-        let workload = WorkloadSpec {
-            path: "trace.mjs".to_string(),
-            env_provider_extensions: Vec::new(),
-            artifact_postprocess: Vec::new(),
-            trace_phase_template: None,
-            public_preview: None,
-            check_groups: None,
-            port_range_size: None,
-            named_leases: Vec::new(),
-            trace: TraceConfig {
-                trace_phase_presets: HashMap::from([(
-                    "startup".to_string(),
-                    vec!["launch".to_string(), "ready".to_string()],
-                )]),
-                trace_span_metadata: HashMap::new(),
-                trace_default_phase_preset: None,
-            },
-            trace_variants: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            trace_probes: Vec::new(),
-            dependencies: Vec::new(),
-            runner_capabilities: Vec::new(),
-            lifecycle: None,
-        };
-
-        assert_eq!(workload.trace_phase_preset("missing"), None);
-        assert_eq!(
-            workload.trace_phase_preset("startup"),
-            Some(["launch".to_string(), "ready".to_string()].as_slice())
-        );
-        let workload_without_preset: WorkloadSpec =
-            serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
-        assert_eq!(workload_without_preset.trace_phase_preset("startup"), None);
-    }
-
-    #[test]
     fn test_trace_span_metadata() {
         let workload: WorkloadSpec = serde_json::from_str(
             r#"{
@@ -1152,36 +1115,6 @@ mod tests {
                 ("retry_count".to_string(), serde_json::json!(2))
             ]
         );
-    }
-
-    #[test]
-    fn test_trace_default_phase_preset() {
-        let workload = WorkloadSpec {
-            path: "trace.mjs".to_string(),
-            env_provider_extensions: Vec::new(),
-            artifact_postprocess: Vec::new(),
-            trace_phase_template: None,
-            public_preview: None,
-            check_groups: None,
-            port_range_size: None,
-            named_leases: Vec::new(),
-            trace: TraceConfig {
-                trace_phase_presets: HashMap::new(),
-                trace_span_metadata: HashMap::new(),
-                trace_default_phase_preset: Some("startup".to_string()),
-            },
-            trace_variants: HashMap::new(),
-            trace_guardrails: Vec::new(),
-            trace_probes: Vec::new(),
-            dependencies: Vec::new(),
-            runner_capabilities: Vec::new(),
-            lifecycle: None,
-        };
-
-        assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
-        let workload_without_default: WorkloadSpec =
-            serde_json::from_str(r#"{"path":"trace.mjs"}"#).expect("parse workload");
-        assert_eq!(workload_without_default.trace_default_phase_preset(), None);
     }
 
     #[test]

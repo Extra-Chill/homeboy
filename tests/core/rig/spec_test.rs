@@ -395,29 +395,6 @@ fn test_check_groups() {
 }
 
 #[test]
-fn test_trace_phase_preset() {
-    let workload = workload_with_trace_metadata();
-
-    assert_eq!(
-        workload.trace_phase_preset("startup"),
-        Some(&["boot:runner.boot".to_string()][..])
-    );
-    assert!(workload.trace_phase_preset("missing").is_none());
-}
-
-#[test]
-fn test_trace_default_phase_preset() {
-    let workload = workload_with_trace_metadata();
-
-    assert_eq!(workload.trace_default_phase_preset(), Some("startup"));
-    let workload_without_default: WorkloadSpec =
-        serde_json::from_str(r#"{ "path": "/tmp/no-default.trace.mjs" }"#).expect("parse workload");
-    assert!(workload_without_default
-        .trace_default_phase_preset()
-        .is_none());
-}
-
-#[test]
 fn test_trace_variants() {
     let workload = workload_with_trace_metadata();
     let variants = workload.trace_variants();
