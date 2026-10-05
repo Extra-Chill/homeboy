@@ -11,9 +11,8 @@ use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubPrOutput, GithubPrView, PrCreateOptions, PrEditOptions,
     PrFindOptions, PrMergeOptions,
 };
-use super::client::{
-    default_gh_host, parse_issue_number_from_url, resolve_component_github, string_value,
-};
+use super::client::{default_gh_host, parse_issue_number_from_url, resolve_component_github};
+use super::pr_view_record::{parse_pr_view, pr_view_args};
 use super::push_markdown_body_file_arg;
 use super::readiness::classify_pr_ci;
 
@@ -291,62 +290,28 @@ pub fn pr_view(
     gh.ensure_ready()?;
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let args: Vec<String> = vec![
-        "pr".into(),
-        "view".into(),
-        number.to_string(),
-        "-R".into(),
-        repo_flag,
-        "--json".into(),
-        "author,baseRefName,headRefName,headRepository,title,url,state,isDraft,mergedAt,headRefOid,reviewDecision,mergeStateStatus,statusCheckRollup".into(),
-    ];
-    let raw = gh.run(&args)?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
-        Error::internal_json(
-            format!("Failed to parse gh pr view JSON: {}", e),
-            Some(raw.clone()),
-        )
-    })?;
-    let author = parsed
-        .pointer("/author/login")
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string());
-    let base = parsed
-        .get("baseRefName")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let head = parsed
-        .get("headRefName")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let head_repository = parsed
-        .pointer("/headRepository/nameWithOwner")
-        .or_else(|| parsed.pointer("/headRepository/name"))
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string());
-    let state = string_value(&parsed, "state").unwrap_or_default();
-    let url = string_value(&parsed, "url").unwrap_or_default();
-    let title = string_value(&parsed, "title");
-    let draft = parsed
-        .get("isDraft")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let head_sha = string_value(&parsed, "headRefOid");
-    let merged_at = string_value(&parsed, "mergedAt");
-    let review_decision = string_value(&parsed, "reviewDecision");
-    let merge_state = string_value(&parsed, "mergeStateStatus");
-    let status_check_rollup = parsed
-        .get("statusCheckRollup")
-        .and_then(|v| v.as_array())
-        .map(|v| v.as_slice())
-        .unwrap_or(&[]);
+    let raw = gh.run(&pr_view_args(&number.to_string(), Some(&repo_flag)))?;
+    let record = parse_pr_view(&raw)?;
+    let author = record.author.and_then(|author| author.login);
+    let base = record.base_ref_name;
+    let head = record.head_ref_name;
+    let head_repository = record
+        .head_repository
+        .and_then(|head| head.name_with_owner.or(head.name));
+    let state = normalized(record.state).unwrap_or_default();
+    let url = normalized(record.url).unwrap_or_default();
+    let title = normalized(record.title);
+    let draft = record.is_draft;
+    let head_sha = normalized(record.head_ref_oid);
+    let merged_at = normalized(record.merged_at);
+    let review_decision = normalized(record.review_decision);
+    let merge_state = normalized(record.merge_state_status);
+    let status_check_rollup = record.status_check_rollup;
     let (ci_state, ci_summary, ci_next_action) = classify_pr_ci(
         &state,
         merged_at.as_deref(),
         merge_state.as_deref(),
-        status_check_rollup,
+        &status_check_rollup,
     );
 
     Ok(GithubPrView {
@@ -370,6 +335,16 @@ pub fn pr_view(
         ci_summary,
         ci_next_action,
     })
+}
+
+/// Trim and drop empty strings, as the `Value`-pointer parser this replaced
+/// did for every optional field, so the view projection is unchanged by the
+/// shared-record refactor.
+fn normalized(value: impl Into<Option<String>>) -> Option<String> {
+    value
+        .into()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// List changed files for one PR.
