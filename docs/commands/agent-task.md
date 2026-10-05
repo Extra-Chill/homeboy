@@ -959,6 +959,12 @@ instead of silently dropping executable inputs. Keyed and array declarations
 remain supported; domain-specific additional data belongs in declared `metadata`
 or `inputs`. Retired alternate field spellings are not translated.
 
+Loop gate results use `satisfied`, `failed`, or `pending`; `missing` describes a
+declared gate without a recorded result. Only `satisfied` meets acceptance.
+Retired `passed`, `warn`, and `warning` result labels are rejected instead of
+being interpreted as satisfaction. Command checks are authored through the
+current typed gate-bundle contract.
+
 Repo-style specs may also declare an explicit `artifact_graph` edge list:
 
 ```json

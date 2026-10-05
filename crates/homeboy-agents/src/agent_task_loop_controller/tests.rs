@@ -824,48 +824,6 @@ fn pr_ownership_red_checks_increment_until_retry_limit() {
 }
 
 #[test]
-fn persisted_gate_records_accept_legacy_status_vocabulary() {
-    let mut record = AgentTaskLoopControllerRecord::new("loop", "verify", "v1");
-    record.gate_results.push(AgentTaskGateBundleResult {
-        result_id: "gate-result-1".to_string(),
-        bundle_id: "quality".to_string(),
-        entity_id: None,
-        run_id: None,
-        status: AgentTaskLoopGateStatus::Satisfied,
-        checks: vec![AgentTaskGateCheckResult {
-            check_id: "check-1".to_string(),
-            status: AgentTaskLoopGateStatus::Satisfied,
-            retryable: false,
-            classification: None,
-            evidence: Vec::new(),
-            details: Value::Null,
-        }],
-        recorded_at: "2026-07-12T00:00:00Z".to_string(),
-    });
-    let mut persisted = serde_json::to_value(record).expect("record serializes");
-    persisted["gate_results"][0]["status"] = json!("passed");
-    persisted["gate_results"][0]["checks"][0]["status"] = json!("warn");
-
-    let loaded: AgentTaskLoopControllerRecord =
-        serde_json::from_value(persisted).expect("legacy record deserializes");
-
-    assert_eq!(
-        loaded.gate_results[0].status,
-        AgentTaskLoopGateStatus::Satisfied
-    );
-    assert_eq!(
-        loaded.gate_results[0].checks[0].status,
-        AgentTaskLoopGateStatus::Satisfied
-    );
-    let serialized = serde_json::to_value(loaded).expect("record reserializes");
-    assert_eq!(serialized["gate_results"][0]["status"], json!("satisfied"));
-    assert_eq!(
-        serialized["gate_results"][0]["checks"][0]["status"],
-        json!("satisfied")
-    );
-}
-
-#[test]
 fn policy_transitions_can_match_structured_event_jsonpath() {
     let mut record = AgentTaskLoopControllerRecord::new("loop", "validate", "v1");
     let policy = AgentTaskLoopPolicy {
@@ -1156,19 +1114,6 @@ fn finding_packets_route_once_with_lineage() {
     assert_eq!(entity.state.as_deref(), Some("routed"));
     assert_eq!(entity.artifact_refs.len(), 1);
     assert_eq!(entity.provenance[0].uri, "artifact://candidate/site");
-}
-
-#[test]
-fn verify_commands_are_reusable_gate_bundle_checks() {
-    let bundle = AgentTaskGateBundle::from_verify_commands(
-        "candidate-gates",
-        vec!["cargo test --lib".to_string()],
-    );
-
-    assert_eq!(bundle.bundle_id, "candidate-gates");
-    assert_eq!(bundle.checks[0].kind, AgentTaskGateBundleCheckKind::Command);
-    assert_eq!(bundle.checks[0].input["command"], json!("cargo test --lib"));
-    assert!(bundle.checks[0].retryable);
 }
 
 #[test]
