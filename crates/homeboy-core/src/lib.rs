@@ -239,7 +239,7 @@ pub use server::auth;
 pub use error::{Error, ErrorCode, Result};
 pub use output::{
     BatchResult, BatchResultItem, BulkResult, BulkResultBuilder, BulkSummary, CreateOutput,
-    CreateResult, EntityCrudOutput, ItemOutcome, MergeOutput, MergeResult, NoExtra,
+    CreateResult, EntityCrudOutput, EntityRows, ItemOutcome, MergeOutput, MergeResult, NoExtra,
     ObservationOutputDetails, ObservationOutputMetadata, OutcomeTotals, RemoveResult,
 };
 

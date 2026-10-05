@@ -428,14 +428,15 @@ fn expose_service(spec: ExposeServiceTunnelSpec) -> CmdResult<TunnelOutput> {
 }
 
 fn list_services() -> CmdResult<TunnelOutput> {
-    Ok((
-        TunnelOutput {
-            command: "tunnel.service.list".to_string(),
-            entities: tunnel::list()?,
-            ..Default::default()
-        },
-        0,
-    ))
+    Ok((list_services_output(tunnel::list()?), 0))
+}
+
+pub(super) fn list_services_output(tunnels: Vec<ServiceTunnel>) -> TunnelOutput {
+    TunnelOutput {
+        command: "tunnel.service.list".to_string(),
+        entities: Some(tunnels),
+        ..Default::default()
+    }
 }
 
 fn show_service(id: &str) -> CmdResult<TunnelOutput> {

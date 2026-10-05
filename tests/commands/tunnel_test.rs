@@ -1,9 +1,19 @@
 use super::service::{
-    run_service, ServiceTunnelAuthModeArg, ServiceTunnelPreviewPolicyArg, TunnelServiceCommand,
+    list_services_output, run_service, ServiceTunnelAuthModeArg, ServiceTunnelPreviewPolicyArg,
+    TunnelServiceCommand,
 };
 use super::*;
 use crate::test_support;
 use std::fs;
+
+#[test]
+fn empty_tunnel_service_list_emits_entities_array() {
+    let value =
+        serde_json::to_value(list_services_output(Vec::new())).expect("serialize tunnel list");
+
+    assert_eq!(value["command"], "tunnel.service.list");
+    assert_eq!(value["entities"], serde_json::json!([]));
+}
 
 fn create_server() {
     homeboy::core::test_support::save_test_server("private-host", "private.example.test")
