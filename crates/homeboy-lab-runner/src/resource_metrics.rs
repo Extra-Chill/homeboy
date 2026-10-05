@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -336,17 +338,10 @@ struct CgroupMemoryFiles {
 impl CgroupMemoryCollector {
     #[cfg(target_os = "linux")]
     fn start(pid: u32) -> Self {
-        // A signal-killed child can disappear before its cgroup membership can
-        // be read. Subprocesses inherit the runner's cgroup, so retain that
-        // parent path as a fallback while preferring the child-specific path.
-        //
-        // This read is intentionally not retried: `start` runs immediately
-        // after `spawn`, before the caller waits on the child, so spending
-        // time here only gives an already-fast-exiting child (e.g. a bare
-        // `kill -KILL $$`) more room to finish and have its cgroup reclaimed
-        // before this baseline is even taken — worse, not better, for that
-        // race (measured). `finish` is the side that can safely afford a
-        // bounded wait.
+        // Pin the resolved directory before opening its counters: the child's
+        // /proc/<pid>/root alias can disappear between those opens. If it has
+        // already disappeared, subprocesses inherit the runner's cgroup, so
+        // resolve the parent as a fallback.
         let directory = cgroup_v2_directory_for_pid(pid)
             .or_else(|| cgroup_v2_directory_for_pid(std::process::id()));
         let mut files = directory.map(open_cgroup_memory_files);
@@ -365,19 +360,7 @@ impl CgroupMemoryCollector {
             return cgroup_memory_unavailable();
         };
         let before = self.before.unwrap_or_default();
-        let mut after = read_cgroup_memory_snapshot(&mut files);
-        // A just-killed child's `memory.events` counters can trail the
-        // kernel's own accounting by a beat: the file descriptor stays valid
-        // (opened before the child ran), but the very first post-exit read
-        // can observe a not-yet-updated `oom_kill` line. `before` already
-        // proved this mechanism reads successfully on this host, so a short
-        // bounded re-read — not a longer timeout — is what closes that race.
-        let mut attempts = 0;
-        while after.oom_kill_count.is_none() && before.oom_kill_count.is_some() && attempts < 3 {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            after = read_cgroup_memory_snapshot(&mut files);
-            attempts += 1;
-        }
+        let after = read_cgroup_memory_snapshot(&mut files);
         cgroup_memory_evidence(before, after)
     }
 
@@ -432,7 +415,7 @@ fn cgroup_memory_unavailable() -> RunnerCgroupMemoryEvidence {
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::path::PathBuf> {
+fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::fs::File> {
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
     let mountinfo = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).ok()?;
     let membership = cgroup_v2_membership_path(&membership)?;
@@ -446,7 +429,7 @@ fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::path::PathBuf> {
         .join("root")
         .join(mount_point.strip_prefix('/')?)
         .join(relative);
-    directory.is_dir().then_some(directory)
+    std::fs::File::open(directory).ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -490,8 +473,10 @@ fn cgroup_relative_to_mount(membership: &str, mount_root: &str) -> Option<std::p
 }
 
 #[cfg(target_os = "linux")]
-fn open_cgroup_memory_files(directory: std::path::PathBuf) -> CgroupMemoryFiles {
-    let open = |name| std::fs::File::open(directory.join(name)).ok();
+fn open_cgroup_memory_files(directory: std::fs::File) -> CgroupMemoryFiles {
+    let directory_path =
+        std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let open = |name| std::fs::File::open(directory_path.join(name)).ok();
     CgroupMemoryFiles {
         memory_limit: open("memory.max"),
         memory_current: open("memory.current"),
@@ -1444,7 +1429,6 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "homeboy#14984: intermittently observes oom_kill_delta=None (both before and after cgroup_memory.events reads can miss the oom_kill counter line) on this host's cgroup v2 setup for a near-instant self-kill child; CgroupMemoryCollector::finish now retries the post-kill read, which measurably helps but does not fully eliminate the race in repeated local sampling (this host's flake rate appeared bursty/load-dependent, not fixed at a single retry count) - needs host-specific cgroup delegation investigation, not another guessed retry count"]
     fn actual_runner_preserves_ordinary_sigkill_as_non_oom() {
         let mut command = Command::new("sh");
         command.args(["-c", "kill -KILL $$"]);
@@ -1457,20 +1441,52 @@ mod tests {
         assert_eq!(output.metrics.cgroup_memory.oom_kill_attribution, "unknown");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_counters_remain_readable_after_the_child_proc_namespace_disappears() {
+        let mut child = Command::new("sh")
+            .args(["-c", "read release"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn blocked child");
+        let directory = cgroup_v2_directory_for_pid(child.id());
+        child.kill().expect("kill owned child");
+        assert_eq!(
+            child.wait().expect("reap child").signal(),
+            Some(libc::SIGKILL)
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{}/root", child.id())).exists());
+
+        let mut files = open_cgroup_memory_files(directory.expect("pin live child cgroup"));
+        assert!(
+            read_cgroup_memory_snapshot(&mut files)
+                .oom_kill_count
+                .is_some(),
+            "counter opens must use the retained directory, not the dead child's /proc alias"
+        );
+        assert_eq!(
+            CgroupMemoryCollector::start(child.id())
+                .finish()
+                .oom_kill_delta,
+            Some(0),
+            "an already-reaped child uses the inherited parent cgroup"
+        );
+    }
+
     /// This test uses the production measurement boundary but only runs when a
     /// disposable cgroup-limited container explicitly opts in. Running an OOM
     /// allocator in an unconstrained developer cgroup would be unsafe.
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "requires explicit opt-in in a disposable cgroup-limited container"]
     fn actual_runner_controlled_oom_is_authoritative_when_enabled() {
-        if std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_none() {
-            return;
-        }
+        require_controlled_oom_test();
         let test_binary = std::env::current_exe().expect("test binary path");
         let mut command = Command::new(test_binary);
         command.args([
             "resource_metrics::tests::synthetic_memory_hog",
             "--exact",
+            "--ignored",
             "--nocapture",
         ]);
 
@@ -1487,14 +1503,27 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "OOM allocator subprocess invoked only by the controlled OOM test"]
     fn synthetic_memory_hog() {
-        if std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_none() {
-            return;
-        }
+        require_controlled_oom_test();
         let mut chunks = Vec::new();
         loop {
-            chunks.push(vec![0_u8; 1024 * 1024]);
+            chunks.push(vec![1_u8; 1024 * 1024]);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_controlled_oom_test() {
+        assert!(
+            std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_some(),
+            "controlled OOM execution requires explicit container opt-in"
+        );
+        let directory = cgroup_v2_directory_for_pid(std::process::id())
+            .expect("controlled OOM execution requires a readable cgroup v2 directory");
+        let mut files = open_cgroup_memory_files(directory);
+        let limit = read_cgroup_memory_snapshot(&mut files).memory_limit_bytes;
+        assert!(limit.is_some_and(|bytes| bytes > 0 && bytes <= 256 * 1024 * 1024),
+            "controlled OOM execution requires a disposable cgroup capped at 256 MiB or less; observed {limit:?}");
     }
 
     #[cfg(target_os = "linux")]
