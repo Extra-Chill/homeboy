@@ -1233,47 +1233,14 @@ pub fn require_success(success: bool, stderr: &str, operation: &str) -> Result<(
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureMetadata {
     pub bytes_seen: u64,
     pub bytes_retained: usize,
     pub byte_limit: usize,
     pub bytes_truncated: u64,
     pub truncated: bool,
-    #[serde(default)]
     pub sha256: String,
-}
-
-impl<'de> Deserialize<'de> for CaptureMetadata {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Record {
-            bytes_seen: u64,
-            bytes_retained: usize,
-            byte_limit: usize,
-            bytes_truncated: Option<u64>,
-            truncated: bool,
-            #[serde(default)]
-            sha256: String,
-        }
-
-        let record = Record::deserialize(deserializer)?;
-        Ok(Self {
-            bytes_seen: record.bytes_seen,
-            bytes_retained: record.bytes_retained,
-            byte_limit: record.byte_limit,
-            bytes_truncated: record.bytes_truncated.unwrap_or_else(|| {
-                record
-                    .bytes_seen
-                    .saturating_sub(record.bytes_retained as u64)
-            }),
-            truncated: record.truncated,
-            sha256: record.sha256,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -4054,32 +4021,53 @@ mod tests {
         assert!(!captured.metadata.truncated);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn capture_metadata_derives_truncation_for_truncated_legacy_records() {
-        let metadata: CaptureMetadata = serde_json::from_value(serde_json::json!({
-            "bytes_seen": 12,
-            "bytes_retained": 8,
-            "byte_limit": 8,
-            "truncated": true
-        }))
-        .expect("legacy capture metadata");
+    fn bounded_command_capture_preserves_canonical_evidence_through_serialization() {
+        use std::process::Stdio;
 
-        assert_eq!(metadata.bytes_truncated, 4);
-        assert!(metadata.sha256.is_empty());
-    }
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'hello world'; printf err >&2"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = command.spawn().expect("spawn capture source");
+        let output = wait_with_bounded_output(child, 5).expect("capture real command output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"world");
+        assert_eq!(output.stderr, b"err");
+        assert_eq!(output.capture.stdout.bytes_seen, 11);
+        assert_eq!(output.capture.stdout.bytes_truncated, 6);
+        assert!(output.capture.stdout.truncated);
+        assert_eq!(output.capture.stderr.bytes_seen, 3);
+        assert_eq!(output.capture.stderr.bytes_truncated, 0);
+        assert!(!output.capture.stderr.truncated);
+        assert_eq!(
+            output.capture.stdout.sha256,
+            format!("sha256:{:x}", Sha256::digest(b"hello world"))
+        );
+        assert_eq!(
+            output.capture.stderr.sha256,
+            format!("sha256:{:x}", Sha256::digest(b"err"))
+        );
 
-    #[test]
-    fn capture_metadata_derives_truncation_for_untruncated_legacy_records() {
-        let metadata: CaptureMetadata = serde_json::from_value(serde_json::json!({
-            "bytes_seen": 8,
-            "bytes_retained": 8,
-            "byte_limit": 8,
-            "truncated": false
-        }))
-        .expect("legacy capture metadata");
-
-        assert_eq!(metadata.bytes_truncated, 0);
-        assert!(metadata.sha256.is_empty());
+        let record = serde_json::to_value(&output.capture).expect("serialize command evidence");
+        assert_eq!(
+            serde_json::from_value::<CommandCaptureMetadata>(record.clone())
+                .expect("read canonical evidence"),
+            output.capture
+        );
+        for stream in ["stdout", "stderr"] {
+            for field in ["bytes_truncated", "sha256"] {
+                let mut incomplete = record.clone();
+                incomplete[stream]
+                    .as_object_mut()
+                    .expect("stream evidence")
+                    .remove(field);
+                assert!(
+                    serde_json::from_value::<CommandCaptureMetadata>(incomplete).is_err(),
+                    "missing {stream}.{field} must not synthesize evidence"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
