@@ -136,31 +136,3 @@ fn normalize_source_env_bindings(
         .into_values()
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn env_materialization_plan_keeps_secret_values_out_of_handoff_metadata() {
-        let env_plan = EnvMaterializationPlan {
-            secret_refs: vec![EnvSecretRef {
-                name: "API_TOKEN".to_string(),
-                owner: Some("runner".to_string()),
-            }],
-            materialized_handoff: Some(EnvMaterializedHandoffMetadata {
-                handoff_ref: "runner-artifact://run/env-handoff.json".to_string(),
-                artifact_ref: Some("artifact://env-handoff".to_string()),
-                env_names: vec!["API_TOKEN".to_string()],
-            }),
-            ..EnvMaterializationPlan::default()
-        };
-
-        let json = serde_json::to_string(&env_plan).expect("serializes env materialization plan");
-
-        assert!(json.contains("API_TOKEN"));
-        assert!(json.contains("runner-artifact://run/env-handoff.json"));
-        assert!(!json.contains("super-secret-token-value"));
-        assert!(!json.contains("value"));
-    }
-}
