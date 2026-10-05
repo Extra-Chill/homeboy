@@ -525,6 +525,12 @@ fn run_once_output(
                 artifact_refs: Vec::new(),
                 metrics: None,
                 capture: None,
+            })
+            .map_err(|finish_error| {
+                err.with_hint(format!(
+                    "Reporting this execution failure to the broker also failed: {}",
+                    finish_error.message
+                ))
             })?;
             let exit_code = 1;
             return Ok((
