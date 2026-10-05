@@ -1218,47 +1218,61 @@ mod tests {
 
     #[test]
     fn test_rig_lifecycle_trace_and_fuzz_contract_fields_round_trip() {
-        let spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "wordpress-core-fuzz-coverage",
-                "components": {
-                    "wordpress-develop": { "path": "/tmp/wordpress-develop" }
-                },
-                "lifecycle": { "cleanup": { "intent": "apply" } },
-                "trace": { "default_component": "wordpress-develop" },
-                "fuzz": {
-                    "default_component": "wordpress-develop",
-                    "schema": "homeboy/fuzz-workload/v1",
-                    "manifest": "${package.root}/manifests/fuzzer-profile.json"
-                }
-            }"#,
-        )
-        .expect("parse rig contract fields");
+        let mut input = serde_json::json!({
+            "id": "wordpress-core-fuzz-coverage",
+            "components": {
+                "wordpress-develop": { "path": "/tmp/wordpress-develop" }
+            },
+            "lifecycle": { "cleanup": { "intent": "apply" } },
+            "trace": { "default_component": "wordpress-develop" },
+            "fuzz": {
+                "default_component": "wordpress-develop",
+                "schema": "homeboy/fuzz-workload/v1",
+                "manifest": "${package.root}/manifests/fuzzer-profile.json"
+            }
+        });
+        for (cleanup, expected_intent) in [
+            (
+                serde_json::json!({"intent": "apply"}),
+                ResourceCleanupIntent::Apply,
+            ),
+            (
+                serde_json::json!({"intent": "pipeline", "reason": "pipeline.down stops the Studio daemon..."}),
+                ResourceCleanupIntent::DryRun,
+            ),
+        ] {
+            input["lifecycle"]["cleanup"] = cleanup.clone();
+            let spec: RigSpec =
+                serde_json::from_value(input.clone()).expect("parse rig contract fields");
+            assert_eq!(
+                spec.lifecycle
+                    .cleanup
+                    .as_ref()
+                    .map(RigCleanupSpec::resource_cleanup_intent),
+                Some(expected_intent)
+            );
+            assert_eq!(
+                spec.trace.default_component.as_deref(),
+                Some("wordpress-develop")
+            );
+            let fuzz = spec.fuzz.as_ref().expect("fuzz spec");
+            assert_eq!(fuzz.default_component.as_deref(), Some("wordpress-develop"));
+            assert_eq!(fuzz.schema.as_deref(), Some("homeboy/fuzz-workload/v1"));
+            assert_eq!(
+                fuzz.manifest.as_deref(),
+                Some("${package.root}/manifests/fuzzer-profile.json")
+            );
 
-        assert_eq!(
-            spec.lifecycle
-                .cleanup
-                .as_ref()
-                .map(RigCleanupSpec::resource_cleanup_intent),
-            Some(ResourceCleanupIntent::Apply)
-        );
-        assert_eq!(
-            spec.trace.default_component.as_deref(),
-            Some("wordpress-develop")
-        );
-        let fuzz = spec.fuzz.as_ref().expect("fuzz spec");
-        assert_eq!(fuzz.default_component.as_deref(), Some("wordpress-develop"));
-        assert_eq!(fuzz.schema.as_deref(), Some("homeboy/fuzz-workload/v1"));
-        assert_eq!(
-            fuzz.manifest.as_deref(),
-            Some("${package.root}/manifests/fuzzer-profile.json")
-        );
-
-        let json = serde_json::to_string(&spec).expect("serialize rig");
-        assert!(json.contains("\"lifecycle\""));
-        assert!(json.contains("\"trace\""));
-        assert!(json.contains("\"schema\""));
-        assert!(json.contains("\"manifest\""));
+            let json = serde_json::to_value(&spec).expect("serialize rig");
+            assert_eq!(json["lifecycle"]["cleanup"], cleanup);
+            assert_eq!(json["trace"]["default_component"], "wordpress-develop");
+            assert_eq!(json["fuzz"]["default_component"], "wordpress-develop");
+            assert_eq!(json["fuzz"]["schema"], "homeboy/fuzz-workload/v1");
+            assert_eq!(
+                json["fuzz"]["manifest"],
+                "${package.root}/manifests/fuzzer-profile.json"
+            );
+        }
     }
 
     #[test]
@@ -1289,30 +1303,6 @@ mod tests {
                     .expect("expected lifecycle JSON")
             );
         }
-    }
-
-    #[test]
-    fn rig_spec_parses_pipeline_owned_cleanup_contract() {
-        let spec: RigSpec = serde_json::from_str(
-            r#"{
-                "id": "studio-runtime",
-                "lifecycle": {
-                    "cleanup": {
-                        "intent": "pipeline",
-                        "reason": "pipeline.down stops the Studio daemon..."
-                    }
-                }
-            }"#,
-        )
-        .expect("parse homeboy-rigs cleanup contract");
-
-        assert_eq!(
-            spec.lifecycle.cleanup,
-            Some(RigCleanupSpec {
-                intent: Some(RigCleanupIntent::Pipeline),
-                reason: Some("pipeline.down stops the Studio daemon...".to_string()),
-            })
-        );
     }
 }
 

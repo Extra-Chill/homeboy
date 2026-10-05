@@ -1332,10 +1332,10 @@ fn compile_batch_cooks_with_readiness_cache(
                 options.workspace.source_worktree_path.as_deref(),
                 cook.component_id.as_deref(),
             ) {
-                super::run::bind_cook_component_workspace(
+                homeboy::agents::agent_task_service::bind_materialized_cook_component_workspace(
                     &mut options.identity.initial_plan,
                     workspace,
-                    component_id,
+                    Some(component_id),
                 )?;
             }
             attach_fanout_placement_decision(plan, &mut options)?;

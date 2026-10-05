@@ -883,7 +883,14 @@ explicit cleanup counterpart to `runner connect`.
 
 ```sh
 homeboy runner list
+homeboy runner list --full
 ```
+
+Rows are always returned under `data.entities` (`[]` when no runners are
+configured). The default returns bounded inventory summaries (identity, kind,
+connection, admission, concurrency, drift, next action); `--full` returns the
+complete redacted runner records plus `sessions`. The former
+`runner_summaries` key was removed in favour of `data.entities`.
 
 ### `show`
 

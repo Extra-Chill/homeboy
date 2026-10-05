@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_service::cook_registered_component_by_id;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
@@ -6463,17 +6464,6 @@ fn cook_components_matching_repository_name(
         .collect()
 }
 
-fn cook_registered_component_by_id(
-    component_id: &str,
-) -> homeboy::core::Result<Option<homeboy::core::component::Component>> {
-    if let Some(component) =
-        homeboy::core::component::inventory::registered_primary_by_id(component_id)?
-    {
-        return Ok(Some(component));
-    }
-    homeboy::core::component::registered_by_id(component_id)
-}
-
 fn select_cook_repository_identity(
     repository_name: &str,
     candidates: &BTreeMap<String, CookRepositoryIdentity>,
@@ -7683,72 +7673,6 @@ fn run_preflight_cook_execution(
     ))
 }
 
-fn cook_component_workspace(
-    args: &AgentTaskCookArgs,
-    workspace: &Path,
-) -> homeboy::core::Result<PathBuf> {
-    let Some(component_id) = args.component.as_deref() else {
-        return Ok(workspace.to_path_buf());
-    };
-    component_workspace(component_id, workspace)
-}
-
-fn component_workspace(component_id: &str, workspace: &Path) -> homeboy::core::Result<PathBuf> {
-    let Some(component) = cook_registered_component_by_id(component_id)? else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "component workspace",
-            format!("configured component `{component_id}` is no longer registered"),
-            Some(component_id.to_string()),
-            None,
-        ));
-    };
-    let effective = homeboy::core::component::resolution::rebase_component_path_to_checkout(
-        &component, workspace,
-    );
-    if !effective.is_dir() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "component workspace",
-            format!(
-                "resolved component `{component_id}` is not present in Cook workspace: {}",
-                effective.display()
-            ),
-            Some(effective.display().to_string()),
-            None,
-        ));
-    }
-    Ok(effective)
-}
-
-pub(super) fn bind_cook_component_workspace(
-    plan: &mut AgentTaskPlan,
-    workspace: &Path,
-    component_id: &str,
-) -> homeboy::core::Result<()> {
-    let effective = component_workspace(component_id, workspace)?;
-    let component_cwd = effective.strip_prefix(workspace).map_err(|_| {
-        homeboy::core::Error::internal_unexpected(
-            "resolved component workspace escapes the Cook workspace".to_string(),
-        )
-    })?;
-    if component_cwd.as_os_str().is_empty() {
-        return Ok(());
-    }
-    plan.metadata["gate_workspace"] = serde_json::json!({
-        "requested_cwd": workspace,
-        "effective_cwd": effective,
-        "component_cwd": component_cwd,
-        "component_id": component_id,
-    });
-    for task in &mut plan.tasks {
-        if !task.executor.config.is_object() {
-            task.executor.config = serde_json::json!({});
-        }
-        task.executor.config["component_cwd"] =
-            serde_json::json!(component_cwd.display().to_string());
-    }
-    Ok(())
-}
-
 pub(crate) fn record_cook_argument_provenance(
     plan: &mut AgentTaskPlan,
     provenance: &crate::cli_surface::CommandArgumentProvenance,
@@ -8312,25 +8236,6 @@ pub(crate) fn compile_cook_plan(
     if let Some(workspace) = requested_workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
-    let component_cwd = requested_workspace
-        .as_deref()
-        .map(|workspace| cook_component_workspace(args, Path::new(workspace)))
-        .transpose()?
-        .map(|workspace| {
-            workspace
-                .strip_prefix(
-                    requested_workspace
-                        .as_deref()
-                        .expect("component workspace has root"),
-                )
-                .map_err(|_| {
-                    homeboy::core::Error::internal_unexpected(
-                        "resolved component workspace escapes the Cook workspace".to_string(),
-                    )
-                })
-                .map(|path| path.display().to_string())
-        })
-        .transpose()?;
     let mut dispatch = resolved_dispatch_args_for_cook(args)?;
     // Provisioning makes an explicit --cwd authoritative, otherwise this is the
     // resolved managed destination. Pass that exact linked worktree downstream.
@@ -8373,18 +8278,15 @@ pub(crate) fn compile_cook_plan(
     };
     plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
-    if let (Some(requested), Some(component_cwd)) =
-        (requested_workspace.as_deref(), component_cwd.as_deref())
-    {
-        plan.metadata["gate_workspace"] = serde_json::json!({
-            "requested_cwd": requested,
-            "effective_cwd": Path::new(requested).join(component_cwd),
-            "component_cwd": component_cwd,
-            "component_id": cook_component_id(args),
-        });
-    }
     if let Some(identity) = &args.repository_identity {
         plan.metadata["cook_repository_identity"] = identity.clone();
+    }
+    if let Some(workspace) = requested_workspace.as_deref() {
+        agent_task_service_direct::bind_materialized_cook_component_workspace(
+            &mut plan,
+            Path::new(workspace),
+            args.component.as_deref(),
+        )?;
     }
     if let Some(resolution) = &args.base_resolution {
         plan.metadata["cook_base_resolution"] = resolution.clone();
@@ -8409,12 +8311,6 @@ pub(crate) fn compile_cook_plan(
             )
         })?;
         task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
-        if let Some(component_cwd) = component_cwd.as_deref() {
-            if !task.executor.config.is_object() {
-                task.executor.config = serde_json::json!({});
-            }
-            task.executor.config["component_cwd"] = serde_json::json!(component_cwd);
-        }
     }
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {

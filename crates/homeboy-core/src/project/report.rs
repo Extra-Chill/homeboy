@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::output::{CreateOutput, EntityCrudOutput, MergeOutput, RemoveResult};
+use crate::output::{CreateOutput, EntityCrudOutput, EntityRows, MergeOutput, RemoveResult};
 
 use super::{calculate_deploy_readiness, collect_status, list, load, Project};
 
@@ -58,8 +58,10 @@ pub struct ProjectPathResolutionReport {
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ProjectReportExtra {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub projects: Option<Vec<ProjectListItem>>,
+    /// `project list` rows under `entities`, mirrored under the deprecated
+    /// `projects` key (#14876). `None` for every other project operation.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<EntityRows<ProjectListItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<crate::project::ProjectComponentsOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,7 +156,7 @@ pub fn build_list_output(report: ProjectListReport) -> ProjectReportOutput {
         command: "project.list".to_string(),
         hint: report.hint,
         extra: ProjectReportExtra {
-            projects: Some(report.projects),
+            projects: Some(EntityRows::with_legacy_key(report.projects, "projects")),
             ..Default::default()
         },
         ..Default::default()
@@ -343,6 +345,57 @@ mod tests {
     use super::*;
     use crate::project::ProjectComponentAttachment;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn list_output_mirrors_rows_under_entities_and_legacy_projects_key() {
+        let output = build_list_output(ProjectListReport {
+            projects: vec![
+                ProjectListItem {
+                    id: "alpha".to_string(),
+                    domain: Some("alpha.example".to_string()),
+                },
+                ProjectListItem {
+                    id: "beta".to_string(),
+                    domain: None,
+                },
+            ],
+            hint: None,
+        });
+
+        let value = serde_json::to_value(&output).expect("serialize project list");
+
+        assert_eq!(value["command"], "project.list");
+        assert_eq!(value["entities"][0]["id"], "alpha");
+        assert_eq!(value["entities"][0]["domain"], "alpha.example");
+        assert_eq!(value["entities"][1]["id"], "beta");
+        assert_eq!(value["entities"], value["projects"]);
+    }
+
+    #[test]
+    fn empty_project_list_emits_entities_array() {
+        let output = build_list_output(ProjectListReport {
+            projects: Vec::new(),
+            hint: Some("No projects configured.".to_string()),
+        });
+
+        let value = serde_json::to_value(&output).expect("serialize project list");
+
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(value["projects"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn non_list_project_output_does_not_emit_entities() {
+        let report = ProjectStatusReport {
+            health: None,
+            component_versions: None,
+        };
+        let value = serde_json::to_value(build_status_output("site", report))
+            .expect("serialize project status");
+
+        assert!(value.get("entities").is_none());
+        assert!(value.get("projects").is_none());
+    }
 
     #[test]
     fn show_report_marks_project_not_deploy_ready_when_component_local_path_is_missing() {
