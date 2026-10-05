@@ -335,7 +335,258 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
             "reason": "explicit local placement is legal before execution ownership begins",
         }]);
     }
+    if args.full {
+        deduplicate_control_plane_evidence(&mut value);
+    } else {
+        value = compact_control_plane_status(value);
+    }
     Ok((value, exit_code))
+}
+
+/// Keep lifecycle status useful at a glance while leaving the canonical
+/// eligibility report and evidence available through `--full`.
+fn compact_control_plane_status(value: Value) -> Value {
+    let run_id = value
+        .get("run")
+        .and_then(Value::as_str)
+        .filter(|run_id| run_id.len() <= COMPACT_TEXT_LIMIT)
+        .unwrap_or("<oversized-run-id>");
+    let actions = value
+        .pointer("/action_eligibility/actions")
+        .and_then(Value::as_array);
+    let available = actions
+        .map(|items| {
+            items
+                .iter()
+                .filter(|action| action["availability"] == "available")
+                .count()
+        })
+        .unwrap_or_default();
+    let next_action = value
+        .pointer("/next_action/command")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::commands::agent_task_summary::control_plane_next_action(&value, run_id)
+        });
+    let next_action = if next_action.len() <= COMPACT_TEXT_LIMIT {
+        next_action
+    } else {
+        "homeboy agent-task evidence <run-id>".to_string()
+    };
+    let next_action_name = next_action
+        .split_whitespace()
+        .skip_while(|part| *part != "agent-task")
+        .nth(1);
+    let selected_eligibility_action = actions.and_then(|actions| {
+        actions.iter().find(|action| {
+            action["availability"] == "available" && action["action"].as_str() == next_action_name
+        })
+    });
+    let selected_action = selected_eligibility_action
+        .map(|action| {
+            json!([{
+                "action": action.get("action"),
+                "availability": "available"
+            }])
+        })
+        .unwrap_or_else(|| json!([]));
+    let mut compact = json!({
+        "schema": value.get("schema"),
+        "run": bounded_value(value.get("run").unwrap_or(&Value::Null)),
+        "mission": bounded_value(value.get("mission").unwrap_or(&Value::Null)),
+        "state": bounded_value(value.get("state").unwrap_or(&Value::Null)),
+        "phase": bounded_value(value.get("phase").unwrap_or(&Value::Null)),
+        "blocker": bounded_value(value.get("blocker").unwrap_or(&Value::Null)),
+        "owner": bounded_value(value.get("owner").unwrap_or(&Value::Null)),
+        "candidate": bounded_value(value.get("candidate").unwrap_or(&Value::Null)),
+        "gates": value.get("gates").and_then(Value::as_array)
+            .map(|gates| gates.iter().take(COMPACT_REF_LIMIT).map(bounded_value).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "gates_omitted": value.get("gates").and_then(Value::as_array)
+            .map(|gates| gates.len().saturating_sub(COMPACT_REF_LIMIT)).unwrap_or_default(),
+        "publication": bounded_value(value.get("publication").unwrap_or(&Value::Null)),
+        "next_action": { "command": next_action },
+        "action_eligibility": {
+            "actions": selected_action,
+            "available_action_count": available
+        },
+        "presentation": "compact",
+    });
+    for key in ["artifacts", "evidence"] {
+        if let Some(items) = value.get(key).and_then(Value::as_array) {
+            let mut seen = HashSet::new();
+            let unique = items
+                .iter()
+                .filter(|item| {
+                    let identity = item
+                        .get("id")
+                        .or_else(|| item.get("uri"))
+                        .unwrap_or(*item)
+                        .to_string();
+                    seen.insert(identity)
+                })
+                .collect::<Vec<_>>();
+            compact[format!("{key}_count")] = json!(unique.len());
+            let refs = unique
+                .iter()
+                .take(3)
+                .map(|item| {
+                    let mut reference = json!({});
+                    for field in ["id", "kind", "uri"] {
+                        if let Some(value) = item.get(field) {
+                            reference[field] = bounded_value(value);
+                        }
+                    }
+                    reference
+                })
+                .collect::<Vec<_>>();
+            compact[format!("{key}_refs")] = json!(refs);
+        }
+    }
+    for key in ["lab_snapshot_failure", "lab_staging_diagnostic"] {
+        if let Some(diagnostic) = value.get(key) {
+            compact[key] = bounded_value(diagnostic);
+        }
+    }
+    // Retain the prior canonical blocker and safe retry guidance attached by
+    // this command, but never duplicate the complete eligibility matrix.
+    if let Some(blocker_summary) = value.get("blocker_summary") {
+        compact["blocker_summary"] = blocker_summary.clone();
+    }
+    compact
+}
+
+fn deduplicate_control_plane_evidence(value: &mut Value) {
+    for key in ["artifacts", "evidence"] {
+        let Some(items) = value.get_mut(key).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        items.retain(|item| {
+            let identity = item
+                .get("id")
+                .or_else(|| item.get("uri"))
+                .unwrap_or(item)
+                .to_string();
+            seen.insert(identity)
+        });
+    }
+}
+
+#[cfg(test)]
+mod compact_status_tests {
+    use super::{compact_control_plane_status, deduplicate_control_plane_evidence};
+    use serde_json::json;
+
+    #[test]
+    fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {
+        let duplicate_artifacts = (0..100)
+            .map(|index| {
+                json!({
+                    "id": format!("artifact-{}", index / 2),
+                    "kind": "patch",
+                    "uri": format!("homeboy://{}-{index}", "u".repeat(8 * 1024)),
+                    "content": "large evidence body",
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "retry-1",
+            "state": "failed",
+            "phase": "provider_start",
+            "blocker": { "code": "runner.transport", "message": "upload failed" },
+            "candidate": { "state": "unavailable" },
+            "gates": (0..20).map(|index| json!({"id": format!("gate-{index}"), "state": "passed"})).collect::<Vec<_>>(),
+            "action_eligibility": { "actions": [
+                { "action": "retry", "availability": "unavailable", "reason": "not retryable" },
+                { "action": "resume", "availability": "unavailable", "reason": "terminal" }
+            ]},
+            "artifacts": duplicate_artifacts,
+            "evidence": [{"id":"e1","kind":"log","uri":"homeboy://e1"}]
+        });
+        let compact = compact_control_plane_status(value.clone());
+        assert_eq!(compact["state"], "failed");
+        assert_eq!(compact["phase"], "provider_start");
+        assert_eq!(compact["blocker"]["code"], "runner.transport");
+        assert_eq!(compact["candidate"]["state"], "unavailable");
+        assert_eq!(
+            compact["gates"].as_array().unwrap().len(),
+            super::COMPACT_REF_LIMIT
+        );
+        assert_eq!(compact["gates_omitted"], 20 - super::COMPACT_REF_LIMIT);
+        assert_eq!(compact["artifacts_count"], 50);
+        assert_eq!(compact["artifacts_refs"].as_array().unwrap().len(), 3);
+        assert_eq!(compact["evidence_refs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            compact["next_action"]["command"],
+            "homeboy agent-task evidence retry-1"
+        );
+        assert_eq!(compact["action_eligibility"]["available_action_count"], 0);
+        assert_eq!(
+            compact["action_eligibility"]["actions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(serde_json::to_vec(&compact).unwrap().len() <= super::COMPACT_STATUS_BYTE_LIMIT);
+
+        let retryable = compact_control_plane_status(json!({
+            "run": "retry-eligible",
+            "state": "failed",
+            "action_eligibility": { "actions": [
+                { "action": "retry", "availability": "available", "required_inputs": [] },
+                { "action": "promote", "availability": "unavailable", "required_inputs": ["to_worktree"] }
+            ]}
+        }));
+        assert_eq!(
+            retryable["next_action"]["command"],
+            "homeboy agent-task retry retry-eligible"
+        );
+        assert_eq!(
+            retryable["action_eligibility"]["actions"][0]["action"],
+            "retry"
+        );
+
+        let needs_input = compact_control_plane_status(json!({
+            "run": "candidate-run",
+            "state": "candidate_recoverable",
+            "action_eligibility": { "actions": [{
+                "action": "promote",
+                "availability": "available",
+                "required_inputs": ["to_worktree"]
+            }]}
+        }));
+        assert_eq!(
+            needs_input["next_action"]["command"],
+            "homeboy agent-task evidence candidate-run"
+        );
+        assert_eq!(
+            needs_input["action_eligibility"]["actions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let mut full = value;
+        deduplicate_control_plane_evidence(&mut full);
+        assert_eq!(full["artifacts"].as_array().unwrap().len(), 50);
+        assert_eq!(full["artifacts"][0]["content"], "large evidence body");
+        assert_eq!(
+            full["action_eligibility"]["actions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            full["action_eligibility"]["actions"][0]["reason"],
+            "not retryable"
+        );
+    }
 }
 
 fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
@@ -457,6 +708,7 @@ pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
     watch_status_with_timeout(
         StatusArgs {
             run_id: run_id.to_string(),
+            full: false,
             exact: false,
             // A successful --no-finalize run may still offer Promote. Its
             // available follow-up actions do not make terminal execution fail.
