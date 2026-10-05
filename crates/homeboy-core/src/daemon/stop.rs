@@ -24,7 +24,80 @@ pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
 }
 
 pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
+    // A live foreground `daemon serve` (for example under systemd) records no
+    // startup token, so the PID-signalling path below refuses it. Ask it to
+    // stop itself over its local API instead; it drains, writes clean-stop
+    // evidence, and releases this exact lease (#15436). Done before taking the
+    // lifecycle lock, which the daemon's own stop handling may need.
+    if let Some(state) = tokenless_live_lease(expected_lease_id)? {
+        return request_foreground_lifecycle_stop(&state);
+    }
     stop_with_force_for_lease(expected_lease_id, false)
+}
+
+/// The persisted lease, when it is `expected_lease_id`, belongs to a running
+/// and reachable daemon, and has no startup token.
+fn tokenless_live_lease(expected_lease_id: &str) -> Result<Option<DaemonState>> {
+    let path = state_path()?;
+    let validation = validate_lease_file(&path)?;
+    Ok(validation.state.filter(|state| {
+        validation.running
+            && validation.reachable
+            && state.lease_id == expected_lease_id
+            && state.startup_token.is_empty()
+    }))
+}
+
+/// Stop a tokenless, reachable foreground daemon by asking it to stop itself,
+/// then wait (bounded) for its process to exit.
+fn request_foreground_lifecycle_stop(state: &DaemonState) -> Result<DaemonStopResult> {
+    let active_job_ids = active_daemon_job_ids()?;
+    if !active_job_ids.is_empty() {
+        return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
+    }
+    let url = format!("http://{}/lifecycle/stop", state.address);
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .and_then(|client| {
+            client
+                .post(&url)
+                .json(&serde_json::json!({ "lease_id": state.lease_id, "force": false }))
+                .send()
+        })
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("request foreground daemon stop at {url}")),
+            )
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!("foreground daemon refused lifecycle stop ({status}): {body}"),
+            Some(state.lease_id.clone()),
+            None,
+        ));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while pid_is_running(state.pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if pid_is_running(state.pid) {
+        return Err(Error::internal_unexpected(format!(
+            "foreground daemon pid {} accepted lifecycle stop but did not exit within 30s",
+            state.pid
+        )));
+    }
+    Ok(DaemonStopResult {
+        stopped: true,
+        already_absent: false,
+        pid: Some(state.pid),
+        state_path: state.state_path.clone(),
+        termination_evidence: read_termination_evidence().ok().flatten(),
+    })
 }
 
 /// Terminate a stale or unreachable daemon directly from its persisted lease.

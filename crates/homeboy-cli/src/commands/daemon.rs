@@ -1269,7 +1269,16 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
-    let state = daemon::serve_with_analysis_runner(parsed, CommandAnalysisJobRunner)?;
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // SIGINT (Ctrl-C) and SIGTERM (supervisor stop) both request a graceful
+    // drain: fence admissions, finish owned responses, release the lease (#15436).
+    homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
+    homeboy::core::process::install_terminate_handler(shutdown.clone())?;
+    let state = daemon::serve_with_analysis_runner_and_shutdown(
+        parsed,
+        CommandAnalysisJobRunner,
+        shutdown,
+    )?;
     Ok((
         DaemonOutput::Serve(DaemonStartResult {
             pid: state.pid,
