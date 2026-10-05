@@ -209,7 +209,16 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         string_config("name", tag_name),
     ));
 
-    let push_branch = super::super::planning_git::release_push_branch(component)?;
+    // A non-git component has no history to check; planning still names the
+    // default branch so the plan stays renderable.
+    let push_branch = if homeboy_core::git::is_git_repo(&component.local_path) {
+        super::super::planning_git::check_default_branch(
+            component,
+            super::super::planning_git::DefaultBranchRequirement::AtTip,
+        )?
+    } else {
+        super::super::planning_git::default_branch(component)
+    };
     steps.push(ready_step(
         "git.push",
         "git.push",
