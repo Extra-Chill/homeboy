@@ -4,9 +4,10 @@
 //! accumulates stdout/stderr-style stream chunks into memory without nearby
 //! evidence of a retention bound and truncation metadata.
 
-use super::conventions::AuditFinding;
+use super::conventions::{AuditFinding, Language};
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::source_text::SourceMasks;
 
 pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -16,7 +17,15 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
             continue;
         }
 
-        let detector_content = strip_test_modules(&strip_string_literals(&fp.content));
+        let masks = SourceMasks::new(&fp.content, Language::Rust);
+        let syntax = fp
+            .content
+            .lines()
+            .enumerate()
+            .map(|(index, _)| masks.syntax(index))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let detector_content = strip_test_modules(&syntax);
 
         if has_unbounded_capture_shape(&detector_content) {
             findings.push(Finding {
@@ -45,43 +54,6 @@ pub(crate) fn run(fingerprints: &[&FileFingerprint]) -> Vec<Finding> {
 
     findings.sort_by(|a, b| a.file.cmp(&b.file));
     findings
-}
-
-fn strip_string_literals(content: &str) -> String {
-    let mut stripped = String::with_capacity(content.len());
-    let chars = content.chars();
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for ch in chars {
-        if in_string {
-            if escaped {
-                escaped = false;
-                stripped.push(' ');
-                continue;
-            }
-            match ch {
-                '\\' => {
-                    escaped = true;
-                    stripped.push(' ');
-                }
-                '"' => {
-                    in_string = false;
-                    stripped.push('"');
-                }
-                '\n' => stripped.push('\n'),
-                _ => stripped.push(' '),
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-        }
-        stripped.push(ch);
-    }
-
-    stripped
 }
 
 fn strip_test_modules(content: &str) -> String {
@@ -415,5 +387,44 @@ mod tests {
         );
 
         assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn raw_fixture_and_comment_capture_shapes_are_not_production_findings() {
+        let file = fp(
+            "src/fixture.rs",
+            r###"
+const FIXTURE: &str = r#"quoted " stdout child.wait_with_output() " tail"#;
+// stdout child.wait_with_output()
+/* for item in files { println!("item"); } */
+fn real() { let c = '{'; }
+"###,
+        );
+        assert!(run(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn comments_cannot_supply_a_retention_bound_for_a_real_capture() {
+        let file = fp("src/capture.rs", "fn capture(child: Child) {\n// TODO add limit_bytes and truncated metadata for stdout\nlet stdout = child.wait_with_output();\n}\n");
+        let findings = run(&[&file]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("append stream chunks"));
+    }
+
+    #[test]
+    fn raw_fixture_test_attributes_cannot_hide_a_real_capture() {
+        let file = fp(
+            "src/capture.rs",
+            r###"
+const FIXTURE: &str = r#"
+#[cfg(test)]
+mod fake_tests {
+"#;
+fn capture(child: Child) {
+    let stdout = child.wait_with_output();
+}
+"###,
+        );
+        assert_eq!(run(&[&file]).len(), 1);
     }
 }
