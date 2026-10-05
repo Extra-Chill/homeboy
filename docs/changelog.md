@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.400.1] - 2026-10-05
+
+### Changed
+- consolidate default-branch checks behind one API
+
+### Fixed
+- put the toolchain bin on PATH during Rust gate cache hydration
+- add changelog entries for commits auto-included from an advanced remote
+
 ## [0.400.0] - 2026-10-05
 
 ### Changed
