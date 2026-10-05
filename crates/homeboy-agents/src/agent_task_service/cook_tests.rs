@@ -7136,6 +7136,93 @@ fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
     });
 }
 
+/// Extra-Chill/homeboy#15474: the worktree artifact inventory cannot see
+/// shared Cargo targets, so their read-only inventory is forwarded too.
+#[test]
+fn reserve_pressure_cook_context_forwards_the_shared_cargo_target_inventory() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new_without_recovery(
+            "cook-reserve-pressure-shared-cargo",
+            2,
+            1,
+            false,
+            None,
+        );
+        let error =
+            homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: "/worktrees/new-task".to_string(),
+                available_bytes: 90,
+                reserve_bytes: 100,
+                shortfall_bytes: 10,
+            })
+            .with_action(homeboy_core::error::ExecutableAction::new(
+                "capacity.reserve.inspect_repository_artifacts",
+                "inspect reclaimable artifacts across repository worktrees",
+                "homeboy",
+                [
+                    "cleanup",
+                    "artifacts",
+                    "--path",
+                    "/worktrees/repository",
+                    "--all-worktrees",
+                ],
+                homeboy_core::error::ActionSafety::ReadOnly,
+            ))
+            .with_action(
+                homeboy_core::error::ExecutableAction::new(
+                    "capacity.reserve.apply_repository_artifacts",
+                    "remove approved artifacts from merged repository worktrees",
+                    "homeboy",
+                    ["cleanup", "artifacts", "--apply"],
+                    homeboy_core::error::ActionSafety::Mutating,
+                )
+                .requiring_confirmation("approve removal"),
+            )
+            .with_action(homeboy_core::error::ExecutableAction::new(
+                "capacity.reserve.inspect_shared_cargo_targets",
+                "inspect reclaimable shared Cargo target stores",
+                "homeboy",
+                ["cleanup", "--include", "shared-cargo-targets"],
+                homeboy_core::error::ActionSafety::ReadOnly,
+            ));
+        super::super::materialize_initial_cook_attempt(&fixture.options)
+            .expect("materialize Cook attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &fixture.run_id,
+            &fixture.options.identity.initial_plan,
+            "worktree_capacity_admission",
+            &error,
+        )
+        .expect("persist capacity failure");
+
+        let report = cook_report(CookReportInput {
+            cook_id: fixture.cook_id.clone(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(error.message.clone()),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fixture.run_id),
+        })
+        .value;
+        let context = report.failure_context.expect("capacity recovery context");
+        let commands = context
+            .next_actions
+            .iter()
+            .map(|action| action.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            commands,
+            vec![
+                "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees",
+                "homeboy cleanup --include shared-cargo-targets",
+            ]
+        );
+    });
+}
+
 #[test]
 fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {

@@ -7292,8 +7292,10 @@ fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bo
 /// A persisted failure is normally not trusted to manufacture shell commands.
 /// Reserve admission actions are core-owned, explicitly read-only, and retain
 /// their structured identifier, so the terminal Cook notification can safely
-/// forward only the inventory action. The confirmation-gated apply action stays
-/// in durable diagnostic evidence.
+/// forward the read-only inventory actions: the scoped worktree artifacts and
+/// the shared Cargo targets that inventory cannot see
+/// (Extra-Chill/homeboy#15474). The confirmation-gated apply action stays in
+/// durable diagnostic evidence.
 fn capacity_reserve_recovery_actions(
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
 ) -> Option<CookRecoveryActions> {
@@ -7329,7 +7331,6 @@ fn capacity_reserve_recovery_actions(
                 command: format!("homeboy {}", quote_args(&args)),
             })
         })
-        .take(1)
         .collect::<Vec<_>>();
     (!actions.is_empty()).then(|| CookRecoveryActions {
         reason: "Filesystem reserve pressure blocked admission. Inspect the protected scoped inventory before approving any removal.".to_string(),

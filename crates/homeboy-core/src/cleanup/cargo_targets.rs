@@ -220,7 +220,9 @@ impl Drop for SharedCargoTargetLease {
 pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease> {
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
-    acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
+    let lease = acquire_shared_cargo_target_in(&root, owner, SystemTime::now())?;
+    retain_recent_shared_cargo_targets(&root, &[lease.target_dir()]);
+    Ok(lease)
 }
 
 /// Resolve Cargo output for managed execution.
@@ -261,6 +263,7 @@ pub fn acquire_isolated_cargo_target(
         &format!("{owner}:run:{}:{started}:{sequence}", std::process::id()),
         SystemTime::now(),
     )?;
+    retain_recent_shared_cargo_targets(&root, &[lease.target_dir()]);
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "isolated",
@@ -341,7 +344,18 @@ fn acquire_managed_cargo_target_for_compatibility(
 
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
-    acquire_managed_cargo_target_for_compatibility_in(&root, owner, source_path, compatibility)
+    let target = acquire_managed_cargo_target_for_compatibility_in(
+        &root,
+        owner,
+        source_path,
+        compatibility,
+    )?;
+    // The run-private store is leased; its base store seeds it now and
+    // receives its promotion on release, so both are current.
+    let mut current = vec![target.target_dir()];
+    current.extend(target.promote_to.as_deref());
+    retain_recent_shared_cargo_targets(&root, &current);
+    Ok(target)
 }
 
 fn acquire_managed_cargo_target_for_compatibility_in(
@@ -1436,6 +1450,104 @@ fn remove_store_if_unleased(
     }
 }
 
+/// How many idle shared Cargo target stores to keep besides the ones an
+/// acquisition is using. Each is a full Cargo target (1-3 GB for Homeboy
+/// itself), one per compatibility identity and one per released run, and a
+/// lockfile changes on nearly every release, so the store otherwise grew
+/// until reserve admission refused work (Extra-Chill/homeboy#15474). Mirrors
+/// the Rust gate cache bound from #15447.
+const SHARED_CARGO_TARGET_RETAINED_STORES: usize = 2;
+
+/// Best-effort bounded retention after a shared store is acquired. An
+/// eviction failure never fails the acquisition.
+fn retain_recent_shared_cargo_targets(root: &Path, current: &[&Path]) {
+    let retention = crate::defaults::load_config().retention;
+    if let Err(error) = evict_stale_shared_cargo_targets(
+        root,
+        current,
+        SHARED_CARGO_TARGET_RETAINED_STORES,
+        SystemTime::now(),
+        Duration::from_secs(retention.shared_store_lease_seconds),
+    ) {
+        crate::log_status!(
+            "cargo",
+            "Shared Cargo target eviction skipped: {}",
+            error.message
+        );
+    }
+}
+
+/// Remove all but the `keep` most recently used idle stores under `root`,
+/// never one in `current`. Recency is the `.homeboy-last-used-ms` sidecar
+/// written on every acquire and final release; the directory mtime is
+/// unusable because opening `.homeboy-lock` creates or touches an entry in it.
+///
+/// In-use safety is the same predicate `homeboy cleanup --include
+/// shared-cargo-targets` applies: a store whose lock is held or whose lease
+/// sidecar is fresh is active, and removal itself goes through
+/// [`remove_store_if_unleased`], which re-checks both under the exclusive
+/// lock. A base store is also in use while any run-private store derived from
+/// it (owner `<base owner>:run:...`) is active, because that run promotes into
+/// it on release. Caller-owned explicit registrations and stores without
+/// lifecycle metadata (legacy, symlinks) are left to `homeboy cleanup`.
+/// Returns the removed store paths.
+fn evict_stale_shared_cargo_targets(
+    root: &Path,
+    current: &[&Path],
+    keep: usize,
+    now: SystemTime,
+    lease_ttl: Duration,
+) -> Result<Vec<PathBuf>> {
+    let entries =
+        fs::read_dir(root).map_err(|error| io_error(error, "list shared Cargo target root"))?;
+    let mut active_owners = Vec::new();
+    let mut idle = Vec::new();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !sidecar_absent(&path, EXPLICIT_TARGET_FILE) {
+            continue;
+        }
+        let Some(last_used_unix_ms) = last_used(&path) else {
+            continue;
+        };
+        // An unreadable lock is treated as held: never evict on doubt.
+        if store_is_active(&path, now, lease_ttl, false).unwrap_or(true) {
+            active_owners.extend(read_owner(&path));
+            continue;
+        }
+        if current.iter().any(|used| *used == path.as_path()) {
+            continue;
+        }
+        idle.push((last_used_unix_ms, path));
+    }
+    idle.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut removed = Vec::new();
+    for (_, path) in idle.into_iter().skip(keep) {
+        let feeds_active_run = read_owner(&path).is_some_and(|owner| {
+            let prefix = format!("{owner}:run:");
+            active_owners
+                .iter()
+                .any(|active| active.starts_with(&prefix))
+        });
+        if feeds_active_run {
+            continue;
+        }
+        if matches!(
+            remove_store_if_unleased(&path, now, Duration::ZERO, lease_ttl),
+            Ok(RemoveOutcome::Removed)
+        ) {
+            removed.push(path);
+        }
+    }
+    Ok(removed)
+}
+
 fn inventory(
     root: &Path,
     now: SystemTime,
@@ -2154,6 +2266,76 @@ mod tests {
 
         assert_eq!(output.applied_count, 1);
         assert!(!target_path.exists());
+    }
+
+    /// Extra-Chill/homeboy#15474: one multi-GB store per identity and run
+    /// accumulated with no retention. Eviction keeps the current stores and
+    /// the most recently used idle ones, by the last-used sidecar.
+    #[test]
+    fn eviction_keeps_current_and_most_recent_stores() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let current = store(root.path(), "current", 1, Duration::from_secs(500), now);
+        let newest = store(root.path(), "newest", 1, Duration::from_secs(50), now);
+        let recent = store(root.path(), "recent", 1, Duration::from_secs(100), now);
+        let old = store(root.path(), "old", 1, Duration::from_secs(200), now);
+        let older = store(root.path(), "older", 1, Duration::from_secs(300), now);
+
+        let mut removed = evict_stale_shared_cargo_targets(
+            root.path(),
+            &[current.as_path()],
+            2,
+            now,
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        removed.sort();
+        let mut expected = vec![old.clone(), older.clone()];
+        expected.sort();
+
+        assert_eq!(removed, expected);
+        for kept in [&current, &newest, &recent] {
+            assert!(kept.is_dir(), "{} was removed", kept.display());
+        }
+        assert!(!old.exists() && !older.exists());
+    }
+
+    /// A leased store, and a base store whose run-private store is leased,
+    /// are in use however old their last use is.
+    #[test]
+    fn eviction_never_removes_a_leased_store_or_the_base_of_a_live_run() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let ancient = now.checked_sub(Duration::from_secs(10_000)).unwrap();
+        let leased = acquire_shared_cargo_target_in(root.path(), "leased", ancient).unwrap();
+        let base = store(
+            root.path(),
+            "gate:identity",
+            1,
+            Duration::from_secs(9_000),
+            now,
+        );
+        let run = acquire_shared_cargo_target_in(root.path(), "gate:identity:run:1:2:3", ancient)
+            .unwrap();
+        let stale = store(root.path(), "stale", 1, Duration::from_secs(100), now);
+
+        let removed =
+            evict_stale_shared_cargo_targets(root.path(), &[], 0, now, Duration::from_secs(3600))
+                .unwrap();
+
+        assert_eq!(removed, vec![stale.clone()]);
+        assert!(leased.target_dir().is_dir(), "leased store was removed");
+        assert!(run.target_dir().is_dir(), "live run store was removed");
+        assert!(base.is_dir(), "base of a live run was removed");
+
+        drop(run);
+        drop(leased);
+        let mut removed =
+            evict_stale_shared_cargo_targets(root.path(), &[], 0, now, Duration::from_secs(3600))
+                .unwrap();
+        removed.sort();
+        assert_eq!(removed.len(), 3, "released stores become evictable");
+        assert!(!base.exists());
     }
 
     #[test]
