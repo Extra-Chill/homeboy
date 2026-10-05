@@ -54,6 +54,13 @@ Adapters should reject incompatible requests in `validate()` with
 `AgentTaskFailureClassification::CapabilityMissing`, `PolicyDenied`, or
 `InvalidInput` so callers get normalized failure classes.
 
+`executor.runtime_selection` carries explicit routing with `runtime_id`,
+`executor_backend`, `executor_provider_id`, `ai_provider_id`, `model`, and
+`substrate_ref`. Its field names are the same in authored and serialized requests.
+Executor and runtime-selection objects reject unrecognized fields so routing
+inputs cannot silently disappear into default selection. Provider-specific
+settings belong in `executor.config`.
+
 ## Sync and async completion
 
 `start_task()` supports both execution styles:
