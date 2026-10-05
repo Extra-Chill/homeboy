@@ -390,8 +390,14 @@ mod tests {
 
     #[test]
     fn identities_computed_under_different_algorithms_are_not_comparable() {
-        let local = MaterializedIdentity::new("homeboy-workspace-content-v1", "sha256:a");
-        let remote = MaterializedIdentity::new("homeboy-workspace-content-v2+portable", "sha256:a");
+        let local = MaterializedIdentity::new(
+            "homeboy-workspace-content-v3+unix-owner-executable",
+            "sha256:a",
+        );
+        let remote = MaterializedIdentity::new(
+            "homeboy-workspace-content-v2+portable-content-only",
+            "sha256:a",
+        );
 
         let verdict = compare_identities("workspace", &local, &remote);
 
