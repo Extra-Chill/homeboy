@@ -318,7 +318,12 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
             );
         }
     }
-    if configured_models.is_empty() {
+    let selected_policy_model_without_routes = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .is_some_and(|policy| policy.model.as_deref() == Some(selected_model));
+    if configured_models.is_empty() && !selected_policy_model_without_routes {
         return Ok(());
     }
     if configured_models.contains(selected_model) {
@@ -1235,6 +1240,27 @@ mod tests {
         let error = require_model_override_acknowledgement(&request)
             .expect_err("a changed policy model cannot self-authorize");
         assert_eq!(error.details["confirmation_required"], true);
+    }
+
+    #[test]
+    fn explicit_policy_model_without_configured_routes_requires_acknowledgement() {
+        let mut request = model_override_request("operator-model", false);
+        let policy = request
+            .core
+            .resolved_provider_policy
+            .as_mut()
+            .expect("resolved policy");
+        policy.model = Some("operator-model".to_string());
+        policy.rotation = None;
+
+        let error = require_model_override_acknowledgement(&request)
+            .expect_err("a selected policy model must not authorize itself");
+
+        assert_eq!(
+            error.details["schema"],
+            "homeboy/agent-task-model-override-confirmation-required/v1"
+        );
+        assert_eq!(error.details["configured_models"], json!([]));
     }
 
     #[test]
