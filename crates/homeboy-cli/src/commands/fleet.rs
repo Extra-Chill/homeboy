@@ -310,16 +310,15 @@ fn delete(id: &str) -> CmdResult<FleetOutput> {
 }
 
 fn list() -> CmdResult<FleetOutput> {
-    let fleets = fleet::list()?;
+    Ok((list_output(fleet::list()?), 0))
+}
 
-    Ok((
-        FleetOutput {
-            command: "fleet.list".to_string(),
-            entities: fleets,
-            ..Default::default()
-        },
-        0,
-    ))
+fn list_output(fleets: Vec<Fleet>) -> FleetOutput {
+    FleetOutput {
+        command: "fleet.list".to_string(),
+        entities: Some(fleets),
+        ..Default::default()
+    }
 }
 
 fn add(fleet_id: &str, project_id: &str) -> CmdResult<FleetOutput> {

@@ -587,6 +587,12 @@ single `fanout_id`. The durable parent retains a sanitized per-cell manifest;
 private gate commands, provider configuration, and evidence file paths remain
 only in the child Cook recipes.
 
+A cell with `repo`, `task_url`, `base`, `head`, and an absent native
+`to_worktree` declares creation intent. Cook creates that exact destination
+after durable child admission and binds its path and base revision before
+provider execution. Preview leaves it absent; an explicit `cwd` or `workspace`
+continues to select an existing source checkout.
+
 #### Multi-Issue Cook Batch
 
 Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues
@@ -713,6 +719,16 @@ handoff by default, with run identity and inspection/watch commands. Acceptance
 is not terminal success. Global `--wait` observes until terminal completion and
 returns the terminal exit status. Placement and durable ownership are independent
 of this wait policy, for both local and Lab execution.
+
+Before a runner job is accepted, deferred source construction remains
+controller-owned. Status reports `source_materialization`, with checkpoint
+heartbeats during packaging and Git transport, rather than attributing a planned
+runner selection to an execution that does not exist yet. Construction honors
+the plan's absolute lifecycle deadline; without one it has a 20-minute fallback
+budget, separate from the longer budget for observing an accepted runner job.
+Cancelling the exact attempt interrupts its owned source processes and fences
+handoff. A construction deadline records a typed pre-execution failure so the
+attempt does not remain queued waiting for nonexistent runner evidence.
 
 Submit a Lab Cook and return after handoff:
 

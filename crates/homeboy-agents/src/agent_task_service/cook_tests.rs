@@ -103,6 +103,34 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
         )
         .expect("register nested component");
 
+        let attached_checkout = tempfile::tempdir().expect("project attachment checkout");
+        std::fs::write(
+            attached_checkout.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": "php-transformer",
+                "remote_url": "https://github.com/example/attached-project.git"
+            })
+            .to_string(),
+        )
+        .expect("portable project attachment identity");
+        homeboy_core::project::save(&homeboy_core::project::Project {
+            id: "attached-site".to_string(),
+            components: vec![homeboy_core::project::ProjectComponentAttachment {
+                id: "php-transformer".to_string(),
+                local_path: attached_checkout.path().display().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .expect("register same-id project attachment");
+        assert_eq!(
+            homeboy_core::component::registered_by_id("php-transformer")
+                .expect("project-scoped lookup")
+                .expect("attachment")
+                .local_path,
+            attached_checkout.path().display().to_string(),
+        );
+
         let mut plan = AgentTaskPlan::new(
             "deferred-component",
             vec![AgentTaskRequest {
@@ -155,20 +183,70 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
             repository.path().display().to_string()
         );
 
+        #[cfg(unix)]
+        {
+            let alias_parent = tempfile::tempdir().expect("alias parent");
+            let alias = alias_parent.path().join("checkout");
+            std::os::unix::fs::symlink(repository.path(), &alias).expect("repository alias");
+            let mut aliased = plan.clone();
+            bind_materialized_cook_component_workspace(
+                &mut aliased,
+                &alias,
+                Some("php-transformer"),
+            )
+            .expect("canonical containment accepts a repository-root alias");
+            assert_eq!(
+                aliased.metadata["gate_workspace"]["requested_cwd"],
+                alias.display().to_string()
+            );
+            assert_eq!(
+                aliased.metadata["gate_workspace"]["component_cwd"],
+                "packages/php-transformer"
+            );
+
+            let outside = tempfile::tempdir().expect("outside workspace");
+            std::os::unix::fs::symlink(outside.path(), repository.path().join("escaped-component"))
+                .expect("escaping component alias");
+            let mut escaped = plan.clone();
+            escaped.metadata["cook_repository_identity"] = serde_json::json!({
+                "component_cwd": "escaped-component"
+            });
+            let before = serde_json::to_value(&escaped).expect("plan snapshot");
+            assert!(bind_materialized_cook_component_workspace(
+                &mut escaped,
+                repository.path(),
+                Some("php-transformer")
+            )
+            .is_err());
+            assert_eq!(
+                serde_json::to_value(&escaped).expect("unchanged plan"),
+                before
+            );
+        }
+
         let mut stale = plan.clone();
         stale.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "blocks-engine",
             "component_id": "removed-transformer",
+            "component_registered": true,
             "provenance": "--repo:configured-component"
         });
         let error = bind_materialized_cook_component_workspace(&mut stale, repository.path(), None)
             .expect_err("stale component registration must fail closed");
         assert!(error.message.contains("no longer registered"));
 
+        let mut unattested = plan.clone();
+        unattested.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "standalone-repository",
+            "component_id": "removed-transformer"
+        });
+        bind_materialized_cook_component_workspace(&mut unattested, repository.path(), None)
+            .expect("a component label without registration evidence grants no binding authority");
+
         let mut unregistered = plan.clone();
         unregistered.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "standalone-repository",
-            "component_id": null,
+            "component_id": "standalone-repository",
             "component_registered": false,
             "provenance": "--cwd:git-remote:origin"
         });
@@ -2457,7 +2535,7 @@ fn run_intentional_no_change_cook(
 #[test]
 fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, _) = run_intentional_no_change_cook(true, "no_change", false);
+        let (result, run_id, _) = run_intentional_no_change_cook(true, "investigation_only", false);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         assert_eq!(
@@ -2490,7 +2568,8 @@ fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_polic
 #[test]
 fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", true);
+        let (result, run_id, options) =
+            run_intentional_no_change_cook(false, "investigation_only", true);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         assert_eq!(
