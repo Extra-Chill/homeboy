@@ -10521,38 +10521,48 @@ pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
     Some(component_id.to_string())
 }
 
-fn bind_materialized_cook_component_workspace(
-    plan: &mut AgentTaskPlan,
+/// Cook selects repository-owned registration before project attachments.
+pub fn cook_registered_component_by_id(
+    component_id: &str,
+) -> Result<Option<homeboy_core::component::Component>> {
+    if let Some(component) =
+        homeboy_core::component::inventory::registered_primary_by_id(component_id)?
+    {
+        return Ok(Some(component));
+    }
+    homeboy_core::component::registered_by_id(component_id)
+}
+
+/// Resolve a registered component inside a materialized Cook repository.
+/// Preserve the caller's root spelling after verifying canonical containment.
+fn resolve_cook_component_workspace(
+    component_id: &str,
     repository_root: &Path,
-    selected_component_id: Option<&str>,
-) -> Result<()> {
-    let Some(component_id) = selected_component_id
-        .map(str::to_string)
-        .or_else(|| cook_repository_identity_component_id(plan))
-    else {
-        return Ok(());
-    };
-    let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {
+    component_cwd: Option<&str>,
+) -> Result<PathBuf> {
+    let Some(component) = cook_registered_component_by_id(component_id)? else {
         return Err(Error::validation_invalid_argument(
             "component workspace",
             format!("configured component `{component_id}` is no longer registered"),
-            Some(component_id),
+            Some(component_id.to_string()),
             None,
         ));
     };
-    let effective = match plan
-        .metadata
-        .pointer("/cook_repository_identity/component_cwd")
-        .and_then(Value::as_str)
-    {
+    let canonical_root = repository_root.canonicalize().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(repository_root.display().to_string()),
+        )
+    })?;
+    let effective = match component_cwd {
         Some(component_cwd) => homeboy_core::resolve_contained_local_path(
-            repository_root,
+            &canonical_root,
             component_cwd,
             "component_cwd",
         )?,
         None => homeboy_core::component::resolution::rebase_component_path_to_checkout(
             &component,
-            repository_root,
+            &canonical_root,
         ),
     };
     if !effective.is_dir() {
@@ -10568,7 +10578,7 @@ fn bind_materialized_cook_component_workspace(
     let effective = effective.canonicalize().map_err(|error| {
         Error::internal_io(error.to_string(), Some(effective.display().to_string()))
     })?;
-    let component_cwd = effective.strip_prefix(repository_root).map_err(|_| {
+    let component_cwd = effective.strip_prefix(&canonical_root).map_err(|_| {
         Error::validation_invalid_argument(
             "component workspace",
             "resolved component workspace escapes the materialized repository root",
@@ -10576,6 +10586,32 @@ fn bind_materialized_cook_component_workspace(
             None,
         )
     })?;
+    Ok(repository_root.join(component_cwd))
+}
+
+/// Bind component-relative execution and gate evidence through the same resolver
+/// for CLI plans, fanout plans, and deferred materialization.
+pub fn bind_materialized_cook_component_workspace(
+    plan: &mut AgentTaskPlan,
+    repository_root: &Path,
+    selected_component_id: Option<&str>,
+) -> Result<()> {
+    let Some(component_id) = selected_component_id
+        .map(str::to_string)
+        .or_else(|| cook_repository_identity_component_id(plan))
+    else {
+        return Ok(());
+    };
+    let effective = resolve_cook_component_workspace(
+        &component_id,
+        repository_root,
+        plan.metadata
+            .pointer("/cook_repository_identity/component_cwd")
+            .and_then(Value::as_str),
+    )?;
+    let component_cwd = effective
+        .strip_prefix(repository_root)
+        .expect("resolved contained workspace");
     if component_cwd.as_os_str().is_empty() {
         return Ok(());
     }
