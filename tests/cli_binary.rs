@@ -4,6 +4,8 @@ mod agent_task_provider_flag_diagnostic;
 mod agent_tool_dispatch;
 #[path = "cli_binary/cook_continue_preflight.rs"]
 mod cook_continue_preflight;
+#[path = "cli_binary/cook_model_routes.rs"]
+mod cook_model_routes;
 #[path = "cli_binary/cook_preview_lifecycle.rs"]
 mod cook_preview_lifecycle;
 #[path = "cli_binary/cook_prompt_stdin.rs"]
