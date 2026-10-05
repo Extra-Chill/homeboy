@@ -25,6 +25,7 @@
     "test:opencode-usage": "node tests/opencode-usage.test.js",
     "test:opencode-progress-events": "node tests/opencode-progress-events.test.js",
     "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js",
+    "test:opencode-session-activity": "node tests/opencode-session-activity.test.js",
     "test:opencode-external-storage-retention": "node tests/opencode-external-storage-retention.test.js",
     "test:opencode-external-storage-native-session": "node tests/opencode-external-storage-native-session.test.js",
     "test:opencode-external-storage-native-integration": "node tests/opencode-external-storage-native-integration.test.js",

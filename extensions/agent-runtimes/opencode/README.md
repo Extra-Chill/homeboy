@@ -29,6 +29,32 @@ embedding CLI details in their own manifests.
 - `provider_preflight` declares the auth checks callers should run before
   launching OpenCode.
 
+### Delegated task liveness
+
+The executor installs a task-scoped native event observer alongside its CLI
+progress adapter. The CLI streams the root session; the observer also records
+actual tool transitions and text/reasoning activity in that root's descendants.
+The root is pinned from this invocation's CLI frames, and unrelated sessions do
+not advance its liveness signal. Busy status alone does not count as progress.
+
+The observer retains at most 200 metadata-only events in the existing artifact
+directory. Retention stays bounded while new activity continues advancing the
+file. Tool arguments, outputs, reasoning text, and error payloads remain outside
+this signal. Homeboy's generic artifact-progress watchdog consumes it without
+runtime-specific logic or unconditional keepalive heartbeats.
+
+Run the deterministic isolation/retention check with
+`npm run test:opencode-session-activity`. For an explicit native delegation
+check using a verified provider/model, run from the repository root:
+
+```sh
+HOMEBOY_TEST_MODEL=provider/model node agent-runtimes/opencode/scripts/verify-delegated-liveness.cjs
+```
+
+The live check is outside automatic tests. It creates an isolated Git fixture,
+waits for real delegated tools to complete, asserts descendant activity while
+the CLI remains root-scoped, and cleans up its temporary workspace.
+
 ### Auth-store handoff behavior
 
 The controller's OpenCode auth store is the source of truth. The runner-side

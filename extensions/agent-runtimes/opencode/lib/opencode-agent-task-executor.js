@@ -1073,7 +1073,7 @@ function collectOpenCodeRuntimeLogs(context = {}) {
 
 	const artifacts = [];
 	const evidence_refs = [];
-	for (const stream of ['stdout', 'stderr']) {
+	for (const stream of ['stdout', 'stderr', 'activity']) {
 		const filePath = context.runtimeLogPaths?.[stream];
 		if (!filePath || !fs.existsSync(filePath)) {
 			continue;
@@ -1471,6 +1471,17 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const cwd = resolveOpenCodeCwd(request, config);
 	const args = opencodeRunArgs(request, config, commandSpec, cwd);
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
+	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
+	if (runtimeLogPaths.stdout) {
+		runtimeLogPaths.activity = runtimeLogPaths.stdout.replace(/stdout\.log$/, 'session-activity.jsonl');
+		spawnExtra.env.HOMEBOY_OPENCODE_ACTIVITY_ROOT = `${runtimeLogPaths.activity}.root.json`;
+		spawnExtra.env.HOMEBOY_OPENCODE_ACTIVITY_FILE = runtimeLogPaths.activity;
+		spawnExtra.env.HOMEBOY_OPENCODE_ACTIVITY_TASK = request.task_id;
+		const nativeConfig = parseOpenCodeConfigContent(spawnExtra.env.OPENCODE_CONFIG_CONTENT);
+		const plugin = require('node:url').pathToFileURL(path.join(__dirname, 'opencode-session-activity-plugin.mjs')).href;
+		nativeConfig.plugin = [...new Set([...arrayValue(nativeConfig.plugin), plugin])];
+		spawnExtra.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(nativeConfig);
+	}
 	const toolPermissions = agentTaskPolicyToolPermissions(request.policy, {
 		native: OPENCODE_NATIVE_WORKSPACE_PERMISSIONS,
 		workspace: OPENCODE_WORKSPACE_TOOLS,
@@ -1492,7 +1503,6 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 		});
 	}
 	const timeoutSeconds = timeoutSecondsFromLimits(request.limits, config.timeout_seconds);
-	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
 	const progressEventPath = openCodeProgressEventPath(request, config);
 	const initialRevision = gitRevision(cwd);
 	const scratchRoot = config.runtime_env?.TMPDIR;
@@ -1643,6 +1653,8 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			fs.writeFileSync(filePath, '');
 		}
+		const rootPath = options.env?.HOMEBOY_OPENCODE_ACTIVITY_ROOT;
+		if (rootPath) fs.writeFileSync(rootPath, '{}');
 
 		const reportFatalRuntimeError = (detected) => {
 			if (fatalRuntimeError) {
@@ -1668,6 +1680,7 @@ function spawnOpenCodeStreaming(command, args, options = {}) {
 			fatalStreamBuffers[stream] = lines.pop().slice(-64 * 1024);
 			for (const line of lines) {
 				for (const sessionId of openCodeSessionIds(line)) {
+					if (rootPath && sessionIds.size === 0) fs.writeFileSync(rootPath, JSON.stringify({ session_id: sessionId }));
 					sessionIds.add(sessionId);
 				}
 				const matched = findOpenCodeFatalStreamError(line);
