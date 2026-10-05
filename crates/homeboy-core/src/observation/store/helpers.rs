@@ -467,6 +467,37 @@ pub(crate) fn sqlite_error_is_storage_exhausted(error: &rusqlite::Error) -> bool
 pub(crate) const SQLITE_WRITE_MAX_ATTEMPTS: u32 = 6;
 /// Base backoff between retries; doubles each attempt (25, 50, 100, 200, ...ms).
 pub(crate) const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
+/// Shared bounded wait for connections that admit observation-store writes.
+/// This is installed when connections are opened, not mutated around an
+/// individual transaction, so a failed admission cannot leak timeout state.
+pub(crate) const SQLITE_CONTROL_PLANE_WRITE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+/// Begin a control-plane write using the connection's canonical bounded
+/// SQLite busy handler. `BEGIN IMMEDIATE` acquires the single-writer slot
+/// before any reads, so SQLite never promotes a stale read snapshot into a
+/// write transaction. Keep admission as one operation: retries after BEGIN
+/// succeeds could replay a non-idempotent decision callback.
+pub(crate) fn begin_control_plane_write(
+    connection: &rusqlite::Connection,
+    operation: &str,
+) -> Result<()> {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    connection
+        .execute_batch("BEGIN IMMEDIATE")
+        .map_err(|error| {
+            if is_transient_lock_error(&error) {
+                sqlite_error(format!(
+                    "{operation} (writer admission exhausted; elapsed {}ms of {}ms budget)",
+                    started.elapsed().as_millis(),
+                    SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis()
+                ))(error)
+            } else {
+                sqlite_error(operation)(error)
+            }
+        })
+}
 
 /// Returns true when the SQLite error is a transient busy/locked condition that
 /// is expected to self-heal once a competing writer releases the lock.
@@ -535,5 +566,42 @@ pub(crate) fn execute_with_retry_inner<T>(
                 return Err(sqlite_error(detail)(error));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod control_plane_admission_tests {
+    use super::*;
+
+    #[test]
+    fn admission_exhaustion_reports_the_bounded_wait() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.sqlite");
+        let initialized = super::ObservationStore::open_initialized_at(&path).unwrap();
+        drop(initialized);
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(
+                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+            );
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let connection = super::schema::open_bounded_writer_connection(&path).unwrap();
+        let started = std::time::Instant::now();
+        let error = begin_control_plane_write(&connection, "begin control-plane test admission")
+            .expect_err("held writer must exhaust the bounded wait");
+        let elapsed = started.elapsed();
+        println!(
+            "bounded admission elapsed_ms={} diagnostic={}",
+            elapsed.as_millis(),
+            error.message
+        );
+        release.join().unwrap();
+        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
+        assert!(elapsed < SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(2));
+        assert!(error.message.contains("begin control-plane test admission"));
+        assert!(error.message.contains("writer admission exhausted"));
+        assert!(error.message.contains("10000ms budget"));
     }
 }
