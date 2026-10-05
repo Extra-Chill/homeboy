@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -242,7 +242,7 @@ fn with_lock<T>(
             )
         })?;
     }
-    let lock = OpenOptions::new()
+    let mut lock = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
@@ -267,6 +267,23 @@ fn with_lock<T>(
                 ));
             }
             if Instant::now() >= deadline {
+                let mut lock_owner = serde_json::Value::Null;
+                if let Ok(mut owner_file) = OpenOptions::new().read(true).open(&lock_path) {
+                    let mut owner = String::new();
+                    if owner_file.read_to_string(&mut owner).is_ok() {
+                        lock_owner =
+                            serde_json::from_str(&owner).unwrap_or(serde_json::Value::Null);
+                    }
+                }
+                let owner_age_ms = lock_owner
+                    .get("acquired_at")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|acquired| chrono::DateTime::parse_from_rfc3339(acquired).ok())
+                    .map(|acquired| {
+                        (Utc::now() - acquired.with_timezone(&Utc))
+                            .num_milliseconds()
+                            .max(0)
+                    });
                 let mut error = Error::internal_io(
                     format!(
                         "timed out after {}ms waiting for runner generation registry lock",
@@ -278,12 +295,34 @@ fn with_lock<T>(
                     "kind": "runner_generation_lock_timeout",
                     "runner_id": runner_id,
                     "timeout_ms": LOCK_TIMEOUT.as_millis(),
+                    "owner_pid": lock_owner.get("owner_pid"),
+                    "phase": lock_owner.get("phase").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
+                    "owner_acquired_at": lock_owner.get("acquired_at"),
+                    "owner_age_ms": owner_age_ms,
+                    "deadline_ms": LOCK_TIMEOUT.as_millis(),
+                    "legal_action": format!("homeboy runner status {runner_id} --full"),
                 });
                 error.retryable = Some(true);
                 return Err(error);
             }
             std::thread::sleep(LOCK_RETRY);
         }
+    }
+    #[cfg(unix)]
+    {
+        let _ = lock.seek(SeekFrom::Start(0));
+        let _ = lock.set_len(0);
+        let _ = lock.write_all(
+            serde_json::to_string(&serde_json::json!({
+                "owner_pid": std::process::id(),
+                "phase": "generation_registry_mutation",
+                "acquired_at": Utc::now().to_rfc3339(),
+                "runner_id": runner_id,
+            }))
+            .unwrap_or_default()
+            .as_bytes(),
+        );
+        let _ = lock.sync_data();
     }
     let result = operation();
     #[cfg(unix)]
@@ -2819,6 +2858,25 @@ mod tests {
     }
 
     #[test]
+    fn registry_lock_publishes_durable_owner_and_phase_metadata() {
+        test_support::with_isolated_home(|_| {
+            with_runner_registry_lock("runner-a", || {
+                let lock_path = path("runner-a")?.with_extension("lock");
+                let owner: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(lock_path).expect("read held lock metadata"),
+                )
+                .expect("lock metadata is JSON");
+                assert_eq!(owner["owner_pid"], std::process::id());
+                assert_eq!(owner["phase"], "generation_registry_mutation");
+                assert_eq!(owner["runner_id"], "runner-a");
+                assert!(owner["acquired_at"].as_str().is_some());
+                Ok(())
+            })
+            .expect("lock operation succeeds");
+        });
+    }
+
+    #[test]
     fn failed_mutation_clears_its_owned_reservation_before_returning() {
         test_support::with_isolated_home(|_| {
             let error = with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
@@ -4305,7 +4363,10 @@ mod tests {
             };
             let owners = status_job_owners("runner-a", Some(&fresh)).expect("owners");
             let summary = report.admission_summary_with_generations(&projection, &owners, 0);
-            assert!(summary.accepting_jobs);
+            assert!(
+                !summary.accepting_jobs,
+                "a connected session without a live lease observation is not admission-ready"
+            );
             assert!(summary.unresolved_generation_ids.is_empty());
             assert_eq!(summary.unresolved_retained_projection_count, 0);
             assert!(operations.stopped_leases.borrow().is_empty());

@@ -733,12 +733,16 @@ impl RunnerStatusReport {
             .filter(|warning| !warning.blocks_admission())
     }
 
-    /// Whether daemon freshness permits admission. An absent observation is
-    /// unverified rather than a hard stale result.
+    /// Whether an observed fresh daemon has a lease identity for admission.
+    /// Missing freshness or lease identity is unverified and fails closed.
     pub fn daemon_fresh(&self) -> bool {
-        self.daemon_freshness
-            .as_ref()
-            .is_none_or(|freshness| freshness.fresh)
+        self.daemon_freshness.as_ref().is_some_and(|freshness| {
+            freshness.fresh
+                && freshness
+                    .lease_id
+                    .as_deref()
+                    .is_some_and(|lease| !lease.is_empty())
+        })
     }
 
     /// Whether the selected daemon is compatible with the controller and
@@ -753,9 +757,8 @@ impl RunnerStatusReport {
     /// Compatibility and the daemon's own freshness observation both prohibit
     /// new work; rotation safety is evaluated separately.
     ///
-    /// A report that established nothing is not a fence — it is surfaced as
-    /// `unverified` and scored down instead, so an unprobeable runner is
-    /// neither silently healthy nor uniformly stale.
+    /// Missing freshness or lease identity is unverified and cannot authorize
+    /// admission; callers surface recovery guidance from the same observation.
     pub fn daemon_fresh_for_admission(&self) -> bool {
         self.daemon_compatible_for_admission() && self.daemon_fresh()
     }
@@ -813,9 +816,8 @@ impl RunnerStatusReport {
         draining_generation_count: usize,
     ) -> RunnerAdmissionSummary {
         let connected = self.is_connected();
-        // Compatibility and an explicitly non-fresh daemon both fence
-        // admission. An absent freshness observation retains the established
-        // unverified/scored-down behavior rather than becoming hard stale.
+        // Compatibility and an explicitly non-fresh or lease-less observation
+        // both fence admission.
         let daemon_fresh = self.daemon_fresh();
         let daemon_compatible = self.daemon_compatible_for_admission();
         let live_daemon_job_count = self.active_job_count;
@@ -953,12 +955,9 @@ impl RunnerStatusReport {
             {
                 return Some(action);
             }
-            if !freshness.fresh {
-                // Missing typed ownership proof means no mutation is authorized.
-                // Keep admission closed and expose the freshness evidence as the
-                // terminal blocker rather than prescribing a read-only loop.
-                return None;
-            }
+        }
+        if self.is_connected() && !self.daemon_fresh() {
+            return Some(status_action(&self.runner_id));
         }
         if let Some(warning) = self.admission_blocking_stale_daemon() {
             if let Some(action) = warning.safe_recovery_actions().into_iter().next() {
@@ -1136,7 +1135,24 @@ mod status_serialization_tests {
             report.configured_job_binary_build_identity.as_deref(),
             Some("homeboy 0.339.0+83a9bd058619")
         );
-        assert!(report.daemon_fresh_for_admission());
+        assert!(!report.daemon_fresh_for_admission());
+    }
+
+    #[test]
+    fn fresh_flag_without_a_lease_cannot_authorize_admission() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        let mut freshness = fresh_daemon_freshness();
+        freshness.lease_id = None;
+        report.daemon_freshness = Some(freshness);
+
+        let summary = report.admission_summary(0);
+        assert!(!summary.daemon_fresh);
+        assert!(!summary.accepting_jobs);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner status homeboy-lab --full")
+        );
     }
 
     #[test]
@@ -1386,8 +1402,8 @@ mod status_serialization_tests {
         });
         let summary = report.admission_summary(0);
         assert!(
-            summary.daemon_fresh,
-            "missing freshness evidence remains unverified rather than stale"
+            !summary.daemon_fresh,
+            "missing lease evidence cannot be reported as fresh"
         );
         assert!(!summary.daemon_compatible);
         assert!(
@@ -1396,8 +1412,8 @@ mod status_serialization_tests {
         );
         assert_eq!(
             summary.next_action.as_deref(),
-            None,
-            "legacy command text must not become executable recovery authority"
+            Some("homeboy runner status homeboy-lab --full"),
+            "missing proof offers inspection, not mutation"
         );
         assert!(!summary.safe_to_rotate, "missing daemon evidence is unsafe");
     }
@@ -1434,16 +1450,20 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_missing_freshness_remains_unverified_not_stale() {
+    fn admission_summary_missing_freshness_fails_closed_with_diagnostic_action() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
 
         let summary = report.admission_summary(0);
 
-        assert!(summary.daemon_fresh);
+        assert!(!summary.daemon_fresh);
         assert!(summary.daemon_compatible);
-        assert!(summary.accepting_jobs);
-        assert!(report.daemon_fresh_for_admission());
+        assert!(!summary.accepting_jobs);
+        assert!(!report.daemon_fresh_for_admission());
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner status homeboy-lab --full")
+        );
     }
 
     #[test]
