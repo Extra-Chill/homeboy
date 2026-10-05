@@ -533,7 +533,10 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             if let Some(state_dir) = state_dir {
                 std::env::set_var(homeboy::core::paths::DAEMON_STATE_DIR_ENV, state_dir);
             }
-            serve(&addr)
+            // A supervised child (token forwarded) keeps the supervisor's
+            // existing lifecycle. Only a foreground serve owned by an external
+            // supervisor needs its own graceful SIGTERM handling (#15436).
+            serve(&addr, startup_token.is_none())
         }
         DaemonCommand::Supervise {
             addr,
@@ -1266,19 +1269,19 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
     ))
 }
 
-fn serve(addr: &str) -> CmdResult<DaemonOutput> {
+fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // SIGINT (Ctrl-C) and SIGTERM (supervisor stop) both request a graceful
-    // drain: fence admissions, finish owned responses, release the lease (#15436).
-    homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
-    homeboy::core::process::install_terminate_handler(shutdown.clone())?;
-    let state = daemon::serve_with_analysis_runner_and_shutdown(
-        parsed,
-        CommandAnalysisJobRunner,
-        shutdown,
-    )?;
+    let state = if foreground {
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // SIGINT (Ctrl-C) and SIGTERM (supervisor stop) both request a
+        // graceful drain: finish owned responses, release the lease (#15436).
+        homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
+        homeboy::core::process::install_terminate_handler(shutdown.clone())?;
+        daemon::serve_with_analysis_runner_and_shutdown(parsed, CommandAnalysisJobRunner, shutdown)?
+    } else {
+        daemon::serve_with_analysis_runner(parsed, CommandAnalysisJobRunner)?
+    };
     Ok((
         DaemonOutput::Serve(DaemonStartResult {
             pid: state.pid,

@@ -1628,7 +1628,12 @@ pub fn serve_with_analysis_runner<R>(addr: SocketAddr, analysis_runner: R) -> Re
 where
     R: AnalysisJobRunner,
 {
-    serve_with_analysis_runner_and_shutdown(addr, analysis_runner, Arc::new(AtomicBool::new(false)))
+    // The supervised path keeps the blocking accept loop and its existing
+    // lifecycle; only a foreground serve opts into the shutdown flag.
+    let owner_lock = acquire_daemon_owner_lock()?;
+    let listener = TcpListener::bind(addr)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
+    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None, None)
 }
 
 pub fn serve_with_analysis_runner_and_shutdown<R>(
