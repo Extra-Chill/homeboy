@@ -4,6 +4,7 @@ use homeboy_runner_contract::RunnerKind;
 
 use super::super::DynamicSetArgs;
 use super::doctor;
+use super::exec_args::RunnerExecArgs;
 use super::lifecycle;
 use super::refresh_plan;
 use super::workspace;
@@ -19,11 +20,11 @@ impl RunnerArgs {
     pub(crate) fn compact_exec_stdout(&self) -> bool {
         matches!(
             &self.command,
-            RunnerCommand::Exec {
+            RunnerCommand::Exec(RunnerExecArgs {
                 json: false,
                 raw: false,
                 ..
-            }
+            })
         )
     }
 
@@ -441,122 +442,7 @@ pub(super) enum RunnerCommand {
     #[command(
         after_help = "Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` to make the Homeboy/remote-command boundary explicit."
     )]
-    Exec {
-        /// Runner ID
-        id: String,
-
-        /// Remote/current working directory. SSH runners require this to be
-        /// inside the runner workspace root unless the runner has a default
-        /// workspace_root.
-        #[arg(long)]
-        cwd: Option<String>,
-
-        /// Snapshot a local worktree to the runner first and execute from the materialized remote path.
-        #[arg(long = "sync-workspace")]
-        sync_workspace: Option<String>,
-
-        /// Opaque ref returned by runner workspace sync. Resolves the exact existing snapshot without rematerializing it.
-        #[arg(long = "workspace-ref", conflicts_with_all = ["cwd", "sync_workspace"])]
-        workspace_ref: Option<String>,
-
-        /// Hydrate detected dependencies from a matching runner cache or sealed controller package before execution. This offline-safe mode never invokes a runner package manager.
-        #[arg(long)]
-        hydrate_deps: bool,
-
-        /// Bound --sync-workspace snapshot preparation and transfer before command handoff. Defaults to 240s; does not limit dependency hydration or the runner command itself.
-        #[arg(long = "workspace-sync-timeout", default_value = "240s", value_parser = crate::commands::utils::watch::parse_duration_arg, value_name = "DURATION")]
-        workspace_sync_timeout: std::time::Duration,
-
-        /// Project ID used for runner trust policy checks
-        #[arg(long)]
-        project: Option<String>,
-
-        /// Allow diagnostic-only SSH command execution when the daemon is disconnected or non-fresh; it never uses or rotates daemon admission
-        #[arg(long)]
-        ssh: bool,
-
-        /// Capture the file delta produced by the remote command as a patch artifact
-        #[arg(long)]
-        capture_patch: bool,
-
-        /// Runner-side path that must exist before executing the command. Repeat for multiple paths.
-        #[arg(long = "require-path")]
-        require_paths: Vec<String>,
-
-        /// Read a shell script from this path and execute its materialized runner copy with bash.
-        /// Use `-` to read stdin on the controller; it is captured with the same bounded semantics.
-        /// Whitespace-only scripts are executed verbatim.
-        #[arg(long = "script-file")]
-        script_file: Option<String>,
-
-        /// Environment variable to inject into the runner process as KEY=VALUE.
-        /// Set a value to `homeboy://controller-proxy` to explicitly project the
-        /// controller proxy as a credential-free runner-loopback URL.
-        /// Repeat for multiple values.
-        #[arg(long = "env")]
-        env: Vec<String>,
-
-        /// Secret environment variable name to resolve through the runner secret-env contract.
-        /// Repeat for multiple names.
-        #[arg(long = "secret-env", value_name = "NAME")]
-        secret_env: Vec<String>,
-
-        /// Secret-env plan JSON to apply to the runner process.
-        #[arg(long = "secret-env-plan", value_name = "JSON")]
-        secret_env_plan: Option<String>,
-
-        /// Path to a secret-env plan JSON file to apply to the runner process.
-        #[arg(long = "secret-env-plan-file", value_name = "PATH")]
-        secret_env_plan_file: Option<String>,
-
-        /// Installed extension that contributes runtime environment on the selected runner. Repeat in contribution order.
-        #[arg(long = "extension-env", value_name = "ID")]
-        extension_env_providers: Vec<String>,
-
-        /// Build the runner exec plan without executing it.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Explicit persisted run id for ad hoc runner exec evidence.
-        #[arg(long = "run-id")]
-        run_id: Option<String>,
-
-        /// File or directory path produced by the runner command to persist as a run artifact.
-        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple artifacts.
-        #[arg(long = "artifact", value_name = "PATH")]
-        artifact_outputs: Vec<String>,
-
-        /// Directory whose immediate produced files/directories should each be persisted as run artifacts.
-        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple directories.
-        #[arg(long = "artifact-dir", value_name = "PATH")]
-        artifact_dir_outputs: Vec<String>,
-
-        /// Summary file or directory produced by the runner command to persist as typed run evidence.
-        /// Relative paths are resolved from the runner exec cwd. Repeat for multiple summaries.
-        #[arg(long = "summary", value_name = "PATH")]
-        summary_outputs: Vec<String>,
-
-        /// Print the full structured runner execution envelope to stdout.
-        #[arg(long)]
-        json: bool,
-
-        /// Print remote stdout/stderr directly instead of the structured JSON envelope.
-        /// Use global --output to still write the full structured envelope to a file.
-        #[arg(long)]
-        raw: bool,
-
-        /// Treat this exec as a read-only retrieval of evidence the runner
-        /// already retains (for example, hydrating a completed run's artifact).
-        /// Routes to the generation that owns the retained run/artifact and
-        /// never rotates the shared tunnel, so a stale admission daemon does not
-        /// block the read.
-        #[arg(long = "read-only-artifact")]
-        read_only_artifact: bool,
-
-        /// Command and arguments to execute on the runner
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
+    Exec(RunnerExecArgs),
     /// Execute an extension-owned recipe provider in one materialized workspace.
     RecipeRun {
         /// Runner ID
@@ -870,10 +756,10 @@ mod tests {
             let cli = Cli::try_parse_from(argv).expect("parse runner exec timeout");
             let Commands::Runner(RunnerArgs {
                 command:
-                    RunnerCommand::Exec {
+                    RunnerCommand::Exec(RunnerExecArgs {
                         workspace_sync_timeout,
                         ..
-                    },
+                    }),
             }) = cli.command
             else {
                 panic!("expected runner exec command");

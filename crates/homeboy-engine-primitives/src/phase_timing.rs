@@ -331,3 +331,16 @@ mod tests {
         assert_eq!(json, "{}");
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn phase_status_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [PhaseStatus::Ok, PhaseStatus::Skipped, PhaseStatus::Failed]
+        );
+    }
+}

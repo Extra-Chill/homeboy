@@ -313,20 +313,48 @@ mod tests {
 
     #[test]
     fn applies_declared_cleanup_intent_to_resource_records() {
-        let resources = RigResourcesSpec {
-            paths: vec!["/tmp/homeboy-rig".to_string()],
-            ..Default::default()
-        };
-        let mut options =
-            RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
-        options.cleanup_intent = ResourceCleanupIntent::Apply;
-
-        let index = rig_resource_lifecycle_index("fixture-rig", &resources, options);
-
-        assert_eq!(
-            index.resources[0].cleanup_intent,
-            ResourceCleanupIntent::Apply
-        );
+        for (cleanup, expected) in [
+            (
+                serde_json::json!({"intent": "apply"}),
+                ResourceCleanupIntent::Apply,
+            ),
+            (
+                serde_json::json!({"intent": "dry_run"}),
+                ResourceCleanupIntent::DryRun,
+            ),
+            (
+                serde_json::json!({"intent": "pipeline"}),
+                ResourceCleanupIntent::DryRun,
+            ),
+            (
+                serde_json::json!({"intent": "external"}),
+                ResourceCleanupIntent::DryRun,
+            ),
+            (
+                serde_json::json!({"reason": "manual by default"}),
+                ResourceCleanupIntent::DryRun,
+            ),
+        ] {
+            let lifecycle: super::super::spec::RigLifecycleSpec =
+                serde_json::from_value(serde_json::json!({"cleanup": cleanup}))
+                    .expect("canonical cleanup declaration");
+            let mut options =
+                RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active);
+            options.cleanup_intent = lifecycle
+                .cleanup
+                .expect("declared cleanup")
+                .resource_cleanup_intent();
+            let index = rig_resource_lifecycle_index("fixture-rig", &fixture_resources(), options);
+            index.validate().expect("contract-valid lifecycle index");
+            assert_eq!(index.resources.len(), 4);
+            for record in &index.resources {
+                assert_eq!(
+                    record.cleanup_intent, expected,
+                    "cleanup intent for {}",
+                    record.kind
+                );
+            }
+        }
     }
 
     /// Non-breaking guarantee: a spec that declares no `ttl`/`cleanup_policy`

@@ -5651,6 +5651,9 @@ pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
 }
 
 fn location(record: &AgentTaskRunRecord) -> Option<ControlPlaneLocation> {
+    if record.is_controller_pre_provider_phase() {
+        return None;
+    }
     let runner_id = record.runner_id().map(str::to_string);
     let transport = record
         .metadata
@@ -5747,6 +5750,11 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
+    if record.is_controller_pre_provider_phase()
+        && record.metadata["phase"] == "source_materialization"
+    {
+        return Some("source_materialization".to_string());
+    }
     if record.has_live_pending_local_cook_supervisor(Utc::now()) {
         return Some("promotion_gates".to_string());
     }
@@ -6058,6 +6066,12 @@ fn unmaterialized_admission_blocker(
 }
 
 fn owner(record: &AgentTaskRunRecord) -> ControlPlaneOwner {
+    if record.is_controller_pre_provider_phase() {
+        return ControlPlaneOwner {
+            kind: "local_controller".to_string(),
+            id: "local_controller".to_string(),
+        };
+    }
     match record.runner_id() {
         Some(runner_id) => ControlPlaneOwner {
             kind: "runner".to_string(),
@@ -8550,6 +8564,33 @@ mod tests {
                 .phase,
             Some("provider_execution".to_string())
         );
+    }
+
+    #[test]
+    fn source_materialization_projects_controller_ownership_before_runner_acceptance() {
+        let record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "materializing",
+            "plan_id": "plan",
+            "state": "queued",
+            "submitted_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+            "plan_path": "/plan",
+            "metadata": {
+                "runner_id": "selected-lab",
+                "phase": "source_materialization",
+                "cook_progress": {"phase": "provider_start", "updated_at": "1970-01-01T00:00:01Z"}
+            }
+        }))
+        .expect("pre-handoff record");
+        let projected = project_record(&record, None).expect("materializing status");
+        assert_eq!(projected.phase.as_deref(), Some("source_materialization"));
+        assert_eq!(
+            projected.owner.as_ref().expect("controller owner").kind,
+            "local_controller"
+        );
+        assert!(projected.location.is_none());
+        assert!(record.has_fresh_controller_pre_provider_heartbeat());
     }
 
     #[test]

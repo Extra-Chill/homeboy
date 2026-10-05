@@ -515,3 +515,20 @@ mod tests {
         assert!(!manifest.has_blocking_condition(BlockingSeverity::Warning));
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn evidence_manifest_source_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                EvidenceManifestSource::RunMetadata,
+                EvidenceManifestSource::Artifact,
+                EvidenceManifestSource::Derived,
+            ]
+        );
+    }
+}

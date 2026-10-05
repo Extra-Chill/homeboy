@@ -720,6 +720,16 @@ is not terminal success. Global `--wait` observes until terminal completion and
 returns the terminal exit status. Placement and durable ownership are independent
 of this wait policy, for both local and Lab execution.
 
+Before a runner job is accepted, deferred source construction remains
+controller-owned. Status reports `source_materialization`, with checkpoint
+heartbeats during packaging and Git transport, rather than attributing a planned
+runner selection to an execution that does not exist yet. Construction honors
+the plan's absolute lifecycle deadline; without one it has a 20-minute fallback
+budget, separate from the longer budget for observing an accepted runner job.
+Cancelling the exact attempt interrupts its owned source processes and fences
+handoff. A construction deadline records a typed pre-execution failure so the
+attempt does not remain queued waiting for nonexistent runner evidence.
+
 Submit a Lab Cook and return after handoff:
 
 ```bash
