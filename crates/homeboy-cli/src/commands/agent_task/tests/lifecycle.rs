@@ -2099,6 +2099,22 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             "ambiguous runner ownership retains its immutable runtime pin"
         );
 
+        let retry_error = homeboy::agents::agent_task_service::retry(run_id, None, true, false)
+            .expect_err("incompatible runtime is rejected before retry reservation");
+        assert!(retry_error
+            .to_string()
+            .contains("No retry identity was reserved"));
+        let unchanged_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
+            .expect("load recipe after rejected retry");
+        assert_eq!(unchanged_recipe.attempts.len(), 1);
+        assert_eq!(
+            test_lifecycle_store()
+                .read_cook_index(cook_id)
+                .expect("read Cook index")
+                .latest_run_id,
+            run_id
+        );
+
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
             preflight: true,
