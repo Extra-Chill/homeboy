@@ -250,10 +250,12 @@ impl RunnerFileTransfer {
                     .any(|value| value.as_str() == Some(capability))
             });
         if version != Some(CHUNK_UPLOAD_PROTOCOL_VERSION) || !enabled {
-            return Err(unsupported_chunk_upload_error(
+            let mut error = unsupported_chunk_upload_error(
                 &self.runner_id,
                 format!("daemon did not advertise {capability} protocol version 1"),
-            ));
+            );
+            error.details["missing_capability"] = json!(capability);
+            return Err(error);
         }
         Ok(())
     }
@@ -1217,6 +1219,48 @@ mod tests {
                 direct_ssh_file_channel(&runner),
                 Ok(RunnerFileChannel::DirectSsh(_))
             ));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_private_directory_creation_preserves_existing_shared_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        homeboy_core::test_support::with_isolated_home(|_| {
+            server::create(
+                &json!({"id": "private-mkdir", "host": "localhost", "user": "test"}).to_string(),
+                false,
+            )
+            .unwrap();
+            let mut runner = runner(RunnerKind::Ssh);
+            runner.server_id = Some("private-mkdir".to_string());
+            let root = tempfile::tempdir().unwrap();
+            let transfer = RunnerFileTransfer {
+                runner_id: runner.id.clone(),
+                workspace_root: Some(root.path().display().to_string()),
+                channel: direct_ssh_file_channel(&runner).unwrap(),
+            };
+            let private = root.path().join("evidence/nested");
+            transfer
+                .ensure_private_directory(private.to_str().unwrap())
+                .expect("private SSH mkdir");
+            assert_eq!(
+                fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            let shared = root.path().join("shared");
+            fs::create_dir(&shared).unwrap();
+            fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+            transfer
+                .ensure_private_directory(shared.to_str().unwrap())
+                .expect_err("shared parent refused");
+            assert_eq!(
+                fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+                0o775
+            );
+            transfer
+                .ensure_directory(shared.to_str().unwrap())
+                .expect("ordinary SSH mkdir");
         });
     }
 
