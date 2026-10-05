@@ -587,3 +587,60 @@ fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable(
         "agent_task.executor_incomplete_empty_result"
     );
 }
+
+/// #15440: a provider that finished but omitted only the `review_form` is not a
+/// provider failure. The cook loop requests the form after gates pass, so the
+/// patch must not be parked as `CandidateRecoverable`.
+#[test]
+fn missing_only_review_form_is_deferred_to_the_cook_loop() {
+    let mut form_request = request("form-task");
+    form_request
+        .output_declarations
+        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
+    outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+    outcome.summary =
+        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+
+    AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(outcome.failure_classification, None);
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
+
+    // A deferred outcome is no longer a provider failure, so the recoverable
+    // retention never parks its patch.
+    AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(&mut outcome);
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+}
+
+#[test]
+fn other_missing_outputs_stay_provider_failures() {
+    let mut form_request = request("form-task");
+    form_request
+        .output_declarations
+        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    for summary in [
+        "OpenCode completed without required structured output(s): review_form, plan.",
+        "OpenCode completed without required structured output(s): plan.",
+        "provider crashed",
+    ] {
+        let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
+        outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+        outcome.summary = Some(summary.to_string());
+        AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed, "{summary}");
+    }
+
+    // Without a declared review_form requirement there is no cook loop to own it.
+    let undeclared = request("plain-task");
+    let mut outcome = outcome("plain-task".to_string(), AgentTaskOutcomeStatus::Failed);
+    outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+    outcome.summary =
+        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+    AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &undeclared);
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+}

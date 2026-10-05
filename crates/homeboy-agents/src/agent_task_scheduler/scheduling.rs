@@ -830,6 +830,7 @@ impl AgentTaskScheduleSupport {
             Self::recover_missing_typed_artifacts_wrapper_failure(&mut outcome, &running.request);
             Self::classify_failed_nested_executor_status(&mut outcome);
             Self::classify_incomplete_executor_result(&mut outcome);
+            Self::defer_missing_review_form_to_cook_loop(&mut outcome, &running.request);
             Self::classify_missing_required_typed_artifacts(&mut outcome, &running.request);
             Self::classify_invalid_required_typed_artifacts(&mut outcome, &running.request);
         } else {
@@ -1047,6 +1048,48 @@ impl AgentTaskScheduleSupport {
                 "value": failed_status.value,
                 "provider_run_result": outcome.outputs.get("provider_run_result").cloned(),
             }),
+        });
+    }
+
+    /// A provider that finished its work but omitted only the reviewer-facing
+    /// `review_form` did not fail: the cook loop owns that gap and recovers it
+    /// with a bounded form-only follow-up once the candidate's deterministic
+    /// gates are green. Classifying it as a provider failure instead retained
+    /// the patch as `CandidateRecoverable`, which the loop never revisits, so
+    /// the cook stalled with passing gates and `resume` had nothing to resume
+    /// (#15440). Any other missing output keeps its failure classification.
+    pub(super) fn defer_missing_review_form_to_cook_loop(
+        outcome: &mut AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) {
+        use crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY;
+        if outcome.status != AgentTaskOutcomeStatus::Failed
+            || outcome.failure_classification != Some(AgentTaskFailureClassification::Provider)
+        {
+            return;
+        }
+        let Some(missing) = missing_required_output_names(outcome) else {
+            return;
+        };
+        let only_review_form =
+            !missing.is_empty() && missing.iter().all(|name| name == AI_REVIEW_FORM_OUTPUT_KEY);
+        let review_form_declared = request.output_declarations.iter().any(|declaration| {
+            declaration.name == AI_REVIEW_FORM_OUTPUT_KEY && declaration.required
+        });
+        if !only_review_form || !review_form_declared {
+            return;
+        }
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        outcome.failure_classification = None;
+        outcome.summary = Some(
+            "provider completed its work without the review_form; the cook loop requests it after deterministic gates"
+                .to_string(),
+        );
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.review_form_deferred_to_cook_loop".to_string(),
+            message: "the only missing required output was review_form; deferring it to the cook loop's form-only follow-up"
+                .to_string(),
+            data: serde_json::json!({ "missing_required_outputs": missing }),
         });
     }
 
@@ -2100,4 +2143,22 @@ mod execution_budget_evidence_tests {
 
         assert!(exhaustion_diagnostic(&outcome).is_none());
     }
+}
+
+/// Names of the required outputs an executor reported missing, read from the
+/// executor's summary: `… completed without required structured output(s): a, b.`
+/// (the OpenCode executor, code `agent_task.opencode_required_outputs_missing`).
+fn missing_required_output_names(outcome: &AgentTaskOutcome) -> Option<Vec<String>> {
+    const MARKER: &str = "completed without required structured output(s):";
+    let text = outcome.summary.as_deref()?;
+    let index = text.find(MARKER)?;
+    Some(
+        text[index + MARKER.len()..]
+            .trim()
+            .trim_end_matches('.')
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect(),
+    )
 }
