@@ -1,7 +1,5 @@
 use super::*;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use serde_json::json;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,30 +30,6 @@ pub enum AgentTaskGateBundleCheckKind {
     Manual,
 }
 
-impl AgentTaskGateBundle {
-    // Part of the loop-controller API exercised only by tests; production wiring is pending.
-    #[cfg(test)]
-    pub(crate) fn from_verify_commands(
-        bundle_id: impl Into<String>,
-        commands: Vec<String>,
-    ) -> Self {
-        Self {
-            bundle_id: bundle_id.into(),
-            description: "legacy --verify command gate bundle".to_string(),
-            checks: commands
-                .into_iter()
-                .enumerate()
-                .map(|(index, command)| AgentTaskGateBundleCheck {
-                    check_id: format!("verify-{}", index + 1),
-                    kind: AgentTaskGateBundleCheckKind::Command,
-                    input: json!({ "command": command }),
-                    retryable: true,
-                })
-                .collect(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateBundleResult {
     pub result_id: String,
@@ -74,10 +48,6 @@ pub struct AgentTaskGateBundleResult {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskLoopGateStatus {
     /// A recorded gate result that satisfies the acceptance requirement.
-    ///
-    /// `passed`, `warn`, and `warning` were emitted by earlier controller
-    /// records. They retain their prior non-blocking behavior when read.
-    #[serde(alias = "passed", alias = "warn", alias = "warning")]
     Satisfied,
     /// The policy declared a gate, but no result has been recorded yet.
     /// This is diagnostic-only and is never written into a gate result.
