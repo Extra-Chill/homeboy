@@ -2322,6 +2322,41 @@ fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
     });
 }
 
+/// `agent-task list` and the daemon's `GET /v1/control-plane/runs` must cover
+/// the same runs. A plain agent-task run (no Cook identity, so no mission) is
+/// listed by discovery; the daemon's list used to contain only mission-bound
+/// runs, so API clients could not see it (#13697).
+#[test]
+fn daemon_run_list_includes_a_mission_less_agent_task_run_that_discovery_lists() {
+    with_isolated_home(|_| {
+        let run_id = "plain-run-without-mission";
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        assert!(
+            discover_runs(AgentTaskDiscoveryFilter::All)
+                .expect("discovery")
+                .runs
+                .iter()
+                .any(|run| run.run_id == run_id),
+            "fixture: discovery lists the plain run"
+        );
+
+        crate::orchestration::register();
+        let page = homeboy_core::control_plane::runs(
+            &homeboy_control_plane_contract::ControlPlaneRunListRequest::default(),
+        )
+        .expect("daemon run list");
+
+        assert!(
+            page.runs.iter().any(|run| run.run.as_str() == run_id),
+            "the control-plane run list must include it: {:?}",
+            page.runs
+                .iter()
+                .map(|run| run.run.as_str())
+                .collect::<Vec<_>>()
+        );
+    });
+}
+
 #[test]
 fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
     with_isolated_home(|home| {
