@@ -10,6 +10,8 @@ mod cook_preview_lifecycle;
 mod cook_prompt_stdin;
 #[path = "cli_binary/cook_retry_projection_recursion.rs"]
 mod cook_retry_projection_recursion;
+#[path = "cli_binary/daemon_chaos.rs"]
+mod daemon_chaos;
 #[path = "cli_binary/daemon_serve_lifecycle.rs"]
 mod daemon_serve_lifecycle;
 #[path = "cli_binary/extension_action_payload.rs"]
