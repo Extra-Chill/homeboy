@@ -178,6 +178,9 @@ impl CookStartupAdmission {
             return Ok(None);
         }
 
+        let caller_workspace =
+            crate::commands::agent_task::run::existing_cook_caller_workspace(cook)?;
+
         let cook_id = cook
             .dispatch
             .run_id
@@ -211,6 +214,26 @@ impl CookStartupAdmission {
                 &launcher_id,
             )?
         };
+        if let Some(workspace) = caller_workspace {
+            record = match store.mutate_record(&cook_id, |current| {
+                if current.state.is_terminal() || !current.metadata["caller_workspace"].is_null() {
+                    return false;
+                }
+                current.metadata["caller_workspace"] = workspace.clone();
+                true
+            })? {
+                Some(updated) => updated,
+                None => store.read_record_bounded(&cook_id)?,
+            };
+            if !record.state.is_terminal() && record.metadata["caller_workspace"] != workspace {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "caller_workspace",
+                    "Cook admission checkout differs from its original caller ownership",
+                    Some(cook_id),
+                    None,
+                ));
+            }
+        }
         // The original launcher delegates to the pinned runtime before local
         // supervision. Transfer the same unforgeable launcher claim to that
         // child so recovery observes the process actually waiting at the
@@ -5703,6 +5726,174 @@ mod tests {
                 before,
                 "preview must not create controller runtime state before runner routing"
             );
+        });
+    }
+
+    #[test]
+    fn cook_startup_admission_projects_existing_checkout_before_runtime_seal() {
+        crate::test_support::with_isolated_home(|home| {
+            let repository = home.path().join("repository");
+            let checkout = home.path().join("repository@candidate");
+            std::fs::create_dir_all(&repository).unwrap();
+            let git = |args: &[&str]| {
+                let result = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repository)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            };
+            git(&["init", "-b", "main"]);
+            git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.org",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ]);
+            git(&[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/repository.git",
+            ]);
+            git(&[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                checkout.to_str().unwrap(),
+            ]);
+            std::env::set_var("HOMEBOY_CALLER_CONTEXT", "existing-checkout-caller");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            let mut normalized = vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--repo",
+                "fixture/repository",
+                "--to-worktree",
+                checkout.to_str().unwrap(),
+                "--run-id",
+                "existing-checkout-admission",
+                "--prompt",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let mut cli = Cli::parse_from(&normalized);
+            let mut primary_argv = normalized.clone();
+            let destination = primary_argv
+                .iter()
+                .position(|arg| arg == "--to-worktree")
+                .unwrap()
+                + 1;
+            primary_argv[destination] = repository.to_str().unwrap().to_string();
+            let mut primary_cli = Cli::parse_from(&primary_argv);
+            assert!(CookStartupAdmission::establish(&mut primary_cli, &mut primary_argv).is_err());
+            assert!(
+                !homeboy::core::paths::observation_db().unwrap().exists(),
+                "unverified checkout must not create a caller owner"
+            );
+            let admission = CookStartupAdmission::establish(&mut cli, &mut normalized)
+                .unwrap()
+                .expect("durable admission");
+            let observation = homeboy::core::observation::ObservationStore::open_readonly_at(
+                homeboy::core::paths::observation_db().unwrap(),
+            )
+            .unwrap();
+            let scope = observation
+                .active_task_scope("existing-checkout-caller")
+                .unwrap();
+            assert_eq!(scope["pending_run_ids"], serde_json::json!([]));
+            assert_eq!(
+                scope["workspaces"][0]["working_directory"],
+                serde_json::json!(checkout.canonicalize().unwrap())
+            );
+            assert_eq!(
+                scope["workspaces"][0]["run_ids"][0],
+                "existing-checkout-admission"
+            );
+            let record = admission
+                .store
+                .read_record_bounded(&admission.cook_id)
+                .unwrap();
+            assert_eq!(
+                record.metadata["cook_progress"]["phase"],
+                "controller_runtime_seal"
+            );
+            assert!(record.metadata["provider_run_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            drop(admission);
+            assert_eq!(
+                observation
+                    .active_task_scope("existing-checkout-caller")
+                    .unwrap()["workspaces"],
+                serde_json::json!([])
+            );
+            std::env::remove_var("HOMEBOY_CALLER_CONTEXT");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+        });
+    }
+
+    #[test]
+    fn cook_startup_unmaterialized_destination_retains_pending_ownership() {
+        crate::test_support::with_isolated_home(|home| {
+            std::env::set_var("HOMEBOY_CALLER_CONTEXT", "unmaterialized-checkout-caller");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            let destination = home.path().join("repository@unmaterialized");
+            let mut normalized = vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--repo",
+                "repository",
+                "--to-worktree",
+                destination.to_str().unwrap(),
+                "--run-id",
+                "unmaterialized-checkout-admission",
+                "--prompt",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let mut cli = Cli::parse_from(&normalized);
+            let admission = CookStartupAdmission::establish(&mut cli, &mut normalized)
+                .unwrap()
+                .unwrap();
+            let observation = homeboy::core::observation::ObservationStore::open_readonly_at(
+                homeboy::core::paths::observation_db().unwrap(),
+            )
+            .unwrap();
+            let scope = observation
+                .active_task_scope("unmaterialized-checkout-caller")
+                .unwrap();
+            assert_eq!(scope["workspaces"], serde_json::json!([]));
+            assert_eq!(
+                scope["pending_run_ids"],
+                serde_json::json!(["unmaterialized-checkout-admission"])
+            );
+            assert!(!destination.exists());
+            drop(admission);
+            std::env::remove_var("HOMEBOY_CALLER_CONTEXT");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
         });
     }
 
