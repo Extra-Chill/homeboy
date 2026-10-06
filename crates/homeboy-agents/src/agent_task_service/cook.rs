@@ -5813,6 +5813,26 @@ fn run_cook_with_runtime(
     durable_observer: &CookProgressObserver<'_>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    // One controller drives a Cook at a time (#15566). Held for the whole
+    // run, released when this returns or the process dies.
+    let Some(_driver) = store.try_acquire_cook_driver(&options.identity.cook_id)? else {
+        let driver = store
+            .foreign_cook_driver(&options.identity.cook_id)?
+            .unwrap_or_default();
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            format!(
+                "Cook is already being driven by another live controller (pid {}); refusing to drive it concurrently",
+                if driver.trim().is_empty() { "unknown" } else { driver.trim() }
+            ),
+            Some(options.identity.cook_id.clone()),
+            Some(vec![format!(
+                "Watch it with `homeboy agent-task status {}` instead of starting a second controller.",
+                options.identity.cook_id
+            )]),
+        )
+        .with_retryable(true));
+    };
     if options.finalization.provider_ci.is_some() {
         // Provider CI mode is never allowed to publish an unverified ready PR,
         // including when a durable request was assembled outside the CLI.
