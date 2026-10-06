@@ -224,6 +224,12 @@ pub struct ControlPlaneRetryParameters {
     pub force: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_route: Option<ControlPlaneProviderRouteOverride>,
+    /// Operator-authorized provider timeout for the successor, in
+    /// milliseconds. Must exceed the source attempt's timeout. Mutually
+    /// exclusive with `provider_route` and `force`. Additive within v1: older
+    /// requests omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Explicit provider route selected for a retry successor. It is part of the

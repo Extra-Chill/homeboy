@@ -5367,6 +5367,21 @@ fn default_retry(
     run_id: &str,
     parameters: &ControlPlaneRetryParameters,
 ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult> {
+    if let Some(timeout_ms) = parameters.timeout_ms {
+        if parameters.provider_route.is_some() || parameters.force {
+            return Err(homeboy_core::Error::validation_invalid_argument(
+                "timeout_ms",
+                "a timeout-override retry cannot also set provider_route or force",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        return crate::agent_task_service::retry_with_timeout_override(
+            run_id,
+            parameters.new_run_id.as_deref(),
+            timeout_ms,
+        );
+    }
     let route = parameters.provider_route.as_ref().map(|route| {
         crate::agent_task_service::CookProviderRouteOverride {
             backend: route.backend.clone(),
