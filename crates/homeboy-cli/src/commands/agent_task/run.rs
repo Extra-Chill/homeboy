@@ -7560,6 +7560,10 @@ fn run_preflight_cook_execution(
         // struct on, so foreground clients (TTY, machine log, `--output` file)
         // all describe a running provider with the same bounded sentence.
         let activity = event.activity_summary();
+        let phase_wait = format!(
+            "elapsed={}ms; wait_owner={}",
+            event.elapsed_ms, event.wait_owner
+        );
         let terminal_outcome =
             event
                 .terminal_success
@@ -7571,10 +7575,10 @@ fn run_preflight_cook_execution(
                     Some(event.cook_id),
                     Some(event.run_id),
                     terminal_outcome.or_else(|| {
-                        (event.phase == "heartbeat")
-                            .then_some(event.detail)
-                            .flatten()
+                        event
+                            .detail
                             .or(activity.as_deref())
+                            .or(Some(phase_wait.as_str()))
                     }),
                     event.terminal_retry_command,
                 )

@@ -534,13 +534,44 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
 
     fn record_provider_outcome(
         &self,
-        _request: &AgentTaskRequest,
+        request: &AgentTaskRequest,
         capacity_key: &str,
         outcome: &AgentTaskOutcome,
     ) {
         let Ok(mut evidence) = self.evidence.lock() else {
             return;
         };
+        let capacity_evidence = reset_at_from_outcome(outcome).is_some()
+            || matches!(
+                outcome.failure_classification,
+                Some(
+                    AgentTaskFailureClassification::RateLimited
+                        | AgentTaskFailureClassification::ProviderAccountBlocked
+                        | AgentTaskFailureClassification::ProviderQuotaExhausted
+                        | AgentTaskFailureClassification::ProviderBillingBlocked
+                        | AgentTaskFailureClassification::ProviderCredentialsExhausted
+                )
+            );
+        if capacity_evidence
+            && request.metadata["provider_readiness_generated_fanout_context"] == true
+        {
+            if let Ok(Some(provider)) = effective_provider_for_request(request, self.providers()) {
+                if let Ok(credential_env) =
+                    super::secrets::provider_request_credential_env(request, &provider)
+                {
+                    let config = super::runtime_readiness::effective_provider_config(
+                        &request.executor.config,
+                        request.executor.model(),
+                    );
+                    super::runtime_readiness::invalidate_fanout_readiness(
+                        &provider,
+                        &config,
+                        &credential_env,
+                        &evidence.readiness,
+                    );
+                }
+            }
+        }
         let capacity_key = capacity_key.to_string();
         if let Some(reset_at) = reset_at_from_outcome(outcome) {
             evidence.usage_caps.record(capacity_key.clone(), reset_at);
@@ -1126,6 +1157,379 @@ mod tests {
         }
 
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn independent_process_readiness_probe_worker() {
+        let Ok(readiness_script) = std::env::var("HOMEBOY_TEST_READINESS_SCRIPT") else {
+            return;
+        };
+        let timeout_ms = std::env::var("HOMEBOY_TEST_READINESS_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(20_000);
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": "test.provider.independent-process",
+            "backend": "test",
+            "secret_env_requirements": [{ "env": ["HOMEBOY_TEST_READINESS_TOKEN"] }],
+            "readiness_invocation": {
+                "argv": ["node", "-e", readiness_script],
+                "timeout_ms": timeout_ms
+            }
+        }))
+        .expect("worker provider");
+        let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
+        let mut request = readiness_request(
+            &std::env::var("HOMEBOY_TEST_READINESS_MODEL").expect("worker model"),
+        );
+        let account = std::env::var("HOMEBOY_TEST_READINESS_ACCOUNT").expect("worker account");
+        request.executor.config = json!({
+            "client_context": {
+                "account": account,
+                "fanout": {
+                    "semantics": "batch_cook",
+                    "cook_id": uuid::Uuid::new_v4().to_string(),
+                    "to_worktree": format!("child-{}", request.task_id),
+                }
+            }
+        });
+        request.metadata = json!({ "provider_readiness_generated_fanout_context": true });
+        let catalog = AgentTaskProviderCatalog {
+            providers: executor.providers().to_vec(),
+            ..Default::default()
+        };
+        let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+            format!("child-admission-{}", request.task_id),
+            vec![request.clone()],
+        );
+        super::dispatchability::admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("real child provider admission");
+        let readiness = executor.provider_route_readiness(&request);
+        assert!(readiness.ready, "{readiness:?}");
+        if std::env::var_os("HOMEBOY_TEST_RECORD_CAPACITY").is_some() {
+            executor.record_provider_outcome(
+                &request,
+                "fixture-capacity-key",
+                &AgentTaskOutcome {
+                    task_id: request.task_id.clone(),
+                    status: AgentTaskOutcomeStatus::ProviderError,
+                    failure_classification: Some(AgentTaskFailureClassification::RateLimited),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn nine_independent_child_processes_share_only_matching_readiness() {
+        use std::process::Command;
+        use std::time::Instant;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let baseline_probe_log = temp.path().join("baseline-probe-log");
+        let candidate_probe_log = temp.path().join("candidate-probe-log");
+        let ready = serde_json::json!({
+            "schema": "homeboy/agent-task-provider-readiness-result/v1",
+            "ready": true,
+            "classification": "ready",
+            "retryable": false,
+            "remediation": "",
+            "reason": "",
+            "cache_key": "shared-route",
+            "identity": {}
+        });
+        let make_readiness_script = |probe_log: &std::path::Path| {
+            format!(
+            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync({:?},request.effective_config.client_context.account+':'+process.env.HOMEBOY_TEST_READINESS_TOKEN+'\\n');setTimeout(()=>process.stdout.write({:?}),100);",
+            probe_log.display().to_string(),
+            serde_json::to_string(&ready).expect("readiness verdict")
+        )
+        };
+        let baseline_readiness_script = make_readiness_script(&baseline_probe_log);
+        let candidate_readiness_script = make_readiness_script(&candidate_probe_log);
+        let test_binary = std::env::current_exe().expect("test binary");
+        let baseline_started = Instant::now();
+        for child in 0..9 {
+            let output = Command::new(&test_binary)
+                .args([
+                    "--exact",
+                    "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+                ])
+                .env("HOMEBOY_TEST_READINESS_SCRIPT", &baseline_readiness_script)
+                .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+                .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+                .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+                .env("HOMEBOY_DATA_DIR", temp.path().join(format!("baseline-{child}")))
+                .output()
+                .expect("start independent child process");
+            assert!(
+                output.status.success(),
+                "child readiness worker failed; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let baseline_elapsed = baseline_started.elapsed();
+        let baseline_probes =
+            std::fs::read_to_string(&baseline_probe_log).expect("baseline subprocess probe log");
+        assert_eq!(baseline_probes.lines().count(), 9);
+
+        let data_root = temp.path().join("candidate-homeboy-data");
+        let candidate_started = Instant::now();
+        for _ in 0..9 {
+            let output = Command::new(&test_binary)
+                .args([
+                    "--exact",
+                    "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+                ])
+                .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+                .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+                .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+                .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+                .env("HOMEBOY_DATA_DIR", &data_root)
+                .output()
+                .expect("start shared-cache child process");
+            assert!(
+                output.status.success(),
+                "shared-cache worker failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let candidate_shared_route_elapsed = candidate_started.elapsed();
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_TEST_RECORD_CAPACITY", "1")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start capacity evidence invalidator");
+        assert!(
+            output.status.success(),
+            "capacity invalidator failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start child after capacity invalidation");
+        assert!(
+            output.status.success(),
+            "post-capacity worker failed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "other-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start different-model process");
+        assert!(
+            output.status.success(),
+            "different-model worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-rotated")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start rotated-credential process");
+        assert!(
+            output.status.success(),
+            "rotated-credential worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-b")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start different-account process");
+        assert!(
+            output.status.success(),
+            "different-account worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-a")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_TEST_READINESS_TIMEOUT_MS", "19000")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start changed-runtime-policy process");
+        assert!(
+            output.status.success(),
+            "changed-policy worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut concurrent_children = Vec::new();
+        for _ in 0..9 {
+            concurrent_children.push(
+                Command::new(&test_binary)
+                    .args([
+                        "--exact",
+                        "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+                        "--nocapture",
+                    ])
+                    .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+                    .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+                    .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-c")
+                    .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+                    .env("HOMEBOY_DATA_DIR", &data_root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("start concurrent cache waiter"),
+            );
+        }
+        let mut observed_lock_wait = false;
+        for child in concurrent_children {
+            let output = child
+                .wait_with_output()
+                .expect("join concurrent cache waiter");
+            let progress = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            observed_lock_wait |= progress.contains("durable_cache_lock")
+                && progress.contains("\"state\":\"waiting\"");
+            assert!(
+                output.status.success(),
+                "concurrent cache waiter failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            observed_lock_wait,
+            "concurrent child processes must report waiting on the durable cache lock"
+        );
+        let probes =
+            std::fs::read_to_string(&candidate_probe_log).expect("candidate subprocess probe log");
+        let cache_directory = data_root.join("runtime/provider-readiness/v1");
+        let cache_entries = std::fs::read_dir(&cache_directory)
+            .expect("durable readiness cache directory")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("cache entry"))
+            .collect::<Vec<_>>();
+        assert_eq!(cache_entries.len(), 6);
+        assert!(cache_entries.iter().all(|entry| {
+            !entry.contains("token-one")
+                && !entry.contains("token-rotated")
+                && !entry.contains("shared-route")
+                && !entry.contains("account-a")
+                && !entry.contains("account-b")
+        }));
+        eprintln!(
+            "independent_child_admission_benchmark children_per_route=9 baseline_probes=9 candidate_probes={} baseline_elapsed_ms={} candidate_elapsed_ms={} observed={probes:?}",
+            probes.lines().count(),
+            baseline_elapsed.as_millis(),
+            candidate_shared_route_elapsed.as_millis(),
+        );
+        assert_eq!(
+            probes.lines().collect::<Vec<_>>(),
+            [
+                "account-a:token-one",
+                "account-a:token-one",
+                "account-a:token-one",
+                "account-a:token-rotated",
+                "account-b:token-one",
+                "account-a:token-one",
+                "account-c:token-one",
+            ]
+        );
+        assert!(candidate_shared_route_elapsed < baseline_elapsed);
+        assert!(candidate_shared_route_elapsed < std::time::Duration::from_secs(3));
+
+        for entry in std::fs::read_dir(&cache_directory)
+            .expect("enumerate durable cache entries for TTL proof")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+        {
+            let mut value: Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).expect("read durable entry"))
+                    .expect("durable entry schema");
+            value["checked_at_unix_ms"] = json!(0);
+            std::fs::write(
+                entry.path(),
+                serde_json::to_vec(&value).expect("serialize expired evidence"),
+            )
+            .expect("expire durable entry");
+        }
+        let output = Command::new(&test_binary)
+            .args([
+                "--exact",
+                "agent_task_provider::executor::tests::independent_process_readiness_probe_worker",
+            ])
+            .env("HOMEBOY_TEST_READINESS_SCRIPT", &candidate_readiness_script)
+            .env("HOMEBOY_TEST_READINESS_MODEL", "shared-model")
+            .env("HOMEBOY_TEST_READINESS_ACCOUNT", "account-c")
+            .env("HOMEBOY_TEST_READINESS_TOKEN", "token-one")
+            .env("HOMEBOY_DATA_DIR", &data_root)
+            .output()
+            .expect("start child after TTL expiration");
+        assert!(
+            output.status.success(),
+            "expired-cache worker failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let probes = std::fs::read_to_string(&candidate_probe_log)
+            .expect("probe log after durable TTL expiration");
+        assert_eq!(probes.lines().last(), Some("account-c:token-one"));
+        assert_eq!(probes.lines().count(), 8);
     }
 
     #[test]

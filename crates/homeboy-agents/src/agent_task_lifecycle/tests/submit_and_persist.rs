@@ -1551,7 +1551,25 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     )
     .expect("record active progress");
     assert_eq!(active.metadata["cook_progress"]["phase"], "provider_start");
+    assert_eq!(
+        active.metadata["cook_progress"]["wait_owner"],
+        "provider_execution"
+    );
+    assert!(active.metadata["cook_progress"]["elapsed_ms"].is_u64());
+    assert!(active.metadata["cook_progress"]["phase_started_at"].is_string());
     assert!(active.lifecycle.heartbeat.is_some());
+
+    for (phase, owner) in [
+        ("queue_admission", "cook_queue"),
+        ("worktree_provider_lookup", "worktree_provider"),
+        ("provider_readiness", "provider_readiness"),
+    ] {
+        let progress = record_cook_progress_in_store(&lifecycle_store, run_id, phase, 1, None)
+            .expect("record owning phase");
+        assert_eq!(progress.metadata["cook_progress"]["phase"], phase);
+        assert_eq!(progress.metadata["cook_progress"]["wait_owner"], owner);
+        assert!(progress.metadata["cook_progress"]["elapsed_ms"].is_u64());
+    }
 
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("fixture cancellation"))
         .expect("cancel run");

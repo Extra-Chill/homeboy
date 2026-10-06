@@ -657,7 +657,7 @@ fn provider_timeout_heartbeat_detail(
 /// at the observer boundary. Passing a struct means adding a fact is an
 /// additive change here rather than a signature change at every call site, so
 /// the boundary stops being the place state goes to die (#11482).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CookProgressEvent<'a> {
     pub phase: &'a str,
     pub cook_id: &'a str,
@@ -666,6 +666,10 @@ pub struct CookProgressEvent<'a> {
     pub attempt: u32,
     /// Controller-owned description of the phase.
     pub detail: Option<&'a str>,
+    /// Time since this durable phase began, as observed by its lifecycle owner.
+    pub elapsed_ms: u64,
+    /// Subsystem that owns the current wait (provider, worktree, queue, etc.).
+    pub wait_owner: String,
     /// The terminal Cook result, when this is the terminal progress event.
     ///
     /// This remains separate from `detail`, which is persisted as the Cook's
@@ -722,19 +726,25 @@ fn report_cook_progress_with_activity(
     terminal_success: Option<bool>,
     terminal_retry_command: Option<&str>,
 ) -> Result<()> {
-    lifecycle_store.record_cook_progress_with_activity(
+    let record = lifecycle_store.record_cook_progress_with_activity(
         run_id,
         phase,
         attempt,
         detail,
         activity.and_then(CookProviderActivity::to_record_value),
     )?;
+    let progress = &record.metadata["cook_progress"];
     let event = CookProgressEvent {
         phase,
         cook_id,
         run_id,
         attempt,
         detail,
+        elapsed_ms: progress["elapsed_ms"].as_u64().unwrap_or_default(),
+        wait_owner: progress["wait_owner"]
+            .as_str()
+            .unwrap_or("cook_controller")
+            .to_string(),
         terminal_success,
         terminal_retry_command,
         activity,
