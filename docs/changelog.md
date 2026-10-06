@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.407.0] - 2026-10-06
+
+### Added
+- extend the provider timeout while the agent is still making progress
+
+### Changed
+- chaos suite replaying lifecycle incidents; fix in-place restart admission
+
+### Fixed
+- judge converging runners against the installed controller
+
 ## [0.406.4] - 2026-10-06
 
 ### Changed
