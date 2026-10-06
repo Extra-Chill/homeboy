@@ -1210,20 +1210,35 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn agent_task_reconciliation_decision_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                AgentTaskReconciliationDecision::NoOp,
+    fn agent_task_reconciliation_decision_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (AgentTaskReconciliationDecision::NoOp, "no_op"),
+            (
                 AgentTaskReconciliationDecision::ApplyCandidate,
+                "apply_candidate",
+            ),
+            (
                 AgentTaskReconciliationDecision::IssueReportCandidate,
+                "issue_report_candidate",
+            ),
+            (
                 AgentTaskReconciliationDecision::RetryCandidate,
+                "retry_candidate",
+            ),
+            (
                 AgentTaskReconciliationDecision::ReviewCandidate,
-            ]
-        );
+                "review_candidate",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

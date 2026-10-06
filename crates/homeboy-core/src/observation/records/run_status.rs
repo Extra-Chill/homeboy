@@ -181,28 +181,22 @@ mod tests {
     }
 
     #[test]
-    fn test_as_str() {
-        assert_eq!(RunStatus::Running.as_str(), "running");
-        assert_eq!(RunStatus::Pass.as_str(), "pass");
-        assert_eq!(RunStatus::Fail.as_str(), "fail");
-        assert_eq!(RunStatus::Error.as_str(), "error");
-        assert_eq!(RunStatus::Skipped.as_str(), "skipped");
-        assert_eq!(RunStatus::Stale.as_str(), "stale");
-        assert_eq!(RunStatus::HandedOff.as_str(), "handed_off");
-    }
-
-    #[test]
-    fn from_label_round_trips_known_statuses() {
-        for status in [
-            RunStatus::Running,
-            RunStatus::Pass,
-            RunStatus::Fail,
-            RunStatus::Error,
-            RunStatus::Skipped,
-            RunStatus::Stale,
-            RunStatus::HandedOff,
+    fn run_status_uses_fixed_wire_labels() {
+        for (status, label) in [
+            (RunStatus::Running, "running"),
+            (RunStatus::Pass, "pass"),
+            (RunStatus::Fail, "fail"),
+            (RunStatus::Error, "error"),
+            (RunStatus::Skipped, "skipped"),
+            (RunStatus::Stale, "stale"),
+            (RunStatus::HandedOff, "handed_off"),
         ] {
-            assert_eq!(RunStatus::from_label(status.as_str()), Some(status));
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(status.as_str(), label);
+            assert_eq!(RunStatus::from_label(label), Some(status));
         }
         assert_eq!(RunStatus::from_label("something-else"), None);
     }
@@ -239,26 +233,5 @@ mod tests {
                 "{status:?} owns its own outcome"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod serde_label_pins {
-    use super::RunStatus;
-
-    #[test]
-    fn run_status_matches_its_serialized_form() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                RunStatus::Running,
-                RunStatus::Pass,
-                RunStatus::Fail,
-                RunStatus::Error,
-                RunStatus::Skipped,
-                RunStatus::Stale,
-                RunStatus::HandedOff,
-            ]
-        );
     }
 }

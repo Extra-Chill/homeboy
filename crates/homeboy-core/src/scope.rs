@@ -567,21 +567,24 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn scope_kind_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                ScopeKind::Component,
-                ScopeKind::Project,
-                ScopeKind::Fleet,
-                ScopeKind::Rig,
-                ScopeKind::Workspace,
-                ScopeKind::Path,
-            ]
-        );
+    fn scope_kind_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (ScopeKind::Component, "component"),
+            (ScopeKind::Project, "project"),
+            (ScopeKind::Fleet, "fleet"),
+            (ScopeKind::Rig, "rig"),
+            (ScopeKind::Workspace, "workspace"),
+            (ScopeKind::Path, "path"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

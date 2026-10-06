@@ -204,14 +204,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn resource_cleanup_intent_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [ResourceCleanupIntent::DryRun, ResourceCleanupIntent::Apply,]
-        );
+    fn resource_cleanup_intent_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (ResourceCleanupIntent::DryRun, "dry_run"),
+            (ResourceCleanupIntent::Apply, "apply"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

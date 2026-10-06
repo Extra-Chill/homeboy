@@ -18,6 +18,3 @@ serde_json = "1.0"
 homeboy-error = { version = "0.1.0", path = "../../homeboy-error" }
 homeboy-redaction = { version = "0.1.0", path = "../../homeboy-redaction" }
 homeboy-runner-contract = { version = "0.1.0", path = "../homeboy-runner-contract" }
-
-[dev-dependencies]
-homeboy-serde-pin = { version = "0.1.0", path = "../../homeboy-serde-pin" }

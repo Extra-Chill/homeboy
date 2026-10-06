@@ -176,20 +176,23 @@ pub struct ChangelogSnapshotData {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn release_state_status_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                ReleaseStateStatus::Uncommitted,
-                ReleaseStateStatus::NeedsRelease,
-                ReleaseStateStatus::DocsOnly,
-                ReleaseStateStatus::Clean,
-                ReleaseStateStatus::Unknown,
-            ]
-        );
+    fn release_state_status_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (ReleaseStateStatus::Uncommitted, "uncommitted"),
+            (ReleaseStateStatus::NeedsRelease, "needs_release"),
+            (ReleaseStateStatus::DocsOnly, "docs_only"),
+            (ReleaseStateStatus::Clean, "clean"),
+            (ReleaseStateStatus::Unknown, "unknown"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

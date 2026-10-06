@@ -697,19 +697,25 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn agent_supervision_metric_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                AgentSupervisionMetric::ElapsedSeconds,
-                AgentSupervisionMetric::RssMib,
-                AgentSupervisionMetric::ChildProcesses,
+    fn agent_supervision_metric_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (AgentSupervisionMetric::ElapsedSeconds, "elapsed_seconds"),
+            (AgentSupervisionMetric::RssMib, "rss_mib"),
+            (AgentSupervisionMetric::ChildProcesses, "child_processes"),
+            (
                 AgentSupervisionMetric::NoProgressSeconds,
-            ]
-        );
+                "no_progress_seconds",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

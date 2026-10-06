@@ -35,5 +35,4 @@ tempfile = "3.14"
 libc = "0.2"
 
 [dev-dependencies]
-homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

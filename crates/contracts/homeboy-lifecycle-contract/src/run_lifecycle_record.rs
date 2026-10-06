@@ -461,43 +461,20 @@ mod run_execution_state_compatibility_tests {
 }
 
 #[cfg(test)]
-mod subsystem_state_compatibility_tests {
+mod subsystem_state_tests {
     use super::*;
-
-    /// The variants #13398 removed had no producer anywhere in the tree, so no
-    /// record can contain them. This pins the belt-and-braces case anyway: if
-    /// one ever appears — a hand-edited record, a binary from another branch —
-    /// it degrades to `Unknown` instead of failing the whole record parse.
-    ///
-    /// This is what makes deleting a variant from a durable enum safe, and it
-    /// is why the removal shipped together with the `#[serde(other)]` hatch
-    /// rather than on its own.
-    #[test]
-    fn removed_states_degrade_to_unknown_rather_than_failing() {
-        for label in ["not_required", "some_state_from_another_binary"] {
-            let parsed: CleanupState =
-                serde_json::from_value(label.into()).expect("must not fail the parse");
-            assert_eq!(parsed, CleanupState::Unknown, "{label}");
-        }
-
-        for label in ["expired", "deleted", "a_status_this_binary_never_had"] {
-            let parsed: ArtifactRetentionStatus =
-                serde_json::from_value(label.into()).expect("must not fail the parse");
-            assert_eq!(parsed, ArtifactRetentionStatus::Unknown, "{label}");
-        }
-    }
 
     /// Degradation has to survive the enclosing record, which is the shape that
     /// actually lands on disk.
     #[test]
-    fn a_removed_state_does_not_fail_the_enclosing_record() {
+    fn unknown_subsystem_states_parse_through_the_enclosing_record() {
         let record: RunLifecycleRecord = serde_json::from_value(serde_json::json!({
             "schema": RUN_LIFECYCLE_RECORD_SCHEMA,
             "execution": { "state": "running" },
-            "cleanup": { "state": "not_required" },
-            "artifact_retention": { "status": "deleted" },
+            "cleanup": { "state": "a_future_cleanup_state" },
+            "artifact_retention": { "status": "a_future_retention_status" },
         }))
-        .expect("record carrying removed states must still parse");
+        .expect("record carrying unknown subsystem states must still parse");
 
         assert_eq!(record.cleanup.state, CleanupState::Unknown);
         assert_eq!(
@@ -506,10 +483,9 @@ mod subsystem_state_compatibility_tests {
         );
     }
 
-    /// Every surviving variant keeps its durable spelling. Deleting a variant
-    /// must not renumber or rename its neighbours.
+    /// Every supported subsystem state keeps its durable spelling.
     #[test]
-    fn surviving_states_keep_their_wire_labels() {
+    fn subsystem_states_keep_their_wire_labels() {
         for (label, state) in [
             ("pending", CleanupState::Pending),
             ("running", CleanupState::Running),

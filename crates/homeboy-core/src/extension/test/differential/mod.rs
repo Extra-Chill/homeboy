@@ -879,23 +879,26 @@ pub fn measurement_from_test_output(output: &TestCommandOutput) -> TestMeasureme
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn differential_verdict_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                DifferentialVerdict::Pass,
-                DifferentialVerdict::Fail,
-                DifferentialVerdict::Timeout,
-                DifferentialVerdict::BaselineRed,
-                DifferentialVerdict::Inconclusive,
-                DifferentialVerdict::NoMeasurement,
-                DifferentialVerdict::NoBaseline,
-                DifferentialVerdict::InvalidEvidence,
-            ]
-        );
+    fn differential_verdict_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (DifferentialVerdict::Pass, "pass"),
+            (DifferentialVerdict::Fail, "fail"),
+            (DifferentialVerdict::Timeout, "timeout"),
+            (DifferentialVerdict::BaselineRed, "baseline_red"),
+            (DifferentialVerdict::Inconclusive, "inconclusive"),
+            (DifferentialVerdict::NoMeasurement, "no_measurement"),
+            (DifferentialVerdict::NoBaseline, "no_baseline"),
+            (DifferentialVerdict::InvalidEvidence, "invalid_evidence"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

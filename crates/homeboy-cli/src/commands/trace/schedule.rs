@@ -116,8 +116,8 @@ pub enum TraceVariantMatrixMode {
 }
 
 impl TraceVariantMatrixMode {
-    /// This mode as its canonical wire string. Serde and this allocation-free
-    /// output helper are pinned together below (#13400).
+    /// This mode as its canonical wire string. Tests pin both serde and this
+    /// allocation-free output helper to independent literal labels.
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -128,18 +128,21 @@ impl TraceVariantMatrixMode {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::TraceVariantMatrixMode;
 
     #[test]
-    fn trace_variant_matrix_mode_matches_its_serialized_form() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                TraceVariantMatrixMode::None,
-                TraceVariantMatrixMode::Single,
-                TraceVariantMatrixMode::Cumulative,
-            ]
-        );
+    fn trace_variant_matrix_mode_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (TraceVariantMatrixMode::None, "none"),
+            (TraceVariantMatrixMode::Single, "single"),
+            (TraceVariantMatrixMode::Cumulative, "cumulative"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

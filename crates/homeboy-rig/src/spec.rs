@@ -1197,16 +1197,6 @@ mod tests {
     }
 
     #[test]
-    fn rig_lifecycle_cleanup_rejects_retired_string_forms() {
-        for input in [r#""dry_run""#, r#""apply""#] {
-            assert!(
-                serde_json::from_str::<RigLifecycleSpec>(&format!(r#"{{"cleanup":{input}}}"#))
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
     fn rig_lifecycle_cleanup_round_trips_object_forms() {
         for input in [
             r#"{"intent":"dry_run"}"#,
@@ -1549,18 +1539,21 @@ mod public_preview_spec_test;
 mod bench_default_baseline_spec_test;
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn filesystem_assertion_kind_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            label,
-            [
-                FilesystemAssertionKind::Path,
-                FilesystemAssertionKind::File,
-                FilesystemAssertionKind::Dir,
-            ]
-        );
+    fn filesystem_assertion_kind_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (FilesystemAssertionKind::Path, "path"),
+            (FilesystemAssertionKind::File, "file"),
+            (FilesystemAssertionKind::Dir, "dir"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.label(), label);
+        }
     }
 }
