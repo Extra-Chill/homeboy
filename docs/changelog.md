@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.405.0] - 2026-10-06
+
+### Changed
+- retire legacy no-change review verdict alias
+
+### Fixed
+- use one durable owner for reconciliation
+
 ## [0.404.1] - 2026-10-05
 
 ### Changed
