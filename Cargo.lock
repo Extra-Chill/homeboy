@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.407.1"
+version = "0.408.1"
 dependencies = [
  "base64",
  "chrono",
@@ -1305,7 +1305,6 @@ version = "0.1.0"
 dependencies = [
  "homeboy-error",
  "homeboy-redaction",
- "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",

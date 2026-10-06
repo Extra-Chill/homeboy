@@ -71,12 +71,24 @@ pub(super) fn router_dir() -> Result<PathBuf> {
 }
 
 fn read_registry() -> Result<Option<LocalDaemonGenerationRegistry>> {
-    let path = registry_path()?;
-    read_registry_at(&path)
+    read_registry_at(&registry_path()?)
+}
+
+/// Read the generation registry stored in `router_dir`, without locking or
+/// mutating it. `None` means no registry exists there yet (a daemon that never
+/// handed off). Lifecycle observation uses this to inspect any router
+/// directory, not only the one this process is configured for (#15557).
+pub(super) fn generations_at(
+    router_dir: &Path,
+) -> Result<Option<RollingGenerations<LocalDaemonEndpoint>>> {
+    Ok(
+        read_registry_at(&router_dir.join("generations.json"))?
+            .map(|registry| registry.generations),
+    )
 }
 
 fn read_registry_at(path: &Path) -> Result<Option<LocalDaemonGenerationRegistry>> {
-    match fs::read(&path) {
+    match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
             Error::internal_json(error.to_string(), Some(format!("parse {}", path.display())))
         }),

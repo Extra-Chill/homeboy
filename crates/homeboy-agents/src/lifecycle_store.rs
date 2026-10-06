@@ -1849,6 +1849,31 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({}));
     let mut record = record.clone();
+    if let Some(owner) =
+        existing_metadata.pointer("/agent_task_run/metadata/client_context/caller_context")
+    {
+        if let Some(incoming) = record.metadata.pointer("/client_context/caller_context") {
+            if incoming != owner {
+                return Err(Error::validation_invalid_argument(
+                    "caller_context",
+                    "A durable task's original caller ownership cannot be reassigned",
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+            }
+        }
+        if record.metadata["client_context"].is_null() {
+            record.metadata["client_context"] = json!({});
+        }
+        record.metadata["client_context"]["caller_context"] = owner.clone();
+        if record.metadata["caller_workspace"].is_null() {
+            if let Some(workspace) =
+                existing_metadata.pointer("/agent_task_run/metadata/caller_workspace")
+            {
+                record.metadata["caller_workspace"] = workspace.clone();
+            }
+        }
+    }
     if record.metadata.get("cook_operation_claims").is_none() {
         if let Some(claims) = existing_metadata
             .pointer("/agent_task_run/metadata/cook_operation_claims")

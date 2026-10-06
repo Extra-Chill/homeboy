@@ -1,7 +1,12 @@
-//! The single reader of Cook attempt lineage (#15567).
+//! Cook attempt lineage: its one durable record and its one reader (#15567).
 //!
-//! "Attempt N continues attempt M" is written in two places today, by two
-//! different producers:
+//! Every recipe attempt appended since #15567 carries its own
+//! [`CookAttemptLineage`], written in the same recipe write that appends the
+//! attempt and validated with the recipe. That record is authoritative.
+//!
+//! Attempts recorded before it have no such record. For those, lineage is
+//! derived from the two places it used to be written by two different
+//! producers:
 //!
 //! - `metadata.retry_of` on the lifecycle record, written by the lifecycle
 //!   retry reserver;
@@ -14,6 +19,7 @@
 //! source attempt", and was invisible to the retry-lineage walk. Every lineage
 //! decision now reads through [`attempt_lineage`], which understands both.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
@@ -21,25 +27,65 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::Result;
 
 /// How an attempt came to continue its source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CookLineageKind {
-    /// A lifecycle retry of the same plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CookLineageKind {
+    /// A lifecycle retry of the source attempt.
     Retry,
-    /// A remediation built from the source's promoted candidate: a gate fix,
-    /// or a review-form follow-up.
-    Remediation { review_form: bool },
+    /// A remediation built from the source's promoted candidate to make
+    /// failed gates pass.
+    GateFix,
+    /// A follow-up that only fills in the review form for the source's
+    /// candidate.
+    ReviewForm,
+    /// Another execution of the same attempt number, replacing the source.
+    Replacement,
 }
 
 /// One attempt's edge back to the attempt it continues.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CookAttemptLineage {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CookAttemptLineage {
     pub source_run_id: String,
     pub kind: CookLineageKind,
     /// The candidate patch a remediation was built from. A retry has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_patch_sha256: Option<String>,
 }
 
-/// The lineage edge of one attempt, from its lifecycle metadata and plan.
+impl CookAttemptLineage {
+    pub(crate) fn retry(source_run_id: &str) -> Self {
+        Self {
+            source_run_id: source_run_id.to_string(),
+            kind: CookLineageKind::Retry,
+            source_patch_sha256: None,
+        }
+    }
+
+    pub(crate) fn replacement(replaced_run_id: &str) -> Self {
+        Self {
+            source_run_id: replaced_run_id.to_string(),
+            kind: CookLineageKind::Replacement,
+            source_patch_sha256: None,
+        }
+    }
+}
+
+/// The lineage of a recipe attempt: its durable record when it has one,
+/// otherwise derived from its lifecycle `metadata` (when the caller has the
+/// record) and its plan. Every lineage decision reads through this.
+pub(crate) fn recipe_attempt_lineage(
+    attempt: &super::cook_recipe::AgentTaskCookRecipeAttempt,
+    metadata: Option<&Value>,
+) -> Option<CookAttemptLineage> {
+    attempt
+        .lineage
+        .clone()
+        .or_else(|| attempt_lineage(metadata.unwrap_or(&Value::Null), Some(&attempt.plan)))
+}
+
+/// Legacy derivation, for attempts recorded before lineage was persisted:
+/// the lineage edge of one attempt, from its lifecycle metadata and plan.
 ///
 /// `retry_of` wins when both are present: it is written by the lifecycle
 /// reserver with the record itself, so it is the stronger evidence.
@@ -75,8 +121,10 @@ pub(crate) fn plan_lineage(plan: &AgentTaskPlan) -> Option<CookAttemptLineage> {
         .filter(|source| !source.is_empty())?;
     Some(CookAttemptLineage {
         source_run_id: source.to_string(),
-        kind: CookLineageKind::Remediation {
-            review_form: cook_loop["review_form_required"] == true,
+        kind: if cook_loop["review_form_required"] == true {
+            CookLineageKind::ReviewForm
+        } else {
+            CookLineageKind::GateFix
         },
         source_patch_sha256: provenance["source_patch_artifact_sha256"]
             .as_str()
@@ -129,10 +177,7 @@ mod tests {
     fn a_gate_fix_without_retry_of_still_continues_its_source() {
         let lineage = attempt_lineage(&json!({}), Some(&gate_fix_plan("run-1", "abc"))).unwrap();
         assert_eq!(lineage.source_run_id, "run-1");
-        assert_eq!(
-            lineage.kind,
-            CookLineageKind::Remediation { review_form: false }
-        );
+        assert_eq!(lineage.kind, CookLineageKind::GateFix);
         assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
     }
 
@@ -156,7 +201,57 @@ mod tests {
         }));
         assert_eq!(
             plan_lineage(&plan).unwrap().kind,
-            CookLineageKind::Remediation { review_form: true }
+            CookLineageKind::ReviewForm
+        );
+    }
+
+    fn recipe_attempt(
+        plan: AgentTaskPlan,
+        lineage: Option<CookAttemptLineage>,
+    ) -> crate::agent_task_service::AgentTaskCookRecipeAttempt {
+        crate::agent_task_service::AgentTaskCookRecipeAttempt {
+            attempt: 2,
+            run_id: "run-2".to_string(),
+            plan,
+            lineage,
+        }
+    }
+
+    /// The durable record is authoritative over anything derivable.
+    #[test]
+    fn a_persisted_lineage_wins_over_derivation() {
+        let attempt = recipe_attempt(
+            gate_fix_plan("run-1", "abc"),
+            Some(CookAttemptLineage::retry("run-0")),
+        );
+        let lineage =
+            recipe_attempt_lineage(&attempt, Some(&json!({ "retry_of": "run-9" }))).unwrap();
+        assert_eq!(lineage, CookAttemptLineage::retry("run-0"));
+    }
+
+    /// Attempts recorded before #15567 still resolve, from the legacy forms.
+    #[test]
+    fn a_legacy_attempt_falls_back_to_derivation() {
+        let attempt = recipe_attempt(gate_fix_plan("run-1", "abc"), None);
+        assert_eq!(
+            recipe_attempt_lineage(&attempt, None).unwrap().kind,
+            CookLineageKind::GateFix
+        );
+        assert_eq!(
+            recipe_attempt_lineage(&attempt, Some(&json!({ "retry_of": "run-0" })))
+                .unwrap()
+                .source_run_id,
+            "run-0"
+        );
+    }
+
+    #[test]
+    fn the_record_round_trips_and_omits_an_absent_patch() {
+        let value = serde_json::to_value(CookAttemptLineage::retry("run-1")).unwrap();
+        assert_eq!(value, json!({ "source_run_id": "run-1", "kind": "retry" }));
+        assert_eq!(
+            serde_json::from_value::<CookAttemptLineage>(value).unwrap(),
+            CookAttemptLineage::retry("run-1")
         );
     }
 

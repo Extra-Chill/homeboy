@@ -12,7 +12,9 @@ on:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Description/title edits retain the running verification. Source updates and
+  # base retargets supersede it; `edited` remains enabled for stacked PRs.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 permissions:
   actions: read
@@ -66,7 +68,7 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@fd3236bf67b313618449c26e134c6069611ca71d
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8e5d4f96b732fe2028076cc2541ab39f17ad9fb0
     with:
       commands: review test
       args: --skip-lint

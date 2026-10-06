@@ -40,14 +40,7 @@ pub fn lifecycle_action_eligibility(
     } else {
         unavailable("run does not retain a potentially promotable candidate")
     };
-    let reconcile = if (record.state == AgentTaskRunState::Running
-        && !matches!(record.local_owner_liveness(), LocalOwnerLiveness::Live))
-        || dead_candidate_adoption_owner(record)
-    {
-        available("running record has no authoritative live local owner")
-    } else {
-        unavailable("reconciliation is offered only for running records without a live local owner")
-    };
+    let reconcile = reconcile_availability(record);
 
     ControlPlaneActionEligibilityReport {
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
@@ -118,6 +111,34 @@ pub fn lifecycle_action_eligibility(
                 "agent_task_run",
             ),
         ],
+    }
+}
+
+/// Reconcile is offered exactly when the fleet reconciler would select the run.
+///
+/// Both read the one liveness rule, `liveness_for_record` (the classifier
+/// behind `agent-task active` and the daemon reconcile tick). This report used
+/// to apply its own narrower test (`Running` without a live local owner), so it
+/// advertised Reconcile for a runner-backed run with a fresh heartbeat that the
+/// reconciler would leave alone, and withheld it for an ownerless queued run
+/// that the reconciler cancels.
+fn reconcile_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
+    if dead_candidate_adoption_owner(record) {
+        return available("candidate adoption owner is gone");
+    }
+    if record.state.is_terminal() {
+        return unavailable("terminal runs have no ownership to reconcile");
+    }
+    let liveness = crate::agent_task_service::liveness_for_record(record, chrono::Utc::now());
+    if liveness.is_reconcilable() {
+        available(format!(
+            "run liveness is {}; no authoritative owner holds it",
+            liveness.as_str()
+        ))
+    } else {
+        unavailable(
+            "run has a live owner, runner, or admission; reconciliation would cancel live work",
+        )
     }
 }
 
@@ -432,6 +453,63 @@ mod tests {
                     ControlPlaneActionAvailability::Indeterminate
                 );
             }
+        }
+    }
+
+    #[test]
+    fn reconcile_availability_is_the_fleet_reconcilers_liveness_rule() {
+        let now = chrono::Utc::now();
+        let fresh = now.to_rfc3339();
+        let old = (now - chrono::Duration::hours(6)).to_rfc3339();
+
+        // A runner-backed run with a fresh heartbeat: the reconciler leaves it
+        // alone, so Reconcile must not be advertised (it used to be).
+        let mut runner_fresh = record(AgentTaskRunState::Running, false);
+        runner_fresh.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+        runner_fresh.updated_at = Some(fresh);
+
+        // A queued run with no owner and an old timestamp: the reconciler
+        // cancels it, so Reconcile must be advertised (it used to be withheld).
+        let mut queued_orphan = record(AgentTaskRunState::Queued, false);
+        queued_orphan.updated_at = Some(old.clone());
+
+        // A running run flagged stale with no owner signal.
+        let mut running_stale = record(AgentTaskRunState::Running, true);
+        running_stale.updated_at = Some(old);
+
+        for (label, fixture, expected) in [
+            (
+                "runner_fresh",
+                &runner_fresh,
+                ControlPlaneActionAvailability::Unavailable,
+            ),
+            (
+                "queued_orphan",
+                &queued_orphan,
+                ControlPlaneActionAvailability::Available,
+            ),
+            (
+                "running_stale",
+                &running_stale,
+                ControlPlaneActionAvailability::Available,
+            ),
+        ] {
+            let liveness = crate::agent_task_service::liveness_for_record(fixture, now);
+            let advertised = decision(
+                &lifecycle_action_eligibility(fixture, None),
+                ControlPlaneAction::Reconcile,
+            );
+            assert_eq!(
+                advertised,
+                expected,
+                "{label}: liveness {}",
+                liveness.as_str()
+            );
+            assert_eq!(
+                advertised == ControlPlaneActionAvailability::Available,
+                liveness.is_reconcilable(),
+                "{label}: eligibility and the reconciler must agree"
+            );
         }
     }
 

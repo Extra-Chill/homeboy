@@ -77,6 +77,19 @@ pub fn record_interrupted_local_owner_in_store(
             return Ok((record, None));
         }
         let decision = annotate_local_provider_ownership(&mut record);
+        // The observer is not the owner. When a provider process it supervised
+        // is still verifiably alive (exact PID plus start identity), the run
+        // keeps executing; only the refreshed owner annotation is persisted.
+        // Terminalizing here cancelled live providers whenever a client timeout
+        // or detach ended the observing Cook job (#15210). An owner that is
+        // merely unverifiable is still interrupted: nothing else would ever
+        // terminalize it once its observer is gone.
+        if matches!(decision, LocalProviderOwnerDecision::StayRunning)
+            && record.local_owner_liveness() == LocalOwnerLiveness::Live
+        {
+            lifecycle_store.write_record(&record)?;
+            return Ok((record, None));
+        }
         record_interrupted_local_owner_locked(lifecycle_store, record, decision)
     })?;
     if let Some(aggregate) = aggregate {

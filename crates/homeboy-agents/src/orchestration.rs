@@ -5186,16 +5186,16 @@ pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<
 }
 
 /// Read a logical Cook or exact run through the shared subject resolver.
+///
+/// This is the same read the daemon's `GET /v1/control-plane/runs/:id` serves
+/// ([`canonical_run`]), so `agent-task status` and the HTTP API cannot resolve
+/// one id to two different resources. It used to skip the loop-projection and
+/// generic observation-run branches, so ids the daemon answered were "not
+/// found" from the CLI (#13697: CLI JSON and daemon routes are projections of
+/// one contract).
 pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
     let requested_id = parse_run_id(run_id)?;
-    if let Some(batch) = batch_resource_from_current_environment(&requested_id)
-        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?
-    {
-        return Ok(batch);
-    }
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
-    OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .run(&requested_id)
+    canonical_run(&requested_id)
         .map_err(|error| run_boundary_error_to_homeboy(error, "run_id", Some(run_id)))
 }
 
@@ -6530,14 +6530,9 @@ fn bind_extension_owners(
 }
 
 fn generic_observation_state(status: &str) -> ControlPlaneRunState {
-    match status {
-        "running" => ControlPlaneRunState::Running,
-        "pass" => ControlPlaneRunState::Succeeded,
-        "fail" | "error" => ControlPlaneRunState::Failed,
-        "cancelled" => ControlPlaneRunState::Cancelled,
-        "skipped" => ControlPlaneRunState::Skipped,
-        _ => ControlPlaneRunState::Unknown,
-    }
+    homeboy_core::observation::RunStatus::from_label(status)
+        .map(homeboy_core::observation::RunStatus::control_plane_state)
+        .unwrap_or(ControlPlaneRunState::Unknown)
 }
 
 fn generic_task_state(value: &str) -> ControlPlaneState {
@@ -6721,6 +6716,47 @@ fn batch_resource_from_current_environment(
     Ok(Some(resource))
 }
 
+/// The one canonical run read: fanout batch, loop projection, generic
+/// observation run, or agent-task lifecycle record. Every control-plane read
+/// of a single run, from the CLI or the daemon, resolves through here.
+fn canonical_run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+    if let Some(batch) = batch_resource_from_current_environment(requested_id)? {
+        return Ok(batch);
+    }
+    let store = AgentTaskLifecycleStore::from_environment()
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let observation = store
+        .open_observation_readonly()
+        .map_err(map_lifecycle_error)?;
+    let resolved_id = observation
+        .control_plane_resource_projection(
+            crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+            requested_id.as_str(),
+        )
+        .map_err(map_lifecycle_error)?
+        .map(|projection| projection.resource_id)
+        .unwrap_or_else(|| requested_id.to_string());
+    if let Some(record) = observation
+        .get_run(&resolved_id)
+        .map_err(map_lifecycle_error)?
+    {
+        if record.kind != "agent-task" {
+            if record.kind != "agent-task-loop"
+                && observation
+                    .get_run_mission(&record.id)
+                    .map_err(map_lifecycle_error)?
+                    .is_none()
+            {
+                return Err(ControlPlaneError::not_found(format!(
+                    "control-plane run not found: {requested_id}"
+                )));
+            }
+            return generic_observation_run(&observation, &record);
+        }
+    }
+    OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
+}
+
 struct RegisteredProvider;
 
 impl ControlPlaneProvider for RegisteredProvider {
@@ -6759,41 +6795,7 @@ impl ControlPlaneProvider for RegisteredProvider {
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
-        if let Some(batch) = batch_resource_from_current_environment(requested_id)? {
-            return Ok(batch);
-        }
-        let store = AgentTaskLifecycleStore::from_environment()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-        let observation = store
-            .open_observation_readonly()
-            .map_err(map_lifecycle_error)?;
-        let resolved_id = observation
-            .control_plane_resource_projection(
-                crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
-                requested_id.as_str(),
-            )
-            .map_err(map_lifecycle_error)?
-            .map(|projection| projection.resource_id)
-            .unwrap_or_else(|| requested_id.to_string());
-        if let Some(record) = observation
-            .get_run(&resolved_id)
-            .map_err(map_lifecycle_error)?
-        {
-            if record.kind != "agent-task" {
-                if record.kind != "agent-task-loop"
-                    && observation
-                        .get_run_mission(&record.id)
-                        .map_err(map_lifecycle_error)?
-                        .is_none()
-                {
-                    return Err(ControlPlaneError::not_found(format!(
-                        "control-plane run not found: {requested_id}"
-                    )));
-                }
-                return generic_observation_run(&observation, &record);
-            }
-        }
-        OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
+        canonical_run(requested_id)
     }
 
     fn run_with_context(
@@ -11512,6 +11514,24 @@ mod tests {
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
     }
 
+    /// A handed-off or stale observation run is settled; the control-plane run
+    /// resource used to project both as `Unknown`, an open state, so they never
+    /// left the open set.
+    #[test]
+    fn settled_observation_statuses_are_terminal_control_plane_states() {
+        for status in ["handed_off", "stale", "pass", "fail", "error", "skipped"] {
+            assert!(
+                super::generic_observation_state(status).is_terminal(),
+                "{status} is terminal for the observation run"
+            );
+        }
+        assert!(!super::generic_observation_state("running").is_terminal());
+        assert_eq!(
+            super::generic_observation_state("not-a-status"),
+            homeboy_control_plane_contract::ControlPlaneRunState::Unknown
+        );
+    }
+
     #[test]
     fn unknown_run_is_typed_not_found() {
         let error = service()
@@ -11519,6 +11539,36 @@ mod tests {
             .expect_err("missing");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
+    }
+
+    /// `agent-task status` and `GET /v1/control-plane/runs/:id` answer one id
+    /// with one resource. The CLI path used to skip the generic observation
+    /// branch, so a mission-bound non-agent-task run was "not found" from the
+    /// CLI while the daemon served it.
+    #[test]
+    fn cli_and_daemon_run_reads_resolve_a_mission_bound_observation_run_identically() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let run = store
+                .open_observation_initialized()
+                .expect("observation store")
+                .start_run_in_mission(
+                    homeboy_core::observation::NewRunRecordBuilder::new("bench").build(),
+                    "mission-cli-daemon-parity",
+                )
+                .expect("mission-bound bench run");
+
+            let cli = super::run_from_current_environment(&run.id)
+                .expect("the CLI resolves what the daemon serves");
+            let daemon = RegisteredProvider
+                .run(&RunId::new(&run.id).expect("run id"))
+                .expect("daemon read");
+
+            assert_eq!(
+                serde_json::to_value(&cli).expect("cli json"),
+                serde_json::to_value(&daemon).expect("daemon json")
+            );
+        });
     }
 
     #[test]

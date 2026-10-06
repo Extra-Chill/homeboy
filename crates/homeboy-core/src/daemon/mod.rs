@@ -46,6 +46,7 @@ pub mod controller_job_driver;
 mod controller_terminal_regression;
 mod daemon_lease;
 mod generation_store;
+pub mod lifecycle;
 mod lifetime;
 pub mod orchestration;
 mod patch_capture;
@@ -1526,7 +1527,18 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
         validation.stale_reason_code,
         Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::PidDead)
     ) && has_conflicting_process_candidates(&process_candidates);
-    let stale_reason = if candidate_conflict {
+    let selected_owner_unverified = !validation.running && daemon_owner_lock_is_held_at(&path)?;
+    let stale_reason = if selected_owner_unverified {
+        let message = format!(
+            "selected daemon generation owner lock is held without a valid live lease at {}; replacement is blocked",
+            path.display()
+        );
+        freshness.restartable = false;
+        freshness.ownership_evidence = Some(message.clone());
+        freshness.adoption_command = None;
+        freshness.repair_plan.clear();
+        Some(message)
+    } else if candidate_conflict {
         let evidence = process_candidates
             .iter()
             .filter(|candidate| {
@@ -8104,6 +8116,27 @@ fn reclaim_unowned_daemon_operation_lock(path: &Path) -> Result<DaemonOperationL
 
 pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
     let state = state_path()?;
+    try_acquire_daemon_owner_lock_at(&state)
+}
+
+/// Inspect only the selected generation's existing lock. Status must not create
+/// a store or a lock file while diagnosing a missing lease.
+fn daemon_owner_lock_is_held_at(state: &Path) -> Result<bool> {
+    let path = state.with_file_name("owner.lock");
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("inspect daemon owner lock {}", path.display())),
+            ));
+        }
+    };
+    Ok(!try_lock_file_exclusive(&file, "daemon owner")?)
+}
+
+pub(super) fn try_acquire_daemon_owner_lock_at(state: &Path) -> Result<Option<DaemonOwnerLock>> {
     let parent = state.parent().ok_or_else(|| {
         Error::internal_io(
             "daemon state path has no parent directory",

@@ -4,8 +4,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::{Barrier, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -22,24 +20,41 @@ use homeboy_core::command_invocation::CommandInvocation;
 
 use homeboy_core::{paths, Error, Result};
 
+/// Cook driver locks this process holds, keyed by lock path: the owning
+/// thread, a reentrancy count, and the open file that keeps the OS lock alive.
+type HeldCookDrivers = std::collections::HashMap<PathBuf, (std::thread::ThreadId, usize, File)>;
+
+fn held_cook_drivers() -> &'static std::sync::Mutex<HeldCookDrivers> {
+    static HELD: std::sync::OnceLock<std::sync::Mutex<HeldCookDrivers>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(Default::default)
+}
+
+/// Ownership of driving one Cook; released when the last guard drops.
+#[derive(Debug)]
+pub(crate) struct CookDriverGuard {
+    key: PathBuf,
+}
+
+impl Drop for CookDriverGuard {
+    fn drop(&mut self) {
+        let mut held = held_cook_drivers().lock().expect("cook driver registry");
+        if let Some(entry) = held.get_mut(&self.key) {
+            entry.1 -= 1;
+            if entry.1 == 0 {
+                // Dropping the file releases the OS lock.
+                held.remove(&self.key);
+            }
+        }
+    }
+}
+
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
 // Base capture reaches the network while holding this lock. It must always
 // surface a wedged peer rather than inherit an operator-configured unbounded
 // config-lock wait.
 const WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
-    LazyLock::new(|| Mutex::new((None, 0)));
-
-#[cfg(test)]
-pub(crate) fn set_initial_recipe_creation_barrier_for_test(barrier: Option<Arc<Barrier>>) {
-    let mut hook = INITIAL_RECIPE_CREATION_BARRIER
-        .lock()
-        .expect("initial recipe creation barrier");
-    *hook = (barrier, 0);
-}
-
 /// Durable Cook storage bound to explicit filesystem roots.
 #[derive(Clone, Debug)]
 pub struct CookRecipeStore {
@@ -96,6 +111,118 @@ impl CookRecipeStore {
         self.recipe_root()
             .join(paths::sanitize_path_segment(cook_id))
             .join("recipe.json")
+    }
+
+    fn driver_lock_path(&self, cook_id: &str) -> PathBuf {
+        self.recipe_path(cook_id).with_file_name("driver.lock")
+    }
+
+    /// Take exclusive ownership of driving one Cook (#15566).
+    ///
+    /// Exactly one controller may advance a Cook at a time: a foreground
+    /// supervisor, a detached child, a continuation consumer or a
+    /// `cook-continue`. Before this, ownership was inferred per attempt from
+    /// metadata — a timed `local_cook_supervisor` lease that a detached
+    /// handoff never writes — so the continuation scheduler judged a
+    /// supervised Cook unowned and drove it beside its live supervisor,
+    /// double-dispatching the same gate fix (#15562).
+    ///
+    /// The lock is an OS advisory lock on one file per Cook, so it needs no
+    /// renewal, cannot outlive its holder, and cannot be fooled by PID reuse.
+    /// Ownership is reentrant on the owning thread, so nested calls made by
+    /// the driver itself keep driving. Another thread is another controller
+    /// even in the same process — daemon jobs run as threads — and is refused
+    /// exactly like another process.
+    ///
+    /// `Ok(None)` means another live controller holds it.
+    pub(crate) fn try_acquire_cook_driver(&self, cook_id: &str) -> Result<Option<CookDriverGuard>> {
+        use fs4::fs_std::FileExt;
+
+        let key = self.driver_lock_path(cook_id);
+        {
+            let mut held = held_cook_drivers().lock().expect("cook driver registry");
+            if let Some(entry) = held.get_mut(&key) {
+                if entry.0 != std::thread::current().id() {
+                    return Ok(None);
+                }
+                entry.1 += 1;
+                return Ok(Some(CookDriverGuard { key }));
+            }
+        }
+        let parent = key.parent().expect("driver lock has parent");
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+        })?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&key)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(key.display().to_string()))
+            })?;
+        match file.try_lock_exclusive() {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(key.display().to_string()),
+                ))
+            }
+        }
+        // Diagnostic only; the lock, not this content, is the authority.
+        let _ = file.set_len(0);
+        let _ = write!(file, "{}", std::process::id());
+        held_cook_drivers()
+            .lock()
+            .expect("cook driver registry")
+            .insert(key.clone(), (std::thread::current().id(), 1, file));
+        Ok(Some(CookDriverGuard { key }))
+    }
+
+    /// The PID of another controller currently driving `cook_id` (another
+    /// process, or another thread of this one), or `None` when nobody else
+    /// drives it. Never takes ownership.
+    pub(crate) fn foreign_cook_driver(&self, cook_id: &str) -> Result<Option<String>> {
+        use fs4::fs_std::FileExt;
+
+        let key = self.driver_lock_path(cook_id);
+        if let Some((owner, _, _)) = held_cook_drivers()
+            .lock()
+            .expect("cook driver registry")
+            .get(&key)
+        {
+            return Ok(
+                (*owner != std::thread::current().id()).then(|| std::process::id().to_string())
+            );
+        }
+        if !key.exists() {
+            return Ok(None);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&key)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(key.display().to_string()))
+            })?;
+        match file.try_lock_exclusive() {
+            Ok(true) => {
+                let _ = file.unlock();
+                Ok(None)
+            }
+            Ok(false) => Ok(Some(fs::read_to_string(&key).unwrap_or_default())),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(Some(fs::read_to_string(&key).unwrap_or_default()))
+            }
+            Err(error) => Err(Error::internal_io(
+                error.to_string(),
+                Some(key.display().to_string()),
+            )),
+        }
     }
 
     /// Serialize the bounded base capture transaction for one durable recipe.
@@ -204,6 +331,27 @@ impl CookRecipeStore {
         plan: &AgentTaskPlan,
     ) -> Result<AgentTaskCookRecipe> {
         record_recipe_attempt_in_store(self, cook_id, attempt, run_id, plan)
+    }
+
+    /// Append a lifecycle retry of `source_run_id`, recording that lineage.
+    pub(crate) fn record_recipe_retry_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        source_run_id: &str,
+    ) -> Result<AgentTaskCookRecipe> {
+        record_recipe_attempt_with_lineage_in_store(
+            self,
+            cook_id,
+            attempt,
+            run_id,
+            plan,
+            Some(super::cook_lineage::CookAttemptLineage::retry(
+                source_run_id,
+            )),
+        )
     }
 
     pub fn record_recipe_attempt_replacement(
@@ -426,6 +574,12 @@ pub struct AgentTaskCookRecipeAttempt {
     pub attempt: u32,
     pub run_id: String,
     pub plan: AgentTaskPlan,
+    /// The attempt this one continues, recorded in the same write that
+    /// appends it (#15567). Absent on an initial attempt and on attempts
+    /// recorded before lineage was persisted; read it through
+    /// `cook_lineage::recipe_attempt_lineage`, which derives those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<super::cook_lineage::CookAttemptLineage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -534,22 +688,6 @@ pub fn persist_initial_recipe_in_store(
     recover_pending_supersession(store, &options.identity.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
-    #[cfg(test)]
-    let barrier = {
-        let mut hook = INITIAL_RECIPE_CREATION_BARRIER
-            .lock()
-            .expect("initial recipe creation barrier");
-        if hook.1 < 2 {
-            hook.1 += 1;
-            hook.0.clone()
-        } else {
-            None
-        }
-    };
-    #[cfg(test)]
-    if let Some(barrier) = barrier {
-        barrier.wait();
-    }
     let recipe_existed_before_admission = store.recipe_exists(&recipe.cook_id);
     if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
         return Ok(InitialRecipeMaterialization {
@@ -755,6 +893,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             attempt: 1,
             run_id: options.identity.initial_run_id.clone(),
             plan: options.identity.initial_plan.clone(),
+            lineage: None,
         }],
         promotion_transport: serde_json::json!({
             "provider_command": options.provider_transport.provider_command,
@@ -1237,6 +1376,7 @@ fn initial_attempt_inputs_match(
     attempt_inputs_match(&left, &right)
 }
 
+#[cfg(test)]
 pub(crate) fn record_recipe_attempt(
     cook_id: &str,
     attempt: u32,
@@ -1244,6 +1384,16 @@ pub(crate) fn record_recipe_attempt(
     plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
+}
+
+pub(crate) fn record_recipe_retry_attempt(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    source_run_id: &str,
+) -> Result<AgentTaskCookRecipe> {
+    default_store()?.record_recipe_retry_attempt(cook_id, attempt, run_id, plan, source_run_id)
 }
 
 pub(crate) fn record_recipe_attempt_replacement_with_plan(
@@ -1260,6 +1410,9 @@ pub(crate) fn record_recipe_attempt_replacement_with_plan(
     )
 }
 
+/// Append an attempt. A remediation's lineage is read from the provenance its
+/// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
+/// lifecycle retry, whose plan says nothing about where it came from.
 pub fn record_recipe_attempt_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
@@ -1267,20 +1420,48 @@ pub fn record_recipe_attempt_in_store(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
+    record_recipe_attempt_with_lineage_in_store(
+        store,
+        cook_id,
+        attempt,
+        run_id,
+        plan,
+        super::cook_lineage::plan_lineage(plan),
+    )
+}
+
+/// The one writer of appended-attempt lineage (#15567): the edge lands in the
+/// same recipe write as the attempt, and `validate_recipe` checks it.
+fn record_recipe_attempt_with_lineage_in_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    lineage: Option<super::cook_lineage::CookAttemptLineage>,
+) -> Result<AgentTaskCookRecipe> {
     let mut recipe = store.load_recipe(cook_id)?;
     let candidate = AgentTaskCookRecipeAttempt {
         attempt,
         run_id: run_id.to_string(),
         plan: plan.clone(),
+        lineage,
     };
     if let Some(existing) = recipe
         .attempts
         .iter()
         .find(|existing| existing.attempt == attempt || existing.run_id == run_id)
     {
+        // An attempt bound by an older Homeboy has no lineage record; it is
+        // still the same attempt when everything else matches. Replaying it
+        // must converge, not fail as a conflicting binding.
+        let mut comparable = candidate.clone();
+        if existing.lineage.is_none() {
+            comparable.lineage = None;
+        }
         let existing_value = serde_json::to_value(existing)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let candidate_value = serde_json::to_value(&candidate)
+        let candidate_value = serde_json::to_value(&comparable)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         if existing_value == candidate_value {
             return Ok(recipe);
@@ -1399,6 +1580,9 @@ fn record_recipe_attempt_replacement_in_store_with_plan(
         attempt: replaced.attempt,
         run_id: replacement_run_id.to_string(),
         plan: replacement_plan.clone(),
+        lineage: Some(super::cook_lineage::CookAttemptLineage::replacement(
+            replaced_run_id,
+        )),
     });
     recipe.sensitive_mappings = canonical_sensitive_mappings(&recipe.attempts)?;
     validate_recipe(&recipe)?;
@@ -2063,6 +2247,16 @@ fn claim_lifecycle_record(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
+    // A Cook another live controller is driving is not claimable: its driver
+    // owns every transition, including the one this continuation would make.
+    // The continuation stays pending and becomes claimable once that driver
+    // exits (#15566).
+    if CookRecipeStore::from_data_root(data_root.to_path_buf())
+        .foreign_cook_driver(cook_id)?
+        .is_some()
+    {
+        return Ok(None);
+    }
     let claim_identity = format!("{}-{}", std::process::id(), Uuid::new_v4());
     let mut claimed = None;
     lifecycle_store.mutate_record(run_id, |record| {
@@ -2314,6 +2508,19 @@ pub fn preflight_continuation_claim_in_store(
 ) -> Result<CookContinuationState> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    if let Some(driver) = store.foreign_cook_driver(cook_id)? {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.claim",
+            format!(
+                "Cook `{cook_id}` is being driven by another live controller (pid {}); it cannot be continued concurrently",
+                if driver.trim().is_empty() { "unknown" } else { driver.trim() }
+            ),
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Watch it with `homeboy agent-task status {cook_id}`, or retry `homeboy agent-task cook-continue {cook_id} --preflight` after that controller exits."
+            )]),
+        ));
+    }
     let record = lifecycle_store.read_record_bounded(run_id)?;
     if !rearm && record.has_live_pending_local_cook_supervisor(chrono::Utc::now()) {
         return Err(Error::validation_invalid_argument(
@@ -3200,7 +3407,7 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
     {
         return Err(Error::validation_invalid_argument("cook_recipe", "cook recipe requires cook_id, at least one exact attempt, and pinned runtime generation", None, None));
     }
-    for attempt in &recipe.attempts {
+    for (index, attempt) in recipe.attempts.iter().enumerate() {
         if attempt.run_id.is_empty() || attempt.plan.tasks.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
@@ -3208,6 +3415,27 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
                 Some(attempt.run_id.clone()),
                 None,
             ));
+        }
+        // A lineage edge points back into this recipe, at an attempt recorded
+        // before this one. Anything else is a dangling or cyclic lineage.
+        if let Some(lineage) = &attempt.lineage {
+            let source = recipe.attempts[..index]
+                .iter()
+                .find(|earlier| earlier.run_id == lineage.source_run_id);
+            let ordered = source.is_some_and(|source| match lineage.kind {
+                super::cook_lineage::CookLineageKind::Replacement => {
+                    source.attempt == attempt.attempt
+                }
+                _ => source.attempt < attempt.attempt,
+            });
+            if !ordered {
+                return Err(Error::validation_invalid_argument(
+                    "cook_recipe.attempts.lineage",
+                    "cook attempt lineage must name an earlier attempt of the same recipe",
+                    Some(attempt.run_id.clone()),
+                    None,
+                ));
+            }
         }
     }
     if recipe
@@ -3410,6 +3638,7 @@ mod tests {
             schema: COOK_RECIPE_SCHEMA.to_string(),
             cook_id: "cook".to_string(),
             attempts: vec![AgentTaskCookRecipeAttempt {
+                lineage: None,
                 attempt: 1,
                 run_id: "run".to_string(),
                 plan: plan.clone(),
@@ -3479,6 +3708,127 @@ mod tests {
             "gate_results": gate_results,
             "operator_notification": { "status": "completed", "message": "fixture" }
         })
+    }
+
+    fn lineage_store() -> (
+        homeboy_core::test_support::HermeticTestContext,
+        CookRecipeStore,
+        AgentTaskPlan,
+    ) {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let options = reconstruct_options(&recipe()).expect("recipe options");
+        store
+            .persist_initial_recipe(&options)
+            .expect("initial recipe");
+        (context, store, options.identity.initial_plan)
+    }
+
+    /// #15567: a lifecycle retry's plan says nothing about its source, so the
+    /// writer records it explicitly, in the same write as the attempt.
+    #[test]
+    fn a_retry_attempt_is_written_with_its_lineage() {
+        let (_context, store, plan) = lineage_store();
+        let recipe = store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .expect("retry attempt");
+        assert_eq!(
+            recipe.attempts[1].lineage,
+            Some(super::super::cook_lineage::CookAttemptLineage::retry("run"))
+        );
+        // Durable, not just returned.
+        assert_eq!(
+            store.load_recipe("cook").unwrap().attempts[1].lineage,
+            recipe.attempts[1].lineage
+        );
+    }
+
+    #[test]
+    fn a_gate_fix_attempt_is_written_with_its_provenance_lineage() {
+        let (_context, store, mut plan) = lineage_store();
+        plan.tasks[0].inputs = serde_json::json!({ "cook_loop": {
+            "review_form_required": false,
+            "artifact_provenance": {
+                "source_run_id": "run",
+                "source_patch_artifact_sha256": "abc",
+            },
+        }});
+        let recipe = store
+            .record_recipe_attempt("cook", 2, "run-2", &plan)
+            .expect("gate-fix attempt");
+        let lineage = recipe.attempts[1]
+            .lineage
+            .clone()
+            .expect("lineage recorded");
+        assert_eq!(lineage.source_run_id, "run");
+        assert_eq!(
+            lineage.kind,
+            super::super::cook_lineage::CookLineageKind::GateFix
+        );
+        assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn a_replacement_is_written_with_its_lineage() {
+        let (_context, store, plan) = lineage_store();
+        store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .unwrap();
+        let recipe = store
+            .record_recipe_attempt_replacement("cook", "run-2", "run-2b")
+            .expect("replacement");
+        assert_eq!(
+            recipe.attempts[2].lineage,
+            Some(super::super::cook_lineage::CookAttemptLineage::replacement(
+                "run-2"
+            ))
+        );
+    }
+
+    /// An attempt bound by an older Homeboy has no lineage. Replaying the same
+    /// binding with lineage must converge rather than conflict.
+    #[test]
+    fn replaying_a_legacy_binding_with_lineage_converges() {
+        let (_context, store, plan) = lineage_store();
+        store
+            .record_recipe_attempt("cook", 2, "run-2", &plan)
+            .unwrap();
+        assert_eq!(store.load_recipe("cook").unwrap().attempts[1].lineage, None);
+        store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .expect("legacy binding replays");
+    }
+
+    #[test]
+    fn lineage_must_name_an_earlier_attempt_of_the_same_recipe() {
+        let mut dangling = recipe();
+        let mut second = dangling.attempts[0].clone();
+        second.attempt = 2;
+        second.run_id = "run-2".to_string();
+        second.lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry(
+            "elsewhere",
+        ));
+        dangling.attempts.push(second.clone());
+        assert!(validate_recipe(&dangling)
+            .unwrap_err()
+            .to_string()
+            .contains("must name an earlier attempt"));
+
+        let mut forward = recipe();
+        forward.attempts[0].lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry(
+            "run-2",
+        ));
+        second.lineage = None;
+        forward.attempts.push(second.clone());
+        assert!(
+            validate_recipe(&forward).is_err(),
+            "edge to a later attempt"
+        );
+
+        let mut valid = recipe();
+        second.lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry("run"));
+        valid.attempts.push(second);
+        validate_recipe(&valid).expect("edge to an earlier attempt is valid");
     }
 
     #[test]
@@ -5587,6 +5937,7 @@ mod tests {
         let mut replacement = previous.clone();
         replacement.finalization["title"] = serde_json::json!("corrected");
         replacement.attempts.push(AgentTaskCookRecipeAttempt {
+            lineage: None,
             attempt: 2,
             run_id: "run-2".to_string(),
             plan: previous.attempts[0].plan.clone(),
@@ -5716,5 +6067,189 @@ mod tests {
             .unwrap()
             .contains("malformed durable cook recipe"));
         assert!(claim_next_from(&store).unwrap().is_none());
+    }
+}
+
+/// One controller drives a Cook at a time (#15566).
+#[cfg(test)]
+mod cook_driver_tests {
+    use super::CookRecipeStore;
+    use fs4::fs_std::FileExt;
+    use std::fs::OpenOptions;
+
+    /// A lock held through a separate open file stands in for another
+    /// process: advisory locks conflict per open file description.
+    fn hold_as_other_process(store: &CookRecipeStore, cook_id: &str) -> std::fs::File {
+        let path = store.driver_lock_path(cook_id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "4242").unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(file.try_lock_exclusive().unwrap());
+        file
+    }
+
+    #[test]
+    fn a_cook_driven_elsewhere_cannot_be_driven_here() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let other = hold_as_other_process(&store, "cook");
+
+        assert!(store.try_acquire_cook_driver("cook").unwrap().is_none());
+        assert_eq!(
+            store.foreign_cook_driver("cook").unwrap().as_deref(),
+            Some("4242")
+        );
+
+        drop(other);
+        assert!(store.foreign_cook_driver("cook").unwrap().is_none());
+        assert!(store.try_acquire_cook_driver("cook").unwrap().is_some());
+    }
+
+    #[test]
+    fn driving_is_reentrant_within_a_process_and_released_on_last_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+
+        let outer = store.try_acquire_cook_driver("cook").unwrap().unwrap();
+        let inner = store.try_acquire_cook_driver("cook").unwrap().unwrap();
+        // This process is the driver, so it is not foreign to itself.
+        assert!(store.foreign_cook_driver("cook").unwrap().is_none());
+
+        let path = store.driver_lock_path("cook");
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(
+            !probe.try_lock_exclusive().unwrap(),
+            "still held after one acquisition"
+        );
+
+        drop(inner);
+        assert!(
+            !probe.try_lock_exclusive().unwrap(),
+            "held until the last guard drops"
+        );
+        drop(outer);
+        assert!(
+            probe.try_lock_exclusive().unwrap(),
+            "released after the last guard"
+        );
+    }
+
+    /// Daemon jobs run as threads, so another thread is another controller.
+    #[test]
+    fn another_thread_in_this_process_is_another_controller() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let _driver = store.try_acquire_cook_driver("cook").unwrap().unwrap();
+
+        let other = store.clone();
+        let (acquired, foreign) = std::thread::spawn(move || {
+            (
+                other.try_acquire_cook_driver("cook").unwrap().is_some(),
+                other.foreign_cook_driver("cook").unwrap(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(!acquired);
+        assert_eq!(foreign, Some(std::process::id().to_string()));
+    }
+
+    #[test]
+    fn distinct_cooks_are_driven_independently() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let _other = hold_as_other_process(&store, "cook-a");
+        assert!(store.try_acquire_cook_driver("cook-b").unwrap().is_some());
+    }
+
+    #[test]
+    fn an_undriven_cook_has_no_foreign_driver() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        assert!(store
+            .foreign_cook_driver("never-started")
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_driver_probe() {
+        let Some(root) = std::env::var_os("HOMEBOY_TEST_DRIVER_ROOT") else {
+            return;
+        };
+        let store = CookRecipeStore::from_data_root(root.into());
+        let _driver = store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .unwrap();
+        std::fs::write(store.data_root().join("driver-ready"), b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_death_releases_ownership_without_expiry_or_record_repair() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let mut child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent_task_service::cook_recipe::cook_driver_tests::process_driver_probe",
+                    "--nocapture",
+                ])
+                .env("HOMEBOY_TEST_DRIVER_ROOT", temp.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !temp.path().join("driver-ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "driver child exited before readiness"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver child readiness deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .is_none());
+        assert!(store.foreign_cook_driver("process-cook").unwrap().is_some());
+        let pid_record = std::fs::read(store.driver_lock_path("process-cook")).unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert_eq!(
+            std::fs::read(store.driver_lock_path("process-cook")).unwrap(),
+            pid_record
+        );
+        assert!(store.foreign_cook_driver("process-cook").unwrap().is_none());
+        assert!(store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .is_some());
     }
 }
