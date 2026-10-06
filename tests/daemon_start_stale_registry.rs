@@ -133,8 +133,6 @@ fn recovery_preview_and_execution_stay_on_registered_generation_with_legacy_stor
     homeboy_core::test_support::with_isolated_home(|home| {
         let router_dir = home.path().join(".config/homeboy/daemon");
         let legacy_dir = router_dir.clone();
-        let generation_dir = router_dir.join("generations/test-generation");
-        std::fs::create_dir_all(&generation_dir).expect("create generation state directory");
         let cli = |args: &[&str], state_dir: &std::path::Path, bypass: bool| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_homeboy"));
             command
@@ -198,10 +196,8 @@ fn recovery_preview_and_execution_stay_on_registered_generation_with_legacy_stor
         // Keep the root-store daemon alive but remove its lease, matching the
         // unleased legacy candidate that used to be invisible to generation status.
         std::fs::remove_file(&legacy_state_path).expect("remove legacy lease, preserve process");
-        let mut generation_state: Value = serde_json::from_slice(
-            &std::fs::read(&generation_state_path).expect("generation lease"),
-        )
-        .unwrap();
+        let generation_original = std::fs::read(&generation_state_path).expect("generation lease");
+        let mut generation_state: Value = serde_json::from_slice(&generation_original).unwrap();
         generation_state["build_identity"]["version"] = serde_json::json!("0.0.0");
         generation_state["build_identity"]["display"] = serde_json::json!("homeboy 0.0.0+legacy");
         std::fs::write(
@@ -244,9 +240,18 @@ fn recovery_preview_and_execution_stay_on_registered_generation_with_legacy_stor
             .cancel(legacy_job_b.id, "integration test cleanup")
             .expect("terminalize second legacy test job");
         std::fs::write(&legacy_state_path, &legacy_state).expect("restore legacy lease");
+        if generation_state_path.exists() {
+            std::fs::write(&generation_state_path, &generation_original)
+                .expect("restore owned generation identity for teardown");
+        }
         for (lease, state_dir) in [
             (legacy_lease.as_str(), legacy_dir.as_path()),
-            (generation_lease.as_str(), generation_dir.as_path()),
+            (
+                generation_lease.as_str(),
+                generation_state_path
+                    .parent()
+                    .expect("generation state directory"),
+            ),
         ] {
             let _ = cli(&["daemon", "stop", "--lease-id", lease], state_dir, true);
         }
@@ -310,18 +315,8 @@ fn recovery_preview_and_execution_stay_on_registered_generation_with_legacy_stor
             generation_lease
         );
         assert!(
-            current_status["data"]["state_path"]
-                .as_str()
-                .unwrap()
-                .starts_with(
-                    generation_dir
-                        .to_str()
-                        .unwrap_or_else(|| router_dir.to_str().unwrap())
-                )
-                || current_status["data"]["state_path"]
-                    .as_str()
-                    .unwrap()
-                    .contains("/generations/")
+            std::path::Path::new(current_status["data"]["state_path"].as_str().unwrap())
+                .starts_with(router_dir.join("generations"))
         );
         assert_eq!(
             admission["data"]["lease_id"],
