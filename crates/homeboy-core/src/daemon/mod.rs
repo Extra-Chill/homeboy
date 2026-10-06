@@ -179,6 +179,7 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
 pub struct LocalControllerJobClient {
     endpoint: String,
+    job_router_dir: Option<PathBuf>,
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
@@ -359,6 +360,30 @@ impl LocalControllerJobClient {
                 None,
             )
         })?;
+        Self::connect_to_existing_endpoint(endpoint, None)
+    }
+
+    /// Connect to an existing controller job using the daemon-generation
+    /// registry rooted at `config_root`. This is the lifecycle-store transport:
+    /// an injected lifecycle root cannot route by consulting ambient HOME.
+    pub fn connect_existing_job_in_root(job_id: &str, config_root: &Path) -> Result<Self> {
+        let endpoint =
+            generation_store::endpoint_for_job_in_router_dir(job_id, &config_root.join("daemon"))?
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                "controller_job_id",
+                "controller job has no recorded daemon generation in the selected lifecycle root",
+                Some(job_id.to_string()),
+                None,
+            )
+                })?;
+        Self::connect_to_existing_endpoint(endpoint, Some(config_root.join("daemon")))
+    }
+
+    fn connect_to_existing_endpoint(
+        endpoint: generation_store::LocalDaemonEndpoint,
+        job_router_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -368,6 +393,7 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", endpoint.address),
+            job_router_dir,
             client,
             _admission_guard: None,
         })
@@ -384,13 +410,20 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
+            job_router_dir: None,
             client,
             _admission_guard: admission_guard,
         })
     }
 
     fn endpoint_for_job(&self, job_id: &str) -> Result<String> {
-        Ok(generation_store::endpoint_for_job(job_id)?
+        let endpoint = match self.job_router_dir.as_deref() {
+            Some(router_dir) => {
+                generation_store::endpoint_for_job_in_router_dir(job_id, router_dir)?
+            }
+            None => generation_store::endpoint_for_job(job_id)?,
+        };
+        Ok(endpoint
             .map(|endpoint| format!("http://{}", endpoint.address))
             .unwrap_or_else(|| self.endpoint.clone()))
     }

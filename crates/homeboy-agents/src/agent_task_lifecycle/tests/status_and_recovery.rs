@@ -1540,7 +1540,12 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                             assert_eq!(runner_id, "homeboy-lab");
                             assert_eq!(job_id, expected_job_id);
                             assert_eq!(durable_run_id, "accepted-then-cancelled");
-                            Ok((cancellation_store.get(job.id).expect("job"), Vec::new()))
+                            Ok((
+                                cancellation_store
+                                    .cancel(job.id, "operator cancellation")
+                                    .expect("cancel accepted runner job"),
+                                Vec::new(),
+                            ))
                         }
                     }),
                 );
