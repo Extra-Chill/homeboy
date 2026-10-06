@@ -789,6 +789,7 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
     );
 
     let mut status = context.command(TestBinary::HomeboyFixture);
+    // Action eligibility is part of the full report, not compact status (#15550).
     status.args(["agent-task", "status", cook_id, "--full"]);
     let status = bounded_output(status);
     let status_stdout = String::from_utf8_lossy(&status.stdout);

@@ -1401,7 +1401,12 @@ impl CliRuntime {
         }
         // Runner-owned fallback staging may outlive the controller process. A
         // detached bounded pass keeps command startup independent of remote I/O.
-        schedule_controller_fallback_reconciliation();
+        // The pass persists projection state (and its lock), so read-only
+        // commands must not start it: they may run while a runtime promotion
+        // holds the mutation lock and must leave config and runtime untouched.
+        if command_capability == CommandCapability::Mutation {
+            schedule_controller_fallback_reconciliation();
+        }
         // Deferred records outlive their worker. Startup restarts the singleton
         // so expired claims recover without another deferral request. The
         // deferred-workload family itself is exempt: the worker would restart
