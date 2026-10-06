@@ -232,10 +232,19 @@ fn with_runtime_pin_deadline<T>(
 ) -> Result<T> {
     RUNTIME_PIN_DEADLINE.with(|deadline| {
         let previous = deadline.replace(Some(context));
-        let result = operation();
-        deadline.replace(previous);
-        result
+        let _restore = RuntimePinDeadlineRestore(previous);
+        operation()
     })
+}
+
+struct RuntimePinDeadlineRestore(Option<RuntimePinDeadline>);
+
+impl Drop for RuntimePinDeadlineRestore {
+    fn drop(&mut self) {
+        RUNTIME_PIN_DEADLINE.with(|deadline| {
+            deadline.replace(self.0.take());
+        });
+    }
 }
 
 fn runtime_pin_checkpoint(stage: &str, path: &Path) -> Result<()> {
@@ -1086,6 +1095,15 @@ pub fn pin_current_queued_in_root(
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<Value> {
     let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission request ID is required",
+            None,
+            None,
+        ));
+    }
     enqueue_admission_request(&lock_path, request_id)?;
     let lock = match acquire_queued_admission_lock(&lock_path, request_id, &cancellation_requested)
     {
@@ -3411,9 +3429,9 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         let _ = fs::remove_file(&staging);
         return Err(error);
     }
+    let _staging_cleanup = StagedPinCleanup(&staging);
     let actual = executable_digest(&staging)?;
     if actual != expected_digest {
-        let _ = fs::remove_file(&staging);
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
             format!(
@@ -3427,13 +3445,11 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
     runtime_pin_checkpoint("publish_pin_link", destination)?;
     match fs::hard_link(&staging, destination) {
         Ok(()) => {
-            let _ = fs::remove_file(&staging);
             register_test_fixture_candidate(source, destination, expected_digest);
             memoize_published_pin(destination, expected_digest);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&staging);
             let actual = executable_digest(destination)?;
             if actual == expected_digest {
                 register_test_fixture_candidate(source, destination, expected_digest);
@@ -3451,13 +3467,18 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
                 ))
             }
         }
-        Err(error) => {
-            let _ = fs::remove_file(&staging);
-            Err(Error::internal_io(
-                error.to_string(),
-                Some("publish controller runtime pin".to_string()),
-            ))
-        }
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some("publish controller runtime pin".to_string()),
+        )),
+    }
+}
+
+struct StagedPinCleanup<'a>(&'a Path);
+
+impl Drop for StagedPinCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
     }
 }
 
@@ -3730,6 +3751,46 @@ mod tests {
         assert!(error
             .message
             .contains("retry with homeboy agent-task retry"));
+    }
+
+    #[test]
+    fn runtime_pin_deadline_is_restored_after_panic() {
+        let started = Instant::now();
+        let context = RuntimePinDeadline {
+            deadline: started + Duration::from_secs(30),
+            request_id: "cook-panic-deadline".to_string(),
+            timeout: Duration::from_secs(30),
+            started,
+        };
+        let panic = std::panic::catch_unwind(|| {
+            let _ = with_runtime_pin_deadline(context, || -> Result<()> {
+                panic!("simulated panic during runtime sealing");
+            });
+        });
+        assert!(panic.is_err());
+        assert!(RUNTIME_PIN_DEADLINE.with(|deadline| deadline.borrow().is_none()));
+    }
+
+    #[test]
+    fn staged_pin_cleanup_removes_file_on_following_error() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let staging = temporary.path().join("staged-homeboy");
+        fs::write(&staging, b"incomplete staged executable").expect("write staging file");
+        let result: Result<()> = (|| {
+            let _cleanup = StagedPinCleanup(&staging);
+            Err(Error::internal_unexpected("staged hash checkpoint failed"))
+        })();
+        assert!(result.is_err());
+        assert!(!staging.exists(), "failed staged validation leaves no file");
+    }
+
+    #[test]
+    fn unbounded_queued_admission_still_rejects_empty_request_ids() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let error = pin_current_queued_in_root(temporary.path(), "  ", || Ok(false))
+            .expect_err("empty request ID is rejected");
+        assert!(error.message.contains("request ID is required"));
+        assert!(!temporary.path().join(ADMISSION_LOCK_DIR).exists());
     }
 
     /// A long-lived process whose binary was replaced sees `<path> (deleted)`
