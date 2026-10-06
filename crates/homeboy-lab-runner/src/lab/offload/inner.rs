@@ -410,7 +410,6 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) path_remaps: Vec<LabPathRemap>,
     pub(crate) workspace_mapping_metadata: serde_json::Value,
     pub(crate) materialized_workspace: Option<MaterializedWorkspace>,
-    pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     pub(crate) remote_output_file: Option<String>,
     pub(crate) host_telemetry: Option<LabHostTelemetryCapture>,
     pub(crate) admission: Option<DaemonAdmissionReservation>,
@@ -951,20 +950,6 @@ pub(crate) fn exec_lab_context(
             exit_code,
             output_file_content: Some(exec_output.stdout),
         });
-    }
-    let dependency_cache_save_outputs =
-        save_dependency_caches(runner_id, &context.dependency_cache_saves)?;
-    if !dependency_cache_save_outputs.is_empty() {
-        context.plan = with_step(
-            context.plan,
-            PlanStep::ready("lab.save_dependency_caches", "lab.save_dependency_caches")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", dependency_cache_save_outputs.len())
-                        .json("caches", &dependency_cache_save_outputs),
-                )
-                .build(),
-        );
     }
     if exec_output.mirror_run_id.is_some() {
         context.plan = with_step(
@@ -2372,7 +2357,6 @@ pub(crate) fn run_lab_offload_inner(
         rig_component_path_overrides,
         broker_target_home,
         broker_target_ids,
-        dependency_cache_saves,
         runtime_overlay_env,
         runtime_overlay_metadata,
     } = workspace_stage;
@@ -2860,7 +2844,6 @@ pub(crate) fn run_lab_offload_inner(
         path_remaps,
         workspace_mapping_metadata,
         materialized_workspace: Some(materialized_workspace),
-        dependency_cache_saves,
         remote_output_file,
         host_telemetry: Some(host_telemetry),
         admission,
@@ -3214,20 +3197,6 @@ pub(crate) fn ensure_lab_offload_streams_not_truncated(
     Err(error)
 }
 
-fn save_dependency_caches(
-    runner_id: &str,
-    requests: &[RunnerDependencyCacheSaveRequest],
-) -> Result<Vec<RunnerDependencyCacheSaveOutput>> {
-    if requests.is_empty() {
-        return Ok(Vec::new());
-    }
-    let runner = load(runner_id)?;
-    requests
-        .iter()
-        .map(|request| dependency_cache_save(&runner, request))
-        .collect()
-}
-
 fn has_recoverable_fuzz_result_artifact(
     exec_output: &super::super::super::RunnerExecOutput,
 ) -> bool {
@@ -3519,7 +3488,6 @@ mod tests {
             path_remaps: Vec::new(),
             workspace_mapping_metadata: serde_json::json!({}),
             materialized_workspace: None,
-            dependency_cache_saves: Vec::new(),
             remote_output_file: None,
             host_telemetry: None,
             admission: None,

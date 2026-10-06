@@ -862,7 +862,7 @@ mod tests {
 
         struct StubToolchain(Option<OsString>);
         impl RigToolchainProvider for StubToolchain {
-            fn command_step_path(&self, _rig_id: Option<&str>) -> Option<OsString> {
+            fn command_step_path(&self) -> Option<OsString> {
                 self.0.clone()
             }
         }

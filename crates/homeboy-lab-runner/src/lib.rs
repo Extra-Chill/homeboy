@@ -416,9 +416,8 @@ pub(crate) use extension_materialization::{
     RunnerExtensionMaterializationSource,
 };
 pub(crate) use git_dependency_materialization::{
-    dependency_cache_save, dependency_cache_save_request, materialize_git_dependency,
-    RunnerDependencyCacheSaveOutput, RunnerDependencyCacheSaveRequest,
-    RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
+    materialize_git_dependency, RunnerGitDependencyMaterializationOptions,
+    RunnerGitDependencyMaterializationOutput,
 };
 pub use homeboy_refresh::{
     plan_homeboy_binary_refresh, refresh_homeboy_binary, refresh_live_progress, runner_dev_sync,

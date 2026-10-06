@@ -1,6 +1,6 @@
 //! Rig-side implementation of core's rig provider hooks.
 //!
-//! Supplies rig data to core's HTTP API and scope resolution, and the toolchain
+//! Supplies rig data to core's HTTP API and scope resolution, and the built-in
 //! command-step PATH, so those core surfaces work without depending on the rig
 //! subsystem directly.
 
@@ -93,14 +93,8 @@ impl RigProvider for RigProviderImpl {
 struct RigToolchainProviderImpl;
 
 impl RigToolchainProvider for RigToolchainProviderImpl {
-    fn command_step_path(&self, rig_id: Option<&str>) -> Option<std::ffi::OsString> {
-        // A named rig contributes its own `toolchain` declaration. An unknown or
-        // unloadable id degrades to the built-in default rather than failing an
-        // exec-env build over PATH assembly.
-        let rig = rig_id
-            .and_then(|rig_id| config_root().ok().map(|root| (root, rig_id)))
-            .and_then(|(root, rig_id)| crate::load(&root, rig_id).ok());
-        crate::toolchain::command_step_path(rig.as_ref())
+    fn command_step_path(&self) -> Option<std::ffi::OsString> {
+        crate::toolchain::command_step_path()
     }
 }
 

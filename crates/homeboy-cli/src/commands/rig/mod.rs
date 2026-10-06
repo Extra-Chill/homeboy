@@ -533,13 +533,7 @@ fn list(config_root: &Path) -> CmdResult<RigCommandOutput> {
         })
         .collect::<homeboy::core::Result<Vec<_>>>()?;
 
-    Ok((
-        RigCommandOutput::List(RigListOutput {
-            command: "rig.list",
-            rigs: summaries,
-        }),
-        0,
-    ))
+    Ok((RigCommandOutput::List(RigListOutput::new(summaries)), 0))
 }
 
 fn install(

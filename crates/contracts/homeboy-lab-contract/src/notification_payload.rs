@@ -509,13 +509,27 @@ mod tests {
     }
 
     #[test]
-    fn payload_round_trips_through_json() {
-        let payload = cook_payload();
-        let json = serde_json::to_string(&payload).unwrap();
+    fn bounded_payload_preserves_complete_payload_and_attachment_metadata() {
+        let payload = cook_payload().with_attachments([NotifyAttachment::new(
+            "visual_source",
+            "artifact",
+            "file:///tmp/source.png",
+            "homeboy runs artifact get run-1 visual_source",
+        )
+        .with_group("visual_compare_27", "source")
+        .with_media_type("image/png")]);
+        let (json, truncated) = payload.serialize_bounded().expect("bounded payload");
+        assert!(!truncated);
+        assert!(json.len() <= NOTIFY_PAYLOAD_MAX_BYTES);
         assert_eq!(
             serde_json::from_str::<NotifyPayload>(&json).unwrap(),
             payload
         );
+        let wire: serde_json::Value = serde_json::from_str(&json).expect("notification wire");
+        assert_eq!(wire["subject"]["id"], "cook-abc");
+        assert_eq!(wire["attachments"][0]["group_id"], "visual_compare_27");
+        assert_eq!(wire["attachments"][0]["role"], "source");
+        assert_eq!(wire["attachments"][0]["media_type"], "image/png");
     }
 
     #[test]
@@ -568,13 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn small_payload_is_not_reported_as_truncated() {
-        let (json, truncated) = cook_payload().serialize_bounded().expect("payload");
-        assert!(!truncated);
-        assert!(json.contains("cook-abc"));
-    }
-
-    #[test]
     fn event_kind_terminality_is_explicit() {
         assert!(NotifyEventKind::Completed.is_terminal());
         assert!(NotifyEventKind::NeedsAttention.is_terminal());
@@ -582,22 +589,5 @@ mod tests {
         assert!(!NotifyEventKind::Started.is_terminal());
         assert!(!NotifyEventKind::Progress.is_terminal());
         assert_eq!(NotifyEventKind::NeedsAttention.as_str(), "needs_attention");
-    }
-
-    #[test]
-    fn attachment_group_metadata_survives_serialization() {
-        let attachment = NotifyAttachment::new(
-            "visual_source",
-            "artifact",
-            "file:///tmp/source.png",
-            "homeboy runs artifact get run-1 visual_source",
-        )
-        .with_group("visual_compare_27", "source")
-        .with_media_type("image/png");
-        let json = serde_json::to_string(&attachment).unwrap();
-        let parsed: NotifyAttachment = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.group_id.as_deref(), Some("visual_compare_27"));
-        assert_eq!(parsed.role.as_deref(), Some("source"));
-        assert_eq!(parsed.media_type.as_deref(), Some("image/png"));
     }
 }

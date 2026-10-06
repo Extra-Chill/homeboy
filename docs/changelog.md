@@ -4,6 +4,47 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.406.0] - 2026-10-06
+
+### Added
+- reject component path/path_setting that restate the automatic override
+
+### Changed
+- delete rig spec features with zero consumers
+
+### Fixed
+- bound retry caller contention
+- own control-plane transactions
+- bound control-plane writer admission
+
+## [0.405.0] - 2026-10-06
+
+### Changed
+- retire legacy no-change review verdict alias
+
+### Fixed
+- use one durable owner for reconciliation
+
+## [0.404.1] - 2026-10-05
+
+### Changed
+- consolidate notification wire fixtures and assert exact metadata
+
+## [0.404.0] - 2026-10-05
+
+### Changed
+- replace vacuous secret metadata checks with exact wire assertions
+- consolidate cleanup fixtures and assert exact wire fields
+- centralize component workspace binding
+- require explicit component registration evidence
+- retire historical execution record identity decoder
+
+### Fixed
+- scope snapshot seed lookup to the source and own its execution
+- return list rows under data.entities, always present, with legacy keys mirrored
+- install --replace installs an extension that is not installed
+- adopt a PR a concurrent publication created instead of failing
+
 ## [0.403.0] - 2026-10-05
 
 ### Changed
