@@ -858,12 +858,8 @@ mod tests {
         );
     }
 
-    /// #10310 collapsed `RunnerExecutionArtifactRef` onto
-    /// `JobArtifactMetadata`. Both were `{id, name, path, url}` with
-    /// identical serde attributes, so records written by an older binary must
-    /// still deserialize and re-serialize byte-identically.
     #[test]
-    fn runner_execution_record_artifact_refs_keep_the_pre_collapse_wire_shape() {
+    fn artifact_refs_preserve_record_and_result_envelope_wire_shapes() {
         let payload = json!({
             "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
             "execution_id": "job-1",
@@ -882,7 +878,7 @@ mod tests {
         });
 
         let record: RunnerExecutionRecord =
-            serde_json::from_value(payload.clone()).expect("legacy record deserializes");
+            serde_json::from_value(payload.clone()).expect("record deserializes");
         assert_eq!(record.artifact_refs.len(), 2);
         assert_eq!(record.artifact_refs[0].id, "report");
         assert_eq!(record.artifact_refs[0].name.as_deref(), Some("summary"));
@@ -895,27 +891,17 @@ mod tests {
 
         let reserialized = serde_json::to_value(&record).expect("record serializes");
         assert_eq!(reserialized["artifact_refs"], payload["artifact_refs"]);
-    }
-
-    /// The lab workload result refs and the runner execution record refs are
-    /// now literally the same type, so a value crosses between them without a
-    /// field-by-field rebuild.
-    #[test]
-    fn workload_result_refs_and_execution_record_refs_share_one_type() {
-        let artifact = JobArtifactMetadata {
-            id: "report".to_string(),
-            name: None,
-            path: Some("artifacts/summary.json".to_string()),
-            url: None,
-            ..Default::default()
-        };
         let result_refs = RunnerExecutionResultRefs {
-            artifacts: vec![artifact.clone()],
+            artifacts: record.artifact_refs,
             ..Default::default()
         };
+        assert_eq!(
+            serde_json::to_value(&result_refs).expect("result refs serialize"),
+            json!({"artifacts": payload["artifact_refs"]})
+        );
         let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
             .with_artifact_refs(result_refs.artifacts.iter().cloned());
-
-        assert_eq!(record.artifact_refs, vec![artifact]);
+        let forwarded = serde_json::to_value(record).expect("forwarded record serializes");
+        assert_eq!(forwarded["artifact_refs"], payload["artifact_refs"]);
     }
 }
