@@ -186,7 +186,7 @@ impl CookStartupAdmission {
         let launcher_id = inherited_launcher_id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let owns_launcher = inherited_launcher_id.is_none();
+        let mut owns_launcher = inherited_launcher_id.is_none();
         if cook.dispatch.run_id.is_none() {
             cook.dispatch.run_id = Some(cook_id.clone());
             let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
@@ -194,12 +194,27 @@ impl CookStartupAdmission {
         }
 
         let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        let record =
+        let mut record =
             homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
                 &store,
                 &cook_id,
                 &launcher_id,
             )?;
+        // The original launcher delegates to the pinned runtime before local
+        // supervision. Transfer the same unforgeable launcher claim to that
+        // child so recovery observes the process actually waiting at the
+        // pre-projection boundary, not its caller that can disappear first.
+        if inherited_launcher_id.is_some()
+            && std::env::var_os(COOK_PINNED_RUNTIME_ENV).is_some()
+            && std::env::var_os("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN").is_none()
+        {
+            record = homeboy::agents::agent_task_lifecycle::transfer_detached_cook_handoff_launcher_in_store(
+                &store,
+                &cook_id,
+                &launcher_id,
+            )?;
+            owns_launcher = true;
+        }
         std::env::set_var(COOK_STARTUP_LAUNCHER_ID_ENV, &launcher_id);
         let handoff = &record.metadata["detached_cook_handoff"];
         let progress_is_current =
@@ -261,6 +276,7 @@ impl CookStartupAdmission {
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != self.launcher_id
+            || handoff["launcher_pid"].as_u64() != Some(u64::from(std::process::id()))
             || handoff["materializing_attempt_run_id"].is_string()
         {
             return;
@@ -2676,6 +2692,7 @@ fn annotate_cook_seal_failure(
     }
     error.details["controller_admission_phase"] = serde_json::json!("cook_runtime_seal");
     error.details["controller_admission_request_id"] = serde_json::json!(request_id);
+    let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
     let replay_args = replay_run_id.map_or_else(
         || normalized_args.to_vec(),
         |replay_run_id| {

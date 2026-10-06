@@ -3443,7 +3443,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         let _ = fs::remove_file(&staging);
         return Err(error);
     }
-    let _staging_cleanup = StagedPinCleanup(&staging);
+    let mut staging_cleanup = StagedPinCleanup::new(&staging);
     let actual = executable_digest(&staging)?;
     if actual != expected_digest {
         return Err(Error::validation_invalid_argument(
@@ -3459,11 +3459,13 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
     runtime_pin_checkpoint("publish_pin_link", destination)?;
     match fs::hard_link(&staging, destination) {
         Ok(()) => {
+            staging_cleanup.remove_now();
             register_test_fixture_candidate(source, destination, expected_digest);
             memoize_published_pin(destination, expected_digest);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            staging_cleanup.remove_now();
             let actual = executable_digest(destination)?;
             if actual == expected_digest {
                 register_test_fixture_candidate(source, destination, expected_digest);
@@ -3481,18 +3483,37 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
                 ))
             }
         }
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some("publish controller runtime pin".to_string()),
-        )),
+        Err(error) => {
+            staging_cleanup.remove_now();
+            Err(Error::internal_io(
+                error.to_string(),
+                Some("publish controller runtime pin".to_string()),
+            ))
+        }
     }
 }
 
-struct StagedPinCleanup<'a>(&'a Path);
+struct StagedPinCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> StagedPinCleanup<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn remove_now(&mut self) {
+        let _ = fs::remove_file(self.path);
+        self.armed = false;
+    }
+}
 
 impl Drop for StagedPinCleanup<'_> {
     fn drop(&mut self) {
-        let _ = fs::remove_file(self.0);
+        if self.armed {
+            let _ = fs::remove_file(self.path);
+        }
     }
 }
 
