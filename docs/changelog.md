@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.406.1] - 2026-10-06
+
+### Fixed
+- recover terminal custody from durable runner run resources
+
 ## [0.406.0] - 2026-10-06
 
 ### Added
