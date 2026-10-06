@@ -22,13 +22,18 @@ pub(super) fn session_is_live_with_timeout(session: &RunnerSession, timeout: Dur
         let Some(local_url) = session.local_url.as_deref() else {
             return false;
         };
+        let deadline = Instant::now() + probe_timeout;
         session.local_port.is_some_and(|port| {
-            wait_for_tcp(port, probe_timeout)
+            if !wait_for_tcp(port, probe_timeout) {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            !remaining.is_zero()
                 && super::connection_daemon::daemon_http_health_matches_with_timeout(
                     local_url,
                     session.remote_daemon_lease_id.as_deref(),
                     session.remote_daemon_pid,
-                    probe_timeout,
+                    remaining,
                 )
         })
     })
@@ -66,19 +71,12 @@ fn session_is_live_with_probe(
 
     const ATTEMPTS: u32 = 3;
     let deadline = std::time::Instant::now() + timeout;
-    for attempt in 0..ATTEMPTS {
+    for _ in 0..ATTEMPTS {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             return false;
         }
-        // Reserve time for later attempts instead of allowing the first TCP or
-        // HTTP request to consume the entire liveness budget under local load.
-        let attempts_left = ATTEMPTS - attempt;
-        let probe_timeout = remaining / attempts_left / 2;
-        if probe_timeout.is_zero() {
-            return false;
-        }
-        if probe(session, probe_timeout) {
+        if probe(session, remaining) {
             return true;
         }
     }
@@ -246,8 +244,11 @@ pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// Status reads the current controller session first, then performs a bounded
 /// projection of peer-owned direct tunnels. This preserves a usable shared
 /// tunnel without allowing historical session directories to turn status into
-/// an unbounded liveness scan.
-pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSession>> {
+/// an unbounded liveness scan. Return its observed state with the selected
+/// session so consumers do not spend the remaining deadline probing it again.
+pub(super) fn read_session_for_status(
+    runner_id: &str,
+) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
     read_session_for_status_until(
         runner_id,
         Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
@@ -259,7 +260,7 @@ pub(super) fn read_session_for_status(runner_id: &str) -> Result<Option<RunnerSe
 pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
-) -> Result<Option<RunnerSession>> {
+) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
     read_session_for_status_until_in_root(&paths::homeboy()?, runner_id, deadline)
 }
 
@@ -268,18 +269,17 @@ pub(super) fn read_session_for_status_until_in_root(
     config_root: &std::path::Path,
     runner_id: &str,
     deadline: Instant,
-) -> Result<Option<RunnerSession>> {
+) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
     let controller_id = controller_id();
     let session = read_session_for_controller_in_root(config_root, runner_id, &controller_id)?;
-    if session.as_ref().is_some_and(|session| {
-        status_session_state_until(Some(session), deadline) == RunnerSessionState::Connected
-    }) {
-        return Ok(session);
+    let state = status_session_state_until(session.as_ref(), deadline);
+    if state == RunnerSessionState::Connected {
+        return Ok((session, state));
     }
     let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
     match status_peer_session_in_until(&directory, &controller_id, deadline)? {
-        StatusPeerSession::One(peer) => Ok(Some(*peer)),
-        StatusPeerSession::None => Ok(session),
+        StatusPeerSession::One(peer) => Ok((Some(*peer), RunnerSessionState::Connected)),
+        StatusPeerSession::None => Ok((session, state)),
         StatusPeerSession::Truncated => {
             record_partial_peer_projection(
                 runner_id,
@@ -288,7 +288,7 @@ pub(super) fn read_session_for_status_until_in_root(
                     "runner `{runner_id}` has more than {STATUS_PEER_SESSION_LIMIT} persisted peer sessions; status did not select a potentially incomplete peer view"
                 ),
             );
-            Ok(session)
+            Ok((session, state))
         }
         StatusPeerSession::Ambiguous => {
             record_partial_peer_projection(
@@ -298,7 +298,7 @@ pub(super) fn read_session_for_status_until_in_root(
                     "multiple live direct-SSH peer sessions for runner `{runner_id}` disagree on daemon identity"
                 ),
             );
-            Ok(session)
+            Ok((session, state))
         }
     }
 }
@@ -655,13 +655,6 @@ fn status_peer_session_in_with(
 /// Keep the local tunnel observation inside the same explicit read-only budget
 /// as remote identity and active-job probes. A failed check is disconnected,
 /// not a trigger to scan peers or reconcile a tunnel.
-pub(super) fn status_session_state(session: Option<&RunnerSession>) -> RunnerSessionState {
-    status_session_state_until(
-        session,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
-}
-
 pub(super) fn status_session_state_until(
     session: Option<&RunnerSession>,
     deadline: Instant,
@@ -1124,19 +1117,50 @@ mod tests {
     }
 
     #[test]
-    fn session_health_accepts_a_healthy_endpoint_after_one_hundred_milliseconds() {
-        let (port, server) = serve_health("lease-live", 42, Duration::from_millis(125));
+    fn session_health_accepts_a_delayed_endpoint_within_the_liveness_deadline() {
+        let (port, server) = serve_health("lease-live", 42, Duration::from_millis(700));
         let session = session_for_health_endpoint(port, "lease-live", 42);
 
-        // Liveness splits its budget across three attempts and reserves half of
-        // each (`remaining / attempts_left / 2`), so a single probe only gets a
-        // fraction of the total timeout. The overall budget must be large enough
-        // that one probe still exceeds the endpoint's 125ms response time.
         assert!(session_is_live_with_timeout(
             &session,
-            Duration::from_millis(1500)
+            Duration::from_secs(2)
         ));
         server.join().expect("server");
+    }
+
+    #[test]
+    fn session_health_times_out_a_stalled_endpoint_without_refreshing_the_deadline() {
+        let (port, server) = serve_health("lease-live", 42, Duration::from_millis(700));
+        let session = session_for_health_endpoint(port, "lease-live", 42);
+        let started = Instant::now();
+
+        assert!(!session_is_live_with_timeout(
+            &session,
+            Duration::from_millis(200)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn persisted_status_keeps_the_session_state_observed_during_selection() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (port, server) = serve_health("lease-live", 42, Duration::from_millis(700));
+            let mut session = session_for_health_endpoint(port, "lease-live", 42);
+            session.controller_id = Some(controller_id());
+            write_session(&session).expect("write session");
+
+            let report = persisted_status_until(
+                &session.runner_id,
+                Instant::now() + Duration::from_millis(900),
+            )
+            .expect("persisted status");
+
+            assert!(report.connected);
+            assert_eq!(report.state, RunnerSessionState::Connected);
+            assert_eq!(report.session, Some(session));
+            server.join().expect("server");
+        });
     }
 
     #[test]
