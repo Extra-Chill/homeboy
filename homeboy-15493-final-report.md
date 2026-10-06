@@ -34,7 +34,7 @@ Isolated Linux source/build is at `/home/chubes/Developer/homeboy-15493-integrat
 
 The Linux `execution::tests::handoff` partition ran 39/41; two daemon-exec error-message assertions failed at `handoff.rs:2019` and `:2431`. They concern missing error-detail wording and an empty-envelope error phrase. They are recorded in `logs/reverse-broker-handoff.log`; no immutable baseline comparison was completed, so these are not classified as environmental or pre-existing.
 
-## Incomplete publication gates
+## Incomplete publication gates at initial checkpoint (superseded)
 
 This report records the work completed and the verification still needed; it does not assert that the requested publication gate is green.
 
@@ -44,7 +44,7 @@ This report records the work completed and the verification still needed; it doe
 - The broad `lab_staging_controller::tests` invocation was stopped after 20 minutes because numerous parallel tests remained blocked; only the focused cancellation guard passed. `runner_staging_store` and `runner_staging_operation` were not reached.
 - The exact-current Linux reverse-broker coverage was limited to the three reverse-broker subset tests; the wider handoff partition still has the two recorded daemon-exec failures.
 
-The worktree is clean after committing this report. The outstanding proof and regression tests need completion before PR publication.
+At this initial checkpoint, the worktree/report were not a completed publication gate. The follow-up section below supersedes the initial missing-test statements.
 
 ## Resume verification — 2026-10-06
 
@@ -64,4 +64,6 @@ The worktree is clean after committing this report. The outstanding proof and re
 - Exact Linux proof command (run with the isolated integrated source and shared Cargo target): `HOMEBOY_NATIVE_BINARY=/home/chubes/Developer/_homeboy_cargo_shared_target/debug/homeboy CARGO_TARGET_DIR=/home/chubes/Developer/_homeboy_cargo_shared_target CARGO_BUILD_JOBS=2 cargo test -p homeboy-agents --test native_15493_private_daemon -- --test-threads=1 --nocapture`; result: 1 passed. Output: `/home/chubes/Developer/homeboy-15493-integrated-20261005/logs/native-proof-current.log`.
 - Exact Linux focused gates passed: terminal/reconcile 87; cancellation 12; action eligibility 10; daemon generation store 17; runner staging store 12; runner staging operation 22; detached staging controller 2; reverse-broker handoff 41; broker ownership HTTP matrix 5. Exact output logs are in `/home/chubes/Developer/homeboy-15493-integrated-20261005/logs/final-*-current.log`.
 - Exact Linux `cargo fmt --all -- --check`, `cargo build --bin homeboy`, and scoped `cargo clippy -p homeboy-agents -p homeboy-core -p homeboy-lab-runner --lib` passed; clippy emitted warnings. No gates were skipped or weakened.
-- Exact candidate source was at `fd532df40fc5ec1c988124da341fbe0249a41e60`, an ordinary merge of current upstream `8376bfa4c` and scoped cancellation follow-up `0e6d79355`. Refresh upstream and rerun these gates if `main` advances before publication.
+- Final exact implementation candidate: `a6d67692f516c1ea7674da5a6256394d2e10886c`, ordinary merge of `origin/main` `15ee4f7a375db450334d34c8475fac968d676ee1` with scoped cancellation follow-up `0e6d79355` and the publication-evidence commit. Exact-head Linux native proof passed (1/1); all scoped Linux gates passed at this SHA. Logs: `/home/chubes/Developer/homeboy-15493-integrated-20261005/logs/native-proof-a6d67692f.log`, `terminal-a6d67692f.log`, `cancellation-a6d67692f.log`, `action-eligibility-a6d67692f.log`, `generation-store-a6d67692f.log`, `staging-store-a6d67692f.log`, `staging-operation-a6d67692f.log`, `detached-staging-a6d67692f.log`, `runner-handoff-a6d67692f.log`, `broker-ownership-a6d67692f.log`, `fmt-a6d67692f.log`, `build-a6d67692f.log`, and `clippy-a6d67692f.log`.
+- Linux native proof invocation: `HOMEBOY_NATIVE_BINARY=/home/chubes/Developer/_homeboy_cargo_shared_target/debug/homeboy CARGO_TARGET_DIR=/home/chubes/Developer/_homeboy_cargo_shared_target CARGO_BUILD_JOBS=2 cargo test -p homeboy-agents --test native_15493_private_daemon -- --test-threads=1 --nocapture` (1 passed). It invokes the candidate CLI against a private daemon, keeps the real controller-owned staging job running during first cancel and idempotent replay, verifies failed/requested/terminal=false acknowledgement, then confirms terminal cancellation only after owner resolution; same-ID second-root stays queued and late runner POST admission remains zero.
+- Final PR publication still requires authoritative CI on the pushed exact head and independent supervisor review. This task does not mark ready or merge.
