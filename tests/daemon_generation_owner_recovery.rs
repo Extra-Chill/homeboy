@@ -220,7 +220,10 @@ fn native_recovery_restores_admission_without_touching_live_root_work() {
     assert_eq!(result["fresh"], true);
     let status = fixture.cli(&["daemon", "status"]);
     assert_eq!(status["daemon"]["lease_id"], result["lease_id"]);
-    assert_ne!(status["daemon"]["lease_id"], fixture.selected_state["lease_id"]);
+    assert_ne!(
+        status["daemon"]["lease_id"],
+        fixture.selected_state["lease_id"]
+    );
     fixture.assert_root_preserved();
 }
 
