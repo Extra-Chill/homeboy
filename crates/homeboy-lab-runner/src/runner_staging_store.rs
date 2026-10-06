@@ -423,7 +423,6 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             .transpose()?;
         let _lock = self.admission_lock()?;
         let mut state = self.load()?;
-        self.migrate_legacy_retention(&mut state)?;
         let key = &envelope.handoff.idempotency_key;
         if let Some(existing) = state.stages.get(key) {
             if existing.envelope != *envelope {
@@ -514,46 +513,6 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 Some(format!("parse {}", self.path.display())),
             )
         })
-    }
-
-    /// Publish only a retention migration, and only while the admission lock
-    /// is held by the caller. Formatting/default differences are intentionally
-    /// not treated as migrations.
-    fn migrate_legacy_retention(&self, state: &mut StagingStoreState) -> Result<()> {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", self.path.display())),
-                ))
-            }
-        };
-        let raw: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse {}", self.path.display())),
-            )
-        })?;
-        let has_legacy_retention = ["stages", "intents"].into_iter().any(|section| {
-            raw.get(section)
-                .and_then(serde_json::Value::as_object)
-                .into_iter()
-                .flat_map(|records| records.values())
-                .any(|record| {
-                    record
-                        .get("envelope")
-                        .and_then(|envelope| envelope.get("handoff"))
-                        .and_then(|handoff| handoff.get("recipe"))
-                        .and_then(serde_json::Value::as_object)
-                        .is_some_and(|recipe| recipe.contains_key("preserve_workspace_on_failure"))
-                })
-        });
-        if has_legacy_retention {
-            self.persist(state)?;
-        }
-        Ok(())
     }
 
     fn persist(&self, state: &StagingStoreState) -> Result<()> {
@@ -1267,7 +1226,52 @@ mod tests {
     }
 
     #[test]
-    fn opens_and_canonicalizes_legacy_retention_records_without_losing_active_state() {
+    fn canonical_retention_replays_without_rewriting_store() {
+        for delete in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("staging.json");
+            let mut request = envelope();
+            request.handoff.recipe.delete_workspace_on_failure = delete;
+            let mut initial = transport(&path);
+            let receipt = initial.store.stage_durable(&request).unwrap();
+            let mut stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let recipe = &mut stored["stages"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .next()
+                .unwrap()["envelope"]["handoff"]["recipe"];
+            if !delete {
+                recipe
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("delete_workspace_on_failure");
+            }
+            let before = serde_json::to_vec_pretty(&stored).unwrap();
+            fs::write(&path, &before).unwrap();
+            let mut restarted = transport(&path);
+            assert_eq!(restarted.store.stage_durable(&request).unwrap(), receipt);
+            assert_eq!(restarted.store.materializer.calls, 0);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            let state = restarted.store.load().unwrap();
+            assert_eq!(
+                state
+                    .stages
+                    .values()
+                    .next()
+                    .unwrap()
+                    .envelope
+                    .handoff
+                    .recipe
+                    .delete_workspace_on_failure,
+                delete
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_retention_is_refused_without_rewriting_stages_or_intents() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
         let request = envelope();
@@ -1295,16 +1299,6 @@ mod tests {
             serde_json::Value::Bool(!delete.as_bool().expect("delete bool")),
         );
         let legacy_recipe = serde_json::Value::Object(legacy_recipe);
-        let mut delete_on_failure_recipe = legacy_recipe.clone();
-        delete_on_failure_recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(false);
-        assert!(
-            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
-                delete_on_failure_recipe
-            )
-            .expect("legacy delete policy")
-            .delete_workspace_on_failure
-        );
-
         let stage = stored["stages"]
             .as_object_mut()
             .expect("stages")
@@ -1322,25 +1316,30 @@ mod tests {
                 "runner_job_id": "runner-job-active"
             }
         });
-        fs::write(&path, serde_json::to_vec(&stored).expect("legacy bytes")).expect("legacy store");
-
-        let mut reopened = transport(&path);
-        reopened
-            .store
-            .stage_durable(&request)
-            .expect("migrate and replay");
-        assert_eq!(reopened.store.materializer.calls, 0);
-        let canonical: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("canonical state")).expect("json");
-        let canonical_text = canonical.to_string();
-        assert!(!canonical_text.contains("preserve_workspace_on_failure"));
-        assert!(canonical_text.contains("delete_workspace_on_failure"));
-        assert!(canonical["intents"].get("active-intent").is_some());
-        assert_eq!(
-            canonical["intents"]["active-intent"]["envelope"]["handoff"]["recipe"]
-                ["delete_workspace_on_failure"],
-            delete
-        );
+        let bytes = serde_json::to_vec(&stored).expect("obsolete bytes");
+        for section in ["stages", "intents"] {
+            let mut invalid = stored.clone();
+            let other = if section == "stages" {
+                "intents"
+            } else {
+                "stages"
+            };
+            invalid[other] = serde_json::json!({});
+            let before = serde_json::to_vec(&invalid).unwrap();
+            fs::write(&path, &before).unwrap();
+            assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_err());
+            let mut live_store = transport(&temp.path().join("unused.json"));
+            live_store.store.path = path.clone();
+            live_store
+                .store
+                .stage_durable(&request)
+                .expect_err("retired recipe refused");
+            assert_eq!(live_store.store.materializer.calls, 0);
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        fs::write(&path, &bytes).unwrap();
+        assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
@@ -1372,9 +1371,7 @@ mod tests {
                 conflicting_recipe.clone(),
             )
             .expect_err("conflicting retention fields must fail");
-        assert!(parse_error
-            .to_string()
-            .contains("both preserve_workspace_on_failure"));
+        assert!(parse_error.to_string().contains("unknown field"));
         fs::write(
             &path,
             serde_json::to_vec(&stored).expect("conflicting bytes"),
@@ -1425,32 +1422,11 @@ mod tests {
     fn concurrent_admission_materializes_once_and_replays_one_receipt() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
-        let legacy = envelope();
+        let request = envelope();
         let mut seed = transport(&path);
-        seed.store.stage_durable(&legacy).expect("seed stage");
+        seed.store.stage_durable(&request).expect("seed stage");
         let mut stored: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("seed state")).expect("json");
-        let recipe = stored["stages"]
-            .as_object_mut()
-            .expect("stages")
-            .values_mut()
-            .next()
-            .expect("stage")
-            .get_mut("envelope")
-            .expect("envelope")
-            .get_mut("handoff")
-            .expect("handoff")
-            .get_mut("recipe")
-            .expect("recipe");
-        let delete = recipe
-            .get("delete_workspace_on_failure")
-            .and_then(serde_json::Value::as_bool)
-            .expect("delete policy");
-        recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(!delete);
-        recipe
-            .as_object_mut()
-            .expect("recipe object")
-            .remove("delete_workspace_on_failure");
         let stage_key = stored["stages"]
             .as_object()
             .expect("stages")
@@ -1471,9 +1447,8 @@ mod tests {
             }),
         );
         stored["intents"] = serde_json::Value::Object(intents);
-        fs::write(&path, serde_json::to_vec(&stored).expect("legacy state")).expect("write legacy");
-
-        let request = legacy;
+        fs::write(&path, serde_json::to_vec(&stored).expect("pending state"))
+            .expect("write intent");
         let calls = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(2));
         let mut workers = Vec::new();
@@ -1497,7 +1472,7 @@ mod tests {
         let state: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("final state")).expect("json");
         assert_eq!(state["stages"].as_object().expect("stages").len(), 1);
-        assert!(!state.to_string().contains("preserve_workspace_on_failure"));
+        assert!(state["intents"].as_object().unwrap().is_empty());
     }
 
     #[test]
