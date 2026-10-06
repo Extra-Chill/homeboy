@@ -195,6 +195,15 @@ pub struct AgentTaskLimits {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runtime_ms: Option<u64>,
+    /// Hard ceiling the per-attempt wall-clock budget may be extended to while
+    /// the provider keeps making progress. `timeout_ms` is the base deadline:
+    /// a provider still producing output when it arrives is extended in steps
+    /// up to this cap; a quiet one times out there as before. Defaults to
+    /// `DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR` x the base. Set it equal to
+    /// `timeout_ms` to disable extension. Never extends past
+    /// `execution_deadline_unix_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_timeout_ms: Option<u64>,
     /// Absolute UTC Unix timestamp inherited from the plan execution budget.
     /// Providers and remote runners use its remaining time rather than starting
     /// another lifecycle-local timeout.

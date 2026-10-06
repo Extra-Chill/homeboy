@@ -74,8 +74,11 @@ fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
             )),
             Err(err) => Err(err),
         }),
-        Commands::Runner(args) if runner::is_compact_exec_stdout(&args) => {
-            runner_compact_exec(args)
+        Commands::Runner(args)
+            if runner::is_compact_exec_stdout(&args)
+                || runner::is_compact_job_list_stdout(&args) =>
+        {
+            runner_compact_raw_output(args)
         }
         Commands::Ssh(args) => ssh_raw(args, retain_raw_evidence),
         Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
@@ -106,7 +109,7 @@ fn ssh_raw(args: ssh::SshArgs, retain_raw_evidence: bool) -> CommandRun {
     }
 }
 
-fn runner_compact_exec(args: crate::commands::runner::RunnerArgs) -> CommandRun {
+fn runner_compact_raw_output(args: crate::commands::runner::RunnerArgs) -> CommandRun {
     runner::run_plain_text_raw(args)
 }
 

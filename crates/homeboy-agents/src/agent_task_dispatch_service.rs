@@ -281,7 +281,11 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
                 .filter(|model| !model.is_empty())
         };
     if let Some(policy) = request.core.resolved_provider_policy.as_ref() {
-        if let Some(model) = policy.model.as_deref().filter(|model| !model.is_empty()) {
+        if let Some(model) = policy
+            .model
+            .as_deref()
+            .filter(|model| !model.is_empty() && *model != selected_model)
+        {
             configured_models.insert(model.to_string());
         }
         if let Some(rotation) = policy.rotation.as_ref() {
@@ -314,10 +318,15 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
             );
         }
     }
-    let Some(configured_primary_model) = configured_primary_model else {
+    let selected_policy_model_without_routes = request
+        .core
+        .resolved_provider_policy
+        .as_ref()
+        .is_some_and(|policy| policy.model.as_deref() == Some(selected_model));
+    if configured_models.is_empty() && !selected_policy_model_without_routes {
         return Ok(());
-    };
-    if configured_primary_model == selected_model {
+    }
+    if configured_models.contains(selected_model) {
         return Ok(());
     }
     if request.core.acknowledge_model_override {
@@ -339,7 +348,9 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
         Value::String("homeboy/agent-task-model-override-confirmation-required/v1".to_string());
     error.details["confirmation_required"] = Value::Bool(true);
     error.details["selected_model"] = Value::String(selected_model.to_string());
-    error.details["configured_primary_model"] = Value::String(configured_primary_model);
+    error.details["configured_primary_model"] = configured_primary_model
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     error.details["configured_models"] =
         serde_json::to_value(configured_models).expect("model route list serializes");
     error.details["acknowledgement_flag"] =
@@ -1211,41 +1222,50 @@ mod tests {
     }
 
     #[test]
-    fn configured_fallback_model_still_requires_acknowledgement() {
-        let error = require_model_override_acknowledgement(&model_override_request(
-            "fallback-model",
-            false,
-        ))
-        .expect_err("a fallback must not silently displace the configured primary");
-
-        assert_eq!(
-            error.details["configured_primary_model"],
-            "configured-model"
-        );
-        assert_eq!(error.details["selected_model"], "fallback-model");
+    fn configured_alternative_model_does_not_require_override_acknowledgement() {
+        require_model_override_acknowledgement(&model_override_request("fallback-model", false))
+            .expect("configured alternatives are directly selectable");
     }
 
     #[test]
-    fn applied_override_in_policy_does_not_become_the_configured_primary() {
-        let mut request = model_override_request("fallback-model", false);
+    fn policy_model_does_not_self_authorize_an_unconfigured_override() {
+        let mut request = model_override_request("operator-model", false);
         request
             .core
             .resolved_provider_policy
             .as_mut()
             .expect("resolved policy")
-            .model = Some("fallback-model".to_string());
+            .model = Some("operator-model".to_string());
 
         let error = require_model_override_acknowledgement(&request)
-            .expect_err("the applied override must not self-authorize");
+            .expect_err("a changed policy model cannot self-authorize");
+        assert_eq!(error.details["confirmation_required"], true);
+    }
+
+    #[test]
+    fn explicit_policy_model_without_configured_routes_requires_acknowledgement() {
+        let mut request = model_override_request("operator-model", false);
+        let policy = request
+            .core
+            .resolved_provider_policy
+            .as_mut()
+            .expect("resolved policy");
+        policy.model = Some("operator-model".to_string());
+        policy.rotation = None;
+
+        let error = require_model_override_acknowledgement(&request)
+            .expect_err("a selected policy model must not authorize itself");
+
         assert_eq!(
-            error.details["configured_primary_model"],
-            "configured-model"
+            error.details["schema"],
+            "homeboy/agent-task-model-override-confirmation-required/v1"
         );
+        assert_eq!(error.details["configured_models"], serde_json::json!([]));
     }
 
     #[test]
     fn dispatch_refuses_override_before_fixture_executor_is_reached() {
-        let mut request = model_override_request("fallback-model", false);
+        let mut request = model_override_request("operator-model", false);
         request.backend = "fixture".to_string();
         request
             .core

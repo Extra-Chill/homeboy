@@ -938,16 +938,37 @@ fn exact_daemon_loss_recovery_requires_the_complete_pidless_active_set_and_persi
 }
 
 #[test]
-fn exact_daemon_loss_recovery_refuses_persisted_child_process_evidence() {
+fn exact_daemon_loss_recovery_accepts_dead_persisted_child_process_evidence() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");
     record_test_local_child(&store, job.id, u32::MAX);
 
-    let error = store
+    let diagnostics = store
         .reconcile_exact_daemon_loss_jobs("lease-dead", &[job.id], 4242)
+        .expect("a dead or reused child PID is covered by the operator attestation");
+
+    assert_eq!(diagnostics.terminalized_count(), 1);
+    assert_eq!(
+        store.get(job.id).expect("terminalized job").status,
+        JobStatus::Failed
+    );
+}
+
+#[test]
+fn exact_daemon_loss_recovery_refuses_a_live_recorded_child() {
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job = store.create("runner.exec");
+    record_test_local_child(&store, job.id, std::process::id());
+
+    let error = store
+        .reconcile_exact_daemon_loss_jobs_with_child_liveness("lease-dead", &[job.id], 4242, |_| {
+            super::super::store::LocalChildLiveness::Live
+        })
         .expect_err("live-process evidence contradicts no-PID recovery");
 
-    assert!(error.message.contains("child-process evidence"));
+    assert!(error
+        .message
+        .contains("live or unverifiable workload-process evidence"));
     assert_eq!(
         store.get(job.id).expect("protected job").status,
         JobStatus::Running
