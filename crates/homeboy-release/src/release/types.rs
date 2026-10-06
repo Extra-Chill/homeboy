@@ -855,27 +855,6 @@ mod tests {
     }
 
     #[test]
-    fn release_step_result_default_matches_the_fully_spelled_out_step() {
-        let via_default = ReleaseStepResult {
-            id: "build".to_string(),
-            step_type: "build".to_string(),
-            status: ReleaseStepStatus::Success,
-            ..Default::default()
-        };
-        let verbose = ReleaseStepResult {
-            id: "build".to_string(),
-            step_type: "build".to_string(),
-            status: ReleaseStepStatus::Success,
-            ..Default::default()
-        };
-        // ReleaseStepResult has no PartialEq; compare via canonical serialization.
-        assert_eq!(
-            serde_json::to_value(&via_default).unwrap(),
-            serde_json::to_value(&verbose).unwrap()
-        );
-    }
-
-    #[test]
     fn release_step_result_default_status_is_failed_never_success() {
         assert_eq!(
             ReleaseStepResult::default().status,

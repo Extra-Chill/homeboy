@@ -885,6 +885,7 @@ fn resume_pre_admission_plan(
 ) -> CmdResult<Value> {
     let mut plan = load_batch_cook_fanout_plan(
         &AgentTaskFanoutInputArgs {
+            resolved_provider_policies: None,
             input: format!("@{}", private_plan.display()),
             resolved_provider_policies: None,
             fanout_id: None,

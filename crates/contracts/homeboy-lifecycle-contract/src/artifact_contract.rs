@@ -256,37 +256,33 @@ mod tests {
     }
 
     #[test]
-    fn artifact_record_default_matches_the_fully_spelled_out_empty_record() {
-        let via_default = ArtifactRecord {
-            id: "frontend_url".to_string(),
-            run_id: "run-1".to_string(),
-            kind: "frontend_url".to_string(),
-            artifact_type: "url".to_string(),
-            path: "https://example.test/".to_string(),
-            created_at: "2026-06-12T00:00:30Z".to_string(),
-            ..Default::default()
-        };
-        let verbose = ArtifactRecord {
-            id: "frontend_url".to_string(),
-            run_id: "run-1".to_string(),
-            kind: "frontend_url".to_string(),
-            artifact_type: "url".to_string(),
-            path: "https://example.test/".to_string(),
-            url: None,
-            public_url: None,
-            viewer_url: None,
-            viewer_links: Vec::new(),
-            sha256: None,
-            size_bytes: None,
-            mime: None,
-            metadata_json: serde_json::Value::Null,
-            created_at: "2026-06-12T00:00:30Z".to_string(),
-        };
-        assert_eq!(via_default, verbose);
-    }
-
-    #[test]
-    fn artifact_record_default_artifact_type_is_file() {
-        assert_eq!(ArtifactRecord::default().artifact_type, "file");
+    fn artifact_record_defaults_and_type_override_use_the_current_wire_shape() {
+        for (declared_type, expected_type) in [(None, "file"), (Some("url"), "url")] {
+            let mut input = json!({
+                "id": "frontend_url", "run_id": "run-1", "kind": "frontend_url",
+                "path": "https://example.test/", "created_at": "2026-06-12T00:00:30Z"
+            });
+            let mut constructed = ArtifactRecord {
+                id: "frontend_url".to_string(),
+                run_id: "run-1".to_string(),
+                kind: "frontend_url".to_string(),
+                path: "https://example.test/".to_string(),
+                created_at: "2026-06-12T00:00:30Z".to_string(),
+                ..Default::default()
+            };
+            if let Some(artifact_type) = declared_type {
+                input["type"] = json!(artifact_type);
+                constructed.artifact_type = artifact_type.to_string();
+            }
+            let decoded: ArtifactRecord = serde_json::from_value(input).expect("artifact record");
+            let expected = json!({
+                "id": "frontend_url", "run_id": "run-1", "kind": "frontend_url",
+                "type": expected_type, "path": "https://example.test/",
+                "sha256": null, "size_bytes": null, "mime": null, "metadata_json": null,
+                "created_at": "2026-06-12T00:00:30Z"
+            });
+            assert_eq!(serde_json::to_value(constructed).unwrap(), expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        }
     }
 }

@@ -265,23 +265,31 @@ mod tests {
     }
 
     #[test]
-    fn run_record_default_matches_the_fully_spelled_out_empty_record() {
-        let via_default = RunRecord {
+    fn defaulted_run_record_uses_the_current_wire_shape() {
+        let record = RunRecord {
             id: "run-1".to_string(),
             kind: "agent-task".to_string(),
             started_at: "2026-07-16T00:00:00Z".to_string(),
             status: "running".to_string(),
             ..Default::default()
         };
-        let verbose = RunRecord {
-            id: "run-1".to_string(),
-            kind: "agent-task".to_string(),
-            started_at: "2026-07-16T00:00:00Z".to_string(),
-            status: "running".to_string(),
-            metadata_json: serde_json::Value::Null,
-            ..Default::default()
-        };
-        assert_eq!(via_default, verbose);
+        assert_eq!(
+            serde_json::to_value(record).unwrap(),
+            serde_json::json!({
+                "id": "run-1",
+                "kind": "agent-task",
+                "component_id": null,
+                "started_at": "2026-07-16T00:00:00Z",
+                "finished_at": null,
+                "status": "running",
+                "command": null,
+                "cwd": null,
+                "homeboy_version": null,
+                "git_sha": null,
+                "rig_id": null,
+                "metadata_json": null
+            })
+        );
     }
 
     #[test]
