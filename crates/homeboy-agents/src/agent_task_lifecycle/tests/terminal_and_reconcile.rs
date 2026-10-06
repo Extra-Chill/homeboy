@@ -5,7 +5,7 @@ use super::*;
 use crate::agent_task::{AgentTaskArtifact, AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-    AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskExecutionBudget, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
 use homeboy_core::api_jobs::{Job, JobEventKind};
@@ -444,20 +444,15 @@ fn artifact_recovery_replaces_only_the_recorded_legacy_pin() {
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The submission, the read-only preview and the migrating execution
-/// read all go through the same injected store, so `record.plan_path` — the
-/// file this test rewrites by hand — is the exact `plan.json` the execution
-/// read migrates. Resolving the preview from one home and the migration from
-/// another would leave both assertions about that file's contents describing
-/// two different files.
+/// Omitted authored budgets use the current default without mutating a stored
+/// plan during inspection or execution readback.
 #[test]
-fn execution_budget_legacy_plan_migrates_only_for_execution_reads() {
+fn execution_budget_defaults_are_current_and_plan_reads_preserve_bytes() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
     let record = lifecycle_store
-        .submit_plan_with_runtime_admission(&test_plan(), "legacy-budget", |_| Ok(json!({})))
+        .submit_plan_with_runtime_admission(&test_plan(), "default-budget", |_| Ok(json!({})))
         .expect("submitted");
     let mut raw: Value =
         serde_json::from_str(&std::fs::read_to_string(&record.plan_path).expect("persisted plan"))
@@ -468,20 +463,22 @@ fn execution_budget_legacy_plan_migrates_only_for_execution_reads() {
         .remove("execution_budget");
     std::fs::write(
         &record.plan_path,
-        serde_json::to_vec(&raw).expect("serialize legacy plan"),
+        serde_json::to_vec(&raw).expect("serialize authored defaults"),
     )
     .expect("replace plan");
 
     let preview = load_plan_in_store(&lifecycle_store, &record.run_id).expect("read-only preview");
-    assert_eq!(preview.options.execution_budget.version, 0);
+    assert_eq!(
+        preview.options.execution_budget,
+        AgentTaskExecutionBudget::default()
+    );
     let before = std::fs::read_to_string(&record.plan_path).expect("unmodified preview file");
     assert!(!before.contains("execution_budget"));
 
     let executed = load_plan_for_execution_in_store(&lifecycle_store, &record.run_id)
-        .expect("execution migration");
-    assert_eq!(executed.options.execution_budget.version, 1);
-    let persisted = std::fs::read_to_string(&record.plan_path).expect("migrated plan");
-    assert!(persisted.contains("\"version\": 1"));
+        .expect("canonical execution read");
+    assert_eq!(executed, preview);
+    assert_eq!(std::fs::read_to_string(&record.plan_path).unwrap(), before);
 }
 
 #[cfg(unix)]
