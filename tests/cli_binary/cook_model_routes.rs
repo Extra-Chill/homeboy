@@ -293,7 +293,7 @@ fn run_preview(home: &TempDir, model: &str, acknowledged: bool) -> Output {
         "--head",
         "fix/14835-model-route-preview",
         "--base",
-        "main",
+        "HEAD",
         "--backend",
         "fixture",
         "--model",
