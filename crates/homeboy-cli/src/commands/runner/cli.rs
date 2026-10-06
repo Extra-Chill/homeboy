@@ -345,6 +345,18 @@ pub(super) enum RunnerCommand {
     Reconcile {
         /// Runner ID
         id: String,
+
+        /// Attest that the workload processes of a blocked remote generation
+        /// were inspected and are absent. When the reconcile is blocked by a
+        /// generation whose daemon PID is dead and whose active jobs lack
+        /// automatic proof, this runs the attested
+        /// `daemon reconcile-dead-lease-orphans` on the runner — bound to that
+        /// exact generation's state directory, lease, and active job set — and
+        /// then re-runs the reconcile. A live daemon PID, a live recorded
+        /// child, or a changed job set is still refused, with the runner-side
+        /// refusal surfaced verbatim (#15556).
+        #[arg(long)]
+        confirm_workload_processes_absent: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
