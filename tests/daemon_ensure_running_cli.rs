@@ -26,8 +26,14 @@ fn on_demand_daemons_reap_their_supervisor_and_restart_without_accumulation() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let started: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let state: serde_json::Value = serde_json::from_slice(
-            &fs::read(context.daemon_dir().join("state.json")).expect("live lease"),
+            &fs::read(
+                started["data"]["state_path"]
+                    .as_str()
+                    .expect("selected generation path"),
+            )
+            .expect("live lease"),
         )
         .unwrap();
         let pid = state["pid"].as_u64().unwrap() as u32;

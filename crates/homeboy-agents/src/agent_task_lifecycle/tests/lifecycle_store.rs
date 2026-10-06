@@ -514,11 +514,13 @@ fn historical_cook_index_import_survives_retry_projection_for_a_failed_attempt()
             cook_id: cook_id.to_string(),
             attempts: vec![
                 crate::agent_task_service::AgentTaskCookRecipeAttempt {
+                    lineage: None,
                     attempt: 2,
                     run_id: failed_run.clone(),
                     plan: plan.clone(),
                 },
                 crate::agent_task_service::AgentTaskCookRecipeAttempt {
+                    lineage: None,
                     attempt: 3,
                     run_id: pending_successor_run,
                     plan,

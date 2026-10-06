@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.407.4] - 2026-10-06
+
+### Changed
+- advertise Reconcile by the fleet reconciler's liveness rule
+
+### Fixed
+- recover the selected admission generation
+
+## [0.407.3] - 2026-10-06
+
+### Fixed
+- an exiting Cook observer no longer cancels a verifiably live provider
+
+## [0.407.2] - 2026-10-06
+
+### Fixed
+- preserve evidence transport causes
+- one controller drives a Cook at a time
+
 ## [0.407.1] - 2026-10-06
 
 ### Fixed
