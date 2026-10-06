@@ -46,6 +46,7 @@ pub mod controller_job_driver;
 mod controller_terminal_regression;
 mod daemon_lease;
 mod generation_store;
+pub mod lifecycle;
 mod lifetime;
 pub mod orchestration;
 mod patch_capture;
