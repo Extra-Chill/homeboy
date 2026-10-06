@@ -4046,12 +4046,12 @@ where
                 None,
             ));
         }
-        let retry = agent_task_service::retry_with_provider_route_override(
+        let (_, retry) = reserve_retry_through_action(
             &record.run_id,
             None,
             false,
-            false,
-            route_override,
+            &route_override,
+            uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
@@ -4139,7 +4139,13 @@ where
         // Reserve its replacement through the retry owner rather than rerunning
         // the terminal record. The normal queue owner then dispatches the
         // successor, preserving append-only Cook lineage and budget.
-        let retry = agent_task_service::retry(&record.run_id, None, false, false)?;
+        let (_, retry) = reserve_retry_through_action(
+            &record.run_id,
+            None,
+            false,
+            &Default::default(),
+            uuid::Uuid::new_v4().to_string(),
+        )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
@@ -10859,6 +10865,56 @@ fn reconstruct_local_cook_attempt_dispatcher(
     crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(recipe)
 }
 
+/// Reserve a retry successor through the control-plane Retry action: the one
+/// legal-action entry point with idempotent acknowledgement, eligibility and
+/// audit. `agent-task retry` and `cook-continue` both reserve through here, so
+/// a Cook continuation is no longer a side door around the action outbox.
+fn reserve_retry_through_action(
+    run_id: &str,
+    new_run_id: Option<String>,
+    force: bool,
+    route_override: &homeboy::agents::agent_task_service::CookProviderRouteOverride,
+    idempotency_key: String,
+) -> homeboy::core::Result<(
+    homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
+    homeboy::agents::agent_task_action_result::RetryActionResult,
+)> {
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                run_id,
+                "retry",
+                &idempotency_key,
+            ),
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({
+                    "new_run_id": new_run_id,
+                    "force": force,
+                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
+                        "backend": route_override.backend,
+                        "selector": route_override.selector,
+                        "model": route_override.model,
+                        "allow_provider_rotation": route_override.allow_provider_rotation,
+                        "provider_rotations": route_override.provider_rotations,
+                    })),
+                }),
+            },
+            confirmed: true,
+        },
+    )?;
+    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    Ok((acknowledgement, retry))
+}
+
 pub(super) fn retry_with<F>(
     args: RetryArgs,
     executor: SharedAgentTaskExecutor,
@@ -10887,39 +10943,13 @@ where
         .idempotency_key
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+    let (acknowledgement, retry) = reserve_retry_through_action(
         &args.run_id,
-        &homeboy_control_plane_contract::ControlPlaneActionRequest {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            effect_id: homeboy_control_plane_contract::action_effect_id(
-                "cli",
-                &args.run_id,
-                "retry",
-                &idempotency_key,
-            ),
-            idempotency_key,
-            actor: "homeboy-cli".to_string(),
-            expected_updated_at: None,
-            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
-                    .to_string(),
-                data: serde_json::json!({
-                    "new_run_id": args.new_run_id,
-                    "force": args.force,
-                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
-                        "backend": route_override.backend,
-                        "selector": route_override.selector,
-                        "model": route_override.model,
-                        "allow_provider_rotation": route_override.allow_provider_rotation,
-                        "provider_rotations": route_override.provider_rotations,
-                    })),
-                }),
-            },
-            confirmed: true,
-        },
+        args.new_run_id.clone(),
+        args.force,
+        &route_override,
+        idempotency_key,
     )?;
-    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
     // Reservation is acknowledged independently from execution. Only the call
     // that created the successor may dispatch it; a replayed acknowledgement
     // must be inspected or resumed through the durable lifecycle instead.

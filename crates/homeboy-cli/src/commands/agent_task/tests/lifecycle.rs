@@ -1769,6 +1769,20 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
         assert_eq!(successor.state, AgentTaskRunState::Queued, "{successor:#?}");
         assert_eq!(successor.metadata["retry_of"], source_run_id);
         assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+        // The successor is reserved through the control-plane Retry action, so
+        // the source run carries an accepted retry action in its event log.
+        homeboy::agents::orchestration::register();
+        let events = homeboy::core::control_plane::events(
+            &homeboy_control_plane_contract::RunId::new(source_run_id).expect("run id"),
+            None,
+        )
+        .expect("source events");
+        assert!(
+            events.events.iter().any(|event| {
+                event.kind == "action.accepted" && event.data["action"] == "retry"
+            }),
+            "cook-continue must reserve its successor through the Retry action"
+        );
 
         let executions = Arc::new(AtomicUsize::new(0));
         let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
