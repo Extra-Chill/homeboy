@@ -220,7 +220,8 @@ impl JobStore {
         )
     }
 
-    #[cfg(test)]
+    /// Implementation of [`Self::reconcile_exact_daemon_loss_jobs`] with an
+    /// injectable child-liveness probe (tests supply a fixed answer).
     #[allow(private_bounds)]
     pub(crate) fn reconcile_exact_daemon_loss_jobs_with_child_liveness(
         &self,
@@ -283,6 +284,17 @@ impl JobStore {
         }
         let now = timestamp_ms();
         for job_id in &expected {
+            // The operator attestation also covers work a linked durable run
+            // may still own elsewhere; record that link so the evidence shows
+            // exactly what was vouched for (#15556).
+            let linked_durable_run = inner
+                .jobs
+                .get(job_id)
+                .and_then(stored_job_durable_run_id)
+                .map(|run_id| {
+                    let state = super::super::agent_task_terminal_recovery::linked_durable_run_state(&run_id);
+                    serde_json::json!({ "run_id": run_id, "state": state })
+                });
             let stored = inner.jobs.get_mut(job_id).expect("active job exists");
             stored.job.status = JobStatus::Failed;
             stored.job.updated_at_ms = now;
@@ -298,6 +310,7 @@ impl JobStore {
                 "daemon_pid": daemon_pid,
                 "operator_confirmed_workload_processes_absent": true,
                 "exact_active_job_set": expected,
+                "linked_durable_run": linked_durable_run,
             });
             for (kind, message) in [
                 (

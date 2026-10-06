@@ -230,6 +230,35 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // adoption or operator-attested PID-less recovery. The freshness report
     // cannot see that per-job distinction, so apply the evidence predicate the
     // store enforces during apply.
+    // A job whose recorded child process is still alive is not orphaned: it is
+    // finishing. Recommending the attested reconcile would only be refused at
+    // apply, so say what to wait for instead (#15556).
+    if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead) {
+        let live = status
+            .active_job_recovery_evidence
+            .iter()
+            .filter(|evidence| {
+                evidence.disposition
+                    == crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
+            })
+            .map(|evidence| match evidence.child_pid {
+                Some(pid) => format!("{} (child pid {pid})", evidence.job_id),
+                None => evidence.job_id.to_string(),
+            })
+            .collect::<Vec<_>>();
+        if !live.is_empty() {
+            return DaemonRecoveryPlan {
+                steps: vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
+                reason: format!(
+                    "dead daemon lease still has running workload process(es) for job(s) {}; wait for them to exit, then recover",
+                    live.join(", ")
+                ),
+                required_confirmations: Vec::new(),
+                executable: false,
+            };
+        }
+    }
+
     let requires_exact_dead_lease_recovery = freshness.stale_reason_code
         == Some(super::DaemonStaleReasonCode::PidDead)
         && status.active_job_recovery_evidence.iter().any(|evidence| {
@@ -727,6 +756,31 @@ mod tests {
             assert_eq!(plan.required_confirmations, vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT]);
             assert!(plan.steps[0].command.contains(&Uuid::from_u128(44).to_string()));
         }
+    }
+
+    /// A live child is finishing, not orphaned: the plan says what to wait for
+    /// instead of recommending a reconcile the store will refuse (#15556).
+    #[test]
+    fn dead_lease_with_a_live_child_waits_instead_of_recommending_a_refused_reconcile() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::PidDead),
+            vec![DaemonRepairStep::executable(
+                DAEMON_ADOPT_ORPHAN,
+                adopt_orphan(LEASE_ID),
+            )],
+            1,
+        );
+        status.active_job_recovery_evidence =
+            vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+                child_pid: Some(4242),
+                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive,
+                ..recovery_evidence(Uuid::from_u128(45))
+            }];
+        let plan = plan_recovery(&status);
+        assert!(!plan.executable);
+        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+        assert!(plan.reason.contains("child pid 4242"), "{}", plan.reason);
+        assert!(plan.required_confirmations.is_empty());
     }
 
     #[test]
