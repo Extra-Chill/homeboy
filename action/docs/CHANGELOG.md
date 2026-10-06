@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.15] - 2026-10-06
+
+### Fixed
+- recognize passing retries whose test summary is colored
+
 ## [2.20.14] - 2026-10-05
 
 ### Changed
