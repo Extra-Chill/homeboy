@@ -4376,6 +4376,36 @@ pub(crate) fn dispatch_cook_follow_up(
                 )
         })
         .cloned();
+    // Remediation is idempotent per candidate. A second controller pass over
+    // the same source attempt — a foreground `--wait` supervisor and the
+    // continuation scheduler both draining one timed-out candidate — used to
+    // fall through to fresh allocation and append an identical gate-fix
+    // attempt beside the live one. Both then executed against the same
+    // worktree and the later promotion failed to apply on top of the earlier,
+    // reporting a Cook that had in fact gone green as a durable failure.
+    if replay.is_none() {
+        if let Some(existing_run_id) = existing_candidate_remediation(
+            related_attempts.clone().map(|recipe_attempt| {
+                (
+                    recipe_attempt.attempt,
+                    recipe_attempt.run_id.as_str(),
+                    &recipe_attempt.plan.tasks[0].inputs["cook_loop"],
+                )
+            }),
+            attempt,
+            promotion.patch_artifact.sha256.as_deref(),
+            |run_id| {
+                lifecycle_store.read_record(run_id).ok().map(|record| {
+                    record.state.is_terminal()
+                        && record.state != agent_task_lifecycle::AgentTaskRunState::Succeeded
+                })
+            },
+        ) {
+            return Ok(CookFollowUpDispatch::Dispatched {
+                run_id: existing_run_id,
+            });
+        }
+    }
     let persisted_budget_authority = plan
         .tasks
         .first()
@@ -4691,6 +4721,41 @@ pub(crate) fn dispatch_cook_follow_up(
     Ok(CookFollowUpDispatch::Dispatched {
         run_id: next_run_id,
     })
+}
+
+/// The run id of a substantive remediation already durably bound for this exact
+/// candidate, if one exists and can still carry the Cook forward.
+///
+/// `related` yields `(attempt, run_id, cook_loop inputs)` for recipe attempts
+/// whose provenance names the same source run. A match must be newer than the
+/// source attempt, must not be a review-form-only follow-up (those have their
+/// own replay rule), and must name the same source patch digest — a candidate
+/// without a digest cannot prove identity, so it is never deduplicated.
+///
+/// `failed_terminal(run_id)` answers `Some(true)` for a terminally failed run,
+/// `Some(false)` for a live or succeeded one, and `None` when no lifecycle
+/// record exists yet. Only a live or succeeded remediation is reused: a failed
+/// one keeps its existing re-dispatch semantics, and an unrecorded one (a
+/// crash between recipe append and plan submission) is not something a caller
+/// could drive.
+fn existing_candidate_remediation<'a>(
+    related: impl IntoIterator<Item = (u32, &'a str, &'a Value)>,
+    source_attempt: u32,
+    source_patch_sha256: Option<&str>,
+    failed_terminal: impl Fn(&str) -> Option<bool>,
+) -> Option<String> {
+    let source_patch_sha256 = source_patch_sha256?;
+    related
+        .into_iter()
+        .filter(|(attempt, _, cook_loop)| {
+            *attempt > source_attempt
+                && cook_loop["review_form_required"] != true
+                && cook_loop["artifact_provenance"]["source_patch_artifact_sha256"].as_str()
+                    == Some(source_patch_sha256)
+        })
+        .max_by_key(|(attempt, _, _)| *attempt)
+        .filter(|(_, run_id, _)| failed_terminal(run_id) == Some(false))
+        .map(|(_, run_id, _)| run_id.to_string())
 }
 
 pub(crate) fn ensure_cook_attempt_admitted(
@@ -11489,5 +11554,103 @@ mod io_error_attribution_tests {
         let diagnostic = bounded_error_diagnostic(&error);
 
         assert_eq!(diagnostic["deepest_cause"]["message"], error.message);
+    }
+}
+
+/// Remediation idempotence: a second controller pass over one candidate must
+/// reuse the gate-fix attempt already bound for it rather than append a twin.
+#[cfg(test)]
+mod candidate_remediation_idempotence_tests {
+    use super::existing_candidate_remediation;
+    use serde_json::{json, Value};
+
+    fn gate_fix(sha: &str) -> Value {
+        json!({
+            "review_form_required": false,
+            "artifact_provenance": { "source_patch_artifact_sha256": sha },
+        })
+    }
+
+    /// The observed double-booking: attempt 2 is the live gate fix for the
+    /// timed-out attempt 1, and a second pass over attempt 1 must get it back.
+    #[test]
+    fn a_live_gate_fix_for_the_same_candidate_is_reused() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
+                Some(false)
+            });
+        assert_eq!(found.as_deref(), Some("run-2"));
+    }
+
+    #[test]
+    fn the_newest_matching_remediation_wins() {
+        let loop_inputs = gate_fix("abc");
+        let found = existing_candidate_remediation(
+            [(2, "run-2", &loop_inputs), (3, "run-3", &loop_inputs)],
+            1,
+            Some("abc"),
+            |_| Some(false),
+        );
+        assert_eq!(found.as_deref(), Some("run-3"));
+    }
+
+    #[test]
+    fn a_failed_remediation_keeps_its_redispatch_semantics() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
+                Some(true)
+            });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn an_unrecorded_remediation_is_not_reused() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| None);
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn a_different_candidate_patch_is_a_different_remediation() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("def"), |_| {
+                Some(false)
+            });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn a_candidate_without_a_digest_is_never_deduplicated() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, None, |_| Some(false));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn review_form_follow_ups_are_left_to_their_own_replay_rule() {
+        let loop_inputs = json!({
+            "review_form_required": true,
+            "artifact_provenance": { "source_patch_artifact_sha256": "abc" },
+        });
+        let found =
+            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
+                Some(false)
+            });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn attempts_not_newer_than_the_source_are_ignored() {
+        let loop_inputs = gate_fix("abc");
+        let found =
+            existing_candidate_remediation([(1, "run-1", &loop_inputs)], 1, Some("abc"), |_| {
+                Some(false)
+            });
+        assert_eq!(found, None);
     }
 }
