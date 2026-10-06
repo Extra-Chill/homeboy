@@ -3056,6 +3056,20 @@ where
 {
     let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
+    if std::env::var("HOMEBOY_CALLER_CONTEXT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        let context = crate::caller_context::capture(
+            normalized_plan
+                .metadata
+                .get("client_context")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )?;
+        normalized_plan.metadata["client_context"] = context;
+    }
     if normalized_plan.workspace_identity.is_none() {
         normalized_plan.workspace_identity = identity_for_plan(&normalized_plan)?;
     }
@@ -3094,6 +3108,18 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    // Persist only the compact ownership projection; the complete client
+    // context remains in the immutable plan rather than the hot lookup row.
+    if let Some(caller) = plan.metadata.pointer("/client_context/caller_context") {
+        metadata["client_context"] = json!({"caller_context": caller});
+    }
+    if let Some(workspace) = plan
+        .metadata
+        .get("caller_workspace")
+        .filter(|value| !value.is_null())
+    {
+        metadata["caller_workspace"] = workspace.clone();
+    }
     let activity_contexts = plan
         .tasks
         .iter()
