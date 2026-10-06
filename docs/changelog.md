@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.415.0] - 2026-10-06
+
+### Added
+- daemon recover routes through the lifecycle plan (#15557 C3)
+
+### Fixed
+- remove duplicate resume policy initializer
+
 ## [0.414.0] - 2026-10-06
 
 ### Changed
