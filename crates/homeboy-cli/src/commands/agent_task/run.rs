@@ -4110,6 +4110,7 @@ where
             None,
             false,
             &route_override,
+            None,
             uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
@@ -4170,7 +4171,14 @@ where
         ));
     }
     if let Some(timeout_ms) = args.review_form_timeout_ms.or(args.timeout_ms) {
-        let retry = agent_task_service::retry_with_timeout_override(&run_id, timeout_ms)?;
+        let (_, retry) = reserve_retry_through_action(
+            &run_id,
+            None,
+            false,
+            &Default::default(),
+            Some(timeout_ms),
+            uuid::Uuid::new_v4().to_string(),
+        )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
             return dispatch_queued_cook_retry(
@@ -4203,6 +4211,7 @@ where
             None,
             false,
             &Default::default(),
+            None,
             uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
@@ -10937,6 +10946,7 @@ fn reserve_retry_through_action(
     new_run_id: Option<String>,
     force: bool,
     route_override: &homeboy::agents::agent_task_service::CookProviderRouteOverride,
+    timeout_ms: Option<u64>,
     idempotency_key: String,
 ) -> homeboy::core::Result<(
     homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
@@ -10969,6 +10979,7 @@ fn reserve_retry_through_action(
                         "allow_provider_rotation": route_override.allow_provider_rotation,
                         "provider_rotations": route_override.provider_rotations,
                     })),
+                    "timeout_ms": timeout_ms,
                 }),
             },
             confirmed: true,
@@ -11011,6 +11022,7 @@ where
         args.new_run_id.clone(),
         args.force,
         &route_override,
+        None,
         idempotency_key,
     )?;
     // Reservation is acknowledged independently from execution. Only the call

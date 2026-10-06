@@ -9573,6 +9573,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 
         let error = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             50,
         )
         .expect_err("override must increase the prior timeout");
@@ -9584,6 +9585,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         .expect("restore a deferred cleanup owner");
         let owner_error = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             100,
         )
         .expect_err("active deferred ownership must block retry");
@@ -9598,6 +9600,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 
         let retry = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             100,
         )
         .expect("reserve timeout override");
@@ -9629,6 +9632,123 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
                 "remaining_provider_rotations": 0,
             })
         );
+    });
+}
+
+#[test]
+fn timeout_override_retry_is_reserved_through_the_control_plane_action() {
+    struct ProviderTimeout;
+
+    impl AgentTaskExecutorAdapter for ProviderTimeout {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+        ) -> crate::agent_task::AgentTaskOutcome {
+            crate::agent_task::AgentTaskOutcome {
+                task_id: request.task_id,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+                failure_classification: Some(
+                    crate::agent_task::AgentTaskFailureClassification::Timeout,
+                ),
+                summary: Some("provider exceeded timeout_ms=50".to_string()),
+                diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                    class: "agent_task.provider_timeout".to_string(),
+                    message: "provider exceeded timeout_ms=50".to_string(),
+                    data: serde_json::json!({ "timeout_ms": 50 }),
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-timeout-action";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.options.timeout_ms = Some(50);
+        options.identity.initial_plan.options.retry.max_attempts = 2;
+        // Exclude Timeout to model a historical first attempt that stopped
+        // before automatic timeout recovery was available.
+        options
+            .identity
+            .initial_plan
+            .options
+            .retry
+            .retryable_failure_classifications =
+            vec![crate::agent_task::AgentTaskFailureClassification::Provider];
+        options.identity.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0);
+        options.identity.initial_plan.tasks[0].limits.timeout_ms = Some(50);
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        let failed = crate::agent_task_service::execution::run_submitted(
+            options.identity.initial_run_id.clone(),
+            Arc::new(ProviderTimeout),
+        )
+        .expect("record provider timeout");
+        assert_eq!(failed.exit_code, 1);
+
+        // `cook-continue --timeout-ms` reserves through the Retry action, so
+        // the override carries an acknowledgement and an `action.accepted`
+        // event like every other retry.
+        let source = options.identity.initial_run_id.clone();
+        let combined = crate::orchestration::execute_action_from_current_environment(
+            &source,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:timeout-and-force".to_string(),
+                ),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: "timeout-and-force".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({ "timeout_ms": 200, "force": true }),
+                },
+                confirmed: true,
+            },
+        );
+        let refused = match combined {
+            Err(error) => error.message,
+            Ok(ack) => ack.message.unwrap_or_default(),
+        };
+        assert!(
+            refused.contains("timeout-override retry cannot"),
+            "{refused}"
+        );
+        let acknowledgement = crate::orchestration::execute_action_from_current_environment(
+            &source,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:timeout-action".to_string(),
+                ),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: "timeout-action".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({ "timeout_ms": 100 }),
+                },
+                confirmed: true,
+            },
+        )
+        .expect("timeout override retry action");
+        let retry = crate::agent_task_action_result::retry(&acknowledgement).expect("retry result");
+        let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+        assert_eq!(recipe.attempts[1].plan.options.timeout_ms, Some(100));
     });
 }
 
