@@ -1021,6 +1021,26 @@ impl AgentTaskScheduler {
                 )
                 .map(|remaining| task_timeout_ms.min(remaining))
                 .unwrap_or(task_timeout_ms);
+                // The scheduler waits up to the CAP, not the base. The provider
+                // runner owns the progress-aware decision to stop between the
+                // two (#692 follow-up); a scheduler that cancelled at the base
+                // would override every extension it granted.
+                let task_cap_timeout_ms =
+                    crate::agent_task_timeout::effective_provider_max_timeout_ms(
+                        crate::agent_task_timeout::effective_provider_timeout_ms(
+                            request.limits.timeout_ms.or(plan.options.timeout_ms),
+                            request.limits.max_runtime_ms,
+                        ),
+                        request.limits.max_timeout_ms,
+                    );
+                let task_cap_timeout_ms =
+                    crate::agent_task_timeout::remaining_execution_deadline_ms(
+                        request.limits.execution_deadline_unix_ms,
+                    )
+                    .map(|remaining| task_cap_timeout_ms.min(remaining))
+                    .unwrap_or(task_cap_timeout_ms)
+                    .max(task_timeout_ms);
+                request.limits.max_timeout_ms = Some(task_cap_timeout_ms);
                 // The scheduler and provider must share one resolved budget.
                 // Without this assignment an inherited/default timeout can
                 // cancel the scheduler while the provider never sees the
@@ -1104,7 +1124,7 @@ impl AgentTaskScheduler {
                     ),
                     attempt,
                     started_at: Instant::now(),
-                    timeout_ms: Some(task_timeout_ms),
+                    timeout_ms: Some(task_cap_timeout_ms),
                     execution_deadline_unix_ms,
                     timeout_cancel_requested: false,
                     rotation_index: scheduled.rotation_index,
