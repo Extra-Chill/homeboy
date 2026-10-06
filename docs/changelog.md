@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.412.0] - 2026-10-06
+
+### Added
+- Retry action carries a timeout override; cook-continue --timeout-ms reserves through it
+
+### Changed
+- publish fixture identity atomically and bound capture
+- retire unscoped baseline fallback and optional scope
+- retire inferred Cargo lifecycle and migration
+- prune retired lifecycle wire absence assertions
+
+### Fixed
+- launch rotation candidate generations resident
+- reconcile cancelled queued generation handoffs
+- publish existing checkout ownership before runtime sealing
+
 ## [0.411.0] - 2026-10-06
 
 ### Added
