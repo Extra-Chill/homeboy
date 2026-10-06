@@ -162,14 +162,9 @@ exit 1
 }
 
 #[test]
-fn full_scope_legacy_baseline_is_compared_with_legacy_provenance() {
+fn full_scope_baseline_writer_and_reader_share_the_same_provenance() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
-        let finding = homeboy_core::finding::HomeboyFinding::builder("eslint", "known finding")
-            .fingerprint("known")
-            .build();
-        crate::extension::lint::baseline::save_baseline(source.path(), "legacy", &[finding])
-            .expect("save legacy baseline");
         let component = routed_lint_component(
             home.path(),
             source.path(),
@@ -179,6 +174,15 @@ exit 1
 "#,
         );
 
+        let mut save_args = lint_args();
+        save_args.baseline_flags.baseline = true;
+        run_main_lint_workflow(
+            &component,
+            source.path(),
+            save_args,
+            &RunDir::create().unwrap(),
+        )
+        .expect("save baseline through the live workflow");
         let workflow = run_main_lint_workflow(
             &component,
             source.path(),
@@ -196,49 +200,51 @@ exit 1
         assert!(provenance.compared);
         assert_eq!(
             provenance.resolution,
-            crate::extension::lint::baseline::LintBaselineResolution::LegacyFull
+            crate::extension::lint::baseline::LintBaselineResolution::Scoped
         );
-        assert_eq!(provenance.baseline_key, "lint");
+        assert!(provenance.baseline_key.starts_with("lint:"));
     });
 }
 
 #[test]
-fn empty_legacy_full_baseline_is_incomparable_instead_of_new_drift() {
+fn unscoped_record_does_not_grant_baseline_comparison_authority() {
     homeboy_core::test_support::with_isolated_home(|home| {
-        let source = tempfile::tempdir().expect("source dir");
-        crate::extension::lint::baseline::save_baseline(source.path(), "legacy", &[])
-            .expect("save empty legacy baseline");
+        let source = tempfile::tempdir().unwrap();
+        let bytes = serde_json::to_vec(&serde_json::json!({"baselines":{"lint":{
+            "created_at":"2026-10-06T00:00:00Z", "context_id":"obsolete", "item_count":1,
+            "known_fingerprints":["known"], "metadata":{"findings_count":1}
+        }}}))
+        .unwrap();
+        let path = source.path().join("homeboy.json");
+        std::fs::write(&path, &bytes).unwrap();
         let component = routed_lint_component(
             home.path(),
             source.path(),
             r#"#!/bin/sh
-printf '[{"tool":"phpcs","message":"standing warning","fingerprint":"standing","file":"src/lib.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpcs","message":"known finding","fingerprint":"known","file":"src/lib.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
 printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
 exit 1
 "#,
         );
-
         let workflow = run_main_lint_workflow(
             &component,
             source.path(),
             lint_args(),
-            &RunDir::create().expect("run dir"),
+            &RunDir::create().unwrap(),
         )
-        .expect("workflow result");
-
-        assert_eq!(workflow.status, "passed");
-        assert_eq!(workflow.exit_code, 0);
+        .unwrap();
         assert!(workflow.baseline_comparison.is_none());
-        let provenance = workflow
-            .baseline_provenance
-            .as_ref()
-            .expect("baseline provenance");
+        let provenance = workflow.baseline_provenance.unwrap();
         assert!(!provenance.compared);
-        assert_eq!(provenance.baseline_key, "lint");
         assert_eq!(
             provenance.resolution,
-            crate::extension::lint::baseline::LintBaselineResolution::LegacyEmptyIncomparable
+            crate::extension::lint::baseline::LintBaselineResolution::Unavailable
         );
+        assert!(provenance.baseline_key.starts_with("lint:"));
+        assert!(
+            crate::extension::lint::baseline::stored_known_fingerprints(source.path()).is_empty()
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     });
 }
 
@@ -259,7 +265,7 @@ fn scoped_empty_full_baseline_still_blocks_a_genuine_increase() {
             source.path(),
             "scoped",
             &[],
-            Some(&provenance),
+            &provenance,
         )
         .expect("save scoped empty baseline");
         let component = routed_lint_component(
@@ -331,8 +337,6 @@ fn accepted_pr_finding_stays_accepted_on_full_default_branch_run() {
         .expect("candidate source");
         run_git(&["add", "."]);
         run_git(&["commit", "-q", "-m", "candidate"]);
-        crate::extension::lint::baseline::save_baseline(source.path(), "legacy", &[])
-            .expect("save empty legacy baseline");
         let component = routed_lint_component(
             home.path(),
             source.path(),
@@ -373,9 +377,7 @@ exit 1
             push.baseline_provenance
                 .as_ref()
                 .map(|provenance| &provenance.resolution),
-            Some(
-                &crate::extension::lint::baseline::LintBaselineResolution::LegacyEmptyIncomparable
-            )
+            Some(&crate::extension::lint::baseline::LintBaselineResolution::Unavailable)
         );
     });
 }
@@ -525,7 +527,7 @@ fn changed_since_gate_treats_full_scope_stored_baseline_findings_as_known() {
             source.path(),
             "fixture",
             &[standing],
-            Some(&full),
+            &full,
         )
         .expect("save full-scope baseline");
 
@@ -598,7 +600,7 @@ exit 1
             source.path(),
             "fixture",
             seed.findings.as_deref().expect("seed findings"),
-            Some(provenance),
+            provenance,
         )
         .expect("save matching baseline");
 
@@ -788,8 +790,22 @@ fn accepted_baseline_does_not_hide_later_route_producer_error() {
             .fingerprint("known")
             .build();
         known.location.file = Some("assets/app.js".to_string());
-        crate::extension::lint::baseline::save_baseline(source.path(), "fixture", &[known])
-            .expect("save baseline");
+        let full = crate::extension::lint::baseline::LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["phpcs".into()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        crate::extension::lint::baseline::save_baseline_for_scope(
+            source.path(),
+            "fixture",
+            &[known],
+            &full,
+        )
+        .expect("save baseline");
         let component = routed_lint_component(
             home.path(),
             source.path(),

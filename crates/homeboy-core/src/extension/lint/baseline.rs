@@ -34,8 +34,6 @@ pub struct LintBaselineMetadata {
 pub enum LintBaselineResolution {
     Unavailable,
     Scoped,
-    LegacyFull,
-    LegacyEmptyIncomparable,
     GitBase,
 }
 
@@ -100,15 +98,6 @@ impl LintBaselineProvenance {
             exclude_sniffs,
         }
     }
-
-    fn permits_legacy_full_baseline(&self) -> bool {
-        self.scope == "full"
-            && self.files.is_empty()
-            && self.category.is_none()
-            && !self.errors_only
-            && self.sniffs.is_none()
-            && self.exclude_sniffs.is_none()
-    }
 }
 
 struct LintFingerprint<'a>(&'a HomeboyFinding);
@@ -136,13 +125,8 @@ impl Fingerprintable for LintFingerprint<'_> {
 pub type LintBaseline = generic::Baseline<LintBaselineMetadata>;
 pub type BaselineComparison = generic::Comparison;
 
-fn config(source_path: &Path, provenance: Option<&LintBaselineProvenance>) -> BaselineConfig {
-    BaselineConfig::new(
-        source_path,
-        provenance
-            .map(|provenance| provenance.baseline_key.as_str())
-            .unwrap_or(BASELINE_KEY),
-    )
+fn config(source_path: &Path, provenance: &LintBaselineProvenance) -> BaselineConfig {
+    BaselineConfig::new(source_path, &provenance.baseline_key)
 }
 
 pub fn parse_findings_file(path: &Path) -> homeboy_core::error::Result<Vec<HomeboyFinding>> {
@@ -195,19 +179,11 @@ pub fn parse_findings_file(path: &Path) -> homeboy_core::error::Result<Vec<Homeb
         .collect())
 }
 
-pub fn save_baseline(
-    source_path: &Path,
-    component_id: &str,
-    findings: &[HomeboyFinding],
-) -> homeboy_core::error::Result<std::path::PathBuf> {
-    save_baseline_for_scope(source_path, component_id, findings, None)
-}
-
 pub fn save_baseline_for_scope(
     source_path: &Path,
     component_id: &str,
     findings: &[HomeboyFinding],
-    provenance: Option<&LintBaselineProvenance>,
+    provenance: &LintBaselineProvenance,
 ) -> homeboy_core::error::Result<std::path::PathBuf> {
     let config = config(source_path, provenance);
     let metadata = LintBaselineMetadata {
@@ -217,42 +193,12 @@ pub fn save_baseline_for_scope(
     generic::save(&config, component_id, &items, metadata)
 }
 
-pub fn load_baseline(source_path: &Path) -> Option<LintBaseline> {
-    load_baseline_for_scope(source_path, None)
-}
-
 pub fn load_baseline_for_scope(
     source_path: &Path,
-    provenance: Option<&LintBaselineProvenance>,
+    provenance: &LintBaselineProvenance,
 ) -> Option<LintBaseline> {
     let config = config(source_path, provenance);
     generic::load::<LintBaselineMetadata>(&config).unwrap_or_default()
-}
-
-/// Load the scope-specific baseline, falling back to the pre-scope full-tree
-/// baseline only when this run measures that same unfiltered population.
-pub fn load_baseline_for_scope_or_legacy_full(
-    source_path: &Path,
-    provenance: &mut LintBaselineProvenance,
-) -> Option<LintBaseline> {
-    if let Some(baseline) = load_baseline_for_scope(source_path, Some(provenance)) {
-        provenance.resolution = LintBaselineResolution::Scoped;
-        return Some(baseline);
-    }
-
-    if provenance.permits_legacy_full_baseline() {
-        if let Some(baseline) = load_baseline(source_path) {
-            provenance.baseline_key = BASELINE_KEY.to_string();
-            if baseline.known_fingerprints.is_empty() {
-                provenance.resolution = LintBaselineResolution::LegacyEmptyIncomparable;
-                return None;
-            }
-            provenance.resolution = LintBaselineResolution::LegacyFull;
-            return Some(baseline);
-        }
-    }
-
-    None
 }
 
 pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> BaselineComparison {
@@ -270,7 +216,7 @@ pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> Baseline
 /// findings and are scope-independent: a finding present in any stored baseline
 /// is pre-existing debt no matter which files the current run happened to scope.
 pub fn stored_known_fingerprints(source_path: &Path) -> HashSet<String> {
-    let json_path = config(source_path, None).json_path();
+    let json_path = BaselineConfig::new(source_path, BASELINE_KEY).json_path();
     let Ok(content) = std::fs::read_to_string(&json_path) else {
         return HashSet::new();
     };
@@ -282,9 +228,7 @@ pub fn stored_known_fingerprints(source_path: &Path) -> HashSet<String> {
     };
     baselines
         .iter()
-        .filter(|(key, _)| {
-            key.as_str() == BASELINE_KEY || key.starts_with(&format!("{BASELINE_KEY}:"))
-        })
+        .filter(|(key, _)| key.starts_with(&format!("{BASELINE_KEY}:")))
         .filter_map(|(_, baseline)| baseline.get("known_fingerprints")?.as_array())
         .flatten()
         .filter_map(|fingerprint| fingerprint.as_str().map(str::to_string))
@@ -389,6 +333,18 @@ fn normalize_legacy_lint_finding(finding: &mut serde_json::Value) {
 mod tests {
     use super::*;
 
+    fn full_scope() -> LintBaselineProvenance {
+        LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["lint".into()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        )
+    }
+
     fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {
         HomeboyFinding::builder("lint", message)
             .category(category)
@@ -423,7 +379,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let finding = lint_finding("id-1", "security", "message");
 
-        let saved = save_baseline(dir.path(), "homeboy", &[finding]).expect("baseline saved");
+        let saved = save_baseline_for_scope(dir.path(), "homeboy", &[finding], &full_scope())
+            .expect("baseline saved");
 
         assert!(saved.exists());
     }
@@ -432,9 +389,10 @@ mod tests {
     fn test_load_baseline() {
         let dir = tempfile::tempdir().expect("temp dir");
         let finding = lint_finding("id-1", "security", "message");
-        save_baseline(dir.path(), "homeboy", &[finding]).expect("baseline saved");
+        save_baseline_for_scope(dir.path(), "homeboy", &[finding], &full_scope())
+            .expect("baseline saved");
 
-        let loaded = load_baseline(dir.path()).expect("baseline loaded");
+        let loaded = load_baseline_for_scope(dir.path(), &full_scope()).expect("baseline loaded");
 
         assert_eq!(loaded.context_id, "homeboy");
         assert_eq!(loaded.item_count, 1);
@@ -461,9 +419,9 @@ mod tests {
     }
 
     #[test]
-    fn scoped_full_baseline_is_preferred_over_legacy_baseline() {
+    fn scoped_full_baseline_is_loaded_by_exact_population() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut provenance = LintBaselineProvenance::new(
+        let provenance = LintBaselineProvenance::new(
             Vec::new(),
             vec!["eslint".to_string()],
             "full",
@@ -472,86 +430,31 @@ mod tests {
             None,
             None,
         );
-        save_baseline(
-            dir.path(),
-            "legacy",
-            &[lint_finding("legacy", "lint", "legacy")],
-        )
-        .expect("save legacy baseline");
         save_baseline_for_scope(
             dir.path(),
             "scoped",
             &[lint_finding("scoped", "lint", "scoped")],
-            Some(&provenance),
+            &provenance,
         )
         .expect("save scoped baseline");
 
-        let baseline = load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance)
-            .expect("load scoped baseline");
+        let baseline =
+            load_baseline_for_scope(dir.path(), &provenance).expect("load scoped baseline");
 
         assert_eq!(baseline.context_id, "scoped");
-        assert_eq!(provenance.resolution, LintBaselineResolution::Scoped);
         assert_ne!(provenance.baseline_key, BASELINE_KEY);
     }
 
     #[test]
-    fn equivalent_full_scope_falls_back_to_legacy_baseline() {
+    fn different_populations_do_not_share_a_baseline() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut provenance = LintBaselineProvenance::new(
-            Vec::new(),
-            vec!["eslint".to_string()],
-            "full",
-            None,
-            false,
-            None,
-            None,
-        );
-        save_baseline(
+        save_baseline_for_scope(
             dir.path(),
-            "legacy",
-            &[lint_finding("legacy", "lint", "legacy")],
-        )
-        .expect("save legacy baseline");
-
-        let baseline = load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance)
-            .expect("load legacy baseline");
-
-        assert_eq!(baseline.context_id, "legacy");
-        assert_eq!(provenance.resolution, LintBaselineResolution::LegacyFull);
-        assert_eq!(provenance.baseline_key, BASELINE_KEY);
-    }
-
-    #[test]
-    fn empty_legacy_baseline_is_explicitly_incomparable() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut provenance = LintBaselineProvenance::new(
-            Vec::new(),
-            vec!["eslint".to_string()],
             "full",
-            None,
-            false,
-            None,
-            None,
-        );
-        save_baseline(dir.path(), "legacy", &[]).expect("save empty legacy baseline");
-
-        assert!(load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance).is_none());
-        assert_eq!(provenance.baseline_key, BASELINE_KEY);
-        assert_eq!(
-            provenance.resolution,
-            LintBaselineResolution::LegacyEmptyIncomparable
-        );
-    }
-
-    #[test]
-    fn scoped_or_filtered_runs_do_not_fall_back_to_legacy_baseline() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        save_baseline(
-            dir.path(),
-            "legacy",
-            &[lint_finding("legacy", "lint", "legacy")],
+            &[lint_finding("full", "lint", "full")],
+            &full_scope(),
         )
-        .expect("save legacy baseline");
+        .expect("save full-scope baseline");
         let cases = [
             (
                 vec!["changed.rs".to_string()],
@@ -605,7 +508,7 @@ mod tests {
         ];
 
         for (files, scope, category, errors_only, sniffs, exclude_sniffs) in cases {
-            let mut provenance = LintBaselineProvenance::new(
+            let provenance = LintBaselineProvenance::new(
                 files,
                 vec!["eslint".to_string()],
                 scope,
@@ -616,7 +519,7 @@ mod tests {
             );
             let scoped_key = provenance.baseline_key.clone();
 
-            assert!(load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance).is_none());
+            assert!(load_baseline_for_scope(dir.path(), &provenance).is_none());
             assert_eq!(provenance.baseline_key, scoped_key);
         }
     }
@@ -639,7 +542,7 @@ mod tests {
             lint_finding("b", "style", "b"),
             lint_finding("c", "style", "c"),
         ];
-        save_baseline_for_scope(dir.path(), "full", &stored, Some(&full)).expect("save baseline");
+        save_baseline_for_scope(dir.path(), "full", &stored, &full).expect("save baseline");
 
         // A release gate runs scoped to the changed files: its key differs.
         let scoped = LintBaselineProvenance::new(
@@ -652,7 +555,7 @@ mod tests {
             None,
         );
         assert_ne!(scoped.baseline_key, full.baseline_key);
-        assert!(load_baseline_for_scope(dir.path(), Some(&scoped)).is_none());
+        assert!(load_baseline_for_scope(dir.path(), &scoped).is_none());
 
         // Git-base measurement found nothing, so everything looks new.
         let current = vec![
@@ -672,8 +575,13 @@ mod tests {
     #[test]
     fn stored_baseline_does_not_hide_genuinely_new_findings() {
         let dir = tempfile::tempdir().expect("temp dir");
-        save_baseline(dir.path(), "legacy", &[lint_finding("a", "style", "a")])
-            .expect("save baseline");
+        save_baseline_for_scope(
+            dir.path(),
+            "full",
+            &[lint_finding("a", "style", "a")],
+            &full_scope(),
+        )
+        .expect("save baseline");
 
         let current = vec![
             lint_finding("a", "style", "a"),
@@ -694,7 +602,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             dir.path().join("homeboy.json"),
-            r#"{"baselines":{"audit":{"known_fingerprints":["audit-1"]},"lint:abc":{"known_fingerprints":["lint-1"]}}}"#,
+            r#"{"baselines":{"audit":{"known_fingerprints":["audit-1"]},"lint":{"known_fingerprints":["unscoped-1"]},"lint:abc":{"known_fingerprints":["lint-1"]}}}"#,
         )
         .expect("write homeboy.json");
 
