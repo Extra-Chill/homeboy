@@ -36,6 +36,7 @@ use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 use homeboy::core::Error;
+use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
 use super::{
@@ -332,7 +333,9 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         None => None,
     }
     .or_else(|| {
-        agent_task_lifecycle::reconcile_status(source_spec)
+        // Only the resolved run id is needed; reconciling here wrote state as a
+        // side effect of identifying the source.
+        agent_task_lifecycle::status(source_spec)
             .ok()
             .map(|record| record.run_id)
     });
@@ -3052,16 +3055,6 @@ fn provider_full_command(args: &ProvidersArgs) -> String {
         }
     }
     command
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {

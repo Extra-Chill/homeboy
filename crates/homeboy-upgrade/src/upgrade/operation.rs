@@ -58,6 +58,8 @@ pub struct UpgradeOperationStatus {
 pub struct UpgradeOperationFailure {
     pub phase: String,
     pub predicate: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
     pub elapsed_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u128>,
@@ -1086,6 +1088,11 @@ fn failure_from_metadata(metadata: &Value, status: &str) -> Option<UpgradeOperat
     Some(UpgradeOperationFailure {
         phase,
         predicate,
+        cause: metadata
+            .pointer("/error/details/cause")
+            .or_else(|| metadata.pointer("/error/details/error"))
+            .and_then(Value::as_str)
+            .map(super::execution::bounded_upgrade_cause),
         elapsed_seconds,
         budget_ms,
         expected_identity,
@@ -1105,6 +1112,10 @@ fn failure_from_error(error: &Error, elapsed_seconds: u64) -> Option<UpgradeOper
             .unwrap_or("failed")
             .to_string(),
         predicate,
+        cause: details
+            .get("cause")
+            .and_then(Value::as_str)
+            .map(super::execution::bounded_upgrade_cause),
         elapsed_seconds,
         budget_ms: details
             .get("budget_ms")
@@ -1113,9 +1124,22 @@ fn failure_from_error(error: &Error, elapsed_seconds: u64) -> Option<UpgradeOper
         expected_identity: None,
         observed_identity: None,
         diagnostic_references: details
-            .get("recovery")
-            .and_then(Value::as_str)
-            .map(|recovery| vec![recovery.to_string()])
+            .get("diagnostic_references")
+            .and_then(Value::as_array)
+            .map(|references| {
+                references
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .take(8)
+                    .map(super::execution::bounded_upgrade_cause)
+                    .collect()
+            })
+            .or_else(|| {
+                details
+                    .get("recovery")
+                    .and_then(Value::as_str)
+                    .map(|recovery| vec![super::execution::bounded_upgrade_cause(recovery)])
+            })
             .unwrap_or_default(),
         runners: Vec::new(),
     })
@@ -1155,6 +1179,7 @@ fn failure_from_result(
     Some(UpgradeOperationFailure {
         phase: "completed".to_string(),
         predicate: "runner_post_swap_verification".to_string(),
+        cause: None,
         elapsed_seconds,
         budget_ms: None,
         expected_identity: result.new_build_identity.clone(),

@@ -25,7 +25,6 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
             r#ref: None,
             default_ref: None,
             extensions: None,
-            dependency_cache: None,
         },
     );
 
@@ -47,7 +46,6 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
         trace_workloads: Default::default(),
         fuzz_workloads: Default::default(),
         trace_workload_defaults: Default::default(),
-        trace_phase_templates: Default::default(),
         trace_variants: Default::default(),
         trace_profiles: Default::default(),
         trace_experiments: Default::default(),
@@ -63,7 +61,6 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
             preflight: vec![AppLauncherPreflight::RigCheck],
             on_preflight_fail: Some("dialog-and-open-terminal".to_string()),
         }),
-        toolchain: None,
     }
 }
 

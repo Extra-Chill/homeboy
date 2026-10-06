@@ -840,15 +840,34 @@ fn run_materialized_provider_command_once_contained(
     let requested_timeout_ms = deadline_remaining_ms
         .map(|remaining| attempt_timeout_ms.min(remaining))
         .unwrap_or(attempt_timeout_ms);
+    // `requested_timeout_ms` is the BASE deadline. A provider still making
+    // progress when it arrives is extended in steps up to this cap rather
+    // than killed mid-edit; see `extended_provider_deadline_ms`. The cap,
+    // like the base, never outruns an absolute execution deadline.
+    let cap_timeout_ms = crate::agent_task_timeout::effective_provider_max_timeout_ms(
+        attempt_timeout_ms,
+        request.limits.max_timeout_ms,
+    );
+    let cap_timeout_ms = deadline_remaining_ms
+        .map(|remaining| cap_timeout_ms.min(remaining))
+        .unwrap_or(cap_timeout_ms)
+        .max(requested_timeout_ms);
     // Grace is for a per-attempt timeout only. An absolute execution deadline
-    // must not be extended by a process-local cleanup allowance.
+    // must not be extended by a process-local cleanup allowance. It applies at
+    // the cap, the one deadline the provider itself also enforces.
     let process_timeout = if deadline_remaining_ms.is_some() {
-        Duration::from_millis(requested_timeout_ms)
+        Duration::from_millis(cap_timeout_ms)
     } else {
-        timeout_with_grace(requested_timeout_ms)
+        timeout_with_grace(cap_timeout_ms)
     };
     let mut provider_request = request.clone();
-    provider_request.request.limits.timeout_ms = Some(requested_timeout_ms);
+    // The provider's own timer runs to the cap, not the base. Executors
+    // enforce `timeout_ms` themselves (the OpenCode executor's setTimeout
+    // fired first in the #692 Cook), so handing them the base would kill a
+    // busy agent before Homeboy could decide to extend it. Homeboy owns the
+    // earlier, progress-aware decision.
+    provider_request.request.limits.timeout_ms = Some(cap_timeout_ms);
+    provider_request.request.limits.max_timeout_ms = Some(cap_timeout_ms);
     provider_request.request.normalize_artifact_declarations();
     if let Err(error) = project_output_declarations_for_provider(&mut provider_request.request) {
         return failure_outcome(
@@ -1219,6 +1238,25 @@ fn run_materialized_provider_command_once_contained(
         WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS,
         WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS,
     );
+    // Progress-aware wall clock. `current_deadline_ms` starts at the base and
+    // moves toward the cap only while progress keeps arriving.
+    let extension_recent_progress_ms =
+        crate::agent_task_timeout::PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS
+            .min(liveness_timeout_ms);
+    let mut current_deadline_ms = requested_timeout_ms;
+    let mut timeout_extensions: u32 = 0;
+    // Every wall-clock stop keeps the same grace the fixed deadline always
+    // had (none under an absolute execution deadline), so a provider racing
+    // to serialize its own outcome at the deadline still can.
+    let kill_at = |deadline_ms: u64| {
+        if deadline_ms >= cap_timeout_ms {
+            process_timeout
+        } else if deadline_remaining_ms.is_some() {
+            Duration::from_millis(deadline_ms)
+        } else {
+            timeout_with_grace(deadline_ms)
+        }
+    };
     let (status, killed_for_liveness, timed_out, cancelled) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (Some(status), false, false, false),
@@ -1267,8 +1305,29 @@ fn run_materialized_provider_command_once_contained(
                         );
                     }
                 }
-                if elapsed >= process_timeout {
-                    break (None, false, true, false);
+                if elapsed >= kill_at(current_deadline_ms) {
+                    // `last_progress_ms` starts at zero, the spawn instant. A
+                    // provider that has never produced anything has shown no
+                    // progress to extend, however early its deadline falls.
+                    let last_progress = last_progress_ms.load(Ordering::SeqCst);
+                    let extension = (last_progress > 0)
+                        .then(|| {
+                            crate::agent_task_timeout::extended_provider_deadline_ms(
+                                current_deadline_ms,
+                                elapsed_ms,
+                                last_progress,
+                                cap_timeout_ms,
+                                extension_recent_progress_ms,
+                            )
+                        })
+                        .flatten();
+                    match extension {
+                        Some(extended) => {
+                            current_deadline_ms = extended;
+                            timeout_extensions = timeout_extensions.saturating_add(1);
+                        }
+                        None => break (None, false, true, false),
+                    }
                 }
                 if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
@@ -1280,7 +1339,7 @@ fn run_materialized_provider_command_once_contained(
                     // Wake up at the earlier of process timeout and liveness deadline.
                     let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
-                        .min(process_timeout - elapsed)
+                        .min(kill_at(current_deadline_ms).saturating_sub(elapsed))
                         .min(Duration::from_millis(50));
                     if sleep_for > Duration::ZERO {
                         std::thread::sleep(sleep_for);
@@ -1381,22 +1440,41 @@ fn run_materialized_provider_command_once_contained(
             AgentTaskOutcomeStatus::Timeout,
             AgentTaskFailureClassification::Timeout,
             "agent_task.provider_timeout",
-            format!(
-                "provider '{}' exceeded timeout_ms={}",
-                provider.id, requested_timeout_ms
-            ),
-            provider_timeout_diagnostic_data(
-                request,
-                provider,
-                &command,
-                run_id,
-                requested_timeout_ms,
-                process_timeout.as_millis(),
-                liveness_timeout_ms,
-                cancellation_acknowledged,
-                &stdout_capture,
-                &stderr_capture,
-            ),
+            if timeout_extensions == 0 {
+                format!(
+                    "provider '{}' exceeded timeout_ms={}",
+                    provider.id, requested_timeout_ms
+                )
+            } else {
+                format!(
+                    "provider '{}' exceeded timeout_ms={} after {} progress extension(s) to {}ms (cap {}ms)",
+                    provider.id,
+                    requested_timeout_ms,
+                    timeout_extensions,
+                    current_deadline_ms,
+                    cap_timeout_ms
+                )
+            },
+            {
+                let mut data = provider_timeout_diagnostic_data(
+                    request,
+                    provider,
+                    &command,
+                    run_id,
+                    requested_timeout_ms,
+                    process_timeout.as_millis(),
+                    liveness_timeout_ms,
+                    cancellation_acknowledged,
+                    &stdout_capture,
+                    &stderr_capture,
+                );
+                // `timeout_ms` stays the base so a retry's "--timeout-ms must
+                // exceed the previous budget" check compares like with like.
+                data["timeout_cap_ms"] = json!(cap_timeout_ms);
+                data["timeout_extensions"] = json!(timeout_extensions);
+                data["effective_timeout_ms"] = json!(current_deadline_ms);
+                data
+            },
         );
     }
     let Some(status) = status else {
@@ -3119,16 +3197,6 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
     run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, None)
-}
-
-#[cfg(test)]
-pub(crate) fn run_provider_readiness_invocation_with_test_timeout_and_mode(
-    provider: &AgentTaskExecutorProvider,
-    effective_config: &Value,
-    timeout: Duration,
-    mode: Option<&str>,
-) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, mode)
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {

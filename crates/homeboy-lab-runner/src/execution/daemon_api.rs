@@ -5,10 +5,13 @@ use reqwest::blocking::RequestBuilder;
 use reqwest::header::CONNECTION;
 use serde_json::{json, Value};
 
-use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::error::{Error, Result};
 
 use super::super::broker_http;
-use super::super::daemon_http_get::{daemon_get, parse_daemon_response_json};
+use super::super::daemon_http_get::{
+    classify_reqwest_error, daemon_get, daemon_transport_error, parse_daemon_response_json,
+    DaemonHttpErrorKind,
+};
 use super::super::{load, status, RunnerSession, RunnerTunnelMode};
 
 #[allow(unused_imports)]
@@ -16,25 +19,6 @@ use super::*;
 
 fn unsupported_daemon_api_method(method: &str) -> Error {
     Error::internal_unexpected(format!("unsupported daemon API method {method}"))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DaemonHttpErrorKind {
-    Connect,
-    Timeout,
-    Status,
-    BodyDecode,
-}
-
-impl DaemonHttpErrorKind {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            DaemonHttpErrorKind::Connect => "connect",
-            DaemonHttpErrorKind::Timeout => "timeout",
-            DaemonHttpErrorKind::Status => "status",
-            DaemonHttpErrorKind::BodyDecode => "body_decode",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -54,38 +38,6 @@ pub fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a V
 
 fn reverse_broker_daemon_data(body: Value) -> Value {
     json!({ "body": body })
-}
-
-pub(super) fn daemon_transport_error(
-    kind: DaemonHttpErrorKind,
-    path: &str,
-    status_code: Option<u16>,
-    context: &str,
-    error: impl Into<String>,
-) -> Error {
-    let mut err = Error::new(
-        ErrorCode::InternalUnexpected,
-        format!("{context}: {}", error.into()),
-        json!({
-            "daemon_transport_error": {
-                "kind": kind.as_str(),
-                "path": path,
-                "http_status": status_code,
-            }
-        }),
-    );
-    err.retryable = Some(true);
-    err
-}
-
-fn classify_reqwest_error(err: &reqwest::Error) -> DaemonHttpErrorKind {
-    if err.is_timeout() {
-        DaemonHttpErrorKind::Timeout
-    } else if err.is_connect() {
-        DaemonHttpErrorKind::Connect
-    } else {
-        DaemonHttpErrorKind::Status
-    }
 }
 
 fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions) -> RequestBuilder {
@@ -438,7 +390,10 @@ mod tests {
         .expect_err("typed daemon error");
         server.join().expect("daemon fixture server");
 
-        assert_eq!(error.code, ErrorCode::InternalJsonError);
+        assert_eq!(
+            error.code,
+            homeboy_core::error::ErrorCode::InternalJsonError
+        );
         assert_eq!(error.details["phase"], "lab_staging_submission");
         assert_eq!(error.hints[0].message, "repair the staging record");
     }

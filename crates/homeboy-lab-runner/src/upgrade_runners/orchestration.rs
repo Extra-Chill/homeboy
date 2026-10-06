@@ -577,6 +577,7 @@ pub(crate) fn upgrade_configured_runners(
     force: bool,
     method_override: Option<InstallMethod>,
     source_path: Option<&Path>,
+    expected_controller_identity: Option<&str>,
     runner_targets: &[String],
     extension_updates: &[ExtensionUpgradeEntry],
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
@@ -591,15 +592,26 @@ pub(crate) fn upgrade_configured_runners(
         "Updating {} configured runner(s)...",
         runners.len()
     );
+    // The installed controller identity, not this (possibly pre-upgrade)
+    // process's own build, is what configured runners converge to — and what
+    // their compatibility is judged against, or a runner that converged to the
+    // installed controller reads as skewed from the old one (#15552).
     let upgrade = || {
-        Ok(upgrade_runners_with_executor(
-            &runners,
-            force,
-            method_override,
-            source_path,
-            extension_updates,
-            runner::exec,
-            runner::status,
+        Ok(crate::controller_identity::with_converging_controller(
+            expected_controller_identity,
+            || {
+                upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+                    &runners,
+                    force,
+                    method_override,
+                    source_path,
+                    extension_updates,
+                    runner::exec,
+                    runner::status,
+                    materialize_runner_source_path,
+                    expected_controller_identity,
+                )
+            },
         ))
     };
     match promotion_lease {
@@ -633,6 +645,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
             force,
             method_override,
             source_path,
+            expected_controller_identity,
             runner_targets,
             extension_updates,
             promotion_lease,
@@ -690,6 +703,7 @@ pub(crate) fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Ru
         .collect())
 }
 
+#[cfg(test)]
 pub fn upgrade_runners_with_executor(
     runners: &[Runner],
     force: bool,
@@ -711,6 +725,7 @@ pub fn upgrade_runners_with_executor(
     )
 }
 
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "Compatibility entry point exposes separately injectable upgrade operations for focused tests."
@@ -881,6 +896,7 @@ pub fn upgrade_runner_with_executor(
             original_homeboy_path,
             previous_version,
             selected_source_revision.as_deref(),
+            expected_controller_identity,
             extension_updates,
             exec,
         );
@@ -1299,12 +1315,14 @@ fn refresh_managed_immutable_runner(
     previous_homeboy_path: String,
     previous_version: Option<String>,
     selected_source_revision: Option<&str>,
+    expected_controller_identity: Option<&str>,
     extension_updates: &[ExtensionUpgradeEntry],
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> RunnerUpgradeEntry {
-    let Some(controller_commit) =
-        managed_immutable_runner_target_revision(selected_source_revision)
-    else {
+    let Some(controller_commit) = managed_immutable_runner_target_revision(
+        selected_source_revision,
+        expected_controller_identity,
+    ) else {
         return managed_immutable_runner_failure_entry(
             &runner.id,
             previous_homeboy_path,
@@ -1435,12 +1453,33 @@ fn refresh_managed_immutable_runner(
     }
 }
 
+/// The commit a managed immutable runner converges to: an explicitly selected
+/// source revision, else the commit of the controller the upgrade installed,
+/// else this process's own build.
+///
+/// `homeboy upgrade` runs its runner phase in the pre-upgrade process. Falling
+/// straight back to this process's build commit refreshed runners to the
+/// version being replaced, and its recovery command named that old commit too.
 pub(super) fn managed_immutable_runner_target_revision(
     selected_source_revision: Option<&str>,
+    expected_controller_identity: Option<&str>,
 ) -> Option<String> {
     selected_source_revision
         .map(str::to_string)
+        .or_else(|| {
+            expected_controller_identity
+                .and_then(build_identity_commit)
+                .map(str::to_string)
+        })
         .or_else(|| homeboy_product_identity::build_identity().git_commit)
+}
+
+/// The commit in a `homeboy <version>+<commit>[-dirty]` build identity.
+fn build_identity_commit(identity: &str) -> Option<&str> {
+    let commit = identity.rsplit_once('+')?.1;
+    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
+    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(commit)
 }
 
 pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {

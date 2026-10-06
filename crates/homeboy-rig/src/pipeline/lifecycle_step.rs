@@ -21,7 +21,6 @@ use super::super::spec::{
 };
 use super::super::state::RigStateStore;
 use super::super::state::{now_rfc3339, LifecycleSnapshotState};
-use super::super::toolchain;
 use super::labels::serialize_lifecycle_op;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lifecycle::{
@@ -433,7 +432,7 @@ fn phase_env(
 ) -> Vec<(String, String)> {
     let mut env = Vec::new();
 
-    if let Some(path) = toolchain::command_step_path(Some(rig)) {
+    if let Some(path) = homeboy_engine_primitives::command_path::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().into_owned()));
     }
 

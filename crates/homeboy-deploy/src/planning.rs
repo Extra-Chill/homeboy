@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
@@ -524,7 +523,8 @@ impl GitProbeCache {
         }
 
         component_git_root(component).is_some_and(|git_root| {
-            git_output(Path::new(&git_root), &["branch", "--show-current"]).is_none()
+            homeboy_core::git::output_optional(Path::new(&git_root), &["branch", "--show-current"])
+                .is_none()
         })
     }
 
@@ -558,7 +558,9 @@ impl GitProbeCache {
         };
 
         let path = Path::new(&git_root);
-        if git_output(path, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_some() {
+        if homeboy_core::git::output_optional(path, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .is_some()
+        {
             return false;
         }
 
@@ -566,7 +568,7 @@ impl GitProbeCache {
             return false;
         };
 
-        git_output(
+        homeboy_core::git::output_optional(
             path,
             &[
                 "rev-list",
@@ -640,21 +642,6 @@ fn fetch_default_remote(path: &Path) {
         &[],
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     );
-}
-
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!value.is_empty()).then_some(value)
-        })
 }
 
 /// Calculate release state for a component.

@@ -2,8 +2,12 @@ use super::*;
 
 #[test]
 fn daemon_job_context_error_preserves_in_flight_job_details() {
-    let source = Error::internal_unexpected(
-        "query runner daemon: error sending request for url (http://127.0.0.1:63203/jobs/job-123)",
+    let source = crate::daemon_http_get::daemon_transport_error(
+        crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+        "/jobs/job-123",
+        None,
+        "query runner daemon",
+        "connection refused",
     )
     .with_hint("original hint");
 

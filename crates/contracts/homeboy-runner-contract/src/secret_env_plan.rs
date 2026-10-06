@@ -1092,17 +1092,14 @@ mod tests {
         }]);
 
         let env_plan = plan.to_env_materialization_plan();
-        let json = serde_json::to_string(&env_plan).expect("serializes env materialization plan");
-
-        assert!(json.contains("SERVICE_TOKEN"));
-        assert!(json.contains("SOURCE_SERVICE_TOKEN"));
-        assert!(!json.contains("secret-value"));
+        let json = serde_json::to_value(&env_plan).expect("serializes env materialization plan");
         assert_eq!(
-            env_plan.source_env_bindings,
-            vec![EnvSourceEnvBinding {
-                name: "SERVICE_TOKEN".to_string(),
-                source_env_refs: vec!["SOURCE_SERVICE_TOKEN".to_string()],
-            }]
+            json,
+            serde_json::json!({
+                "schema": "homeboy/env-materialization-plan/v1",
+                "secret_refs": [{"name": "SERVICE_TOKEN"}, {"name": "SOURCE_SERVICE_TOKEN"}],
+                "source_env_bindings": [{"name": "SERVICE_TOKEN", "source_env_refs": ["SOURCE_SERVICE_TOKEN"]}]
+            })
         );
     }
 
@@ -1441,10 +1438,13 @@ mod tests {
         let resolved = resolver
             .resolve_plan(&plan, "missing required secret env")
             .expect("fallback source resolves");
+        assert_eq!(
+            resolved.env,
+            vec![("API_TOKEN".to_string(), "secret-value".to_string())]
+        );
         let handoff = SecretEnvMaterializedHandoff::from_resolution(&plan, &resolved);
         let serialized = serde_json::to_string(&handoff).expect("handoff json");
 
-        assert_eq!(handoff.schema, SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA);
         assert_eq!(
             handoff.env,
             vec![SecretEnvMaterializedHandoffEnv {
@@ -1458,9 +1458,36 @@ mod tests {
             handoff.diagnostics.status[0].missing_source_env_names,
             vec!["PRIMARY_API_TOKEN".to_string()]
         );
-        assert!(serialized.contains("API_TOKEN"));
-        assert!(serialized.contains("test-env"));
+        let wire = serde_json::to_value(&handoff).expect("handoff wire metadata");
+        assert_eq!(wire["schema"], "homeboy/secret-env-materialized-handoff/v1");
+        assert_eq!(
+            wire["env"],
+            serde_json::json!([{"name": "API_TOKEN", "source": "test-env",
+            "source_env_name": "FALLBACK_API_TOKEN"}])
+        );
         assert!(!serialized.contains("secret-value"));
+
+        let mut env_plan = plan.to_env_materialization_plan();
+        env_plan.secret_refs[0].owner = Some("runner".to_string());
+        env_plan.materialized_handoff = Some(
+            crate::env_materialization_plan::EnvMaterializedHandoffMetadata {
+                handoff_ref: "runner-artifact://run/env-handoff.json".to_string(),
+                artifact_ref: Some("artifact://env-handoff".to_string()),
+                env_names: vec!["API_TOKEN".to_string()],
+            },
+        );
+        let wire = serde_json::to_value(&env_plan).expect("public materialization metadata");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "schema": "homeboy/env-materialization-plan/v1",
+            "secret_refs": [{"name": "API_TOKEN", "owner": "runner"}, {"name": "FALLBACK_API_TOKEN"}, {"name": "PRIMARY_API_TOKEN"}],
+                "source_env_bindings": [{"name": "API_TOKEN", "source_env_refs": ["FALLBACK_API_TOKEN", "PRIMARY_API_TOKEN"]}],
+                "materialized_handoff": {"handoff_ref": "runner-artifact://run/env-handoff.json",
+                    "artifact_ref": "artifact://env-handoff", "env_names": ["API_TOKEN"]}
+            })
+        );
+        assert!(!wire.to_string().contains("secret-value"));
     }
 
     #[test]
@@ -1493,9 +1520,16 @@ mod tests {
             handoff.diagnostics.status[0].missing_source_env_names,
             vec!["SOURCE_API_TOKEN".to_string()]
         );
-        assert!(serialized.contains("SOURCE_API_TOKEN"));
-        assert!(!serialized.contains("secret-value"));
-        assert!(!serialized.contains("super-secret"));
+        let wire: serde_json::Value =
+            serde_json::from_str(&serialized).expect("handoff wire metadata");
+        assert_eq!(
+            wire["missing_secret_env_names"],
+            serde_json::json!(["API_TOKEN"])
+        );
+        assert_eq!(
+            wire["diagnostics"]["status"][0]["missing_source_env_names"],
+            serde_json::json!(["SOURCE_API_TOKEN"])
+        );
     }
 
     #[test]
@@ -1545,9 +1579,16 @@ mod tests {
             ]
         );
         let serialized = serde_json::to_string(&diagnostics).expect("diagnostics json");
-        assert!(serialized.contains("PRIMARY_API_TOKEN"));
-        assert!(serialized.contains("FALLBACK_API_TOKEN"));
-        assert!(!serialized.contains("secret-value"));
+        let wire: serde_json::Value =
+            serde_json::from_str(&serialized).expect("diagnostic wire metadata");
+        assert_eq!(
+            wire["status"][0]["source_env_names"],
+            serde_json::json!(["PRIMARY_API_TOKEN", "FALLBACK_API_TOKEN"])
+        );
+        assert_eq!(
+            wire["status"][0]["missing_source_env_names"],
+            serde_json::json!(["PRIMARY_API_TOKEN", "FALLBACK_API_TOKEN"])
+        );
     }
 
     #[test]

@@ -3224,7 +3224,7 @@ enum DeadLeaseJobDisposition {
     TerminalizeDead,
 }
 
-enum LocalChildLiveness {
+pub(crate) enum LocalChildLiveness {
     Live,
     Dead,
     IdentityMismatch,

@@ -75,6 +75,8 @@ homeboy server list
 homeboy server list --full
 ```
 
+Rows are always returned under `data.entities`, the canonical key for every row-shaped `list` command; an empty registry returns `"entities": []` rather than omitting the key.
+
 The default keeps `entities` as a bounded summary of `id`, `host`, `port`, `user`, and `kind`. Runner PATH, settings, environment, and resources are omitted. `output_budget` uses the shared collection budget; `continue_command` is `homeboy server list --full`.
 
 `homeboy server show <id>` and `homeboy server list --full` return the complete redacted server record. Sensitive environment values stay `[redacted]`.

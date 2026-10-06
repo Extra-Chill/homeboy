@@ -16,7 +16,6 @@ homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primi
 homeboy-stack = { version = "0.1.0", path = "../homeboy-stack" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-contract" }
-homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runner-contract" }
 homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
@@ -30,4 +29,5 @@ sha2 = "0.10.9"
 fs4 = "0.13"
 
 [dev-dependencies]
+homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

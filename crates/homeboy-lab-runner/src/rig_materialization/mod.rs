@@ -6,10 +6,9 @@ use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, Result};
 
 use super::{
-    dependency_cache_save_request, exec, load, materialize_git_dependency,
-    preflight_remote_argv_path_translation, sync_workspace,
+    exec, load, materialize_git_dependency, preflight_remote_argv_path_translation, sync_workspace,
     workspace::{parent_remote_path, sanitize_path_segment},
-    RunnerDependencyCacheSaveRequest, RunnerExecOptions, RunnerGitDependencyMaterializationOptions,
+    RunnerExecOptions, RunnerGitDependencyMaterializationOptions,
     RunnerGitDependencyMaterializationOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 
@@ -145,8 +144,6 @@ pub(super) struct RigComponentDependency {
     pub required_subpath: Option<String>,
     pub remote_url: Option<String>,
     pub pinned_ref: Option<String>,
-    pub component_ref: Option<String>,
-    pub dependency_cache: Option<homeboy_rig::spec::DependencyCacheSpec>,
     pub lab_stack: Option<homeboy_rig::LabStackSpec>,
 }
 
@@ -701,7 +698,6 @@ pub(super) struct LabOffloadRigComponentSync {
     /// Per-dependency materialization outputs (remote paths, freshness, etc.).
     pub materializations: Vec<RunnerGitDependencyMaterializationOutput>,
     pub lab_stack_materializations: Vec<LabStackComponentMaterialization>,
-    pub dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Generic `${components.<id>.path}` override env vars mapping each rig
     /// component to its runner-side materialized path, so checks that execute
     /// on the runner resolve component paths to the runner workspace instead of
@@ -917,7 +913,6 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         return Ok(LabOffloadRigComponentSync {
             materializations: Vec::new(),
             lab_stack_materializations: Vec::new(),
-            dependency_cache_saves: Vec::new(),
             component_path_env: Vec::new(),
             selected_component_path,
         });
@@ -967,21 +962,13 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
                 required_subpath: dependency.required_subpath,
                 pinned_ref: dependency.pinned_ref,
                 allow_dirty: allow_dirty_lab_workspace,
-                dependency_cache: dependency.dependency_cache,
-                component_ref: dependency.component_ref,
             },
         )?;
         synced.push(materialization);
     }
-    let dependency_cache_saves = synced
-        .iter()
-        .filter_map(dependency_cache_save_request)
-        .collect();
-
     Ok(LabOffloadRigComponentSync {
         materializations: synced,
         lab_stack_materializations,
-        dependency_cache_saves,
         component_path_env,
         selected_component_path,
     })
@@ -1067,6 +1054,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     )))
 }
 
+#[cfg(test)]
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
     primary_workspace: Option<(&str, &str)>,
@@ -1110,8 +1098,6 @@ fn lab_offload_rig_component_dependencies_with_runner_env(
                     required_subpath: None,
                     remote_url: Some(lab_stack.repository.clone()),
                     pinned_ref: Some(lab_stack.base.sha.clone()),
-                    component_ref: Some(lab_stack.base.sha.clone()),
-                    dependency_cache: None,
                     lab_stack: Some(lab_stack.clone()),
                 });
                 continue;
@@ -1130,8 +1116,6 @@ fn lab_offload_rig_component_dependencies_with_runner_env(
                     required_subpath: None,
                     remote_url: component.remote_url.clone(),
                     pinned_ref: homeboy_rig::component_ref(component),
-                    component_ref: homeboy_rig::component_ref(component),
-                    dependency_cache: None,
                     lab_stack: None,
                 });
                 continue;
@@ -1218,8 +1202,6 @@ fn lab_offload_rig_component_dependencies_with_runner_env(
                 required_subpath,
                 remote_url: component.remote_url.clone(),
                 pinned_ref: homeboy_rig::component_ref(component),
-                component_ref: homeboy_rig::component_ref(component),
-                dependency_cache: component.dependency_cache.clone(),
                 lab_stack: None,
             });
         }
@@ -2161,8 +2143,6 @@ mod tests {
                 required_subpath: None,
                 remote_url: None,
                 pinned_ref: None,
-                component_ref: None,
-                dependency_cache: None,
                 lab_stack: None,
             },
             RigComponentDependency {
@@ -2174,8 +2154,6 @@ mod tests {
                 required_subpath: None,
                 remote_url: None,
                 pinned_ref: None,
-                component_ref: None,
-                dependency_cache: None,
                 lab_stack: None,
             },
         ];
@@ -2206,8 +2184,6 @@ mod tests {
             required_subpath: Some("projects/plugins/jetpack".to_string()),
             remote_url: None,
             pinned_ref: None,
-            component_ref: None,
-            dependency_cache: None,
             lab_stack: None,
         }];
 
@@ -2255,8 +2231,6 @@ mod tests {
                     required_subpath: None,
                     remote_url: None,
                     pinned_ref: None,
-                    component_ref: None,
-                    dependency_cache: None,
                     lab_stack: None,
                 },
                 RigComponentDependency {
@@ -2268,8 +2242,6 @@ mod tests {
                     required_subpath: None,
                     remote_url: None,
                     pinned_ref: None,
-                    component_ref: None,
-                    dependency_cache: None,
                     lab_stack: None,
                 },
             ];
@@ -2480,8 +2452,6 @@ mod tests {
             required_subpath: Some("plugins/woocommerce".to_string()),
             remote_url: Some("https://github.com/woocommerce/woocommerce.git".to_string()),
             pinned_ref: None,
-            component_ref: None,
-            dependency_cache: None,
             lab_stack: None,
         };
 
@@ -3373,8 +3343,6 @@ mod tests {
             required_subpath: Some("projects/plugins/jetpack".to_string()),
             remote_url: None,
             pinned_ref: None,
-            component_ref: None,
-            dependency_cache: None,
             lab_stack: None,
         };
         let remote = effective_remote_component_path(
@@ -3401,8 +3369,6 @@ mod tests {
             required_subpath: None,
             remote_url: None,
             pinned_ref: None,
-            component_ref: None,
-            dependency_cache: None,
             lab_stack: None,
         };
         let remote = effective_remote_component_path(
@@ -3483,8 +3449,6 @@ mod tests {
             required_subpath: None,
             remote_url: Some("https://github.example.com/example-org/studio-web.git".to_string()),
             pinned_ref: None,
-            component_ref: None,
-            dependency_cache: None,
             lab_stack: None,
         }];
 

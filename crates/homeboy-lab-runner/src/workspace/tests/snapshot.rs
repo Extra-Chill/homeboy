@@ -11,9 +11,8 @@ use crate::workspace::snapshot::{
     snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
     snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
     workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_hash_v1, workspace_content_manifest_and_hash_for_policy,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -926,27 +925,6 @@ fn workspace_content_hash_skips_runner_metadata_removed_after_discovery() {
             "runner-owned metadata must not make an active snapshot claimant fail"
         );
     }
-
-    fs::create_dir_all(&metadata).expect("restore runner metadata directory");
-    fs::write(metadata.join("runner-workspace.json"), "{}\n").expect("restore runner metadata");
-    let expected_v1 =
-        workspace_content_hash_v1(workspace.path(), &[]).expect("legacy baseline hash");
-    let metadata_to_remove = metadata.clone();
-    {
-        let _hook = register_after_snapshot_directory_discovery_hook(
-            metadata.canonicalize().expect("canonical metadata path"),
-            move || {
-                fs::remove_dir_all(&metadata_to_remove)
-                    .expect("remove runner metadata during legacy traversal");
-            },
-        );
-        assert_eq!(
-            workspace_content_hash_v1(workspace.path(), &[])
-                .expect("legacy metadata cache miss is reconciled"),
-            expected_v1,
-            "legacy verification must tolerate the same runner metadata race"
-        );
-    }
 }
 
 #[test]
@@ -1801,10 +1779,10 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
 }
 
 #[test]
+#[ignore = "stage-owner subprocess invoked by snapshot_staging_runtime_owner_protects_live_stage_and_reclaims_killed_stage"]
 fn snapshot_staging_runtime_owner_fixture() {
-    let Some(source) = std::env::var_os("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_SOURCE") else {
-        return;
-    };
+    let source =
+        std::env::var_os("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_SOURCE").expect("fixture source path");
     let ready = std::path::PathBuf::from(
         std::env::var_os("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_READY").expect("fixture ready path"),
     );
@@ -1846,7 +1824,11 @@ fn snapshot_staging_runtime_owner_protects_live_stage_and_reclaims_killed_stage(
         let ready = source.path().join("stage-ready");
         let mut child =
             std::process::Command::new(std::env::current_exe().expect("current test executable"))
-                .arg("snapshot_staging_runtime_owner_fixture")
+                .args([
+                    "--exact",
+                    "workspace::tests::snapshot::snapshot_staging_runtime_owner_fixture",
+                    "--ignored",
+                ])
                 .env("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_SOURCE", source.path())
                 .env("HOMEBOY_SNAPSHOT_STAGE_FIXTURE_READY", &ready)
                 .spawn()
@@ -2529,8 +2511,6 @@ fn content_hash_binds_tracked_unresolved_symlinks_deterministically() {
     // Deterministic: re-hashing the same shape yields the same identity.
     let repeat = workspace_content_hash(dir.path(), &[]).expect("repeat hash");
     assert_eq!(hash, repeat, "content hash must be deterministic");
-    // The legacy v1 algorithm must also bind it rather than refuse.
-    workspace_content_hash_v1(dir.path(), &[]).expect("v1 must also bind the symlink");
 
     // The symlink target text is part of the identity: changing it changes hash.
     let other = tempfile::tempdir().expect("other workspace");
@@ -2747,25 +2727,17 @@ fn snapshot_content_hash_matches_materialized_workspace_after_runner_metadata_in
 }
 
 #[test]
-fn every_content_hash_algorithm_ignores_all_reserved_runner_workspace_paths() {
-    // Both the v1 and v2 content-hash traversals must exclude every
-    // runner-owned materialization artifact from `RESERVED_RUNNER_WORKSPACE_PATHS`
-    // identically. Regression guard for the drift where the v2 traversal was
-    // taught to skip `.homeboy/lab-at-files` (#9003) but the v1 traversal was
-    // not, so a v1 workspace carrying that runner path would hash differently on
-    // the runner than on the controller.
+fn content_hash_ignores_reserved_runner_workspace_paths() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("source");
     fs::create_dir_all(source.join("packages")).expect("source package directory");
     fs::write(source.join("packages/app.rs"), "fn main() {}\n").expect("source file");
     let excludes: Vec<String> = Vec::new();
 
-    let expected_v1 = workspace_content_hash_v1(&source, &excludes).expect("v1 source hash");
-    let expected_v2 = workspace_content_hash(&source, &excludes).expect("v2 source hash");
+    let expected = workspace_content_hash(&source, &excludes).expect("source hash");
 
     // Inject every reserved runner-owned path, exactly as the runner would after
-    // transport, then re-hash. The identity must be unchanged for both
-    // algorithms.
+    // transport, then re-hash. The identity must be unchanged.
     fs::create_dir_all(source.join(".homeboy/lab-at-files")).expect("lab-at-files directory");
     fs::write(
         source.join(".homeboy/lab-at-files/at-input.txt"),
@@ -2779,14 +2751,9 @@ fn every_content_hash_algorithm_ignores_all_reserved_runner_workspace_paths() {
     .expect("runner metadata");
 
     assert_eq!(
-        workspace_content_hash_v1(&source, &excludes).expect("v1 injected hash"),
-        expected_v1,
-        "v1 content hash must ignore every reserved runner-owned workspace path"
-    );
-    assert_eq!(
-        workspace_content_hash(&source, &excludes).expect("v2 injected hash"),
-        expected_v2,
-        "v2 content hash must ignore every reserved runner-owned workspace path"
+        workspace_content_hash(&source, &excludes).expect("materialized hash"),
+        expected,
+        "content hash must ignore reserved runner-owned workspace paths"
     );
 }
 

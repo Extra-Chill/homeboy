@@ -44,9 +44,7 @@ fn admitted_component_identity_survives_explicit_repository_selection() {
     );
 }
 
-use super::super::cook_recipe::{
-    load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
-};
+use super::super::cook_recipe::{load_recipe, persist_initial_recipe};
 use super::*;
 use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
@@ -103,6 +101,34 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
         )
         .expect("register nested component");
 
+        let attached_checkout = tempfile::tempdir().expect("project attachment checkout");
+        std::fs::write(
+            attached_checkout.path().join("homeboy.json"),
+            serde_json::json!({
+                "id": "php-transformer",
+                "remote_url": "https://github.com/example/attached-project.git"
+            })
+            .to_string(),
+        )
+        .expect("portable project attachment identity");
+        homeboy_core::project::save(&homeboy_core::project::Project {
+            id: "attached-site".to_string(),
+            components: vec![homeboy_core::project::ProjectComponentAttachment {
+                id: "php-transformer".to_string(),
+                local_path: attached_checkout.path().display().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .expect("register same-id project attachment");
+        assert_eq!(
+            homeboy_core::component::registered_by_id("php-transformer")
+                .expect("project-scoped lookup")
+                .expect("attachment")
+                .local_path,
+            attached_checkout.path().display().to_string(),
+        );
+
         let mut plan = AgentTaskPlan::new(
             "deferred-component",
             vec![AgentTaskRequest {
@@ -155,20 +181,70 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
             repository.path().display().to_string()
         );
 
+        #[cfg(unix)]
+        {
+            let alias_parent = tempfile::tempdir().expect("alias parent");
+            let alias = alias_parent.path().join("checkout");
+            std::os::unix::fs::symlink(repository.path(), &alias).expect("repository alias");
+            let mut aliased = plan.clone();
+            bind_materialized_cook_component_workspace(
+                &mut aliased,
+                &alias,
+                Some("php-transformer"),
+            )
+            .expect("canonical containment accepts a repository-root alias");
+            assert_eq!(
+                aliased.metadata["gate_workspace"]["requested_cwd"],
+                alias.display().to_string()
+            );
+            assert_eq!(
+                aliased.metadata["gate_workspace"]["component_cwd"],
+                "packages/php-transformer"
+            );
+
+            let outside = tempfile::tempdir().expect("outside workspace");
+            std::os::unix::fs::symlink(outside.path(), repository.path().join("escaped-component"))
+                .expect("escaping component alias");
+            let mut escaped = plan.clone();
+            escaped.metadata["cook_repository_identity"] = serde_json::json!({
+                "component_cwd": "escaped-component"
+            });
+            let before = serde_json::to_value(&escaped).expect("plan snapshot");
+            assert!(bind_materialized_cook_component_workspace(
+                &mut escaped,
+                repository.path(),
+                Some("php-transformer")
+            )
+            .is_err());
+            assert_eq!(
+                serde_json::to_value(&escaped).expect("unchanged plan"),
+                before
+            );
+        }
+
         let mut stale = plan.clone();
         stale.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "blocks-engine",
             "component_id": "removed-transformer",
+            "component_registered": true,
             "provenance": "--repo:configured-component"
         });
         let error = bind_materialized_cook_component_workspace(&mut stale, repository.path(), None)
             .expect_err("stale component registration must fail closed");
         assert!(error.message.contains("no longer registered"));
 
+        let mut unattested = plan.clone();
+        unattested.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "standalone-repository",
+            "component_id": "removed-transformer"
+        });
+        bind_materialized_cook_component_workspace(&mut unattested, repository.path(), None)
+            .expect("a component label without registration evidence grants no binding authority");
+
         let mut unregistered = plan.clone();
         unregistered.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "standalone-repository",
-            "component_id": null,
+            "component_id": "standalone-repository",
             "component_registered": false,
             "provenance": "--cwd:git-remote:origin"
         });
@@ -2457,7 +2533,7 @@ fn run_intentional_no_change_cook(
 #[test]
 fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, _) = run_intentional_no_change_cook(true, "no_change", false);
+        let (result, run_id, _) = run_intentional_no_change_cook(true, "investigation_only", false);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "intentional_no_change");
         assert_eq!(
@@ -2490,7 +2566,8 @@ fn finalizing_cook_accepts_patch_absent_intentional_no_change_for_evidence_polic
 #[test]
 fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let (result, run_id, options) = run_intentional_no_change_cook(false, "no_change", true);
+        let (result, run_id, options) =
+            run_intentional_no_change_cook(false, "investigation_only", true);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.value.status, "no_candidate");
         assert_eq!(
@@ -4698,6 +4775,36 @@ impl AgentTaskCookAttemptDispatcher for ProviderStartObservingDispatcher {
 #[derive(Debug)]
 struct RecordingDetachedAttemptDispatcher {
     dispatches: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct BlockingDetachedAttemptDispatcher {
+    inner: RecordingDetachedAttemptDispatcher,
+    entered: std::sync::mpsc::Sender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for BlockingDetachedAttemptDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        self.inner.durable_recipe()
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        self.entered
+            .send(())
+            .expect("driver reached provider boundary");
+        self.release
+            .lock()
+            .expect("release channel")
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("release live driver");
+        self.inner.dispatch_attempt(plan, run_id, baseline)
+    }
 }
 
 impl AgentTaskCookAttemptDispatcher for RecordingDetachedAttemptDispatcher {
@@ -7499,22 +7606,73 @@ fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() 
         .expect("ambient lifecycle state remains untouched"));
 }
 
+#[test]
+fn a_foreign_kernel_owner_blocks_cook_before_recipe_or_provider_work() {
+    use fs4::fs_std::FileExt;
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle = AgentTaskLifecycleStore::new(roots);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let options = batch_cook_options(
+            "foreign-driver-cook",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: calls.clone(),
+            }),
+        );
+        let lock_path = store
+            .data_root()
+            .join("agent-task-cooks/foreign-driver-cook/driver.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let foreign = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        foreign.lock_exclusive().unwrap();
+        let drive = || {
+            run_cook(CookContext {
+                store: Some(&store),
+                lifecycle_store: Some(&lifecycle),
+                side_effects: Some(CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({})))),
+                ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+            })
+        };
+        let error = drive().expect_err("kernel ownership fences the runtime entry point");
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(!store.recipe_exists(&options.identity.cook_id));
+        assert!(!lifecycle
+            .record_exists(&options.identity.initial_run_id)
+            .unwrap());
+        drop(foreign);
+        assert_eq!(drive().unwrap().value.status, "in_flight");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    });
+}
+
 fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
     let store = CookRecipeStore::new(roots.clone());
     let lifecycle_store = AgentTaskLifecycleStore::new(roots);
     let cook_id = format!("concurrent-first-cook-{}", uuid::Uuid::new_v4());
     let dispatches = Arc::new(AtomicUsize::new(0));
-    let dispatcher = Arc::new(RecordingDetachedAttemptDispatcher {
-        dispatches: Arc::clone(&dispatches),
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let dispatcher = Arc::new(BlockingDetachedAttemptDispatcher {
+        inner: RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::clone(&dispatches),
+        },
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
     });
     let mut winner = batch_cook_options(&cook_id, dispatcher.clone());
     winner.identity.initial_plan.plan_id = "creator-plan".to_string();
     let mut loser = winner.clone();
     loser.identity.initial_plan.plan_id = "loser-plan".to_string();
 
-    let barrier = Arc::new(Barrier::new(2));
-    set_initial_recipe_creation_barrier_for_test(Some(Arc::clone(&barrier)));
     let (winner_result, loser_result) = std::thread::scope(|scope| {
         let winner = scope.spawn(|| {
             run_cook(CookContext {
@@ -7524,6 +7682,9 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
                 ..CookContext::new(winner, Arc::new(UnusedExecutor))
             })
         });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first controller holds ownership at provider boundary");
         let loser = scope.spawn(|| {
             run_cook(CookContext {
                 store: Some(&store),
@@ -7532,31 +7693,20 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
                 ..CookContext::new(loser, Arc::new(UnusedExecutor))
             })
         });
-        (winner.join().unwrap(), loser.join().unwrap())
+        let loser_result = loser.join().unwrap();
+        release_tx.send(()).expect("allow owner to finish handoff");
+        (winner.join().unwrap(), loser_result)
     });
-    set_initial_recipe_creation_barrier_for_test(None);
-
-    let outcomes = [winner_result.unwrap(), loser_result.unwrap()];
-    let statuses = outcomes
-        .iter()
-        .map(|outcome| outcome.value.status.as_str())
-        .collect::<Vec<_>>();
     assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| outcome.value.status == "in_flight")
-            .count(),
-        1,
-        "unexpected concurrent Cook statuses: {statuses:?}; outcomes: {outcomes:#?}"
+        winner_result
+            .expect("one controller advances the Cook")
+            .value
+            .status,
+        "in_flight"
     );
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| outcome.value.status == "durable_failure")
-            .count(),
-        1,
-        "unexpected concurrent Cook statuses: {statuses:?}"
-    );
+    let contention = loser_result.expect_err("another controller cannot advance the same Cook");
+    assert_eq!(contention.retryable, Some(true));
+    assert!(contention.message.contains("already being driven"));
     let recipe = store.load_recipe(&cook_id).expect("creator recipe");
     let creator_options = super::super::reconstruct_options_with_dispatcher(
         &recipe,
@@ -7589,10 +7739,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             .expect("creator plan remains immutable"),
         plan_before
     );
-    assert!(matches!(
-        plan_before.plan_id.as_str(),
-        "creator-plan" | "loser-plan"
-    ));
+    assert_eq!(plan_before.plan_id, "creator-plan");
     assert_eq!(
         recipe.attempts[0].plan.plan_id, plan_before.plan_id,
         "the recipe creator's immutable first plan must match the lifecycle plan"

@@ -895,7 +895,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     lines.push(format!(
         "Artifacts: {}",
-        array_len(payload, &["artifacts"]).unwrap_or(0)
+        payload
+            .get("artifacts_count")
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+            .or_else(|| array_len(payload, &["artifacts"]))
+            .unwrap_or(0)
     ));
     lines.push(format!(
         "Next: {}",
@@ -904,7 +909,7 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
-fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     if string_value(payload, &["blocker", "code"])
         .is_some_and(|code| code.starts_with("resource_guard."))
     {
@@ -941,17 +946,21 @@ fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
         .pointer("/action_eligibility/actions")
         .and_then(Value::as_array)
     else {
-        return format!("homeboy agent-task logs {run_id}");
+        return format!("homeboy agent-task evidence {run_id}");
     };
     for name in PREFERRED {
         if actions.iter().any(|action| {
             action.get("action").and_then(Value::as_str) == Some(name)
                 && action.get("availability").and_then(Value::as_str) == Some("available")
+                && !action
+                    .get("required_inputs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inputs| !inputs.is_empty())
         }) {
             return format!("homeboy agent-task {name} {run_id}");
         }
     }
-    format!("homeboy agent-task logs {run_id}")
+    format!("homeboy agent-task evidence {run_id}")
 }
 
 fn render_logs_summary(payload: &Value) -> Option<String> {
@@ -2325,7 +2334,7 @@ mod tests {
             );
             assert!(summary.contains("Artifacts: 0\n"), "{summary}");
             assert!(
-                summary.contains("Next: homeboy agent-task logs homeboy-4345\n"),
+                summary.contains("Next: homeboy agent-task evidence homeboy-4345\n"),
                 "{summary}"
             );
             assert!(!summary.contains("status_scope"), "{summary}");

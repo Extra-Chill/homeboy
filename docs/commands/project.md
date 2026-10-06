@@ -200,6 +200,12 @@ JSON output (`list`):
 ```json
 {
   "command": "project.list",
+  "entities": [
+    {
+      "id": "<project_id>",
+      "domain": "<domain>"
+    }
+  ],
   "projects": [
     {
       "id": "<project_id>",
@@ -208,6 +214,8 @@ JSON output (`list`):
   ]
 }
 ```
+
+`entities` is the canonical key for the rows of every row-shaped `list` command, and is always present (`[]` when no projects are configured). `projects` carries the same rows and is **deprecated**: it is kept only for a deprecation window and will be removed. Read `data.entities`.
 
 JSON output (`show`):
 

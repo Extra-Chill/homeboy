@@ -18,12 +18,26 @@ pub fn stop() -> Result<DaemonStopResult> {
 /// Stop a daemon only after preserving its active durable work, unless the
 /// caller supplied an explicit destructive force request.
 pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
+    if !generation_store::bypassed() {
+        if let Some(endpoint) = generation_store::admitting()? {
+            if std::path::Path::new(&endpoint.state_dir).join("state.json") != state_path()? {
+                return control::stop_registered_generation(&endpoint, force);
+            }
+        }
+    }
     let _lock = acquire_daemon_operation_lock()?;
     let _admission_fence = acquire_daemon_job_admission_fence()?;
     stop_unlocked_with_force(force)
 }
 
 pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
+    if !generation_store::bypassed() {
+        if let Some(endpoint) = generation_store::endpoint_for_lease(expected_lease_id)? {
+            if std::path::Path::new(&endpoint.state_dir).join("state.json") != state_path()? {
+                return control::stop_registered_generation(&endpoint, false);
+            }
+        }
+    }
     // A live foreground `daemon serve` (for example under systemd) records no
     // startup token, so the PID-signalling path below refuses it. Ask it to
     // stop itself over its local API instead; it drains, writes clean-stop

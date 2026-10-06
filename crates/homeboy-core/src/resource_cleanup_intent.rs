@@ -202,3 +202,16 @@ mod tests {
         assert_eq!(error.details["field"], "schema");
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn resource_cleanup_intent_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [ResourceCleanupIntent::DryRun, ResourceCleanupIntent::Apply,]
+        );
+    }
+}

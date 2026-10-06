@@ -552,7 +552,7 @@ fn run_controller_upgrade_with_operation(
                                 convergence_runner_method,
                                 convergence_source_path,
                                 convergence_source_path.is_some(),
-                                None,
+                                completion.build_identity.as_deref(),
                                 runner_targets,
                                 &extensions_updated,
                                 None,

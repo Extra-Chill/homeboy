@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy_agents::agent_task_provider::discovery::AgentTaskExecutorDiscovery;
 use homeboy_core::extension;
 use homeboy_core::extension::registry::ExtensionLifecycleValidation;
+use homeboy_engine_primitives::shell::shell_arg;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
@@ -11,6 +12,7 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
+use homeboy::core::EntityRows;
 use homeboy::runner::runners;
 use homeboy_core::error::ExecutableAction;
 use homeboy_core::extension::catalog::{
@@ -382,7 +384,10 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        extensions: Vec<ExtensionInventoryEntry>,
+        /// Rows under `entities`, mirrored under the deprecated `extensions`
+        /// key (#14876).
+        #[serde(flatten)]
+        extensions: EntityRows<ExtensionInventoryEntry>,
     },
     #[serde(rename = "extension.diff_installed")]
     DiffInstalled {
@@ -993,13 +998,14 @@ fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
     let summaries = extension_inventory(project_config.as_ref(), readiness);
 
-    Ok((
-        ExtensionOutput::List {
-            project_id: project,
-            extensions: summaries,
-        },
-        0,
-    ))
+    Ok((list_output(project, summaries), 0))
+}
+
+fn list_output(project_id: Option<String>, rows: Vec<ExtensionInventoryEntry>) -> ExtensionOutput {
+    ExtensionOutput::List {
+        project_id,
+        extensions: EntityRows::with_legacy_key(rows, "extensions"),
+    }
 }
 
 fn diff_installed(
@@ -1419,24 +1425,33 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result = homeboy_core::extension::lifecycle::replace_with_revision(
+        match homeboy_core::extension::lifecycle::replace_with_revision(
             source,
             id.as_deref(),
             revision.as_deref(),
             ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
-        )?;
-        return Ok((
-            ExtensionOutput::Replace {
-                extension_id: result.extension_id,
-                old_path: result.old_path.to_string_lossy().to_string(),
-                new_path: result.new_path.to_string_lossy().to_string(),
-                manifest_path: result.manifest_path.to_string_lossy().to_string(),
-                source: result.source,
-                linked: result.linked,
-                source_revision: result.source_revision,
-            },
-            0,
-        ));
+        ) {
+            Ok(result) => {
+                return Ok((
+                    ExtensionOutput::Replace {
+                        extension_id: result.extension_id,
+                        old_path: result.old_path.to_string_lossy().to_string(),
+                        new_path: result.new_path.to_string_lossy().to_string(),
+                        manifest_path: result.manifest_path.to_string_lossy().to_string(),
+                        source: result.source,
+                        linked: result.linked,
+                        source_revision: result.source_revision,
+                    },
+                    0,
+                ));
+            }
+            // `--replace` means "install or replace". With nothing installed
+            // there is nothing to replace, so install. Upgrade recovery emits
+            // `install --replace` for extensions a runner never had; failing
+            // with "Extension not found" made that recovery unrunnable.
+            Err(error) if error.code == homeboy_core::error::ErrorCode::ExtensionNotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     let result = homeboy_core::extension::lifecycle::install_with_revision(
@@ -1896,17 +1911,6 @@ fn runtime_diagnostic_env<'a>(
         .collect()
 }
 
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
 fn run_action(
     extension_id: &str,
     action_id: &str,
@@ -1979,6 +1983,37 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn extension_list_mirrors_rows_under_entities_and_legacy_extensions_key() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/listed");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("listed.json"),
+                r#"{ "name": "Listed", "version": "1.0.0" }"#,
+            )
+            .expect("extension manifest");
+
+            let (output, _) = list(None, ExtensionReadinessMode::Cached).expect("list extensions");
+            let value = serde_json::to_value(&output).expect("serialize extension list");
+
+            assert_eq!(value["command"], "extension.list");
+            assert_eq!(value["entities"][0]["id"], "listed");
+            assert_eq!(value["entities"], value["extensions"]);
+        });
+    }
+
+    #[test]
+    fn empty_extension_list_emits_entities_array() {
+        let value =
+            serde_json::to_value(list_output(None, Vec::new())).expect("serialize extension list");
+
+        assert_eq!(value["command"], "extension.list");
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(value["extensions"], serde_json::json!([]));
+        assert!(value.get("project_id").is_none());
+    }
+
+    #[test]
     fn convergence_restarts_only_extensions_with_changed_source_revisions() {
         let entries = vec![
             update_entry("unchanged", Some("abc"), Some("abc")),
@@ -1995,6 +2030,44 @@ mod tests {
 
         assert!(changed_extension_ids(&entries).is_empty());
         assert_eq!(revision_evidence(&entries)[0].status, "unknown");
+    }
+
+    #[test]
+    fn install_replace_installs_an_extension_that_is_not_installed() {
+        // Upgrade recovery emits `extension install --replace` for an extension
+        // a runner never had; it must install rather than fail "not found".
+        with_isolated_home(|home| {
+            let source = home.path().join("source").join("demo");
+            fs::create_dir_all(&source).expect("fixture dir");
+            fs::write(
+                source.join("demo.json"),
+                r#"{"name":"Demo","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+
+            let (output, exit_code) = install_extension(
+                &source.to_string_lossy(),
+                Some("demo".to_string()),
+                None,
+                true,
+            )
+            .expect("install --replace with nothing installed");
+            assert_eq!(exit_code, 0);
+            assert!(matches!(output, ExtensionOutput::Install { .. }));
+            assert!(homeboy_core::paths::extension("demo")
+                .expect("extension path")
+                .exists());
+
+            // Installed now, so the same command replaces.
+            let (output, _) = install_extension(
+                &source.to_string_lossy(),
+                Some("demo".to_string()),
+                None,
+                true,
+            )
+            .expect("install --replace with demo installed");
+            assert!(matches!(output, ExtensionOutput::Replace { .. }));
+        });
     }
 
     #[test]

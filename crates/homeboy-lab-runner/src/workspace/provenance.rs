@@ -6,7 +6,7 @@ use homeboy_core::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADA
 use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::snapshot::{
-    snapshot_git_exclude_pathspecs, workspace_content_hash_for_policy, workspace_content_hash_v1,
+    snapshot_git_exclude_pathspecs, workspace_content_hash_for_policy,
     workspace_content_manifest_for_policy, WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
 use super::workspace_content_hash_algorithm;
@@ -31,7 +31,7 @@ pub(crate) struct VerifiedLabWorkspaceProvenance {
     pub snapshot_hash: String,
     content_hash: String,
     content_hash_algorithm: String,
-    permission_policy: Option<String>,
+    permission_policy: String,
     content_manifest: Option<WorkspaceContentManifest>,
     sync_excludes: Vec<String>,
     local_source_path: Option<String>,
@@ -526,10 +526,7 @@ pub(crate) fn verify_lab_workspace(
         match verification {
             Some(verification) => {
                 let schema = verification.get("schema").and_then(|value| value.as_str());
-                let content_hash_algorithm = match schema {
-                    Some("homeboy/lab-workspace-verification/v1") => {
-                        "homeboy-workspace-content-v1".to_string()
-                    }
+                let (content_hash_algorithm, permission_policy) = match schema {
                     Some("homeboy/lab-workspace-verification/v2") => {
                         let policy = verification
                             .get("permission_policy")
@@ -545,7 +542,7 @@ pub(crate) fn verify_lab_workspace(
                         {
                             return Err("v2 workspace content hash algorithm does not bind its permission policy".to_string());
                         }
-                        algorithm
+                        (algorithm, policy)
                     }
                     Some(schema) => {
                         return Err(format!(
@@ -591,26 +588,7 @@ pub(crate) fn verify_lab_workspace(
                     content_hash,
                     identity,
                     content_hash_algorithm,
-                    verification
-                        .get("permission_policy")
-                        .and_then(|value| value.as_str()),
-                )
-            }
-            None if materialization_mode == "git" => {
-                let content_hash = lab
-                    .get("workspace_content_hash")
-                    .and_then(|value| value.as_str())
-                    .ok_or("is missing workspace content hash")?;
-                let identity = lab
-                    .get("workspace_materialization_plan")
-                    .and_then(|value| value.get("identity"))
-                    .and_then(|value| value.as_str())
-                    .ok_or("is missing workspace materialization identity")?;
-                (
-                    content_hash,
-                    identity,
-                    "homeboy-workspace-content-v1".to_string(),
-                    None,
+                    permission_policy,
                 )
             }
             None => return Err("is missing workspace verification metadata".to_string()),
@@ -635,7 +613,7 @@ pub(crate) fn verify_lab_workspace(
         snapshot_hash: snapshot.snapshot_hash,
         content_hash: expected_content_hash.to_string(),
         content_hash_algorithm,
-        permission_policy: permission_policy.map(str::to_string),
+        permission_policy: permission_policy.to_string(),
         content_manifest,
         sync_excludes: snapshot.sync_excludes,
         local_source_path: snapshot.local_path,
@@ -729,24 +707,9 @@ fn verify_snapshot_workspace_content(
     provenance: &VerifiedLabWorkspaceProvenance,
 ) -> std::result::Result<(), String> {
     let excludes = runner_verification_excludes(workspace, &provenance.sync_excludes);
-    let actual_content_hash = match provenance.content_hash_algorithm.as_str() {
-        "homeboy-workspace-content-v1" => workspace_content_hash_v1(workspace, &excludes),
-        algorithm
-            if algorithm.starts_with("homeboy-workspace-content-v2+")
-                || algorithm == "homeboy-workspace-content-v3+unix-owner-executable" =>
-        {
-            workspace_content_hash_for_policy(
-                workspace,
-                &excludes,
-                provenance
-                    .permission_policy
-                    .as_deref()
-                    .expect("v2 policy validated above"),
-            )
-        }
-        _ => unreachable!("workspace verification algorithm was validated above"),
-    }
-    .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
+    let actual_content_hash =
+        workspace_content_hash_for_policy(workspace, &excludes, &provenance.permission_policy)
+            .map_err(|error| format!("could not hash materialized workspace: {}", error.message))?;
     if actual_content_hash != provenance.content_hash {
         let diagnostic = match provenance.materialization_mode.as_str() {
             "snapshot-git" => format!(
@@ -773,7 +736,7 @@ fn verify_snapshot_workspace_content(
                 workspace_content_manifest_for_policy(
                     workspace,
                     &excludes,
-                    provenance.permission_policy.as_deref()?,
+                    &provenance.permission_policy,
                 )
                 .ok()
                 .map(|actual| content_manifest_difference(expected, &actual))
@@ -857,7 +820,7 @@ fn content_manifest_entry_difference(
 
 fn validate_content_manifest(
     manifest: &WorkspaceContentManifest,
-    permission_policy: Option<&str>,
+    permission_policy: &str,
 ) -> std::result::Result<(), String> {
     if manifest.entry_count != manifest.entries.len() {
         return Err("has incomplete workspace content manifest".to_string());
@@ -884,7 +847,7 @@ fn validate_content_manifest(
         }
         if entry.kind == "file"
             && permission_policy
-                == Some(super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE)
+                == super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE
             && entry.owner_executable.is_none()
         {
             return Err("has incomplete v3 workspace content manifest entry".to_string());
@@ -1155,8 +1118,12 @@ mod tests {
     }
 
     fn lab(path: &Path, snapshot: &SourceSnapshot) -> serde_json::Value {
-        let content_hash = workspace_content_hash_v1(path, &snapshot.sync_excludes)
-            .expect("legacy snapshot content hash");
+        let content_hash = workspace_content_hash_for_policy(
+            path,
+            &snapshot.sync_excludes,
+            WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("snapshot content hash");
         serde_json::json!({
             "runner_id": "lab",
             "remote_workspace": path.display().to_string(),
@@ -1164,7 +1131,10 @@ mod tests {
             "status": "offloaded",
             "source_snapshot": snapshot,
             "workspace_verification": {
-                "schema": "homeboy/lab-workspace-verification/v1",
+                "schema": "homeboy/lab-workspace-verification/v2",
+                "permission_policy": WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+                "content_hash_algorithm": workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
+                    .expect("default content hash algorithm"),
                 "identity": "snapshot:verified-content",
                 "content_hash": content_hash,
                 "sync_excludes": snapshot.sync_excludes,
@@ -2437,8 +2407,11 @@ mod tests {
             workspace_identity: "snapshot:verified-content".to_string(),
             snapshot_hash: "sha256:verified-source".to_string(),
             content_hash: String::new(),
-            content_hash_algorithm: "homeboy-workspace-content-v1".to_string(),
-            permission_policy: None,
+            content_hash_algorithm: workspace_content_hash_algorithm(
+                WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+            )
+            .expect("default content hash algorithm"),
+            permission_policy: WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY.to_string(),
             content_manifest: None,
             sync_excludes: vec!["AGENTS.md".to_string()],
             local_source_path: None,
@@ -2490,64 +2463,35 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn verifier_accepts_legacy_v1_v2_and_current_v3_content_hashes() {
+    fn verifier_accepts_explicit_unix_permission_policies() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
 
-        verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot.clone(),
-            lab(workspace.path(), &snapshot),
-        )
-        .expect("legacy v1 metadata remains valid");
-
-        let content_hash = workspace_content_hash_for_policy(
-            workspace.path(),
-            &snapshot.sync_excludes,
+        for policy in [
             super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
-        )
-        .expect("historical v2 content hash");
-        let mut v2 = lab(workspace.path(), &snapshot);
-        v2["workspace_verification"]["schema"] =
-            serde_json::json!("homeboy/lab-workspace-verification/v2");
-        v2["workspace_verification"]["permission_policy"] =
-            serde_json::json!(super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE);
-        v2["workspace_verification"]["content_hash_algorithm"] =
-            serde_json::json!(workspace_content_hash_algorithm(
-                super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE
+            super::super::snapshot::WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
+        ] {
+            let mut metadata = lab(workspace.path(), &snapshot);
+            metadata["workspace_verification"]["permission_policy"] = serde_json::json!(policy);
+            metadata["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
+                workspace_content_hash_algorithm(policy).expect("Unix content hash algorithm")
+            );
+            metadata["workspace_verification"]["content_hash"] =
+                serde_json::json!(workspace_content_hash_for_policy(
+                    workspace.path(),
+                    &snapshot.sync_excludes,
+                    policy
+                )
+                .expect("Unix content hash"));
+            verify_lab_workspace(
+                &workspace.path().display().to_string(),
+                workspace.path(),
+                snapshot.clone(),
+                metadata,
             )
-            .expect("historical v2 content hash algorithm"));
-        v2["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
-        verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot.clone(),
-            v2,
-        )
-        .expect("historical v2 metadata remains valid");
-
-        let content_hash =
-            super::super::workspace_content_hash(workspace.path(), &snapshot.sync_excludes)
-                .expect("current v3 content hash");
-        let mut v3 = lab(workspace.path(), &snapshot);
-        v3["workspace_verification"]["schema"] =
-            serde_json::json!("homeboy/lab-workspace-verification/v2");
-        v3["workspace_verification"]["permission_policy"] =
-            serde_json::json!(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY);
-        v3["workspace_verification"]["content_hash_algorithm"] = serde_json::json!(
-            workspace_content_hash_algorithm(WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY)
-                .expect("current v3 content hash algorithm")
-        );
-        v3["workspace_verification"]["content_hash"] = serde_json::json!(content_hash);
-        verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot,
-            v3,
-        )
-        .expect("current v3 metadata verifies");
+            .expect("explicit Unix policy verifies");
+        }
     }
 
     #[test]
@@ -2585,23 +2529,29 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         let snapshot = snapshot(workspace.path());
-        let mut newer = lab(workspace.path(), &snapshot);
-        newer["workspace_verification"]["schema"] =
-            serde_json::json!("homeboy/lab-workspace-verification/v3");
-        let error = verify_lab_workspace(
-            &workspace.path().display().to_string(),
-            workspace.path(),
-            snapshot.clone(),
-            newer,
-        )
-        .expect_err("older verifier must reject newer schema");
-        assert!(error.contains(
-            "unsupported workspace verification schema `homeboy/lab-workspace-verification/v3`"
-        ));
+        for schema in [
+            "homeboy/lab-workspace-verification/v1",
+            "homeboy/lab-workspace-verification/v3",
+        ] {
+            let mut unsupported = lab(workspace.path(), &snapshot);
+            unsupported["workspace_verification"]["schema"] = serde_json::json!(schema);
+            let error = verify_lab_workspace(
+                &workspace.path().display().to_string(),
+                workspace.path(),
+                snapshot.clone(),
+                unsupported,
+            )
+            .expect_err("retired and unknown schemas must be refused");
+            assert!(error.contains(&format!(
+                "unsupported workspace verification schema `{schema}`"
+            )));
+        }
 
         let mut incomplete = lab(workspace.path(), &snapshot);
-        incomplete["workspace_verification"]["schema"] =
-            serde_json::json!("homeboy/lab-workspace-verification/v2");
+        incomplete["workspace_verification"]
+            .as_object_mut()
+            .expect("verification record")
+            .remove("permission_policy");
         let error = verify_lab_workspace(
             &workspace.path().display().to_string(),
             workspace.path(),
@@ -2626,6 +2576,31 @@ mod tests {
         )
         .expect_err("v2 algorithm must bind the declared policy");
         assert!(error.contains("does not bind its permission policy"));
+    }
+
+    #[test]
+    fn verifier_requires_verification_metadata_for_git_materialization() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut snapshot = snapshot(workspace.path());
+        snapshot.sync_excludes.clear();
+        let mut metadata = lab(workspace.path(), &snapshot);
+        let verification = metadata
+            .as_object_mut()
+            .expect("Lab metadata")
+            .remove("workspace_verification")
+            .expect("verification record");
+        metadata["sync_mode"] = serde_json::json!("git");
+        metadata["workspace_content_hash"] = verification["content_hash"].clone();
+        metadata["workspace_materialization_plan"] =
+            serde_json::json!({"identity": snapshot.workspace_snapshot_identity});
+        let error = verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot,
+            metadata,
+        )
+        .expect_err("old path metadata cannot substitute for verification");
+        assert!(error.contains("missing workspace verification metadata"));
     }
 
     #[test]

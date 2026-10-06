@@ -4,22 +4,7 @@ fn escape_single_quote_content(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
-pub fn quote_arg(arg: &str) -> String {
-    if arg.is_empty() {
-        return "''".to_string();
-    }
-
-    const SHELL_META: &[char] = &[
-        ' ', '\t', '\n', '\'', '"', '\\', '$', '`', '!', '*', '?', '[', ']', '(', ')', '{', '}',
-        '<', '>', '|', '&', ';', '#', '~',
-    ];
-
-    if !arg.contains(SHELL_META) {
-        return arg.to_string();
-    }
-
-    format!("'{}'", escape_single_quote_content(arg))
-}
+pub use homeboy_error::posix_quote_arg as quote_arg;
 
 pub fn quote_args(args: &[String]) -> String {
     args.iter()
@@ -77,16 +62,27 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 /// Quote a shell argument, leaving conservatively safe words bare.
 ///
 /// Unlike [`quote_arg`], which quotes anything containing a shell metacharacter,
-/// this keeps unquoted only an explicit allowlist. Command builders that render
+/// this keeps unquoted only an explicit allowlist: ASCII alphanumerics and
+/// `-` `_` `.` `/` `:` `=` `@`. (`=` and `@` are inert in argument position, so
+/// `user@host` and `key=value` stay bare.) Everything else is single-quoted, with
+/// embedded single quotes escaped as `'\''`. Command builders that render
 /// readable remote commands use it so a plain path or flag stays legible.
+///
+/// An empty value renders as `''` so it survives as a distinct (empty) argument
+/// instead of silently vanishing from the rendered command line. Callers that
+/// want an absent option omitted must skip it themselves.
 pub fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.chars().all(is_shell_arg_safe_char) {
         return value.to_string();
     }
-    format!("'{}'", value.replace('\'', "'\\''"))
+    format!("'{}'", escape_single_quote_content(value))
+}
+
+fn is_shell_arg_safe_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '@')
 }
 
 pub fn quote_path(path: &str) -> String {
@@ -125,81 +121,36 @@ fn escape_double_quoted_env_value(value: &str) -> String {
         .replace('`', "\\`")
 }
 
-/// `homeboy-error` carries a byte-for-byte duplicate of [`quote_arg`] named
-/// `posix_quote_arg`, because it sits below this crate in the dependency graph
-/// and cannot import it. That constraint is real, so the duplicate stays -- but
-/// the claim of byte-equality was previously only a comment. These tests
-/// enforce it, so the two implementations cannot drift silently.
 #[cfg(test)]
-mod error_crate_duplicate_parity_tests {
-    use super::quote_arg;
-    use homeboy_error::posix_quote_arg;
-
-    /// Every character `quote_arg` treats as a shell metacharacter, plus the
-    /// edge cases around them.
-    const PARITY_CASES: &[&str] = &[
-        "",
-        "plain",
-        "already-safe_arg.v1",
-        "/abs/path/to/file",
-        "has space",
-        "has\ttab",
-        "has\nnewline",
-        "has'single",
-        "has\"double",
-        "has\\backslash",
-        "has$dollar",
-        "has`backtick",
-        "has!bang",
-        "has*star",
-        "has?question",
-        "has[bracket",
-        "has]bracket",
-        "has(paren",
-        "has)paren",
-        "has{brace",
-        "has}brace",
-        "has<lt",
-        "has>gt",
-        "has|pipe",
-        "has&amp",
-        "has;semi",
-        "has#hash",
-        "has~tilde",
-        "'",
-        "''",
-        "a'b'c",
-        "'leading",
-        "trailing'",
-        "rm -rf / ; echo pwned",
-        "unicode-\u{e9}\u{4e2d}",
-    ];
+mod shell_arg_tests {
+    use super::shell_arg;
 
     #[test]
-    fn posix_quote_arg_is_byte_identical_to_quote_arg() {
-        for case in PARITY_CASES {
-            assert_eq!(
-                quote_arg(case),
-                posix_quote_arg(case),
-                "shell::quote_arg and homeboy_error::posix_quote_arg diverged on {case:?}"
-            );
-        }
+    fn safe_set_is_left_bare() {
+        assert_eq!(shell_arg("abc-DEF_1.2/x:y"), "abc-DEF_1.2/x:y");
+        assert_eq!(shell_arg("user@host"), "user@host");
+        assert_eq!(shell_arg("key=value"), "key=value");
+        assert_eq!(shell_arg("a@b=c/d:e"), "a@b=c/d:e");
     }
 
-    /// Sweep the whole ASCII range so a metacharacter added to one table and
-    /// not the other is caught even if nobody remembers to extend
-    /// `PARITY_CASES`.
     #[test]
-    fn posix_quote_arg_matches_quote_arg_across_ascii() {
-        for byte in 0u8..=127 {
-            let ch = byte as char;
-            let case = format!("a{ch}b");
-            assert_eq!(
-                quote_arg(&case),
-                posix_quote_arg(&case),
-                "shell::quote_arg and homeboy_error::posix_quote_arg diverged on ASCII {byte:#04x}"
-            );
-        }
+    fn unsafe_values_are_single_quoted() {
+        assert_eq!(shell_arg("a b"), "'a b'");
+        assert_eq!(shell_arg("$HOME"), "'$HOME'");
+        assert_eq!(shell_arg("a;b"), "'a;b'");
+        assert_eq!(shell_arg("{\"k\":1}"), "'{\"k\":1}'");
+        assert_eq!(shell_arg("~/x"), "'~/x'");
+    }
+
+    #[test]
+    fn embedded_single_quote_is_escaped() {
+        assert_eq!(shell_arg("a'b"), "'a'\\''b'");
+        assert_eq!(shell_arg("'"), "''\\'''");
+    }
+
+    #[test]
+    fn empty_value_is_quoted_not_dropped() {
+        assert_eq!(shell_arg(""), "''");
     }
 }
 

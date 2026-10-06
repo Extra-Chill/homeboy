@@ -98,14 +98,14 @@ JSON run, summary, and aggregate outputs include a `profile` object with the res
 
 Trace dependency preflight rejects stale or dirty dependency checkouts before running the expensive workflow so stale local dependencies cannot produce misleading evidence.
 
-## Phase Templates
+## Shared Phase Presets
 
-Rig specs can define reusable trace phase/span templates under `trace_phase_templates`. A workload can reference one directly with `trace_phase_template`, or an extension-scoped `trace_workload_defaults` entry can apply the same template to every workload for that trace extension. Templates are domain-neutral: they only provide phase presets, span metadata, and an optional default phase preset name.
+An extension-scoped `trace_workload_defaults` entry can declare phase presets, span metadata, and a default phase preset once for every workload of that trace extension.
 
 ```jsonc
 {
-  "trace_phase_templates": {
-    "startup": {
+  "trace_workload_defaults": {
+    "trace-extension": {
       "trace_default_phase_preset": "default",
       "trace_phase_presets": {
         "default": ["boot:runner.boot", "ready:runner.ready"]
@@ -118,11 +118,6 @@ Rig specs can define reusable trace phase/span templates under `trace_phase_temp
       }
     }
   },
-  "trace_workload_defaults": {
-    "trace-extension": {
-      "trace_phase_template": "startup"
-    }
-  },
   "trace_workloads": {
     "trace-extension": [
       { "path": "${components.app.path}/traces/create.trace.mjs" }
@@ -131,7 +126,7 @@ Rig specs can define reusable trace phase/span templates under `trace_phase_temp
 }
 ```
 
-Workload-local declarations remain authoritative. A workload can override the default preset or add/replace individual `trace_phase_presets` and `trace_span_metadata` entries while still inheriting the rest of the template.
+Workload-local declarations remain authoritative. A workload can override the default preset or add/replace individual `trace_phase_presets` and `trace_span_metadata` entries while still inheriting the rest of the defaults.
 
 ## Public Preview Asset Gates
 

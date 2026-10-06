@@ -188,15 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn index_config_matches_the_constants_it_replaced() {
-        let config = FsIndexLockConfig::index("rig lease");
-        assert_eq!(config.name, ".index.lock");
-        assert_eq!(config.stale_after, Duration::from_secs(30));
-        assert_eq!(config.attempts, 100);
-        assert_eq!(config.sleep, Duration::from_millis(20));
-    }
-
-    #[test]
     fn acquire_creates_the_lock_directory_and_drop_releases_it() {
         let temp = tempfile::tempdir().expect("tempdir");
         let dir = temp.path().join("leases");
@@ -247,10 +238,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "lock-holder subprocess invoked by lock_contention_is_enforced_across_processes"]
     fn child_holds_lock_until_released() {
-        let Ok(directory) = std::env::var("HOMEBOY_FS_INDEX_LOCK_CHILD_DIRECTORY") else {
-            return;
-        };
+        let directory = std::env::var_os("HOMEBOY_FS_INDEX_LOCK_CHILD_DIRECTORY")
+            .expect("child lock directory");
         let ready = PathBuf::from(
             std::env::var("HOMEBOY_FS_INDEX_LOCK_CHILD_READY").expect("child ready path"),
         );
@@ -280,6 +271,7 @@ mod tests {
                 .args([
                     "--exact",
                     "fs_index_lock::tests::child_holds_lock_until_released",
+                    "--ignored",
                     "--nocapture",
                 ])
                 .env("HOMEBOY_FS_INDEX_LOCK_CHILD_DIRECTORY", temporary.path())

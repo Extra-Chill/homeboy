@@ -1740,30 +1740,64 @@ fn start_admission_generation(
 pub(super) fn stop_drained_generation(
     endpoint: &generation_store::LocalDaemonEndpoint,
 ) -> Result<()> {
+    stop_registered_generation(endpoint, false).map(|_| ())
+}
+
+/// Execute the existing lease stop in the exact registered generation frame.
+/// Status, job checks, locks and termination all address that same store; the
+/// invoking process's inherited state directory cannot select another owner.
+pub(super) fn stop_registered_generation(
+    endpoint: &generation_store::LocalDaemonEndpoint,
+    force: bool,
+) -> Result<super::DaemonStopResult> {
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve current executable".to_string()),
         )
     })?;
-    let status = Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .args(["daemon", "stop", "--lease-id", &endpoint.lease_id])
         .env(crate::paths::DAEMON_STATE_DIR_ENV, &endpoint.state_dir)
+        .env(DAEMON_ROUTER_DIR_ENV, generation_store::router_dir()?)
         .env(DAEMON_ROUTER_BYPASS_ENV, "1")
-        .status()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("retire drained daemon generation".to_string()),
-            )
-        })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(Error::internal_unexpected(
-            "drained daemon generation lease stop failed",
-        ))
+        .stdin(Stdio::null());
+    if force {
+        command.arg("--force");
     }
+    let output = command.output().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("retire drained daemon generation".to_string()),
+        )
+    })?;
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!(
+                "read generation-bound daemon stop (exit {}; stderr: {})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+        )
+    })?;
+    if !output.status.success() {
+        let diagnostics = &envelope["diagnostics"];
+        return Err(Error::new(
+            crate::error::ErrorCode::InternalUnexpected,
+            diagnostics["message"]
+                .as_str()
+                .unwrap_or("generation-bound daemon stop failed"),
+            diagnostics["details"].clone(),
+        ));
+    }
+    serde_json::from_value(envelope["data"].clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("decode generation-bound daemon stop".to_string()),
+        )
+    })
 }
 
 /// The optional controller operation id is intentionally additive. Existing
@@ -3225,6 +3259,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn terminate_token_owned_startup_process_with_operations<Owns, Signal, Wait>(
     pid: u32,
     startup_token: &str,

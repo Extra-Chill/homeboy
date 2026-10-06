@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::commands::bench::{BenchOutput, RigRunBenchPlan};
 use crate::commands::CommandReport;
+use homeboy::core::EntityRows;
 use homeboy::rig::{self, RigResourcesSpec, RigSpec};
 
 /// Tagged union of every rig command's output.
@@ -57,7 +58,18 @@ pub type RigReleaseLockOutput = CommandReport<rig::ReleaseLeaseOutcome>;
 #[derive(Serialize)]
 pub struct RigListOutput {
     pub command: &'static str,
-    pub rigs: Vec<RigSummary>,
+    /// Rows under `entities`, mirrored under the deprecated `rigs` key (#14876).
+    #[serde(flatten)]
+    pub rigs: EntityRows<RigSummary>,
+}
+
+impl RigListOutput {
+    pub fn new(rigs: Vec<RigSummary>) -> Self {
+        Self {
+            command: "rig.list",
+            rigs: EntityRows::with_legacy_key(rigs, "rigs"),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -171,6 +183,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rig_list_mirrors_rows_under_entities_and_legacy_rigs_key() {
+        let output = RigCommandOutput::List(RigListOutput::new(vec![RigSummary {
+            id: "studio-bfb".to_string(),
+            declared_id: None,
+            description: "Studio".to_string(),
+            component_count: 2,
+            service_count: 1,
+            pipelines: vec!["up".to_string()],
+            source: None,
+        }]));
+
+        let value = serde_json::to_value(&output).expect("serialize rig list");
+
+        assert_eq!(value["variant"], "list");
+        assert_eq!(value["payload"]["command"], "rig.list");
+        assert_eq!(value["payload"]["entities"][0]["id"], "studio-bfb");
+        assert_eq!(value["payload"]["entities"], value["payload"]["rigs"]);
+    }
+
+    #[test]
+    fn empty_rig_list_emits_entities_array() {
+        let value = serde_json::to_value(RigCommandOutput::List(RigListOutput::new(Vec::new())))
+            .expect("serialize rig list");
+
+        assert_eq!(value["payload"]["entities"], serde_json::json!([]));
+        assert_eq!(value["payload"]["rigs"], serde_json::json!([]));
+    }
+
+    #[test]
     fn test_rig_show_output_includes_expanded_resources() {
         let output = RigShowOutput {
             command: "rig.show",
@@ -195,7 +236,6 @@ mod tests {
                 trace_workloads: Default::default(),
                 fuzz_workloads: Default::default(),
                 trace_workload_defaults: Default::default(),
-                trace_phase_templates: Default::default(),
                 trace_variants: Default::default(),
                 trace_profiles: Default::default(),
                 trace_experiments: Default::default(),
@@ -203,7 +243,6 @@ mod tests {
                 bench_profiles: Default::default(),
                 fuzz_profiles: Default::default(),
                 app_launcher: None,
-                toolchain: None,
             },
             resources: RigResourcesSpec {
                 exclusive: vec!["studio-runtime".to_string()],

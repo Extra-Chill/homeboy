@@ -52,7 +52,6 @@
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -404,26 +403,11 @@ fn extension_identity(extension_id: &str) -> String {
                 .collect::<String>()
         })
         .unwrap_or_else(|| "no-manifest".to_string());
-    let head = git_stdout(&dir, &["rev-parse", "HEAD"]).unwrap_or_else(|| "nogit".to_string());
-    let status = git_stdout(&dir, &["status", "--porcelain=v1"]).unwrap_or_default();
+    let head = homeboy_core::git::output_allow_empty(&dir, &["rev-parse", "HEAD"])
+        .unwrap_or_else(|| "nogit".to_string());
+    let status = homeboy_core::git::output_allow_empty(&dir, &["status", "--porcelain=v1"])
+        .unwrap_or_default();
     format!("{manifest}\n{head}\n{status}")
-}
-
-fn git_stdout(path: &Path, args: &[&str]) -> Option<String> {
-    if !path.is_dir() {
-        return None;
-    }
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn entry_is_complete(entry: &Path) -> bool {

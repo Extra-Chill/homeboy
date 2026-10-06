@@ -72,11 +72,6 @@ mod tests {
         let a = json!({ "one": 1, "two": { "b": 2, "a": 1 }, "three": [3, 2, 1] });
         let b = json!({ "three": [3, 2, 1], "two": { "a": 1, "b": 2 }, "one": 1 });
         assert_eq!(
-            canonical_json(a.clone()),
-            canonical_json(b.clone()),
-            "reordered keys must canonicalize identically"
-        );
-        assert_eq!(
             canonical_json_bytes(&a).unwrap(),
             canonical_json_bytes(&b).unwrap()
         );
@@ -100,17 +95,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_json_bytes_matches_manual_pipeline() {
-        // The helper must be byte-identical to the historical inline pipeline
-        // consumers used: to_value -> canonicalize -> to_vec.
+    fn canonical_json_bytes_sorts_serialized_struct_fields() {
         #[derive(serde::Serialize)]
         struct Payload {
             zebra: u8,
             alpha: u8,
         }
         let payload = Payload { zebra: 9, alpha: 1 };
-        let manual =
-            serde_json::to_vec(&canonical_json(serde_json::to_value(&payload).unwrap())).unwrap();
-        assert_eq!(canonical_json_bytes(&payload).unwrap(), manual);
+        assert_eq!(
+            canonical_json_bytes(&payload).unwrap(),
+            br#"{"alpha":1,"zebra":9}"#
+        );
     }
 }

@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use super::spec::RigSpec;
 
 const EXTENDS_FIELD: &str = "extends";
-const SHARED_TEMPLATES_FIELD: &str = "shared_templates";
 
 pub use super::discovery::{discover_rigs, discover_stacks, DiscoveredRig, DiscoveredStack};
 use super::discovery::{discover_rigs_for_install, select_rigs};
@@ -113,12 +112,6 @@ pub struct StackSourceMetadata {
     pub source_content_hash: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct RigPackageMetadata {
-    #[serde(default)]
-    package_dependencies: Vec<String>,
-}
-
 pub fn install(
     config_root: &Path,
     source: &str,
@@ -137,17 +130,13 @@ pub fn install_with_local_source_copy(
     all: bool,
     copy_local_source: bool,
 ) -> Result<RigInstallResult> {
-    let mut prepared = if copy_local_source && !is_git_url(source) && !source.contains(".git//") {
+    let prepared = if copy_local_source && !is_git_url(source) && !source.contains(".git//") {
         prepare_copied_local_source(config_root, source)?
     } else {
         prepare_source(config_root, source)?
     };
     let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
-    let dependency_roots = package_source_roots_for_dependencies(&prepared, &selected)?;
-    prepared.source_root = dependency_roots.source_root;
-    prepared.package_path = dependency_roots.package_path;
-    prepared.discovery_path = dependency_roots.discovery_path;
     let discovered_stacks = if id.is_some() && !all {
         Vec::new()
     } else {
@@ -335,14 +324,7 @@ pub(crate) fn write_rig_config_from_source(
         return Ok(false);
     }
 
-    let shared_template_roots = shared_template_roots(&source_value, source, source_root)?;
-    let value = materialize_rig_spec_value(
-        source,
-        source_root,
-        source_value,
-        &shared_template_roots,
-        &mut Vec::new(),
-    )?;
+    let value = materialize_rig_spec_value(source, source_root, source_value, &mut Vec::new())?;
     let content = serde_json::to_string_pretty(&value).map_err(|e| {
         Error::internal_json(
             e.to_string(),
@@ -441,21 +423,13 @@ pub fn materialize_rig_resource(
 /// `extends` nor array merge directives and uses the install merge semantics.
 pub fn materialize_rig_spec(path: &Path, source_root: &Path) -> Result<serde_json::Value> {
     let value = read_json_value(path)?;
-    let shared_template_roots = shared_template_roots(&value, path, source_root)?;
-    materialize_rig_spec_value(
-        path,
-        source_root,
-        value,
-        &shared_template_roots,
-        &mut Vec::new(),
-    )
+    materialize_rig_spec_value(path, source_root, value, &mut Vec::new())
 }
 
 fn materialize_rig_spec_value(
     path: &Path,
     source_root: &Path,
     mut value: serde_json::Value,
-    shared_template_roots: &[PathBuf],
     stack: &mut Vec<PathBuf>,
 ) -> Result<serde_json::Value> {
     let canonical = path.canonicalize().map_err(|e| {
@@ -474,19 +448,14 @@ fn materialize_rig_spec_value(
     }
     stack.push(canonical);
 
-    let parents = extends_paths(&value, path, source_root, shared_template_roots)?;
+    let parents = extends_paths(&value, path, source_root)?;
     remove_extends(&mut value);
 
     let mut merged = serde_json::Value::Object(serde_json::Map::new());
     for parent in parents {
         let parent_value = read_json_value(&parent)?;
-        let parent_materialized = materialize_rig_spec_value(
-            &parent,
-            source_root,
-            parent_value,
-            shared_template_roots,
-            stack,
-        )?;
+        let parent_materialized =
+            materialize_rig_spec_value(&parent, source_root, parent_value, stack)?;
         merge_json(&mut merged, parent_materialized, &parent, "")?;
     }
     merge_json(&mut merged, value, path, "")?;
@@ -515,7 +484,6 @@ fn extends_paths(
     value: &serde_json::Value,
     path: &Path,
     source_root: &Path,
-    shared_template_roots: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let Some(extends) = value.get(EXTENDS_FIELD) else {
         return Ok(Vec::new());
@@ -573,14 +541,10 @@ fn extends_paths(
                 Some(format!("resolve rig template {}", candidate.display())),
             )
         })?;
-        if !canonical.starts_with(&source_root)
-            && !shared_template_roots
-                .iter()
-                .any(|root| canonical.starts_with(root))
-        {
+        if !canonical.starts_with(&source_root) {
             return Err(Error::validation_invalid_argument(
                 EXTENDS_FIELD,
-                "Rig template extends paths must stay inside the rig package source root or a declared shared template root",
+                "Rig template extends paths must stay inside the rig package source root",
                 Some(raw_path.to_string()),
                 None,
             ));
@@ -590,184 +554,13 @@ fn extends_paths(
     Ok(paths)
 }
 
-fn shared_template_roots(
-    value: &serde_json::Value,
-    path: &Path,
-    package_root: &Path,
-) -> Result<Vec<PathBuf>> {
-    let Some(shared_templates) = value.get(SHARED_TEMPLATES_FIELD) else {
-        return Ok(Vec::new());
-    };
-    let entries = shared_templates.as_array().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            SHARED_TEMPLATES_FIELD,
-            "Rig shared template roots must be an array of relative paths",
-            Some(shared_templates.to_string()),
-            None,
-        )
-    })?;
-    let package_root = package_root.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package root {}",
-                package_root.display()
-            )),
-        )
-    })?;
-    let source_root = git::repo_root(&package_root)
-        .or_else(|| materialized_runner_source_root(&package_root))
-        .unwrap_or_else(|| package_root.clone());
-    let source_root = source_root.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package source root {}",
-                source_root.display()
-            )),
-        )
-    })?;
-    let base = path.parent().unwrap_or_else(|| Path::new("."));
-
-    entries
-        .iter()
-        .map(|entry| {
-            let raw_path = entry.as_str().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    SHARED_TEMPLATES_FIELD,
-                    "Rig shared template roots must be strings",
-                    Some(entry.to_string()),
-                    None,
-                )
-            })?;
-            if raw_path.trim().is_empty() || Path::new(raw_path).is_absolute() {
-                return Err(Error::validation_invalid_argument(
-                    SHARED_TEMPLATES_FIELD,
-                    "Rig shared template roots must be non-empty relative paths",
-                    Some(raw_path.to_string()),
-                    None,
-                ));
-            }
-            let candidate = base.join(raw_path);
-            let canonical = candidate.canonicalize().map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some(format!(
-                        "resolve shared rig template root {}",
-                        candidate.display()
-                    )),
-                )
-            })?;
-            if !canonical.starts_with(&source_root) {
-                return Err(Error::validation_invalid_argument(
-                    SHARED_TEMPLATES_FIELD,
-                    "Rig shared template roots must stay inside the rig package source root",
-                    Some(raw_path.to_string()),
-                    None,
-                ));
-            }
-            Ok(canonical)
-        })
-        .collect()
-}
-
 fn remove_extends(value: &mut serde_json::Value) {
     if let Some(object) = value.as_object_mut() {
         object.remove(EXTENDS_FIELD);
-        object.remove(SHARED_TEMPLATES_FIELD);
     }
 }
 
-struct PackageDependencySourceRoots {
-    source_root: PathBuf,
-    package_path: PathBuf,
-    discovery_path: PathBuf,
-}
-
-fn package_source_roots_for_dependencies(
-    prepared: &PreparedSource,
-    rigs: &[DiscoveredRig],
-) -> Result<PackageDependencySourceRoots> {
-    let Some((source_root, package_root)) = resolve_package_dependency_roots(
-        &prepared.package_path,
-        Some(&prepared.source_root),
-        rigs,
-    )?
-    else {
-        return Ok(PackageDependencySourceRoots {
-            source_root: prepared.source_root.clone(),
-            package_path: prepared.package_path.clone(),
-            discovery_path: prepared.discovery_path.clone(),
-        });
-    };
-
-    Ok(PackageDependencySourceRoots {
-        source_root,
-        package_path: package_root.clone(),
-        discovery_path: package_root,
-    })
-}
-
-pub(crate) fn local_package_source_root_for_dependencies(
-    package_path: &Path,
-    rigs: &[DiscoveredRig],
-) -> Result<PathBuf> {
-    if let Some((source_root, _)) = resolve_package_dependency_roots(package_path, None, rigs)? {
-        return Ok(source_root);
-    }
-    canonical_package_path(package_path, "path")
-}
-
-fn resolve_package_dependency_roots(
-    package_path: &Path,
-    fallback_source_root: Option<&Path>,
-    rigs: &[DiscoveredRig],
-) -> Result<Option<(PathBuf, PathBuf)>> {
-    let mut dependency_paths = Vec::new();
-    for rig in rigs {
-        let value = read_json_value(&rig.rig_path)?;
-        let spec: RigPackageMetadata = serde_json::from_value(value).map_err(|e| {
-            Error::validation_invalid_argument(
-                "rig_spec",
-                format!(
-                    "Rig spec schema is not compatible with this Homeboy binary: {}",
-                    e
-                ),
-                Some(rig.rig_path.to_string_lossy().to_string()),
-                None,
-            )
-        })?;
-        for dependency in spec.package_dependencies {
-            dependency_paths.push((rig.id.clone(), dependency));
-        }
-    }
-
-    if dependency_paths.is_empty() {
-        return Ok(None);
-    }
-
-    let package_root = canonical_package_path(package_path, "path")?;
-    let source_root = git::repo_root(&package_root)
-        .or_else(|| materialized_runner_source_root(&package_root))
-        .or_else(|| fallback_source_root.map(Path::to_path_buf))
-        .unwrap_or_else(|| package_root.clone());
-    let source_root = canonical_package_path(&source_root, "source root")?;
-    if !package_root.starts_with(&source_root) {
-        return Err(Error::validation_invalid_argument(
-            "package_dependencies",
-            "Rig package dependencies require the selected package path to stay inside the package source root",
-            Some(package_path.to_string_lossy().to_string()),
-            Some(vec![format!("source root: {}", source_root.display())]),
-        ));
-    }
-
-    for (rig_id, dependency) in dependency_paths {
-        validate_package_dependency_path(&rig_id, &dependency, &package_root, &source_root)?;
-    }
-    Ok(Some((source_root, package_root)))
-}
-
-fn canonical_package_path(package_path: &Path, label: &str) -> Result<PathBuf> {
+pub(crate) fn canonical_package_path(package_path: &Path, label: &str) -> Result<PathBuf> {
     package_path.canonicalize().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -777,47 +570,6 @@ fn canonical_package_path(package_path: &Path, label: &str) -> Result<PathBuf> {
             )),
         )
     })
-}
-
-fn validate_package_dependency_path(
-    rig_id: &str,
-    dependency: &str,
-    package_root: &Path,
-    source_root: &Path,
-) -> Result<PathBuf> {
-    let dependency = dependency.trim();
-    if dependency.is_empty() || Path::new(dependency).is_absolute() {
-        return Err(Error::validation_invalid_argument(
-            "package_dependencies",
-            "Rig package dependency paths must be non-empty relative paths",
-            Some(dependency.to_string()),
-            Some(vec![format!("rig: {rig_id}")]),
-        ));
-    }
-
-    let candidate = package_root.join(dependency);
-    let canonical = candidate.canonicalize().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "resolve rig package dependency {} for {}",
-                candidate.display(),
-                rig_id
-            )),
-        )
-    })?;
-    if !canonical.starts_with(source_root) {
-        return Err(Error::validation_invalid_argument(
-            "package_dependencies",
-            "Rig package dependency paths must stay inside the package source root",
-            Some(dependency.to_string()),
-            Some(vec![
-                format!("rig: {rig_id}"),
-                format!("source root: {}", source_root.display()),
-            ]),
-        ));
-    }
-    Ok(canonical)
 }
 
 fn materialized_runner_source_root(path: &Path) -> Option<PathBuf> {

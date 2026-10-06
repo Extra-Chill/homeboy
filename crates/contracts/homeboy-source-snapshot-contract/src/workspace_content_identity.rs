@@ -18,7 +18,8 @@
 //!
 //! The hashing rules have evolved; each change is a new marker so a digest can
 //! never be reinterpreted under different rules:
-//! - `homeboy-workspace-content-v1` — legacy: sorted entries, content + mode.
+//! Retired v1 sorted-entry records are refused by the current verifier.
+//! Supported policy markers are:
 //! - `homeboy-workspace-content-v2+<policy>` — streaming traversal; the
 //!   permission policy decides whether/which execute bit is bound.
 //! - `homeboy-workspace-content-v3+unix-owner-executable` — binds only the

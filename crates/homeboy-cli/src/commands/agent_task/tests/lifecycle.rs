@@ -143,6 +143,7 @@ fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -446,16 +447,30 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
         })
         .expect("persist selected runner");
-        let io_error = std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "Authorization: Bearer status-fixture-secret",
-        );
-        let source = Error::internal_io(
-            io_error.to_string(),
-            Some("submit selected Lab runner job".to_string()),
+        let long_path_root = tempfile::tempdir().expect("long evidence path root");
+        let mut evidence_parent = long_path_root.path().to_path_buf();
+        for index in 0..6 {
+            evidence_parent.push(format!("segment-{index}-{}", "p".repeat(76)));
+            std::fs::create_dir(&evidence_parent).expect("create long path component");
+        }
+        evidence_parent.push("Authorization: Bearer status-fixture-secret");
+        std::fs::create_dir(&evidence_parent).expect("create credential-bearing path component");
+        let missing_evidence = evidence_parent.join("missing-evidence.json");
+        assert!(missing_evidence.to_string_lossy().len() > 512);
+        assert!(missing_evidence
+            .to_string_lossy()
+            .contains("status-fixture-secret"));
+        let redacted_missing_evidence =
+            homeboy_core::redaction::redact_string(&missing_evidence.to_string_lossy());
+        let io_error = std::fs::File::open(&missing_evidence)
+            .expect_err("fixture exercises a real filesystem open failure");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+        let source = homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error(
+            io_error,
+            format!("private evidence upload {}", missing_evidence.display()),
         )
-        .with_source(io_error)
         .with_retryable(true);
+        assert_eq!(source.retryable, Some(true));
         let error = preacceptance_transport_error(
             run_id,
             "homeboy-lab",
@@ -463,13 +478,18 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             LabJobAcceptanceDisposition::NoJobAccepted,
             source,
         );
-        agent_task_lifecycle::record_pre_execution_failure(
+        assert_eq!(error.details["source_error"]["retryable"], true);
+        let persisted = agent_task_lifecycle::record_pre_execution_failure(
             run_id,
             &plan,
             "lab_handoff_preacceptance",
             &error,
         )
         .expect("persist Lab transport failure");
+        assert_eq!(
+            persisted.metadata["pre_execution_failure"]["details"]["source_error"]["retryable"],
+            true
+        );
 
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable failed record");
         let aggregate = test_lifecycle_store()
@@ -488,8 +508,46 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         assert_eq!(
             aggregate.outcomes[0].diagnostics[0].data["details"]["lab_transport_attempt_receipt"]
                 ["error"]["kind"],
-            "broken_pipe"
+            "not_found"
         );
+        let persisted_receipt =
+            &record.metadata["pre_execution_failure"]["details"]["lab_transport_attempt_receipt"];
+        assert!(persisted_receipt["error"]["message"]
+            .as_str()
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
+        let source_error = &record.metadata["pre_execution_failure"]["details"]["source_error"];
+        assert_eq!(source_error["code"], "internal.io_error");
+        assert_eq!(source_error["retryable"], true);
+        assert!(source_error["details"]["context"]
+            .as_str()
+            .is_some_and(|context| context.chars().count() > 512));
+        assert_eq!(
+            source_error["details"]["context"],
+            format!(
+                "private evidence upload {}",
+                redacted_missing_evidence.clone()
+            )
+        );
+        assert_eq!(
+            source_error["details"]["error"],
+            "No such file or directory (os error 2)"
+        );
+        assert_eq!(source_error["causes"][0]["kind"], "not_found");
+        assert_eq!(source_error["causes"][0]["raw_os_error"], 2);
+        assert_eq!(
+            source_error["causes"][0]["message"],
+            "No such file or directory (os error 2)"
+        );
+        assert!(!serde_json::to_string(&(record.clone(), aggregate.clone()))
+            .expect("serialize durable source evidence")
+            .contains("status-fixture-secret"));
+        assert!(persisted_receipt["error"]["context"]
+            .as_str()
+            .is_some_and(|context| context.len() <= 4 * 1024
+                && context.contains(&redacted_missing_evidence)
+                && context.contains("[REDACTED]")));
 
         let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
@@ -501,7 +559,43 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             full: true,
         })
         .expect("full diagnosis");
+        let (full_evidence, _) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: None,
+            task: None,
+            failure_only: false,
+            full: true,
+        })
+        .expect("full evidence projection");
+        let (status_output, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+            ..Default::default()
+        })
+        .expect("terminal status projection");
 
+        assert!(compact_diagnosis["root_cause"]["message"]
+            .as_str()
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
+        assert!(
+            compact_diagnosis["root_cause"]["details"]["lab_transport_attempt_receipt"]["error"]
+                ["causes"]
+                .as_array()
+                .is_some_and(|causes| causes.iter().any(|cause| {
+                    cause["kind"] == "not_found"
+                        && cause["message"].as_str().is_some_and(|message| {
+                            message.contains("No such file") || message.contains("not found")
+                        })
+                }))
+        );
+        assert!(status_output["blocker"]["message"]
+            .as_str()
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
         for receipt in [
             &compact_diagnosis["lab_transport_failure"]["receipt"],
             &full_diagnosis["lab_transport_failure"]["receipt"],
@@ -509,16 +603,35 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             assert_eq!(receipt["operation"], "dispatch_cook_attempt");
             assert_eq!(receipt["selected_runner"], "homeboy-lab");
             assert_eq!(receipt["acceptance"], "no_job_accepted");
-            assert_eq!(receipt["error"]["kind"], "broken_pipe");
+            assert_eq!(receipt["error"]["kind"], "not_found");
+            assert!(receipt["error"]["message"]
+                .as_str()
+                .is_some_and(
+                    |message| message.contains("No such file") || message.contains("not found")
+                ));
+            assert!(receipt["error"]["context"]
+                .as_str()
+                .is_some_and(|context| context.contains("private evidence upload")
+                    && context.contains(&redacted_missing_evidence)
+                    && context.contains("[REDACTED]")));
             assert_eq!(receipt["retryable"], true);
             assert!(receipt["error"]["causes"]
                 .as_array()
                 .is_some_and(|causes| causes.len() <= 4));
+            assert!(receipt["error"]["context"]
+                .as_str()
+                .is_some_and(|context| context.len() <= 4 * 1024
+                    && context.contains(&redacted_missing_evidence)));
         }
         assert_eq!(
             compact_diagnosis["root_cause"]["class"],
             "runner.lab_transport_failure"
         );
+        assert!(compact_diagnosis["root_cause"]["message"]
+            .as_str()
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
         // Both compact and full diagnosis route through the same
         // `attach_diagnose_actionable` and carry their one remediation
         // exclusively under `_homeboy_actionable.next_actions`; there is no
@@ -538,6 +651,51 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
                 .expect("serialize command output")
                 .contains("status-fixture-secret"));
         }
+        let full_evidence_text = serde_json::to_string(&full_evidence).expect("serialize evidence");
+        assert!(
+            full_evidence_text.contains("No such file") || full_evidence_text.contains("not found")
+        );
+        assert!(full_evidence_text.contains(&redacted_missing_evidence));
+        assert!(!full_evidence_text.contains("status-fixture-secret"));
+        assert_eq!(
+            full_diagnosis["root_cause"]["details"]["source_error"]["details"]["context"],
+            source_error["details"]["context"]
+        );
+        assert!(full_evidence_text.contains(
+            source_error["details"]["context"]
+                .as_str()
+                .expect("full source context")
+        ));
+        let summary_message = record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .expect("bounded durable failure summary");
+        assert!(summary_message.chars().count() <= 512);
+        assert_eq!(compact_diagnosis["root_cause"]["message"], summary_message);
+        assert_eq!(full_diagnosis["root_cause"]["message"], summary_message);
+        assert_eq!(status_output["blocker"]["message"], summary_message);
+        for output in [
+            serde_json::to_string(&record).expect("record JSON"),
+            serde_json::to_string(&aggregate).expect("aggregate JSON"),
+            serde_json::to_string(&compact_diagnosis).expect("compact diagnosis JSON"),
+            serde_json::to_string(&full_diagnosis).expect("full diagnosis JSON"),
+            full_evidence_text,
+            serde_json::to_string(&status_output).expect("status JSON"),
+        ] {
+            assert!(!output.contains("status-fixture-secret"));
+        }
+        let status_bytes = serde_json::to_vec(&status_output)
+            .expect("serialize default status")
+            .len();
+        let full_diagnosis_bytes = serde_json::to_vec(&full_diagnosis)
+            .expect("serialize full diagnosis")
+            .len();
+        let full_evidence_bytes = serde_json::to_vec(&full_evidence)
+            .expect("serialize full evidence")
+            .len();
+        assert!(status_bytes <= 16 * 1024, "status_bytes={status_bytes}");
+        eprintln!(
+            "long-context diagnostic output bytes: status={status_bytes}, full_diagnosis={full_diagnosis_bytes}, full_evidence={full_evidence_bytes}"
+        );
         assert!(!serde_json::to_string(&(record, aggregate))
             .expect("serialize durable evidence")
             .contains("status-fixture-secret"));
@@ -691,6 +849,7 @@ fn status_returns_control_plane_run_for_a_cancelled_retry() {
 
         let status_args = || StatusArgs {
             run_id: retry_run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -807,6 +966,7 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
 
         let (value, exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: true,
             exact: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
@@ -3332,6 +3492,7 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -5469,15 +5630,29 @@ fn reconcile_apply_accounts_for_each_record_in_a_cook_scope() {
         assert_eq!(exit_code, 0);
         assert_eq!(value["requested_run_id"], cook_id);
         assert_eq!(value["acknowledgements"].as_array().map(Vec::len), Some(2));
+        // Reconciliation is owned by one durable control-plane effect per
+        // record (#15533), not by a lifecycle-projection claim, so each record
+        // is accounted for by its own acknowledgement and idempotency key.
+        let acknowledgements = value["acknowledgements"]
+            .as_array()
+            .expect("acknowledgements");
+        let mut keys = std::collections::BTreeSet::new();
         for run_id in [cook_id, attempt_id.as_str()] {
-            let record = agent_task_lifecycle::exact_record(run_id).expect("action record");
+            let prefix = format!("{run_id}:action:reconcile:");
+            let matching = acknowledgements
+                .iter()
+                .filter(|ack| {
+                    ack["acknowledgement"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(&prefix))
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                record.metadata["cook_operation_claims"]
-                    .as_array()
-                    .map(Vec::len),
-                Some(1),
-                "{run_id} receives its own action claim"
+                matching.len(),
+                1,
+                "{run_id} receives its own acknowledgement"
             );
+            assert!(keys.insert(matching[0]["idempotency_key"].to_string()));
         }
     });
 }

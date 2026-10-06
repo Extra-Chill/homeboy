@@ -6,6 +6,7 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
 use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
+use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::{
     RunnerApiListRequest, RunnerApiListResponse, RunnerKind, RUNNER_API_LIST_REQUEST_SCHEMA,
     RUNNER_API_V1,
@@ -16,8 +17,8 @@ use super::super::{CmdResult, DynamicSetArgs};
 use super::cli::RunnerKindArg;
 use super::types::{
     RunnerConnectionOutput, RunnerDisconnectStatus, RunnerExtra, RunnerInventoryConcurrency,
-    RunnerInventoryEvidence, RunnerInventorySummary, RunnerListOutput, RunnerListTruncation,
-    RunnerOutput, REDACTED_ENV_VALUE,
+    RunnerInventoryEvidence, RunnerInventorySummary, RunnerListOutput, RunnerListRows,
+    RunnerListTruncation, RunnerOutput, REDACTED_ENV_VALUE,
 };
 
 pub(super) struct RunnerAddInput {
@@ -91,6 +92,7 @@ pub(super) fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
 
 const RUNNER_LIST_LIMIT: usize = 10;
 const RUNNER_LIST_TEXT_LIMIT: usize = 256;
+/// Wire budget for the default runner-list envelope.
 const RUNNER_LIST_PROJECTION_BYTES: usize = 12 * 1024;
 
 pub(super) fn list(full: bool) -> CmdResult<RunnerListOutput> {
@@ -140,8 +142,7 @@ fn full_list_output(
     RunnerListOutput {
         command: "runner.list",
         variant: "list",
-        runner_summaries: Vec::new(),
-        entities,
+        rows: RunnerListRows::full(entities),
         sessions,
         truncation: None,
     }
@@ -172,8 +173,7 @@ fn compact_list_output(
             evidence_ref: "runner:configured-inventory",
             full_command: "homeboy runner list --full",
         }),
-        runner_summaries,
-        entities: Vec::new(),
+        rows: RunnerListRows::summaries(runner_summaries),
         sessions: Vec::new(),
     }
 }
@@ -267,8 +267,7 @@ fn bounded_list_output(output: RunnerListOutput) -> RunnerListOutput {
     RunnerListOutput {
         command: "runner.list",
         variant: "list",
-        runner_summaries: Vec::new(),
-        entities: Vec::new(),
+        rows: RunnerListRows::summaries(Vec::new()),
         sessions: Vec::new(),
         truncation: Some(RunnerListTruncation {
             shown: 0,
@@ -289,18 +288,6 @@ fn bounded_list_text(value: &str) -> String {
         format!("{bounded}...")
     } else {
         bounded
-    }
-}
-
-fn shell_arg(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -326,7 +313,7 @@ fn list_envelope_bytes(output: &RunnerListOutput) -> homeboy::core::Result<usize
 }
 
 pub(crate) fn render_list_summary(payload: &Value) -> Option<String> {
-    let summaries = payload.get("runner_summaries").and_then(Value::as_array);
+    let summaries = payload.get("entities").and_then(Value::as_array);
     let mut rendered = format!(
         "Runner summaries\nRunners shown: {}",
         summaries.map_or(0, Vec::len)
@@ -697,7 +684,7 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
         redact_runner_env(runner);
     }
 
-    for runner in &mut output.entities {
+    for runner in output.entities.iter_mut().flatten() {
         redact_runner_env(runner);
     }
 }
@@ -973,16 +960,13 @@ mod tests {
             let wire_json = serde_json::to_value(&wire).expect("wire serializes");
 
             assert!(wire.stdout_json().unwrap().len() <= RUNNER_LIST_PROJECTION_BYTES);
-            assert!(wire_json["data"].get("entities").is_none());
             assert!(wire_json["data"].get("sessions").is_none());
             assert!(!wire_json["data"].to_string().contains("ENV_0"));
-            assert_eq!(
-                wire_json["data"]["runner_summaries"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                10
-            );
+            // Summaries are the canonical `entities` rows (#14876); the former
+            // `runner_summaries` key is gone.
+            assert_eq!(wire_json["data"]["entities"].as_array().unwrap().len(), 10);
+            assert_eq!(wire_json["data"]["entities"][0]["identity"], "lab-0");
+            assert!(wire_json["data"].get("runner_summaries").is_none());
             assert_eq!(wire_json["data"]["truncation"]["shown"], 10);
             assert_eq!(wire_json["data"]["truncation"]["omitted"], 15);
             assert_eq!(
@@ -1000,7 +984,7 @@ mod tests {
             let id = "lab 'quoted' \\ target";
             let runners = vec![descriptor(&configured_runner(id))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
-            let summary = &output.runner_summaries[0];
+            let summary = &output.runner_summaries()[0];
 
             assert_eq!(summary.identity, id);
             assert_eq!(
@@ -1022,10 +1006,37 @@ mod tests {
             let runners = vec![descriptor(&configured_runner(&"\"\\\n".repeat(10_000)))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
 
-            assert!(output.runner_summaries.is_empty());
+            assert!(output.runner_summaries().is_empty());
             assert_eq!(output.truncation.as_ref().unwrap().shown, 0);
             assert_eq!(output.truncation.as_ref().unwrap().omitted, 1);
             assert!(list_envelope_bytes(&output).unwrap() <= RUNNER_LIST_PROJECTION_BYTES);
+
+            let value = serde_json::to_value(&output).expect("fallback serializes");
+            assert_eq!(value["entities"], serde_json::json!([]));
+        }
+
+        #[test]
+        fn default_list_returns_summaries_under_entities_only() {
+            let runners = vec![descriptor(&configured_runner("lab"))];
+            let output = bounded_list_output(compact_list_output(&runners, &[]));
+            let value = serde_json::to_value(&output).expect("list serializes");
+
+            assert_eq!(value["command"], "runner.list");
+            assert_eq!(value["entities"][0]["identity"], "lab");
+            assert!(value.get("runner_summaries").is_none());
+        }
+
+        #[test]
+        fn empty_runner_lists_emit_entities_array() {
+            let compact = serde_json::to_value(bounded_list_output(compact_list_output(&[], &[])))
+                .expect("compact list serializes");
+            assert_eq!(compact["entities"], serde_json::json!([]));
+            assert!(compact.get("runner_summaries").is_none());
+
+            let full = serde_json::to_value(full_list_output(Vec::new(), Vec::new()))
+                .expect("full list serializes");
+            assert_eq!(full["entities"], serde_json::json!([]));
+            assert!(full.get("runner_summaries").is_none());
         }
 
         #[test]
@@ -1035,7 +1046,7 @@ mod tests {
             let status = ssh_status("lab", runner::RunnerActiveJobState::Unavailable);
             let output = compact_list_output(&[descriptor(&configured)], &[status]);
             let value =
-                serde_json::to_value(&output.runner_summaries[0]).expect("summary serializes");
+                serde_json::to_value(&output.runner_summaries()[0]).expect("summary serializes");
 
             assert_eq!(value["connection_state"], "connected");
             assert_eq!(value["admission_state"], "blocked");

@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
-use homeboy::core::EntityCrudOutput;
+use homeboy::core::{EntityCrudOutput, EntityRows};
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
     PeerSessionMaintenanceReport, ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary,
@@ -208,18 +208,50 @@ pub struct RunnerListTruncation {
 
 /// Runner-owned list payload. The generic CRUD output remains lossless for
 /// entity commands while the default inventory can omit configuration maps.
+///
+/// Both modes return their rows under `entities` (#14876); see
+/// [`RunnerListRows`] for which row type each mode carries.
 #[derive(Debug, Serialize)]
 pub struct RunnerListOutput {
     pub command: &'static str,
     pub variant: &'static str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub runner_summaries: Vec<RunnerInventorySummary>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub entities: Vec<Runner>,
+    #[serde(flatten)]
+    pub rows: RunnerListRows,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<RunnerListTruncation>,
+}
+
+#[cfg(test)]
+impl RunnerListOutput {
+    /// Compact inventory rows; empty for `--full` output.
+    pub fn runner_summaries(&self) -> &[RunnerInventorySummary] {
+        match &self.rows {
+            RunnerListRows::Summaries(rows) => rows.rows(),
+            RunnerListRows::Full(_) => &[],
+        }
+    }
+}
+
+/// The rows of `runner list`, always serialized under `entities`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum RunnerListRows {
+    /// Default bounded inventory summaries, under `entities` (#14876).
+    Summaries(EntityRows<RunnerInventorySummary>),
+    /// `--full`: complete (redacted) runner records, under `entities`.
+    Full(EntityRows<Runner>),
+}
+
+impl RunnerListRows {
+    pub fn summaries(rows: Vec<RunnerInventorySummary>) -> Self {
+        Self::Summaries(EntityRows::new(rows))
+    }
+
+    pub fn full(rows: Vec<Runner>) -> Self {
+        Self::Full(EntityRows::new(rows))
+    }
 }
 
 /// Execution paths available to this controller, kept apart from concrete
@@ -295,7 +327,6 @@ pub struct LabSelectedRunnerOutput {
     pub readiness_state: String,
     pub connected: bool,
     pub availability: RunnerAvailability,
-    pub status: RunnerStatusReport,
 }
 
 #[derive(Debug, Serialize)]

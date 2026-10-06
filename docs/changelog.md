@@ -4,6 +4,129 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.407.2] - 2026-10-06
+
+### Fixed
+- preserve evidence transport causes
+- one controller drives a Cook at a time
+
+## [0.407.1] - 2026-10-06
+
+### Fixed
+- read attempt lineage through one function
+- restore a green main after contract retirements and the fallback reconciliation pass
+- admit configured model choices
+- reuse the bound gate-fix remediation instead of dispatching a twin
+
+## [0.407.0] - 2026-10-06
+
+### Added
+- extend the provider timeout while the agent is still making progress
+
+### Changed
+- chaos suite replaying lifecycle incidents; fix in-place restart admission
+
+### Fixed
+- judge converging runners against the installed controller
+
+## [0.406.4] - 2026-10-06
+
+### Changed
+- Allow operator-attested recovery of exact dead-lease jobs
+
+## [0.406.3] - 2026-10-06
+
+### Fixed
+- reconcile previews, loop status, and source probes no longer write lifecycle state
+
+## [0.406.2] - 2026-10-06
+
+### Changed
+- call the command-step PATH directly; delete the rig toolchain provider
+
+### Fixed
+- preserve configured runtime in bash shells
+- authorize exact run-owned runtime evidence
+- invoke scoped generation stop with valid CLI args
+- render default runner job lists
+- resume pre-admission batches through native cook
+- make default status compact and actionable
+
+## [0.406.1] - 2026-10-06
+
+### Fixed
+- recover terminal custody from durable runner run resources
+
+## [0.406.0] - 2026-10-06
+
+### Added
+- reject component path/path_setting that restate the automatic override
+
+### Changed
+- delete rig spec features with zero consumers
+
+### Fixed
+- bound retry caller contention
+- own control-plane transactions
+- bound control-plane writer admission
+
+## [0.405.0] - 2026-10-06
+
+### Changed
+- retire legacy no-change review verdict alias
+
+### Fixed
+- use one durable owner for reconciliation
+
+## [0.404.1] - 2026-10-05
+
+### Changed
+- consolidate notification wire fixtures and assert exact metadata
+
+## [0.404.0] - 2026-10-05
+
+### Changed
+- replace vacuous secret metadata checks with exact wire assertions
+- consolidate cleanup fixtures and assert exact wire fields
+- centralize component workspace binding
+- require explicit component registration evidence
+- retire historical execution record identity decoder
+
+### Fixed
+- scope snapshot seed lookup to the source and own its execution
+- return list rows under data.entities, always present, with legacy keys mirrored
+- install --replace installs an extension that is not installed
+- adopt a PR a concurrent publication created instead of failing
+
+## [0.403.0] - 2026-10-05
+
+### Changed
+- replace artifact constant parity with independent wire assertions
+- pin 23 enum labels to their serde wire form
+- retire legacy scalar cleanup configuration
+- share POSIX quoting and prune copy parity tests
+- retire delimited extra-workspace input
+- route private git probe helpers through core output primitives
+- require canonical runtime selection fields
+- retire v1 workspace verification and legacy hash traversal
+- one shell_arg allowlist quoter, quoting empty arguments
+- retire legacy capture decoding and stale test signals
+- retire mission-keyed handoff ledger migration
+- require structured daemon transport evidence
+
+### Fixed
+- bound runner exec argument construction and unify dispatch
+- supervise deferred source materialization and report controller ownership
+- provision absent manifest destinations through the native lifecycle
+- bind lease stops to the registered generation store
+- classify canonical identity command results
+- preserve candidate refusal cause in durable status
+- recover a poisoned upload registry and isolate daemon tests from HOME races
+- pin cgroup directory lifetime and restore SIGKILL coverage
+- converge managed runners to the installed controller, not the pre-upgrade build
+- rotate deferred Lab reconciliation batches fairly
+- restore reverse staging coverage and preserve first failure
+
 ## [0.402.0] - 2026-10-05
 
 ### Changed

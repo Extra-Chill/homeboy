@@ -390,8 +390,14 @@ mod tests {
 
     #[test]
     fn identities_computed_under_different_algorithms_are_not_comparable() {
-        let local = MaterializedIdentity::new("homeboy-workspace-content-v1", "sha256:a");
-        let remote = MaterializedIdentity::new("homeboy-workspace-content-v2+portable", "sha256:a");
+        let local = MaterializedIdentity::new(
+            "homeboy-workspace-content-v3+unix-owner-executable",
+            "sha256:a",
+        );
+        let remote = MaterializedIdentity::new(
+            "homeboy-workspace-content-v2+portable-content-only",
+            "sha256:a",
+        );
 
         let verdict = compare_identities("workspace", &local, &remote);
 
@@ -430,6 +436,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Currency::stale("drifted")).expect("serialize"),
             serde_json::json!({ "verdict": "stale", "reason": "drifted" })
+        );
+    }
+}
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn currency_evidence_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                CurrencyEvidence::ContentDigest,
+                CurrencyEvidence::SourceRevision,
+                CurrencyEvidence::BuildIdentity,
+                CurrencyEvidence::BuildTimestamp,
+            ]
         );
     }
 }

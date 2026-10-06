@@ -48,14 +48,14 @@ impl VerifiedTargetUpgrade {
         candidate_identity: String,
         selected_tag_or_artifact: Option<String>,
     ) -> Self {
+        let installed_identity = normalized_identity(&installed_identity);
+        let candidate_identity = normalized_identity(&candidate_identity);
         let installed_version = identity_version(&installed_identity);
         let candidate_version = identity_version(&candidate_identity);
-        let installed_display = normalized_identity(&installed_identity);
-        let candidate_display = normalized_identity(&candidate_identity);
         let operation_class = match (installed_version, candidate_version) {
             (Some(installed), Some(candidate)) if candidate > installed => "version_upgrade",
             (Some(installed), Some(candidate)) if candidate < installed => "version_downgrade",
-            (Some(_), Some(_)) if installed_display != candidate_display => {
+            (Some(_), Some(_)) if installed_identity != candidate_identity => {
                 "source_build_replacement"
             }
             (Some(_), Some(_)) => "exact_version_repair",
@@ -71,7 +71,6 @@ impl VerifiedTargetUpgrade {
 }
 
 fn identity_version(identity: &str) -> Option<semver::Version> {
-    let identity = normalized_identity(identity);
     identity
         .trim()
         .strip_prefix("homeboy ")?
@@ -86,7 +85,20 @@ fn normalized_identity(identity: &str) -> String {
     let json_identity = serde_json::from_str::<serde_json::Value>(identity)
         .ok()
         .and_then(|identity| {
-            identity
+            let payload = if identity.get("schema").and_then(serde_json::Value::as_str)
+                == Some("homeboy/command-result/v3")
+                && identity.get("command").and_then(serde_json::Value::as_str) == Some("self")
+                && identity
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("identity")
+                && identity.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+            {
+                identity.get("data")?
+            } else {
+                &identity
+            };
+            payload
                 .get("display")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
@@ -246,6 +258,68 @@ mod tests {
         );
 
         assert_eq!(target.operation_class, "exact_version_repair");
+    }
+
+    #[test]
+    fn verified_target_classifies_current_identity_command_envelope() {
+        let installed = serde_json::json!({
+            "schema": "homeboy/command-result/v3",
+            "command": "self",
+            "operation": "identity",
+            "success": true,
+            "data": { "display": "homeboy 0.399.35+1bda7272", "version": "0.399.35" }
+        })
+        .to_string();
+        let target = VerifiedTargetUpgrade::classify(
+            installed,
+            "homeboy 0.402.0+bfeb5c80".to_string(),
+            Some("v0.402.0".to_string()),
+        );
+        assert_eq!(target.operation_class, "version_upgrade");
+        assert_eq!(target.installed_identity, "homeboy 0.399.35+1bda7272");
+    }
+
+    #[test]
+    fn identity_envelopes_preserve_repair_replacement_and_downgrade_classification() {
+        let identity = |display: &str| {
+            serde_json::json!({
+                "schema": "homeboy/command-result/v3", "command": "self",
+                "operation": "identity", "success": true, "data": { "display": display }
+            })
+            .to_string()
+        };
+        for (candidate, expected) in [
+            ("homeboy 0.402.0+abc", "exact_version_repair"),
+            ("homeboy 0.402.0+def", "source_build_replacement"),
+            ("homeboy 0.399.35+abc", "version_downgrade"),
+        ] {
+            let target = VerifiedTargetUpgrade::classify(
+                identity("homeboy 0.402.0+abc"),
+                identity(candidate),
+                None,
+            );
+            assert_eq!(target.operation_class, expected);
+            assert_eq!(target.candidate_identity, candidate);
+        }
+    }
+
+    #[test]
+    fn unsuccessful_or_unrelated_command_envelopes_are_not_identity_proof() {
+        for (command, operation, success) in [
+            ("self", "identity", false),
+            ("other", "identity", true),
+            ("self", "other", true),
+        ] {
+            let installed = serde_json::json!({
+                "schema": "homeboy/command-result/v3", "command": command,
+                "operation": operation, "success": success,
+                "data": { "display": "homeboy 0.399.35+abc" }
+            })
+            .to_string();
+            assert_eq!(VerifiedTargetUpgrade::classify(
+                installed, "homeboy 0.402.0+abc".to_string(), None,
+            ).operation_class, "unverified_replacement");
+        }
     }
 
     #[test]

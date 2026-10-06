@@ -1564,8 +1564,8 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("controller-driver or persisted child-process evidence"),
-                "operator no-PID recovery must refuse typed controller ownership: {error}"
+                    .contains("live or unverifiable workload-process evidence"),
+                "operator no-PID recovery must refuse a job whose workload process is live: {error}"
             );
             let other_submission = cook_job_submission_for_launcher(
                 "ownership-other",
@@ -2275,6 +2275,181 @@ mod tests {
             assert_eq!(
                 aggregate.outcomes[0].diagnostics[0].class,
                 "interrupted_owner"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observe_terminal_keeps_a_live_provider_running_when_its_observer_exits() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-live-provider-observer";
+            let run_id = "cook-live-provider-observer-attempt-1";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "live-provider-observer",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "test".to_string(),
+                        selector: Some("fixture".to_string()),
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "run".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    output_declarations: Vec::new(),
+                    runtime_tools: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                run_id,
+            )
+            .expect("index attempt");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &plan.tasks[0],
+                1,
+            )
+            .expect("reserved");
+            let mut owner = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start live provider");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+                record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] =
+                    Value::Null;
+            })
+            .expect("live provider fixture");
+            // #15210: the observing Cook job ends (client timeout or detach)
+            // while the provider process it supervised is still executing.
+            let mut job =
+                AgentTaskCookJob::parse(request_of(cook_id, u32::MAX)).expect("parse request");
+            job.phase = WorkJobPhase::Supervising;
+            let observed = job.observe_terminal(Some(run_id.to_string()));
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("read run");
+            owner.kill().expect("kill live provider");
+            owner.wait().expect("reap live provider");
+            observed.expect("observe exited observer");
+            assert_eq!(
+                record.state,
+                agent_task_lifecycle::AgentTaskRunState::Running,
+                "a live provider must survive its observer exiting: {:?}",
+                record.metadata.get("stop_reason")
+            );
+            assert_eq!(
+                record.metadata["provider_executions"][0]["state"],
+                json!("running")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observe_terminal_still_interrupts_an_unverifiable_provider_owner() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-unverifiable-owner-observer";
+            let run_id = "cook-unverifiable-owner-observer-attempt-1";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "unverifiable-owner-observer",
+                vec![AgentTaskRequest {
+                    schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                    task_id: "task-a".to_string(),
+                    group_key: None,
+                    parent_plan_id: None,
+                    executor: AgentTaskExecutor {
+                        backend: "test".to_string(),
+                        selector: Some("fixture".to_string()),
+                        runtime_selection: None,
+                        required_capabilities: Vec::new(),
+                        secret_env: Vec::new(),
+                        model: None,
+                        config: Value::Null,
+                    },
+                    instructions: "run".to_string(),
+                    inputs: Value::Null,
+                    source_refs: Vec::new(),
+                    workspace: AgentTaskWorkspace::default(),
+                    component_contracts: Vec::new(),
+                    policy: AgentTaskPolicy::default(),
+                    limits: AgentTaskLimits::default(),
+                    expected_artifacts: Vec::new(),
+                    artifact_declarations: Vec::new(),
+                    output_declarations: Vec::new(),
+                    runtime_tools: Vec::new(),
+                    metadata: Value::Null,
+                }],
+            );
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                run_id,
+            )
+            .expect("index attempt");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::reserve_provider_execution_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &plan.tasks[0],
+                1,
+            )
+            .expect("reserved");
+            // No provider PID was ever bound, so the owner cannot be proven
+            // alive. With its observer gone nothing else would terminalize the
+            // run, so the observer exit must still record the interruption.
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                let execution = record.metadata["provider_executions"][0]
+                    .as_object_mut()
+                    .expect("execution object");
+                execution.remove("owner_pid");
+                execution.remove("owner_linux_starttime_ticks");
+            })
+            .expect("unverifiable owner fixture");
+
+            let mut job =
+                AgentTaskCookJob::parse(request_of(cook_id, u32::MAX)).expect("parse request");
+            job.phase = WorkJobPhase::Supervising;
+            job.observe_terminal(Some(run_id.to_string()))
+                .expect("observe exited observer");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("read run");
+            assert!(record.state.is_terminal(), "{:?}", record.state);
+            assert_eq!(
+                record.metadata["stop_reason"],
+                json!("local Cook observer was interrupted during provider execution")
             );
         });
     }

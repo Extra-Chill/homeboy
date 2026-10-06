@@ -79,7 +79,6 @@ pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) broker_target_home: Option<String>,
     /// Named targets explicitly admitted to the job-scoped SSH broker config.
     pub(crate) broker_target_ids: Vec<String>,
-    pub(crate) dependency_cache_saves: Vec<RunnerDependencyCacheSaveRequest>,
     /// Env-var overrides surfacing synced runtime-overlay remote paths to the
     /// hot command. Empty when no overlay declared `expose_remote_path_env`.
     pub(crate) runtime_overlay_env: Vec<(String, String)>,
@@ -128,7 +127,6 @@ pub(crate) fn durable_workspace_stage_projection(
         "rig_component_path_overrides": stage.rig_component_path_overrides,
         "broker_target_home": stage.broker_target_home.as_ref().map(|_| "[job-scoped]"),
         "broker_targets": stage.broker_target_ids,
-        "dependency_cache_saves": stage.dependency_cache_saves,
         "runtime_overlay_env": stage.runtime_overlay_env,
         "runtime_overlay_metadata": stage.runtime_overlay_metadata,
         "plan": stage.plan,
@@ -586,7 +584,6 @@ fn prepare_lab_offload_workspace_stage_inner(
         )?;
         let synced_rig_dependencies = rig_component_sync.materializations;
         let synced_lab_stacks = rig_component_sync.lab_stack_materializations;
-        let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
         let rig_component_path_overrides = rig_component_sync.component_path_env;
         let selected_rig_component_path = rig_component_sync.selected_component_path;
         let broker_target_sync = rig_materialization::sync_lab_offload_broker_targets(
@@ -798,7 +795,6 @@ fn prepare_lab_offload_workspace_stage_inner(
             rig_component_path_overrides,
             broker_target_home,
             broker_target_ids,
-            dependency_cache_saves,
             runtime_overlay_env,
             runtime_overlay_metadata,
         })

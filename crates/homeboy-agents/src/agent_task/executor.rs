@@ -2,11 +2,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskExecutor {
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
-    #[serde(default, alias = "runtime", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_selection: Option<AgentTaskRuntimeSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_capabilities: Vec<String>,
@@ -19,14 +20,15 @@ pub struct AgentTaskExecutor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskRuntimeSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_id: Option<String>,
-    #[serde(default, alias = "backend", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_backend: Option<String>,
-    #[serde(default, alias = "selector", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor_provider_id: Option<String>,
-    #[serde(default, alias = "provider", skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -125,6 +127,26 @@ impl AgentTaskExecutor {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unrecognized_runtime_routing_is_rejected_instead_of_selecting_defaults() {
+        let base = json!({
+            "backend": "default-backend",
+            "selector": "default-provider",
+            "config": { "provider": "default-ai-provider" }
+        });
+        let mut outer = base.clone();
+        outer["runtime"] = json!({ "runtime_id": "requested-runtime" });
+        assert!(serde_json::from_value::<AgentTaskExecutor>(outer).is_err());
+        for field in ["backend", "selector", "provider", "executor_provider"] {
+            let mut input = base.clone();
+            input["runtime_selection"] = json!({ (field): "requested-route" });
+            assert!(
+                serde_json::from_value::<AgentTaskExecutor>(input).is_err(),
+                "{field} must not become default routing"
+            );
+        }
+    }
 
     #[test]
     fn remaps_only_declared_provider_workspace_fields() {

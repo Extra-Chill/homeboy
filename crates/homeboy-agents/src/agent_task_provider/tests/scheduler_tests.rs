@@ -2111,3 +2111,105 @@ fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_lim
             == crate::agent_task_provider::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS
     }));
 }
+
+/// Chatters on stderr every 20ms, then (if `finish_ms` is set) prints a
+/// succeeded outcome. Stands in for an agent that is busy, not hung.
+fn chatty_provider_script(finish_ms: Option<u64>) -> String {
+    let finish = finish_ms.map_or_else(String::new, |ms| {
+        format!(
+            "setTimeout(()=>{{clearInterval(t); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'finished after the base deadline'}}));}}, {ms});"
+        )
+    });
+    script(&format!(
+        "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let t=setInterval(()=>process.stderr.write('.'), 20); {finish}"
+    ))
+}
+
+#[test]
+fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
+    let command = format!("node {}", chatty_provider_script(Some(600)));
+    let (mut request, provider) = request("task-timeout-extended", command);
+    request.limits.timeout_ms = Some(150);
+    request.limits.max_timeout_ms = Some(5_000);
+    request.limits.liveness_timeout_ms = Some(2_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+    assert_eq!(
+        outcome.summary.as_deref(),
+        Some("finished after the base deadline")
+    );
+}
+
+#[test]
+fn a_provider_that_never_finishes_still_times_out_at_the_cap() {
+    let command = format!("node {}", chatty_provider_script(None));
+    let (mut request, provider) = request("task-timeout-capped", command);
+    request.limits.timeout_ms = Some(100);
+    request.limits.max_timeout_ms = Some(400);
+    request.limits.liveness_timeout_ms = Some(2_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+        .expect("timeout diagnostic");
+    assert_eq!(diagnostic.data["timeout_ms"], json!(100));
+    assert_eq!(diagnostic.data["timeout_cap_ms"], json!(400));
+    assert_eq!(diagnostic.data["effective_timeout_ms"], json!(400));
+    assert!(
+        diagnostic.data["timeout_extensions"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1
+    );
+}
+
+#[test]
+fn a_cap_equal_to_the_base_disables_extension() {
+    let command = format!("node {}", chatty_provider_script(Some(1_500)));
+    let (mut request, provider) = request("task-timeout-no-extension", command);
+    request.limits.timeout_ms = Some(150);
+    request.limits.max_timeout_ms = Some(150);
+    request.limits.liveness_timeout_ms = Some(2_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+        .expect("timeout diagnostic");
+    assert_eq!(diagnostic.data["timeout_extensions"], json!(0));
+}
+
+#[test]
+fn the_provider_is_handed_the_cap_as_its_own_timeout() {
+    // Executors run their own timer from `limits.timeout_ms`. If they got the
+    // base, they would kill a busy agent before Homeboy could extend it.
+    let command = format!(
+        "node {}",
+        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:String(req.limits.timeout_ms)}));")
+    );
+    let (mut request, provider) = request("task-timeout-provider-cap", command);
+    request.limits.timeout_ms = Some(1_000);
+    request.limits.max_timeout_ms = Some(9_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.summary.as_deref(), Some("9000"));
+}

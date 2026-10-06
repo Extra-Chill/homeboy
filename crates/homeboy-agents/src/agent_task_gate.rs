@@ -5649,7 +5649,7 @@ mod tests {
         std::fs::write(
             &homeboy,
             format!(
-                "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test && test \"$3\" = '$HOME' || exit 97\n[ -z \"$HOMEBOY_FAKE_GATE_SLEEP\" ] || sleep \"$HOMEBOY_FAKE_GATE_SLEEP\"\nprintf '%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\nexit {exit_code}\n"
+                "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test && test \"$3\" = '$HOME' || exit 97\nif [ \"$HOMEBOY_FAKE_GATE_BLOCK\" = 1 ]; then while :; do sleep 1; done; fi\n[ -z \"$HOMEBOY_FAKE_GATE_SLEEP\" ] || sleep \"$HOMEBOY_FAKE_GATE_SLEEP\"\nprintf '%s|%s|%s|%s' \"$1\" \"$2\" \"$3\" \"$HOMEBOY_TEST_TIMEOUT_SECONDS\"\nexit {exit_code}\n"
             ),
         )
         .expect("adapter");
@@ -5740,7 +5740,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn declared_supervised_cancellation_retains_its_typed_outcome() {
-        let (workspace, plan, environment) = declared_adapter_fixture(0);
+        let (workspace, plan, mut environment) = declared_adapter_fixture(0);
+        environment
+            .variables
+            .insert("HOMEBOY_FAKE_GATE_BLOCK".to_string(), "1".to_string());
         let supervision = declared_supervision(true, Duration::from_secs(1));
         let report = run_declared_test_with_supervision(
             workspace.path(),

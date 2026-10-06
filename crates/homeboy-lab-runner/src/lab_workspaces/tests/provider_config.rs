@@ -4,14 +4,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::super::{
-    agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
-    declared_path_input_values, extension_source_extra_workspaces, path_setting_values,
-    path_values_extra_workspaces, preflight_provider_config_source_cli_dependencies,
-    provider_config_candidate_paths, provider_config_extra_workspaces,
-    resolve_path_setting_workspace_refs_in_args,
+    accepted_extra_lab_workspaces, agent_task_fanout_extra_workspaces,
+    agent_task_plan_extra_workspaces, agent_task_plan_spec, declared_path_input_values,
+    extension_source_extra_workspaces, path_setting_values, path_values_extra_workspaces,
+    preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
+    provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces_from_entries, runtime_refresh_source_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
     workspace_mapping_entry, workspace_ref_extra_workspaces, ExtraLabWorkspace,
+    LAB_EXTRA_WORKSPACES_JSON_ENV,
 };
 use crate::workspace::git_output;
 use crate::{
@@ -40,6 +41,89 @@ fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
             worktree.to_str().expect("utf-8 worktree path"),
         ],
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_extra_workspace_input_materializes_delimiter_paths_without_legacy_sources() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let controller = tempfile::tempdir().expect("controller");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let primary = tempfile::tempdir().expect("primary workspace");
+        let sources = [
+            controller.path().join("comma, and space"),
+            controller.path().join("line\n break"),
+        ];
+        for (index, source) in sources.iter().enumerate() {
+            std::fs::create_dir(source).expect("source directory");
+            std::fs::write(source.join("input.txt"), format!("source-{index}"))
+                .expect("source bytes");
+        }
+        let retired_source = controller.path().join("legacy-only");
+        std::fs::create_dir(&retired_source).expect("retired source directory");
+        std::env::set_var("HOMEBOY_LAB_EXTRA_WORKSPACES", &retired_source);
+        for (value, field) in [
+            ("not-json".to_string(), LAB_EXTRA_WORKSPACES_JSON_ENV),
+            (
+                serde_json::json!([controller.path().join("missing")]).to_string(),
+                "extra_workspace",
+            ),
+        ] {
+            std::env::set_var(LAB_EXTRA_WORKSPACES_JSON_ENV, value);
+            let error = accepted_extra_lab_workspaces().expect_err("invalid declaration must fail");
+            assert_eq!(error.details["field"], field);
+        }
+        std::env::set_var(LAB_EXTRA_WORKSPACES_JSON_ENV, "[]");
+        assert!(
+            accepted_extra_lab_workspaces()
+                .expect("empty declaration")
+                .is_empty(),
+            "retired delimited input must not inject undeclared sources"
+        );
+        std::env::set_var(
+            LAB_EXTRA_WORKSPACES_JSON_ENV,
+            serde_json::to_string(&sources).expect("JSON paths"),
+        );
+        let declared = accepted_extra_lab_workspaces();
+        std::env::remove_var(LAB_EXTRA_WORKSPACES_JSON_ENV);
+        std::env::remove_var("HOMEBOY_LAB_EXTRA_WORKSPACES");
+        let declared = declared.expect("JSON workspace declarations");
+        assert_eq!(declared.len(), 2);
+
+        crate::create(
+            &serde_json::json!({"id": "json-extra-input", "kind": "local",
+            "workspace_root": runner_root.path()})
+            .to_string(),
+            false,
+        )
+        .expect("local runner");
+        let mut mapping = Vec::new();
+        let synced = sync_extra_lab_workspaces(
+            "json-extra-input",
+            primary.path().to_str().expect("primary path"),
+            declared,
+            &mut mapping,
+        )
+        .expect("materialize declared extra workspaces");
+        assert_eq!(synced.len(), 2);
+        assert_eq!(mapping.len(), 2);
+        for (index, (entry, source)) in mapping.iter().zip(&sources).enumerate() {
+            assert_eq!(entry.role(), "extra");
+            assert_eq!(
+                entry.local_path(),
+                source
+                    .canonicalize()
+                    .expect("canonical source")
+                    .to_str()
+                    .expect("source path")
+            );
+            assert_eq!(
+                std::fs::read_to_string(Path::new(entry.remote_path()).join("input.txt"))
+                    .expect("materialized source bytes"),
+                format!("source-{index}")
+            );
+        }
+    });
 }
 
 #[test]
@@ -1257,7 +1341,6 @@ fn rig_dependency_workspace_mapping_uses_dependency_sync_mode_and_subpath() {
         used_pinned_ref: false,
         dirty_overlay: false,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-        dependency_cache: None,
         counts: ByteFileCounts {
             files: 7,
             bytes: 42,
