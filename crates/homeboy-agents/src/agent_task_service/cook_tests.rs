@@ -20185,7 +20185,7 @@ fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_tw
             );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let before = std::fs::read(recipes.recipe_path("intent-crash")).unwrap();
+        let before = serde_json::to_value(recipes.load_recipe("intent-crash").unwrap()).unwrap();
         let error = dispatch_cook_follow_up(
             (&recipes, &lifecycle),
             &options,
@@ -20207,7 +20207,7 @@ fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_tw
         .expect("submitted intent is equally immutable");
         assert!(error.message.contains("conflicts with replay inputs"));
         assert_eq!(
-            std::fs::read(recipes.recipe_path("intent-crash")).unwrap(),
+            serde_json::to_value(recipes.load_recipe("intent-crash").unwrap()).unwrap(),
             before
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
