@@ -1416,6 +1416,12 @@ impl ObservationStore {
         Ok(run_page_from_probe(runs, limit as i64, 0))
     }
 
+    /// One page of control-plane runs: every mission-bound run plus every
+    /// agent-task lifecycle run. An agent-task run is a control-plane resource
+    /// whether or not it belongs to a mission (`GET .../runs/:id` serves it
+    /// either way), so a list limited to mission-bound rows hid every non-Cook
+    /// agent-task run that `agent-task list` shows (#13697). Generic
+    /// observation runs still need a mission to be control-plane resources.
     pub fn list_control_plane_runs_page(
         &self,
         after: Option<&RunCursor>,
@@ -1431,9 +1437,10 @@ impl ObservationStore {
                 r#"
                 SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
                        r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
-                FROM control_plane_mission_runs mr
-                INNER JOIN runs r ON r.id = mr.run_id
-                WHERE (?1 IS NULL OR r.started_at < ?1 OR (r.started_at = ?1 AND r.id < ?2))
+                FROM runs r
+                LEFT JOIN control_plane_mission_runs mr ON mr.run_id = r.id
+                WHERE (mr.run_id IS NOT NULL OR r.kind = 'agent-task')
+                  AND (?1 IS NULL OR r.started_at < ?1 OR (r.started_at = ?1 AND r.id < ?2))
                 ORDER BY r.started_at DESC, r.id DESC
                 LIMIT ?3
                 "#,
@@ -2546,6 +2553,28 @@ mod tests {
                 .expect("canonical runs");
             assert_eq!(page.runs.len(), 1);
             assert_eq!(page.runs[0].id, "release-run-13697");
+
+            // An agent-task run with no mission is still a control-plane run.
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("agent-task").build(),
+                    "unbound-agent-task".to_string(),
+                )
+                .expect("start unbound agent-task run");
+            let ids = store
+                .list_control_plane_runs_page(None, 10)
+                .expect("canonical runs")
+                .runs
+                .into_iter()
+                .map(|run| run.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                ids,
+                ["release-run-13697", "unbound-agent-task"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            );
         });
     }
 
