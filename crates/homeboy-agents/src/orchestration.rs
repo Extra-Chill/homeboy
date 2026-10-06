@@ -6441,14 +6441,9 @@ fn bind_extension_owners(
 }
 
 fn generic_observation_state(status: &str) -> ControlPlaneRunState {
-    match status {
-        "running" => ControlPlaneRunState::Running,
-        "pass" => ControlPlaneRunState::Succeeded,
-        "fail" | "error" => ControlPlaneRunState::Failed,
-        "cancelled" => ControlPlaneRunState::Cancelled,
-        "skipped" => ControlPlaneRunState::Skipped,
-        _ => ControlPlaneRunState::Unknown,
-    }
+    homeboy_core::observation::RunStatus::from_label(status)
+        .map(homeboy_core::observation::RunStatus::control_plane_state)
+        .unwrap_or(ControlPlaneRunState::Unknown)
 }
 
 fn generic_task_state(value: &str) -> ControlPlaneState {
@@ -11335,6 +11330,24 @@ mod tests {
             .run(&RunId::new(AGENT_TASK_COOK).expect("Cook alias"))
             .expect_err("mission alias must use a mission resource");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
+    }
+
+    /// A handed-off or stale observation run is settled; the control-plane run
+    /// resource used to project both as `Unknown`, an open state, so they never
+    /// left the open set.
+    #[test]
+    fn settled_observation_statuses_are_terminal_control_plane_states() {
+        for status in ["handed_off", "stale", "pass", "fail", "error", "skipped"] {
+            assert!(
+                super::generic_observation_state(status).is_terminal(),
+                "{status} is terminal for the observation run"
+            );
+        }
+        assert!(!super::generic_observation_state("running").is_terminal());
+        assert_eq!(
+            super::generic_observation_state("not-a-status"),
+            homeboy_control_plane_contract::ControlPlaneRunState::Unknown
+        );
     }
 
     #[test]
