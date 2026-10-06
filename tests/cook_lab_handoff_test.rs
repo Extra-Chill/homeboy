@@ -986,29 +986,12 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         ));
     let mut client = client.spawn().expect("start foreground Cook client");
 
-    // Observe the client's public progress stream, then prove the provider is
-    // durably running before terminating that observer.
+    // Prove actual provider execution through the public lifecycle resource,
+    // independently of progress text and its output channel.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if std::fs::read_to_string(&client_stderr)
-            .unwrap_or_default()
-            .contains("Cook provider_start")
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Cook did not start provider work: client stdout={} stderr={}",
-            std::fs::read_to_string(&client_stdout).unwrap_or_default(),
-            std::fs::read_to_string(&client_stderr).unwrap_or_default(),
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let (provider_status, provider_status_json) = loop {
         let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-        status.args(["agent-task", "status", cook_id]);
+        status.args(["agent-task", "status", cook_id, "--full"]);
         let provider_status = bounded_output(status);
         let provider_status_json =
             serde_json::from_slice::<serde_json::Value>(&provider_status.stdout)
@@ -1018,23 +1001,21 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
                 .pointer("/data/state")
                 .and_then(serde_json::Value::as_str)
                 == Some("running")
+            && provider_status_json
+                .pointer("/data/provider/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("running")
         {
-            break (provider_status, provider_status_json);
+            break;
         }
         assert!(
             Instant::now() < deadline,
-            "Cook did not durably record running provider work: {provider_status_json}"
+            "Cook did not durably record running provider work: {provider_status_json}; client stdout={} stderr={}",
+            std::fs::read_to_string(&client_stdout).unwrap_or_default(),
+            std::fs::read_to_string(&client_stderr).unwrap_or_default(),
         );
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert!(
-        provider_status.status.success()
-            && provider_status_json
-                .pointer("/data/state")
-                .and_then(serde_json::Value::as_str)
-                == Some("running"),
-        "Cook did not durably record running provider work: {provider_status_json}",
-    );
+        std::thread::sleep(Duration::from_secs(1));
+    }
 
     client.kill().expect("terminate observing client");
     client.wait().expect("reap observing client");
