@@ -155,6 +155,7 @@ struct CookStartupAdmission {
     cook_id: String,
     launcher_id: String,
     owns_launcher: bool,
+    replay_run_id: String,
 }
 
 impl CookStartupAdmission {
@@ -241,6 +242,7 @@ impl CookStartupAdmission {
             cook_id,
             launcher_id,
             owns_launcher,
+            replay_run_id: format!("agent-task-replay-{}", Uuid::new_v4()),
         }))
     }
 
@@ -270,6 +272,88 @@ impl CookStartupAdmission {
             reason,
         );
     }
+}
+
+fn persist_cook_stdin_replay_prompt(
+    data_root: &std::path::Path,
+    cook_id: &str,
+    prompt: &str,
+) -> homeboy::core::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let category = data_root.join("cook-replay-inputs");
+    let cook_root = category.join(homeboy::core::paths::sanitize_path_segment(cook_id));
+    let root = cook_root.join(Uuid::new_v4().to_string());
+    for directory in [&category, &cook_root, &root] {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create Cook replay input directory {}",
+                    directory.display()
+                )),
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [&category, &cook_root, &root] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some(format!(
+                            "protect Cook replay input directory {}",
+                            directory.display()
+                        )),
+                    )
+                },
+            )?;
+        }
+    }
+    let path = root.join("prompt.stdin");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&path).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        file.write_all(prompt.as_bytes()).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "write Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "sync Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        Ok(path.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    result
 }
 
 impl Drop for CookStartupAdmission {
@@ -2488,8 +2572,26 @@ fn delegate_agent_task_cook_to_pinned_runtime(
             || Ok(false),
         )
     };
-    let pinned =
-        pin.map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
+    let pinned = pin.map_err(|error| {
+        annotate_cook_seal_failure(
+            error,
+            &request_id,
+            normalized_args,
+            roots.data(),
+            match &cli.command {
+                Commands::AgentTask(agent_task) => match &agent_task.command {
+                    crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
+                        .prompt_snapshot
+                        .as_ref()
+                        .filter(|snapshot| snapshot.source == "stdin")
+                        .map(|snapshot| snapshot.content.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            startup_admission.map(|admission| admission.replay_run_id.as_str()),
+        )
+    })?;
     let prompt_snapshot = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
@@ -2565,17 +2667,85 @@ fn annotate_cook_seal_failure(
     mut error: homeboy::core::Error,
     request_id: &str,
     normalized_args: &[String],
+    data_root: &std::path::Path,
+    stdin_prompt_snapshot: Option<&str>,
+    replay_run_id: Option<&str>,
 ) -> homeboy::core::Error {
     if !error.details.is_object() {
         error.details = serde_json::json!({});
     }
     error.details["controller_admission_phase"] = serde_json::json!("cook_runtime_seal");
     error.details["controller_admission_request_id"] = serde_json::json!(request_id);
-    error.details["next_actions"] =
-        serde_json::json!([homeboy::core::engine::shell::quote_args(normalized_args)]);
-    error.with_hint(
-        "Controller admission is FIFO: re-running the identical cook command queues behind the current owner instead of racing it.",
-    )
+    let replay_args = replay_run_id.map_or_else(
+        || normalized_args.to_vec(),
+        |replay_run_id| {
+            let mut args = normalized_args.to_vec();
+            let mut index = 0;
+            while index < args.len() {
+                if args[index] == "--run-id" {
+                    if args.get(index + 1).is_some_and(|value| value == request_id) {
+                        args[index + 1] = replay_run_id.to_string();
+                    }
+                    break;
+                }
+                if args[index].starts_with("--run-id=") {
+                    if args[index] == format!("--run-id={request_id}") {
+                        args[index] = format!("--run-id={replay_run_id}");
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            args
+        },
+    );
+    let mut replay_command = homeboy::core::engine::shell::quote_args(&replay_args);
+    let mut replay_ready = true;
+    if let Some(prompt) = stdin_prompt_snapshot {
+        match persist_cook_stdin_replay_prompt(data_root, request_id, prompt) {
+            Ok(prompt_path) => {
+                replay_command.push_str(" < ");
+                replay_command.push_str(&homeboy::core::engine::shell::quote_args(&[prompt_path
+                    .display()
+                    .to_string()]));
+            }
+            Err(snapshot_error) => {
+                error.details["stdin_replay_snapshot_error"] =
+                    serde_json::json!(snapshot_error.message);
+                error.details["stdin_replay_required"] = serde_json::json!(true);
+                replay_ready = false;
+            }
+        }
+    }
+    if replay_ready {
+        if let Some(previous_retry) = error.details["retry_command"].as_str() {
+            error.message = error.message.replace(previous_retry, &replay_command);
+        }
+        error.details["retry_command"] = serde_json::json!(replay_command);
+        error.details["next_actions"] = serde_json::json!([replay_command]);
+    } else {
+        if let Some(details) = error.details.as_object_mut() {
+            let _ = details.remove("retry_command");
+        }
+        error.details["next_actions"] = serde_json::json!([]);
+    }
+    error.hints.retain(|hint| {
+        !hint.message.contains("agent-task retry") || !hint.message.contains("--run")
+    });
+    error.details["replay_command_kind"] = serde_json::json!("original_cook_invocation");
+    error.details["source_run_id"] = serde_json::json!(request_id);
+    if let Some(replay_run_id) = replay_run_id {
+        error.details["replay_run_id"] = serde_json::json!(replay_run_id);
+    }
+    if replay_ready {
+        error.with_hint(
+            "Replay the original Cook invocation shown in next_actions after the controller admission blocker clears. It creates a fresh Cook ID and preserves the failed pre-seal ID for status inspection.",
+        )
+    } else {
+        error.with_hint(
+            "The original prompt was captured but its private replay snapshot could not be saved; resubmit the original Cook with its prompt input after resolving the controller admission blocker.",
+        )
+    }
 }
 
 /// Durable lifecycle mutations remain owned by the runtime that admitted the

@@ -258,6 +258,20 @@ fn runtime_pin_checkpoint(stage: &str, path: &Path) -> Result<()> {
             }
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    if stage == "hash_executable"
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".homeboy-"))
+    {
+        if let Ok(delay_ms) = std::env::var("HOMEBOY_TEST_CONTROLLER_RUNTIME_STAGED_HASH_DELAY_MS")
+        {
+            if let Ok(delay_ms) = delay_ms.parse::<u64>() {
+                std::thread::sleep(Duration::from_millis(delay_ms.min(5_000)));
+            }
+        }
+    }
     RUNTIME_PIN_DEADLINE.with(|deadline| {
         let deadline = deadline.borrow();
         let Some(context) = deadline.as_ref() else {
@@ -3772,16 +3786,48 @@ mod tests {
     }
 
     #[test]
-    fn staged_pin_cleanup_removes_file_on_following_error() {
+    fn publish_pin_cleans_staging_after_post_copy_hash_deadline() {
         let temporary = tempfile::tempdir().expect("temporary runtime root");
-        let staging = temporary.path().join("staged-homeboy");
-        fs::write(&staging, b"incomplete staged executable").expect("write staging file");
-        let result: Result<()> = (|| {
-            let _cleanup = StagedPinCleanup(&staging);
-            Err(Error::internal_unexpected("staged hash checkpoint failed"))
-        })();
-        assert!(result.is_err());
-        assert!(!staging.exists(), "failed staged validation leaves no file");
+        let source = temporary.path().join("source-homeboy");
+        let root = temporary.path().join("runtime");
+        let destination = root.join("test-pin").join("homeboy");
+        fs::write(&source, vec![0x5a; 1024 * 1024]).expect("write source executable");
+        let expected_digest = executable_digest(&source).expect("hash source executable");
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let delay_variable = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STAGED_HASH_DELAY_MS";
+        let previous_delay = std::env::var_os(delay_variable);
+        std::env::set_var(delay_variable, "100");
+        let context = RuntimePinDeadline {
+            deadline,
+            request_id: "cook-staged-hash-cleanup".to_string(),
+            timeout: Duration::from_millis(25),
+            started: Instant::now(),
+        };
+        let result = with_runtime_pin_deadline(context, || {
+            publish_pin(&source, &destination, &expected_digest)
+        });
+        if let Some(previous_delay) = previous_delay {
+            std::env::set_var(delay_variable, previous_delay);
+        } else {
+            std::env::remove_var(delay_variable);
+        }
+        let error = result.expect_err("staged hash crosses the finite deadline");
+        assert_eq!(error.details["controller_runtime_stage"], "hash_executable");
+        assert!(
+            !destination.exists(),
+            "failed staged hash is never published"
+        );
+        let pin_parent = destination.parent().expect("pin parent");
+        assert!(
+            fs::read_dir(pin_parent)
+                .expect("read pin parent")
+                .all(|entry| !entry
+                    .expect("staging directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".homeboy-")),
+            "publish_pin must remove its actual staged executable after hash failure"
+        );
     }
 
     #[test]
