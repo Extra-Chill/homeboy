@@ -48,6 +48,28 @@ A synchronous invocation (no daemon-owned job or `automatic-retention` cadence b
 
 Regular `homeboy cleanup` includes `repo-artifacts` inventory. After an agent-task provider exits, Homeboy also cleans declared rebuildable artifacts from that exact detached attempt worktree before applying its existing source-state and commit safety guard. Active sibling worktrees are not scanned by this lifecycle step.
 
+## Controller Scratch
+
+```bash
+homeboy cleanup --include controller-scratch --limit 5
+# Run the returned next_command to inspect the next page.
+```
+
+`--limit` bounds registered resource inspections before lifecycle, Git, or
+filesystem-size probes. The result reports `inspected_count` and
+`uninspected_resource_count`; candidate counts, byte estimates, and retention
+summaries describe the inspected page. `--full` expands detail for that page,
+without expanding the scan. A partial page carries `next_cursor` and an exact
+`next_command`, and the aggregate reports partial inventory coverage.
+
+The cursor orders stable resource-path identities, so retained rows do not
+starve later resources and deleting earlier candidates does not shift the next
+page. Follow the continuation until it is absent, then begin a fresh sweep to
+reconsider retained resources and newly registered identities. Each apply
+still revalidates ownership, running processes, Git state, and retention at the
+destructive boundary. Per-resource probes remain subject to the category's
+existing process-group deadline.
+
 ## Orphaned Artifact Bytes
 
 ```bash

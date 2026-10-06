@@ -46,16 +46,16 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "DAYS")]
     pub runtime_tmp_managed_older_than_days: Option<u64>,
 
-    /// Override the configured maximum number of persisted artifacts inspected.
+    /// Override the configured maximum number of resources inspected per pass.
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
 
-    /// Include every controller-scratch candidate and retained-resource detail.
+    /// Include every candidate and retained-resource detail in the inspected page.
     /// Default output keeps representative detail within the shared response budget.
     #[arg(long)]
     pub full: bool,
 
-    /// Continue a bounded shared-store cleanup inventory from this cursor.
+    /// Continue a bounded shared-store or controller-scratch inventory from its cursor.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
 
