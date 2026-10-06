@@ -45,3 +45,12 @@ This report records the work completed and the verification still needed; it doe
 - The exact-current Linux reverse-broker coverage was limited to the three reverse-broker subset tests; the wider handoff partition still has the two recorded daemon-exec failures.
 
 The worktree is clean after committing this report. The outstanding proof and regression tests need completion before PR publication.
+
+## Resume verification — 2026-10-06
+
+- Merged current `origin/main` `68ba10305` normally; merge commit `7cd2bbd6f` is the current candidate. Added `35e2f10ef` to align the CLI deferred-cancellation regression with the authoritative failed/nonterminal action acknowledgement (`exit_code=1`, outcome `failed`). The focused test passed locally and on Linux.
+- Re-ran the two previously failing Linux daemon-exec assertions against immutable latest-main source and the exact merged candidate: both pass in both trees. They were resolved by current-main integration.
+- Exact-head Linux additional gates passed: `runner_staging_store::tests` (12), `runner_staging_operation::tests` (22), `lab_staging_controller::tests::detached_staging` (2), detached reverse-broker handoff (1), rooted controller-staging blocker (1), rooted pending submission root isolation/fence (1), and pending cancellation effect/replay (1).
+- Exact-head Linux `cargo test` for pending cancellation effect took 15.25 seconds and passed. Prior broader candidate checks and CI artifacts remain as recorded above.
+- Still incomplete: actual broker HTTP owner-lease transition regression matrix, reproducible native private-daemon test source and exact-head rerun, and full exact-head Linux broad gates after the latest merge. The PR must remain draft. Do not treat previous native log output as exact-head proof.
+- The prior CI failure on `cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_cancelled` came from the new failed/nonterminal acknowledgement contract; the regression now asserts the correct failed outcome and nonzero exit. The refreshed CI run after publication will be authoritative.
