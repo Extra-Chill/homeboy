@@ -809,12 +809,28 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     lifecycle_store
         .mutate_record(&target_run, |record| {
             // The test process claimed the durable batch coordinator above;
-            // keep it live as the original parent owner while continuing only
-            // the distinct terminal child.
+            // keep it live as the original parent owner. Reopen only this
+            // just-terminalized Cook continuation so the public CLI exercises
+            // the same pre-claim boundary as an interrupted batch child.
             record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+            record
+                .metadata
+                .as_object_mut()
+                .expect("run metadata object")
+                .remove("cook_continuation");
             true
         })
         .unwrap();
+    assert_eq!(
+        homeboy::agents::agent_task_service::continuation_state_in_store(
+            &recipe_store,
+            target_cook,
+            &target_run,
+        )
+        .unwrap(),
+        homeboy::agents::agent_task_service::CookContinuationState::Absent,
+        "target child is staged at the pre-continuation boundary"
+    );
 
     let preflight = |run_id: &str| {
         context

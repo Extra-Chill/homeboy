@@ -5474,7 +5474,7 @@ pub fn preflight_cook_continuation_admission_for_observation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
-    if let Some(error) = live_owner_continuation_denial(record) {
+    if let Some(error) = cook_continuation_owner_denial(record, &options.identity.cook_id)? {
         return Err(error);
     }
     let mut options = options.clone();
@@ -5591,6 +5591,47 @@ pub fn live_owner_continuation_denial(
         "logs_command": format!("homeboy agent-task logs {}", record.run_id),
     });
     Some(error)
+}
+
+/// Refuse continuation while this Cook has a canonical runtime driver. The
+/// kernel lock is Cook-scoped, so unlike a lifecycle `runner_pid` it cannot
+/// confuse a live batch coordinator driving siblings with this child's owner.
+pub fn cook_continuation_owner_denial(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    cook_id: &str,
+) -> Result<Option<Error>> {
+    if let Some(error) = live_owner_continuation_denial(record) {
+        return Ok(Some(error));
+    }
+    let store = CookRecipeStore::from_current_data_root()?;
+    let Some(owner) = store.foreign_cook_driver(cook_id)? else {
+        return Ok(None);
+    };
+    let phase = record
+        .metadata
+        .pointer("/promotion_progress/phase")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/cook_progress/phase")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("cook_driver");
+    let mut error = Error::validation_invalid_argument(
+        "cook_continuation",
+        "continuation is blocked while the original local owner is still running",
+        Some(record.run_id.clone()),
+        None,
+    );
+    error.details["continuation_admission"] = serde_json::json!({
+        "first_authoritative_denial": "live_owner_in_progress",
+        "owner_pid": owner.trim().parse::<u32>().ok(),
+        "phase": phase,
+        "status_command": format!("homeboy agent-task status {}", record.run_id),
+        "logs_command": format!("homeboy agent-task logs {}", record.run_id),
+    });
+    Ok(Some(error))
 }
 
 pub fn cook_continuation_replays_provider(
