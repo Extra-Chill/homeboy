@@ -4171,7 +4171,7 @@ fn stale_daemon_warning_until(
     };
     let current_version = current_identity.version.clone();
     let configured_job_binary_build_identity = current_identity.build_identity.clone();
-    let controller_identity = homeboy_product_identity::build_identity();
+    let controller_identity = crate::controller_identity::compatibility_controller_identity();
     let observed_session_version = session
         .local_url
         .as_deref()
@@ -4192,10 +4192,6 @@ fn stale_daemon_warning_until(
     let identity_comparison = compare_identities(
         session_identity.as_deref(),
         current_identity.build_identity.as_deref(),
-    );
-    let controller_commit_comparison = compare_build_commits(
-        current_identity.build_identity.as_deref(),
-        Some(&controller_identity.display),
     );
     let stale_runtime_paths = session
         .local_url
@@ -4224,12 +4220,14 @@ fn stale_daemon_warning_until(
         &stale_runtime_paths,
         &changed_runtime_paths,
     );
-    let controller_reference = ControllerReference::for_identity(&controller_identity);
-    let controller_version_matches = versions_match(&current_version, &controller_identity.version);
-    let controller_matches_configured = controller_runtime_is_current(
-        controller_reference,
-        controller_version_matches,
-        controller_commit_comparison,
+    let ControllerCompatibility {
+        reference: controller_reference,
+        version_matches: controller_version_matches,
+        current: controller_matches_configured,
+    } = controller_compatibility(
+        &current_version,
+        current_identity.build_identity.as_deref(),
+        &controller_identity,
     );
     if daemon_matches_configured && controller_matches_configured {
         return Ok((None, configured_job_binary_build_identity));
@@ -4370,6 +4368,33 @@ impl ControllerReference {
         } else {
             Self::Comparable
         }
+    }
+}
+
+/// The controller half of the stale-daemon verdict for one runner.
+struct ControllerCompatibility {
+    reference: ControllerReference,
+    version_matches: bool,
+    current: bool,
+}
+
+/// Judge a runner's configured job binary against `controller` — the identity
+/// from [`crate::controller_identity::compatibility_controller_identity`], which
+/// during `homeboy upgrade` is the installed controller rather than this
+/// pre-upgrade process (#15552).
+fn controller_compatibility(
+    configured_version: &str,
+    configured_build_identity: Option<&str>,
+    controller: &homeboy_product_identity::BuildIdentity,
+) -> ControllerCompatibility {
+    let reference = ControllerReference::for_identity(controller);
+    let version_matches = versions_match(configured_version, &controller.version);
+    let commit_comparison =
+        compare_build_commits(configured_build_identity, Some(&controller.display));
+    ControllerCompatibility {
+        reference,
+        version_matches,
+        current: controller_runtime_is_current(reference, version_matches, commit_comparison),
     }
 }
 

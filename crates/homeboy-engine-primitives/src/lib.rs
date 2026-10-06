@@ -13,6 +13,7 @@ pub mod canonical_json;
 pub mod cargo_target;
 pub mod codebase_scan;
 pub mod command;
+pub mod command_path;
 pub mod content_hash;
 pub mod detail_output;
 pub mod edit_op;

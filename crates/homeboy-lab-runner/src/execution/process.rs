@@ -310,10 +310,12 @@ pub(crate) fn prepare_runner_process(
         request.validate_require_paths_on_host,
     )?;
 
+    let command = resolve_configured_homeboy_argv(request.command, &env);
+
     Ok(PreparedRunnerProcess {
         runner,
         cwd,
-        command: request.command,
+        command,
         env,
         resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
@@ -432,13 +434,28 @@ pub(crate) fn prepare_daemon_local_process(
     Ok(PreparedRunnerProcess {
         runner,
         cwd,
-        command: request.command,
+        command: resolve_configured_homeboy_argv(request.command, &env),
         env,
         resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+pub(super) fn resolve_configured_homeboy_argv(
+    mut command: Vec<String>,
+    env: &HashMap<String, String>,
+) -> Vec<String> {
+    if command
+        .first()
+        .is_some_and(|executable| executable == "homeboy")
+    {
+        if let Some(configured) = env.get("HOMEBOY_COMMAND") {
+            command[0] = configured.clone();
+        }
+    }
+    command
 }
 
 pub(crate) fn controller_proxy_projection_names(
@@ -1117,8 +1134,50 @@ pub(super) fn apply_runner_process_env(
     // The runner envelope is the producer boundary for direct commands, which
     // do not acquire an InvocationGuard of their own.
     env.extend(temp_owner.child_env_vars());
+    configure_bash_runtime_path(&mut env, temp_owner)?;
     preserve_durable_homeboy_data_dir(command, &env);
     command.envs(env.iter());
+    Ok(())
+}
+
+fn configure_bash_runtime_path(
+    env: &mut HashMap<String, String>,
+    temp_owner: &homeboy_core::engine::temp::RuntimeTempOwner,
+) -> Result<()> {
+    let Some(homeboy_command) = env.get("HOMEBOY_COMMAND") else {
+        return Ok(());
+    };
+    let executable = Path::new(homeboy_command);
+    if !executable.is_absolute() {
+        return Ok(());
+    }
+    let Some(parent) = executable
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+
+    let init_path = temp_owner.path().join("bash-runtime-path.sh");
+    let mut init = String::new();
+    if let Some(existing) = env.get("BASH_ENV") {
+        init.push_str(". ");
+        init.push_str(&shell::quote_arg(existing));
+        init.push('\n');
+    }
+    init.push_str("export PATH=");
+    init.push_str(&shell::quote_arg(&parent.display().to_string()));
+    init.push_str(":\"$PATH\"\n");
+    fs::write(&init_path, init).map_err(|error| {
+        Error::from_io_error(
+            &error,
+            Some(format!(
+                "preparing configured Homeboy Bash environment at {}",
+                init_path.display()
+            )),
+        )
+    })?;
+    env.insert("BASH_ENV".to_string(), init_path.display().to_string());
     Ok(())
 }
 
