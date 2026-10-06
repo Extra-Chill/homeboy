@@ -5182,6 +5182,7 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 data: json!({
                     "phase": failure.get("phase"),
                     "lab_transport_attempt_receipt": receipt,
+                    "source_error": details.get("source_error"),
                 }),
             });
         }
