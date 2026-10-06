@@ -1736,6 +1736,38 @@ pub fn serve_listener_until_shutdown(
     )
 }
 
+/// Whether a registered admission owner can no longer be serving.
+///
+/// An owner registered in the **same** state directory as this daemon was
+/// restarted in place: this process holds that directory's exclusive owner
+/// lock and has just written its own lease to `state.json`, so the previous
+/// lease cannot be serving. Reading `state.json` there would see this live
+/// daemon and wrongly keep admission with the dead lease (#15555). Owners in
+/// other directories (blue-green generations) are dead only when their own
+/// lease file proves the PID dead.
+fn admission_owner_is_dead(
+    endpoint: &generation_store::LocalDaemonEndpoint,
+    serving_state_dir: Option<&Path>,
+) -> bool {
+    let owner_dir = Path::new(&endpoint.state_dir);
+    if serving_state_dir.is_some_and(|serving| same_directory(serving, owner_dir)) {
+        return true;
+    }
+    validate_lease_file(&owner_dir.join("state.json"))
+        .map(|validation| {
+            !validation.running
+                && validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+        })
+        .unwrap_or(false)
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 /// The shutdown flag of the daemon served by this process, if any. A foreground
 /// `daemon serve` records no startup token, so no other process may signal it
 /// by PID; a lease-bound lifecycle stop instead asks the daemon to stop itself
@@ -1810,13 +1842,9 @@ where
     // generation, or every status probe reports this live daemon as not
     // ready (#15456). A live previous owner (blue-green) keeps admission.
     if !generation_store::bypassed() {
+        let serving_state_dir = paths::daemon_state_file()?.parent().map(Path::to_path_buf);
         generation_store::claim_admission_from_dead_owner(&state, |endpoint| {
-            validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))
-                .map(|validation| {
-                    !validation.running
-                        && validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
-                })
-                .unwrap_or(false)
+            admission_owner_is_dead(endpoint, serving_state_dir.as_deref())
         })?;
     }
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)

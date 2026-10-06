@@ -24,7 +24,6 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
             r#ref: None,
             default_ref: None,
             extensions: None,
-            dependency_cache: None,
         },
     );
     let mut pipeline = HashMap::new();
@@ -47,7 +46,6 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
         trace_workloads: Default::default(),
         fuzz_workloads: Default::default(),
         trace_workload_defaults: Default::default(),
-        trace_phase_templates: Default::default(),
         trace_variants: Default::default(),
         trace_profiles: Default::default(),
         trace_experiments: Default::default(),
@@ -55,7 +53,6 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
-        toolchain: None,
     }
 }
 

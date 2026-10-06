@@ -196,7 +196,6 @@ pub(crate) fn run_runner_resident_lab_offload(
             "runner_cwd": runner_workspace_root,
         }),
         materialized_workspace: None,
-        dependency_cache_saves: Vec::new(),
         remote_output_file,
         host_telemetry: None,
         admission: None,

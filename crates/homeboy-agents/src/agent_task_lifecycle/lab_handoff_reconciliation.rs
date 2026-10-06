@@ -766,6 +766,17 @@ pub(crate) fn reconcile_runner_job_state_in_store(
     ) else {
         return Ok(());
     };
+    if let Ok(Some(source)) = super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_run_record(&runner_id, &record.run_id)
+    }) {
+        if super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+            lifecycle_store,
+            record,
+            &source,
+        )? {
+            return Ok(());
+        }
+    }
     match super::runner_continuation::with_runner_continuation(|p| {
         p.reconcile_runner_job(&runner_id, &job_id)
     }) {
