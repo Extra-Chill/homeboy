@@ -208,165 +208,22 @@ pub(super) fn exec_via_reverse_broker(
         }
     }
     let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
-    let submit_and_resolve = || -> Result<serde_json::Value> {
-        let data = broker_http::post_json(
-            &client,
-            broker_url,
-            "/runner/jobs",
-            serde_json::to_value(&submission).map_err(|err| {
-                Error::internal_json(
-                    err.to_string(),
-                    Some("serialize reverse runner job request".to_string()),
-                )
-            })?,
-            "submit reverse runner job",
-            broker_token.as_deref(),
-        );
-        let data = data.and_then(|data| {
-            if let Some(response) = data.get("response") {
-                let response: RunnerApiSubmitResponse = serde_json::from_value(response.clone())
-                    .map_err(|error| {
-                        Error::internal_json(
-                            error.to_string(),
-                            Some("parse runner submit response".to_string()),
-                        )
-                    })?;
-                if let RunnerApiSubmitOutcome::Rejected { failure } = response.outcome {
-                    return Err(Error::validation_invalid_argument(
-                        "runner_submission",
-                        failure.message,
-                        None,
-                        None,
-                    ));
-                }
-            }
-            Ok(data)
-        });
-        match data {
-            Ok(data) => Ok(data),
-            Err(error) => {
-                let accepted = broker_http::post_json(
-                    &client,
-                    broker_url,
-                    "/runner/jobs/submissions/lookup",
-                    serde_json::json!({
-                        "runner_id": runner.id,
-                        "submission_key": submission_key,
-                    }),
-                    "look up ambiguous reverse broker submission",
-                    broker_token.as_deref(),
-                )
-                .and_then(|data| {
-                    serde_json::from_value::<RemoteRunnerSubmissionLookup>(
-                        data.get("result").cloned().unwrap_or_default(),
-                    )
-                    .map_err(|parse_error| {
-                        Error::internal_json(
-                            parse_error.to_string(),
-                            Some("parse reverse broker submission lookup".to_string()),
-                        )
-                    })
-                });
-                if let Ok(RemoteRunnerSubmissionLookup::Accepted { job }) = &accepted {
-                    // The broker accepted this exact immutable request. Keep its
-                    // original owner lease and continue through normal binding.
-                    return Ok(serde_json::json!({ "job": job }));
-                }
-                let non_acceptance = matches!(
-                    accepted.as_ref(),
-                    Ok(RemoteRunnerSubmissionLookup::Absent
-                        | RemoteRunnerSubmissionLookup::Expired { .. })
-                );
-                if !non_acceptance {
-                    return Err(Error::new(
-                        error.code,
-                        error.message,
-                        serde_json::json!({
-                            "workspace_owner_lease_recovery": {
-                                "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
-                                "lease": workspace_owner_lease,
-                                "submission_key": submission_key,
-                                "lookup": accepted.as_ref().err().map(ToString::to_string),
-                            }
-                        }),
-                    ));
-                }
-                if let Some(lease) = workspace_owner_lease.as_ref() {
-                    if let Err(cleanup_error) = broker_http::post_json(
-                        &client,
-                        broker_url,
-                        "/runner/workspace-owners/release",
-                        serde_json::json!({ "workspace_owner_lease": lease }),
-                        "rollback reverse broker workspace owner",
-                        broker_token.as_deref(),
-                    ) {
-                        return Err(Error::new(
-                            error.code,
-                            error.message,
-                            serde_json::json!({
-                                "workspace_owner_lease_cleanup": {
-                                    "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
-                                    "lease": lease,
-                                    "error": cleanup_error.message,
-                                }
-                            }),
-                        ));
-                    }
-                }
-                Err(error)
-            }
-        }
-    };
-    let data = if detach_after_handoff {
-        if let Some(run_id) = run_id.as_deref() {
-            let lifecycle_store =
-                homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-            let admitted = homeboy_agents::agent_task_lifecycle::with_pending_runner_submission_admission_in_store(
-                &lifecycle_store,
-                run_id,
-                &submission,
-                submit_and_resolve,
-            );
-            match admitted {
-                Ok(data) => data,
-                Err(homeboy_agents::agent_task_lifecycle::PendingRunnerSubmissionAdmissionError::Submission(error)) => {
-                    // Transport ambiguity retains the original lease custody;
-                    // the inner submit/resolve path owns proven nonacceptance
-                    // cleanup and accepted-identity recovery.
-                    return Err(error);
-                }
-                Err(homeboy_agents::agent_task_lifecycle::PendingRunnerSubmissionAdmissionError::Rejected(error)) => {
-                    if let Some(lease) = workspace_owner_lease.as_ref() {
-                        if let Err(cleanup_error) = broker_http::post_json(
-                            &client,
-                            broker_url,
-                            "/runner/workspace-owners/release",
-                            serde_json::json!({ "workspace_owner_lease": lease }),
-                            "rollback reverse broker workspace owner after cancellation fence",
-                            broker_token.as_deref(),
-                        ) {
-                            return Err(Error::new(
-                                error.code,
-                                error.message,
-                                serde_json::json!({
-                                    "workspace_owner_lease_cleanup": {
-                                        "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
-                                        "lease": lease,
-                                        "error": cleanup_error.message,
-                                    }
-                                }),
-                            ));
-                        }
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            submit_and_resolve()?
-        }
+    let lifecycle_store = if detach_after_handoff && run_id.is_some() {
+        Some(homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?)
     } else {
-        submit_and_resolve()?
+        None
     };
+    let data = submit_reverse_broker_job_with_admission(
+        &client,
+        broker_url,
+        &runner.id,
+        &submission_key,
+        &submission,
+        workspace_owner_lease.as_ref(),
+        broker_token.as_deref(),
+        lifecycle_store.as_ref(),
+        run_id.as_deref(),
+    )?;
     let job_value = data
         .get("job")
         .ok_or_else(|| Error::internal_unexpected("reverse broker submit returned no job"))?;
@@ -463,6 +320,195 @@ pub(super) fn exec_via_reverse_broker(
         |_, _| Ok(()),
     )
     .map(RunnerExecCompletion::into_output);
+}
+
+/// Submit through the broker while preserving the admission fence's ownership
+/// result. The submission resolver owns cleanup only after a proven absent or
+/// expired lookup; ambiguous lookup and accepted identity retain lease custody.
+fn submit_reverse_broker_job_with_admission(
+    client: &Client,
+    broker_url: &str,
+    runner_id: &str,
+    submission_key: &str,
+    submission: &RunnerApiSubmitRequest,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
+    broker_token: Option<&str>,
+    lifecycle_store: Option<&homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    run_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    let submit_and_resolve = || {
+        submit_and_resolve_reverse_broker_job(
+            client,
+            broker_url,
+            runner_id,
+            submission_key,
+            submission,
+            workspace_owner_lease,
+            broker_token,
+        )
+    };
+    let Some((lifecycle_store, run_id)) = lifecycle_store.zip(run_id) else {
+        return submit_and_resolve();
+    };
+    match homeboy_agents::agent_task_lifecycle::with_pending_runner_submission_admission_in_store(
+        lifecycle_store,
+        run_id,
+        submission,
+        submit_and_resolve,
+    ) {
+        Ok(data) => Ok(data),
+        Err(
+            homeboy_agents::agent_task_lifecycle::PendingRunnerSubmissionAdmissionError::Submission(
+                error,
+            ),
+        ) => {
+            // Transport ambiguity retains the original lease custody; the inner
+            // submission resolver still owns accepted and proven-absence logic.
+            Err(error)
+        }
+        Err(
+            homeboy_agents::agent_task_lifecycle::PendingRunnerSubmissionAdmissionError::Rejected(
+                error,
+            ),
+        ) => release_workspace_owner_lease(
+            client,
+            broker_url,
+            workspace_owner_lease,
+            broker_token,
+            "rollback reverse broker workspace owner after cancellation fence",
+            error,
+        ),
+    }
+}
+
+fn submit_and_resolve_reverse_broker_job(
+    client: &Client,
+    broker_url: &str,
+    runner_id: &str,
+    submission_key: &str,
+    submission: &RunnerApiSubmitRequest,
+    workspace_owner_lease: Option<&WorkspaceOwnerLease>,
+    broker_token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let submitted = broker_http::post_json(
+        client,
+        broker_url,
+        "/runner/jobs",
+        serde_json::to_value(submission).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize reverse runner job request".to_string()),
+            )
+        })?,
+        "submit reverse runner job",
+        broker_token,
+    )
+    .and_then(|data| {
+        if let Some(response) = data.get("response") {
+            let response: RunnerApiSubmitResponse = serde_json::from_value(response.clone())
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("parse runner submit response".to_string()),
+                    )
+                })?;
+            if let RunnerApiSubmitOutcome::Rejected { failure } = response.outcome {
+                return Err(Error::validation_invalid_argument(
+                    "runner_submission",
+                    failure.message,
+                    None,
+                    None,
+                ));
+            }
+        }
+        Ok(data)
+    });
+    let Err(submission_error) = submitted else {
+        return submitted;
+    };
+
+    let lookup = broker_http::post_json(
+        client,
+        broker_url,
+        "/runner/jobs/submissions/lookup",
+        serde_json::json!({ "runner_id": runner_id, "submission_key": submission_key }),
+        "look up ambiguous reverse broker submission",
+        broker_token,
+    )
+    .and_then(|data| {
+        serde_json::from_value::<RemoteRunnerSubmissionLookup>(
+            data.get("result").cloned().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse reverse broker submission lookup".to_string()),
+            )
+        })
+    });
+    if let Ok(RemoteRunnerSubmissionLookup::Accepted { job }) = &lookup {
+        return Ok(serde_json::json!({ "job": job }));
+    }
+    let proven_absent = matches!(
+        &lookup,
+        Ok(RemoteRunnerSubmissionLookup::Absent | RemoteRunnerSubmissionLookup::Expired { .. })
+    );
+    if !proven_absent {
+        return Err(Error::new(
+            submission_error.code,
+            submission_error.message,
+            serde_json::json!({
+                "workspace_owner_lease_recovery": {
+                    "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
+                    "lease": workspace_owner_lease,
+                    "submission_key": submission_key,
+                    "lookup": lookup.as_ref().err().map(ToString::to_string),
+                }
+            }),
+        ));
+    }
+    release_workspace_owner_lease(
+        client,
+        broker_url,
+        workspace_owner_lease,
+        broker_token,
+        "rollback reverse broker workspace owner",
+        submission_error,
+    )
+}
+
+fn release_workspace_owner_lease(
+    client: &Client,
+    broker_url: &str,
+    lease: Option<&WorkspaceOwnerLease>,
+    broker_token: Option<&str>,
+    action: &str,
+    prior_error: Error,
+) -> Result<serde_json::Value> {
+    let Some(lease) = lease else {
+        return Err(prior_error);
+    };
+    if let Err(cleanup_error) = broker_http::post_json(
+        client,
+        broker_url,
+        "/runner/workspace-owners/release",
+        serde_json::json!({ "workspace_owner_lease": lease }),
+        action,
+        broker_token,
+    ) {
+        return Err(Error::new(
+            prior_error.code,
+            prior_error.message,
+            serde_json::json!({
+                "workspace_owner_lease_cleanup": {
+                    "schema": homeboy_core::workspace_claim::WORKSPACE_OWNER_RELEASE_RECOVERY_SCHEMA,
+                    "lease": lease,
+                    "error": cleanup_error.message,
+                }
+            }),
+        ));
+    }
+    Err(prior_error)
 }
 
 /// Preserve file-backed argv values past controller cleanup. Values are content
@@ -607,4 +653,620 @@ fn durable_command_assets(
             }))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
+
+    struct Reply {
+        path: &'static str,
+        status: Option<u16>,
+        body: serde_json::Value,
+    }
+
+    fn start_broker(
+        replies: Vec<Reply>,
+    ) -> (
+        String,
+        mpsc::Receiver<Vec<(String, serde_json::Value)>>,
+        JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind broker fixture");
+        let url = format!("http://{}", listener.local_addr().expect("broker addr"));
+        let (requests_tx, requests_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept().expect("accept broker HTTP request");
+                let (path, body) = read_http_request(&mut stream);
+                assert_eq!(path, reply.path, "unexpected broker request order");
+                requests.push((path, body));
+                if let Some(status) = reply.status {
+                    let response_body = reply.body.to_string();
+                    let reason = if status < 400 { "OK" } else { "Bad Gateway" };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    )
+                    .expect("write broker response");
+                }
+            }
+            requests_tx
+                .send(requests)
+                .expect("return captured requests");
+        });
+        (url, requests_rx, server)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> (String, serde_json::Value) {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let (header_end, content_length) = loop {
+            let read = stream.read(&mut chunk).expect("read broker request");
+            assert_ne!(read, 0, "client closed before completing request");
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let header = String::from_utf8_lossy(&bytes[..end]);
+                let content_length = header
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= end + 4 + content_length {
+                    break (end, content_length);
+                }
+            }
+        };
+        let header = String::from_utf8_lossy(&bytes[..header_end]);
+        let path = header
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .expect("request target")
+            .to_string();
+        let body_start = header_end + 4;
+        let body = serde_json::from_slice(&bytes[body_start..body_start + content_length])
+            .expect("decode broker JSON request");
+        (path, body)
+    }
+
+    fn lease(owner_id: &str) -> WorkspaceOwnerLease {
+        WorkspaceOwnerLease {
+            schema: homeboy_runner_contract::WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
+            protocol: homeboy_runner_contract::WorkspaceOwnerLeaseProtocol::current(),
+            workspace: homeboy_runner_contract::WorkspaceIdentity::new(
+                "managed-workspace",
+                "ownership-matrix/repo",
+            )
+            .expect("workspace identity"),
+            owner_id: owner_id.to_string(),
+            lifecycle_revision: 7,
+            token: "owner-lease-token".to_string(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+        }
+    }
+
+    fn submission(run_id: &str, lease: Option<WorkspaceOwnerLease>) -> RunnerApiSubmitRequest {
+        let submission_key = reverse_broker_submission_key("homeboy-lab", run_id);
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
+            runner_id: "homeboy-lab".to_string(),
+            project_id: None,
+            command,
+            cwd: "/runner/workspace/homeboy".to_string(),
+            env: Default::default(),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            capture_patch: false,
+            source_snapshot: SourceSnapshot::default(),
+            path_materialization_plan: None,
+            require_paths: Vec::new(),
+            extension_env_providers: Vec::new(),
+            workload: None,
+            lifecycle: RunnerJobLifecycleMetadata {
+                source: Some("reverse-broker".to_string()),
+                kind: Some("runner.exec".to_string()),
+                durable_run_id: Some(run_id.to_string()),
+                ..Default::default()
+            },
+            metadata: serde_json::json!({
+                "durable_run_id": run_id,
+                "submission_key": submission_key,
+            }),
+        })
+        .expect("runner execution envelope");
+        RunnerApiSubmitRequest {
+            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            submission_key,
+            envelope,
+            workspace_claim_binding: None,
+            workspace_owner_lease: lease,
+            credential_delivery: None,
+        }
+    }
+
+    fn job() -> Job {
+        Job {
+            id: uuid::Uuid::new_v4(),
+            operation: "runner.exec".to_string(),
+            status: homeboy_core::api_jobs::JobStatus::Queued,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            started_at_ms: None,
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: Some("homeboy-lab".to_string()),
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        }
+    }
+
+    fn failed_reply(message: &str) -> serde_json::Value {
+        serde_json::json!({
+            "success": false,
+            "error": { "code": "internal.unexpected", "message": message },
+        })
+    }
+
+    fn successful_reply(body: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "success": true, "data": { "body": body } })
+    }
+
+    struct AcceptedJobContinuation {
+        jobs: homeboy_core::api_jobs::JobStore,
+    }
+
+    impl homeboy_agents::agent_task_lifecycle::RunnerContinuationProvider for AcceptedJobContinuation {
+        fn runner_job_log_snapshot(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+        ) -> homeboy_core::Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+            Err(Error::internal_unexpected(
+                "snapshot not used in ownership race",
+            ))
+        }
+
+        fn is_runner_connected(&self, _runner_id: &str) -> bool {
+            true
+        }
+
+        fn run_continuation_exec(
+            &self,
+            _runner_id: &str,
+            _cwd: &str,
+            _command: &[String],
+            _run_id: &str,
+        ) -> homeboy_core::Result<i32> {
+            Err(Error::internal_unexpected(
+                "exec not used in ownership race",
+            ))
+        }
+
+        fn submit_runner_api_request(
+            &self,
+            _runner_id: &str,
+            submission: homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission,
+        ) -> homeboy_core::Result<Job> {
+            match submission {
+                homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission::RunnerApi(
+                    request,
+                ) => self.jobs.submit_runner_api_request(request),
+                homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission::LegacyReplay(
+                    request,
+                ) => self.jobs.submit_remote_runner_job(request),
+            }
+        }
+
+        fn lookup_reverse_broker_submission(
+            &self,
+            _runner_id: &str,
+            submission_key: &str,
+        ) -> homeboy_core::Result<RemoteRunnerSubmissionLookup> {
+            Ok(self.jobs.lookup_remote_runner_submission(submission_key))
+        }
+    }
+
+    fn execute(
+        url: &str,
+        submission: &RunnerApiSubmitRequest,
+        store: Option<&homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore>,
+        run_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("HTTP client");
+        let lease = submission.workspace_owner_lease.as_ref();
+        submit_reverse_broker_job_with_admission(
+            &client,
+            url,
+            "homeboy-lab",
+            &submission.submission_key,
+            submission,
+            lease,
+            None,
+            store,
+            run_id,
+        )
+    }
+
+    fn prepare_pending_lifecycle(
+        run_id: &str,
+        submission: &RunnerApiSubmitRequest,
+    ) -> homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+        let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let dispatch = submission.envelope.dispatch.as_ref().expect("dispatch");
+        let command = dispatch.command.clone();
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned_in_store(
+            &store,
+            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                run_id,
+                runner_id: &dispatch.runner_id,
+                remote_workspace: dispatch.cwd.as_deref().expect("cwd"),
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("controller proxy");
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_intent_in_store(
+            &store,
+            run_id,
+            &dispatch.runner_id,
+            dispatch.cwd.as_deref().expect("cwd"),
+            &command,
+            &[],
+        )
+        .expect("write-ahead submission intent");
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_submission_envelope(
+            run_id, submission,
+        )
+        .expect("persist exact pending HTTP request");
+        store
+    }
+
+    #[test]
+    fn accepted_response_lost_resolves_identity_and_retains_owner_lease() {
+        let lease = lease("accepted-response-lost");
+        let accepted = job();
+        let (url, requests, server) = start_broker(vec![
+            Reply {
+                path: "/runner/jobs",
+                status: None,
+                body: serde_json::Value::Null,
+            },
+            Reply {
+                path: "/runner/jobs/submissions/lookup",
+                status: Some(200),
+                body: successful_reply(serde_json::json!({
+                    "result": { "status": "accepted", "job": accepted },
+                })),
+            },
+        ]);
+        let submission = submission("accepted-response-lost", Some(lease.clone()));
+
+        let data = execute(&url, &submission, None, None).expect("lookup recovers accepted job");
+        let captured = requests.recv().expect("captured broker HTTP requests");
+        server.join().expect("broker fixture thread");
+        assert_eq!(data["job"]["id"], accepted.id.to_string());
+        assert_eq!(captured.len(), 2, "accepted custody must never be released");
+        assert_eq!(captured[0].0, "/runner/jobs");
+        assert_eq!(captured[1].0, "/runner/jobs/submissions/lookup");
+        assert_eq!(
+            captured[0].1["workspace_owner_lease"],
+            serde_json::to_value(&lease).unwrap()
+        );
+        assert_eq!(captured[1].1["submission_key"], submission.submission_key);
+    }
+
+    #[test]
+    fn unavailable_lookup_preserves_ambiguous_owner_lease() {
+        let lease = lease("lookup-unavailable");
+        let (url, requests, server) = start_broker(vec![
+            Reply {
+                path: "/runner/jobs",
+                status: Some(502),
+                body: failed_reply("submit acknowledgement lost"),
+            },
+            Reply {
+                path: "/runner/jobs/submissions/lookup",
+                status: Some(503),
+                body: failed_reply("lookup unavailable"),
+            },
+        ]);
+        let submission = submission("lookup-unavailable", Some(lease.clone()));
+
+        let error = execute(&url, &submission, None, None).expect_err("ambiguous submit retained");
+        let captured = requests.recv().expect("captured broker HTTP requests");
+        server.join().expect("broker fixture thread");
+        assert_eq!(captured.len(), 2, "ambiguous lease is never released");
+        assert_eq!(captured[0].0, "/runner/jobs");
+        assert_eq!(captured[1].0, "/runner/jobs/submissions/lookup");
+        assert_eq!(
+            error.details["workspace_owner_lease_recovery"]["lease"],
+            serde_json::to_value(&lease).unwrap()
+        );
+        assert!(error.details["workspace_owner_lease_recovery"]["lookup"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("lookup unavailable"));
+    }
+
+    #[test]
+    fn proven_absence_attempts_owner_cleanup_and_retains_recovery_on_cleanup_failure() {
+        let lease = lease("cleanup-failure");
+        let (url, requests, server) = start_broker(vec![
+            Reply {
+                path: "/runner/jobs",
+                status: Some(502),
+                body: failed_reply("submit failed"),
+            },
+            Reply {
+                path: "/runner/jobs/submissions/lookup",
+                status: Some(200),
+                body: successful_reply(serde_json::json!({ "result": { "status": "absent" } })),
+            },
+            Reply {
+                path: "/runner/workspace-owners/release",
+                status: Some(503),
+                body: failed_reply("release unavailable"),
+            },
+        ]);
+        let submission = submission("cleanup-failure", Some(lease.clone()));
+
+        let error = execute(&url, &submission, None, None).expect_err("cleanup failure surfaced");
+        let captured = requests.recv().expect("captured broker HTTP requests");
+        server.join().expect("broker fixture thread");
+        assert_eq!(
+            captured
+                .iter()
+                .map(|request| request.0.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/runner/jobs",
+                "/runner/jobs/submissions/lookup",
+                "/runner/workspace-owners/release",
+            ]
+        );
+        assert_eq!(
+            captured[2].1["workspace_owner_lease"],
+            serde_json::to_value(&lease).unwrap()
+        );
+        assert_eq!(
+            error.details["workspace_owner_lease_cleanup"]["lease"],
+            serde_json::to_value(&lease).unwrap()
+        );
+        assert!(error.details["workspace_owner_lease_cleanup"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("release unavailable"));
+    }
+
+    #[test]
+    fn cancellation_fence_prevents_broker_post_and_releases_only_provisional_owner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "http-fenced-before-post";
+            let owner_lease = lease(run_id);
+            let submission = submission(run_id, Some(owner_lease.clone()));
+            let lifecycle_store = prepare_pending_lifecycle(run_id, &submission);
+            let pending = homeboy_agents::agent_task_lifecycle::cancel_run_in_store(
+                &lifecycle_store,
+                run_id,
+                Some("fence before broker POST"),
+            )
+            .expect("unresolved pending cancellation remains nonterminal");
+            assert!(!pending.state.is_terminal());
+            assert_eq!(
+                pending.metadata["runner_submission_cancellation"]["state"],
+                "requested"
+            );
+
+            let (url, requests, server) = start_broker(vec![Reply {
+                path: "/runner/workspace-owners/release",
+                status: Some(200),
+                body: successful_reply(serde_json::json!({})),
+            }]);
+            let error = execute(&url, &submission, Some(&lifecycle_store), Some(run_id))
+                .expect_err("fenced intent refuses submit");
+            let captured = requests.recv().expect("captured release request");
+            server.join().expect("broker fixture thread");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "/runner/workspace-owners/release");
+            assert_eq!(
+                captured[0].1["workspace_owner_lease"],
+                serde_json::to_value(&owner_lease).unwrap()
+            );
+            assert!(error.message.contains("fenced before POST"));
+            let after = lifecycle_store
+                .read_record(run_id)
+                .expect("read fenced run");
+            assert!(
+                !after.state.is_terminal(),
+                "an unavailable owner is not falsely terminalized"
+            );
+            assert!(after.metadata.get("run_cancelled").is_none());
+        });
+    }
+
+    #[test]
+    fn acceptance_cancel_race_keeps_http_owner_custody_and_fences_later_post() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "http-acceptance-cancel-race";
+            let owner_lease = lease(run_id);
+            let submission = submission(run_id, Some(owner_lease.clone()));
+            let lifecycle_store = prepare_pending_lifecycle(run_id, &submission);
+            let jobs = homeboy_core::api_jobs::JobStore::default();
+            let _continuation =
+                homeboy_agents::agent_task_lifecycle::RunnerContinuationTestGuard::install(
+                    Box::new(AcceptedJobContinuation { jobs: jobs.clone() }),
+                );
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind racing broker");
+            let url = format!("http://{}", listener.local_addr().expect("broker addr"));
+            let (post_seen_tx, post_seen_rx) = mpsc::channel();
+            let (drop_post_ack_tx, drop_post_ack_rx) = mpsc::channel();
+            let (requests_tx, requests_rx) = mpsc::channel();
+            let server_jobs = jobs.clone();
+            let server = std::thread::spawn(move || {
+                let (mut post_stream, _) = listener.accept().expect("runner POST");
+                let (path, body) = read_http_request(&mut post_stream);
+                assert_eq!(path, "/runner/jobs");
+                let request: RunnerApiSubmitRequest =
+                    serde_json::from_value(body.clone()).expect("canonical submission request");
+                let accepted = server_jobs
+                    .submit_runner_api_request(request.clone())
+                    .expect("broker stores accepted work before losing acknowledgement");
+                post_seen_tx
+                    .send(accepted.id)
+                    .expect("notify accepted POST");
+                drop_post_ack_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test releases lost acknowledgement");
+                requests_tx
+                    .send((path, body))
+                    .expect("record accepted POST");
+                drop(post_stream);
+
+                let (mut lookup_stream, _) = listener.accept().expect("submission lookup");
+                let (lookup_path, lookup_body) = read_http_request(&mut lookup_stream);
+                assert_eq!(lookup_path, "/runner/jobs/submissions/lookup");
+                assert_eq!(lookup_body["submission_key"], request.submission_key);
+                let lookup = server_jobs.lookup_remote_runner_submission(&request.submission_key);
+                let response = successful_reply(serde_json::json!({
+                    "result": serde_json::to_value(lookup).expect("lookup wire value"),
+                }))
+                .to_string();
+                write!(
+                    lookup_stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .expect("write authoritative accepted lookup");
+                requests_tx
+                    .send((lookup_path, lookup_body))
+                    .expect("record accepted lookup");
+            });
+
+            let submit_store = lifecycle_store.clone();
+            let submit_request = submission.clone();
+            let submit_url = url.clone();
+            let submit = std::thread::spawn(move || {
+                execute(
+                    &submit_url,
+                    &submit_request,
+                    Some(&submit_store),
+                    Some(run_id),
+                )
+            });
+            let accepted_job_id = post_seen_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("HTTP owner accepted POST while admission lock is held");
+
+            let (cancel_started_tx, cancel_started_rx) = mpsc::channel();
+            let cancel_store = lifecycle_store.clone();
+            let cancel = std::thread::spawn(move || {
+                cancel_started_tx.send(()).expect("announce cancellation");
+                homeboy_agents::agent_task_lifecycle::cancel_run_in_store(
+                    &cancel_store,
+                    run_id,
+                    Some("cancel while broker acknowledgement is lost"),
+                )
+            });
+            cancel_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cancellation started");
+            std::thread::sleep(Duration::from_millis(150));
+            assert!(
+                !cancel.is_finished(),
+                "cancellation must wait for the accepted HTTP submission's owner lock"
+            );
+            drop_post_ack_tx
+                .send(())
+                .expect("drop the submit acknowledgement");
+
+            let submit_result = submit
+                .join()
+                .expect("submit thread joins")
+                .expect("accepted identity is recovered by broker lookup");
+            assert_eq!(submit_result["job"]["id"], accepted_job_id.to_string());
+            let cancel_result = cancel.join().expect("cancel thread joins");
+            server.join().expect("broker thread joins");
+            let mut observed = vec![requests_rx.recv().unwrap(), requests_rx.recv().unwrap()];
+            observed.sort_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(observed[0].0, "/runner/jobs");
+            assert_eq!(observed[1].0, "/runner/jobs/submissions/lookup");
+            assert_eq!(
+                observed[0].1["workspace_owner_lease"],
+                serde_json::to_value(&owner_lease).unwrap()
+            );
+            assert_eq!(
+                jobs.get(accepted_job_id).unwrap().status,
+                homeboy_core::api_jobs::JobStatus::Queued
+            );
+
+            let after_race = lifecycle_store.read_record(run_id).expect("race record");
+            assert_eq!(
+                after_race.runner_job_id(),
+                Some(accepted_job_id.to_string().as_str())
+            );
+            assert!(
+                !after_race.state.is_terminal(),
+                "unconfirmed runner cancellation cannot terminalize"
+            );
+            assert!(
+                cancel_result.is_err(),
+                "missing runner cancel authority remains an explicit failure"
+            );
+            assert!(lifecycle_store
+                .open_observation_readonly()
+                .unwrap()
+                .control_plane_event_stream(
+                    &homeboy_control_plane_contract::RunId::new(run_id).unwrap()
+                )
+                .unwrap()
+                .unwrap()
+                .iter()
+                .all(|event| event.kind != "run.cancelled"));
+
+            let (later_url, later_requests, later_server) = start_broker(vec![Reply {
+                path: "/runner/workspace-owners/release",
+                status: Some(200),
+                body: successful_reply(serde_json::json!({})),
+            }]);
+            let later = execute(
+                &later_url,
+                &submission,
+                Some(&lifecycle_store),
+                Some(run_id),
+            )
+            .expect_err("cancellation fence denies every later HTTP POST");
+            let captured = later_requests.recv().expect("provisional lease release");
+            later_server.join().expect("later broker fixture");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "/runner/workspace-owners/release");
+            assert!(later.message.contains("fenced before POST"));
+        });
+    }
 }

@@ -8,7 +8,7 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use crate::agent_task_service::{reconcile_run, reconcile_stale_active_runs};
-use homeboy_core::api_jobs::{Job, JobEventKind};
+use homeboy_core::api_jobs::{Job, JobEventKind, JobStore};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
@@ -1034,6 +1034,150 @@ fn cancellation_waits_while_the_initial_runner_post_owns_the_handoff_fence() {
         assert_eq!(
             cancelled.metadata["runner_submission_cancellation"]["state"],
             "requested"
+        );
+    });
+}
+
+#[test]
+fn cancellation_reloads_preparing_to_pending_intent_after_waiting_for_handoff_lock() {
+    with_isolated_home(|_| {
+        ensure_runner_continuation_provider_reset_hook();
+        let store = test_lifecycle_store();
+        let run_id = "cancel-reloads-pending-after-handoff-lock";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned_in_store(
+            &store,
+            LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("proxy");
+        record_lab_offload_submission_intent_in_store(
+            &store,
+            run_id,
+            "homeboy-lab",
+            "/runner/workspace/homeboy",
+            &command,
+            &[],
+        )
+        .expect("preparing intent");
+
+        let legacy = replay_request(run_id, &command);
+        let submission_key = legacy.submission_key().expect("stable key").to_string();
+        let handoff_lock = LabHandoffLock::lock_in_store(&store, run_id).expect("handoff lock");
+        let runner_jobs = JobStore::default();
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let lookups = Arc::new(Mutex::new(Vec::new()));
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (accepted_job_tx, accepted_job_rx) = std::sync::mpsc::channel::<uuid::Uuid>();
+        let cancel_store = store.clone();
+        let cancel_jobs = runner_jobs.clone();
+        let provider_jobs = runner_jobs.clone();
+        let provider_submitted = Arc::clone(&submitted);
+        let provider_lookups = Arc::clone(&lookups);
+        let cancellation = std::thread::spawn(move || {
+            ensure_runner_continuation_provider_reset_hook();
+            let _provider = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
+                store: provider_jobs,
+                submitted: provider_submitted,
+                lookups: provider_lookups,
+                fail_after_accept_once: Arc::new(Mutex::new(false)),
+            }));
+            let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+                move |runner_id, runner_job_id, durable_run_id| {
+                    assert_eq!(runner_id, "homeboy-lab");
+                    assert_eq!(durable_run_id, run_id);
+                    let accepted_job_id = accepted_job_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("handoff owner publishes the accepted identity before unlock");
+                    assert_eq!(runner_job_id, accepted_job_id.to_string());
+                    let job = cancel_jobs
+                        .cancel(accepted_job_id, "cancel accepted post after lock wait")?;
+                    Ok((job, Vec::new()))
+                },
+            ));
+            started_tx.send(()).expect("signal cancellation start");
+            cancel_exact_run_in_store(&cancel_store, run_id, Some("race cancellation"))
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancellation thread starts while intent is preparing");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !cancellation.is_finished(),
+            "cancellation must wait for the in-flight handoff owner"
+        );
+
+        // Model the owner completing its irreversible POST and durable pending
+        // intent while still holding the very lock cancellation is waiting for.
+        let accepted_job = runner_jobs
+            .submit_remote_runner_job(legacy.clone())
+            .expect("broker accepted the exact pending request");
+        store
+            .mutate_record(run_id, |record| {
+                let submitted_at = chrono::Utc::now();
+                let mut handoff = AgentTaskLabHandoff::pending(
+                    "homeboy-lab",
+                    submitted_at.to_rfc3339(),
+                    (submitted_at + chrono::Duration::seconds(120)).to_rfc3339(),
+                );
+                handoff.submission_key = Some(submission_key.clone());
+                record.lab_handoff = Some(handoff);
+                record.metadata["runner_submission_intent"]["state"] = json!("pending");
+                record.metadata["runner_submission_intent"]["replay_request"] =
+                    json!(legacy.clone());
+                true
+            })
+            .expect("persist accepted pending intent before releasing the owner lock");
+        accepted_job_tx
+            .send(accepted_job.id)
+            .expect("publish accepted runner job identity");
+        drop(handoff_lock);
+
+        let cancelled = cancellation
+            .join()
+            .expect("cancellation thread joins")
+            .expect("cancellation binds and cancels the accepted runner job");
+        assert_eq!(
+            cancelled.state,
+            AgentTaskRunState::Cancelled,
+            "{cancelled:#?}"
+        );
+        assert_eq!(
+            cancelled.runner_job_id(),
+            Some(accepted_job.id.to_string().as_str())
+        );
+        assert_eq!(
+            runner_jobs.get(accepted_job.id).unwrap().status,
+            homeboy_core::api_jobs::JobStatus::Cancelled
+        );
+        assert_eq!(
+            submitted.lock().unwrap().len(),
+            0,
+            "cancellation never replays the POST"
+        );
+        assert_eq!(
+            lookups.lock().unwrap().len(),
+            1,
+            "cancellation resolves accepted custody once"
+        );
+        assert!(
+            store
+                .open_observation_readonly()
+                .unwrap()
+                .control_plane_event_stream(
+                    &homeboy_control_plane_contract::RunId::new(run_id).unwrap()
+                )
+                .unwrap()
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == "run.cancelled"),
+            "terminal acknowledgement follows authoritative runner cancellation"
         );
     });
 }

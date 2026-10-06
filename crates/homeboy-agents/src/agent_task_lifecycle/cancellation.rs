@@ -302,6 +302,12 @@ pub(crate) fn cancel_exact_run_in_store(
     let run_id = sanitize_run_id(run_id);
     let mut rooted_record = lifecycle_store.read_record(&run_id)?;
     ensure_rooted_exact_cancellation_supported(&rooted_record)?;
+    // Admission may advance a preparing intent to pending while cancellation
+    // waits for this lock. Re-read and classify only after owning the same
+    // rooted fence that protects the irreversible runner POST.
+    let mut pending_handoff_lock = Some(LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?);
+    rooted_record = lifecycle_store.read_record(&run_id)?;
+    ensure_rooted_exact_cancellation_supported(&rooted_record)?;
     let submission_state = rooted_record
         .metadata
         .pointer("/runner_submission_intent/state")
@@ -310,11 +316,6 @@ pub(crate) fn cancel_exact_run_in_store(
     let pending_submission = submission_state.as_deref() == Some("pending");
     let submission_handoff_open =
         matches!(submission_state.as_deref(), Some("preparing" | "pending"));
-    let mut pending_handoff_lock = if submission_handoff_open {
-        Some(LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?)
-    } else {
-        None
-    };
     if submission_handoff_open {
         let requested_at = now_timestamp();
         lifecycle_store.mutate_record(&run_id, |record| {
@@ -707,6 +708,13 @@ fn cancel_resolved_run_in_store(
     // materialized attempt once one exists; before then the handoff parent is
     // the direct record and remains cancellable.
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    // Do not use the pre-lock submission state: a provider may complete the
+    // preparing-to-pending transition while cancellation is queued here.
+    let mut pending_handoff_lock = Some(LabHandoffLock::lock_in_store(
+        lifecycle_store,
+        &record.run_id,
+    )?);
+    record = lifecycle_store.read_record(&record.run_id)?;
     let submission_state = record
         .metadata
         .pointer("/runner_submission_intent/state")
@@ -715,39 +723,25 @@ fn cancel_resolved_run_in_store(
     let pending_submission = submission_state.as_deref() == Some("pending");
     let submission_handoff_open =
         matches!(submission_state.as_deref(), Some("preparing" | "pending"));
-    let mut pending_handoff_lock = if submission_handoff_open {
-        Some(LabHandoffLock::lock_in_store(
-            lifecycle_store,
-            &record.run_id,
-        )?)
-    } else {
-        None
-    };
-    if submission_handoff_open {
+    if submission_handoff_open && !record.state.is_terminal() {
+        let requested_at = now_timestamp();
+        let record_run_id = record.run_id.clone();
+        lifecycle_store.mutate_record(&record_run_id, |record| {
+            if record.state.is_terminal() {
+                return false;
+            }
+            record.ensure_metadata_object().insert(
+                "runner_submission_cancellation".to_string(),
+                json!({
+                    "state": "requested",
+                    "requested_at": requested_at,
+                    "reason": reason.unwrap_or("cancel requested"),
+                    "recovery_action": format!("homeboy agent-task cancel {record_run_id}"),
+                }),
+            );
+            true
+        })?;
         record = lifecycle_store.read_record(&record.run_id)?;
-        if !record.state.is_terminal()
-            && record
-                .metadata
-                .pointer("/runner_submission_intent/state")
-                .and_then(Value::as_str)
-                == submission_state.as_deref()
-        {
-            let requested_at = now_timestamp();
-            let record_run_id = record.run_id.clone();
-            lifecycle_store.mutate_record(&record_run_id, |record| {
-                record.ensure_metadata_object().insert(
-                    "runner_submission_cancellation".to_string(),
-                    json!({
-                        "state": "requested",
-                        "requested_at": requested_at,
-                        "reason": reason.unwrap_or("cancel requested"),
-                        "recovery_action": format!("homeboy agent-task cancel {record_run_id}"),
-                    }),
-                );
-                true
-            })?;
-            record = lifecycle_store.read_record(&record.run_id)?;
-        }
     }
     let detached_child = record
         .metadata
