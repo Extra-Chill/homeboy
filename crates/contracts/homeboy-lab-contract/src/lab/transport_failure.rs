@@ -390,6 +390,7 @@ mod tests {
         );
         assert_eq!(receipt.selected_runner, "homeboy-lab");
         assert!(receipt.causes_are_bounded());
+        assert_eq!(wrapped.details["source_error"]["retryable"], true);
         assert!(!serde_json::to_string(&wrapped.details)
             .expect("serialize details")
             .contains("fixture-secret"));
