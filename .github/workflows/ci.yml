@@ -66,14 +66,14 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@fd3236bf67b313618449c26e134c6069611ca71d
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@92c40cda03dc086ae61803a573f04bc10a93850e
     with:
       commands: review test
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
-      # #524 strips ANSI-colored Nextest summaries before retry outcome parsing.
-      action-ref: 8e5d4f96b732fe2028076cc2541ab39f17ad9fb0
+      # #522 adds forced-color retry coverage; #524 fixes colored summary parsing.
+      action-ref: 92c40cda03dc086ae61803a573f04bc10a93850e
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
