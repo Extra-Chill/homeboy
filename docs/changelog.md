@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.414.0] - 2026-10-06
+
+### Changed
+- remove unused lint emission shim
+
 ## [0.413.0] - 2026-10-06
 
 ### Added
