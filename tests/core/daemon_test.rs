@@ -2007,9 +2007,8 @@ fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease(
 
     let status = read_status().expect("status");
 
-    // Zero durable jobs are at risk, so the whole repair is a stop/start. The
-    // report carries its lease, so the advertised stop names it: a bare stop
-    // would refuse to stop the stale recorded lease (#11220).
+    // Zero durable jobs are at risk, so the generation-aware lifecycle can
+    // rotate the selected authority without splitting stop and start stores.
     assert!(status.freshness.restartable);
     assert_eq!(
         status
@@ -2018,10 +2017,7 @@ fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease(
             .iter()
             .map(|step| (step.code.as_str(), step.command.as_str()))
             .collect::<Vec<_>>(),
-        vec![
-            ("daemon_stop", "homeboy daemon stop --lease-id test-lease"),
-            ("daemon_start", "homeboy daemon start"),
-        ]
+        vec![("daemon_ensure_running", "homeboy daemon ensure-running",)]
     );
 }
 

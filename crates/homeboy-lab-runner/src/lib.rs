@@ -367,10 +367,11 @@ pub use connection::{
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
     diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
-    reconcile_status_with_outcome, reconcile_terminal_jobs, reconnect_job_log_owner,
-    reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
-    PeerSessionMaintenanceReport,
+    reconcile_status_with_outcome, reconcile_status_with_outcome_with_remote_attestation,
+    reconcile_terminal_jobs, reconnect_job_log_owner, reverse_broker_artifact,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
+    statuses, statuses_indexed, submit_runner_api_request, PeerSessionMaintenanceReport,
+    RunnerReconcileWithAttestationOutcome,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,

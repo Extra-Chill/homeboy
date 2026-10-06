@@ -41,6 +41,8 @@ pub(crate) fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Resu
         (b"daemon-jobs\0".as_slice(), jobs_path),
     ] {
         hasher.update(label);
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update([0]);
         match fs::read(path) {
             Ok(bytes) => {
                 hasher.update([1]);
@@ -252,24 +254,19 @@ pub(crate) fn freshness_report_from_validation(
         .as_ref()
         .map(crate::error::ExecutableAction::render_command);
 
-    // A restartable lease has nothing durable to protect, so a plain stop/start
-    // is the whole repair. Otherwise the repair is exactly the explicit
+    // A restartable lease has nothing durable to protect. Ask the lifecycle
+    // resolver to rotate the selected authority instead of stopping first and
+    // accidentally starting in the caller's legacy state directory. Otherwise
+    // the repair is exactly the explicit
     // reconciliation the evidence authorizes; anything else would be prose. The
     // last case is deliberately empty here: a local report that authorizes no
     // mutation is completed by the dispatcher, which owns the diagnostic step.
     //
-    // The stop names the exact lease whenever the report carries one: a bare
-    // `homeboy daemon stop` would refuse to stop the stale recorded lease and
-    // leave an operator worse than before (#11220).
     let repair_plan = if restartable {
-        let stop_action = lease_id
-            .as_deref()
-            .map(recovery_actions::stop_for_lease)
-            .unwrap_or_else(recovery_actions::stop);
-        vec![
-            DaemonRepairStep::executable(recovery_actions::DAEMON_STOP, stop_action),
-            DaemonRepairStep::executable(recovery_actions::DAEMON_START, recovery_actions::start()),
-        ]
+        vec![DaemonRepairStep::executable(
+            recovery_actions::DAEMON_ENSURE_RUNNING,
+            recovery_actions::ensure_running(),
+        )]
     } else if proven_dead {
         vec![DaemonRepairStep::executable(
             recovery_actions::DAEMON_ADOPT_ORPHAN,
@@ -373,12 +370,30 @@ mod tests {
             .collect()
     }
 
-    /// #11220: a restartable report carries its lease, so the advertised stop
-    /// must name it. A bare `homeboy daemon stop` refuses to stop the stale
-    /// recorded lease, so an operator copy-pasting the plan would land worse
-    /// than before.
     #[test]
-    fn a_restartable_report_binds_the_advertised_stop_to_its_lease() {
+    fn daemon_state_identity_binds_the_store_paths_even_when_bytes_match() {
+        let root = tempfile::tempdir().expect("identity root");
+        let a = root.path().join("generation-a");
+        let b = root.path().join("legacy");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for directory in [&a, &b] {
+            std::fs::write(directory.join("state.json"), b"same lease bytes").unwrap();
+            std::fs::write(directory.join("jobs.json"), b"same jobs bytes").unwrap();
+        }
+
+        assert_ne!(
+            daemon_state_identity(&a.join("state.json"), &a.join("jobs.json")).unwrap(),
+            daemon_state_identity(&b.join("state.json"), &b.join("jobs.json")).unwrap(),
+            "identity must fence authority/store changes even when files happen to match"
+        );
+    }
+
+    /// A stale but idle report routes replacement through the generation-aware
+    /// lifecycle rather than composing a stop in one store and a start in
+    /// another.
+    #[test]
+    fn a_restartable_report_uses_generation_aware_ensure_running() {
         let report = freshness_report_from_validation(
             &restartable_validation(Some("lease-restartable".to_string())),
             0,
@@ -388,40 +403,27 @@ mod tests {
         assert_eq!(report.lease_id.as_deref(), Some("lease-restartable"));
         assert_eq!(
             repair_plan_commands(&report),
-            vec![
-                (
-                    recovery_actions::DAEMON_STOP.to_string(),
-                    "homeboy daemon stop --lease-id lease-restartable".to_string(),
-                ),
-                (
-                    recovery_actions::DAEMON_START.to_string(),
-                    "homeboy daemon start".to_string(),
-                ),
-            ]
+            vec![(
+                recovery_actions::DAEMON_ENSURE_RUNNING.to_string(),
+                "homeboy daemon ensure-running".to_string(),
+            ),]
         );
     }
 
-    /// A restartable report with no lease (a missing lease, nothing durable at
-    /// risk) has nothing to bind, so the bare stop remains the correct
-    /// rendering — `--lease-id` would be a lie.
+    /// A restartable report with no lease still uses the same canonical
+    /// lifecycle resolver; it must not synthesize a lease selector.
     #[test]
-    fn a_restartable_report_without_a_lease_keeps_the_bare_stop() {
+    fn a_restartable_report_without_a_lease_uses_ensure_running() {
         let report = freshness_report_from_validation(&restartable_validation(None), 0);
 
         assert!(report.restartable);
         assert_eq!(report.lease_id, None);
         assert_eq!(
             repair_plan_commands(&report),
-            vec![
-                (
-                    recovery_actions::DAEMON_STOP.to_string(),
-                    "homeboy daemon stop".to_string(),
-                ),
-                (
-                    recovery_actions::DAEMON_START.to_string(),
-                    "homeboy daemon start".to_string(),
-                ),
-            ]
+            vec![(
+                recovery_actions::DAEMON_ENSURE_RUNNING.to_string(),
+                "homeboy daemon ensure-running".to_string(),
+            ),]
         );
     }
 }

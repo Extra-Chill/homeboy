@@ -401,7 +401,12 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         outcome.remaining_blocker.as_deref(),
         Some("daemon_ownership_evidence_unavailable")
     );
-    assert_eq!(outcome.next_action, None);
+    // The blocked plan never dead-ends: it names the exact attested command
+    // that would apply (#15556).
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner reconcile 'homeboy lab' --confirm-workload-processes-absent")
+    );
     assert_eq!(
         outcome.retry_predicate.as_deref(),
         Some("ownership evidence required before daemon recovery: remote daemon lease ownership could not be established")
@@ -420,7 +425,10 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         .recovery_evidence = None;
     let admission = report.admission_summary(0);
     let outcome = reconciliation_outcome("homeboy lab", Vec::new(), &report, &admission);
-    assert_eq!(outcome.next_action, None);
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner reconcile 'homeboy lab' --confirm-workload-processes-absent")
+    );
     assert_eq!(
         operator_summary(&report).next_action,
         "No automatic daemon recovery: typed ownership evidence is insufficient: remote daemon lease ownership could not be established"
@@ -998,7 +1006,10 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
         outcome.remaining_blocker.as_deref(),
         Some("daemon_ownership_evidence_unavailable")
     );
-    assert_eq!(outcome.next_action, None);
+    assert_eq!(
+        outcome.next_action.as_deref(),
+        Some("homeboy runner reconcile homeboy-lab --confirm-workload-processes-absent")
+    );
     assert!(followups.iter().all(|followup| {
         !matches!(
             followup.label.as_str(),

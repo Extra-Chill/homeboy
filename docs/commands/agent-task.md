@@ -162,6 +162,10 @@ Every agent-task plan serializes one `execution_budget` per task: total provider
 executions, same-provider retries, and cross-provider rotations. The total cap is
 always authoritative across both retry paths.
 
+Explicit budget objects require `version: 1`. Other versions are rejected on
+plan admission and readback; reading a plan never upgrades or rewrites it.
+Omitting the budget in an authored plan uses the current schedule default.
+
 ```bash
 # Exactly one provider process: no retry and no rotation.
 homeboy agent-task cook --prompt @task.md --max-provider-executions 1

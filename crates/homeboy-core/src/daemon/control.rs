@@ -206,6 +206,51 @@ fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
     });
 }
 
+#[cfg(all(test, unix))]
+#[test]
+fn supervisor_stops_its_daemon_once_the_state_directory_is_removed() {
+    crate::test_support::with_isolated_home(|_| {
+        let scratch = tempfile::tempdir().unwrap();
+        let state_dir = scratch.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let mut child = Command::new("sh")
+            .args(["-c", "trap 'exit 0' TERM; while :; do sleep 0.1; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter_path = state_path.clone();
+        let waiter = thread::spawn(move || {
+            let status = wait_for_daemon_with_lifetime(
+                &mut child,
+                Some(Duration::from_secs(300)),
+                &waiter_path,
+            );
+            done_tx.send(()).unwrap();
+            status
+        });
+
+        // Directory present, lease not yet published: the startup window.
+        // The supervisor must keep the daemon alive here.
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(3)).is_err(),
+            "supervisor must not stop a daemon whose lease is merely unpublished"
+        );
+        assert!(pid_is_running(pid));
+
+        std::fs::remove_dir_all(&state_dir).unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("supervisor must stop its daemon once the state directory is gone");
+        waiter.join().unwrap().unwrap();
+        assert!(!pid_is_running(pid), "orphaned daemon child must be reaped");
+    });
+}
+
 fn supervise_child_with_lifetime(
     mut child: std::process::Child,
     idle_timeout: Option<Duration>,
@@ -227,6 +272,11 @@ fn supervise_child_with_lifetime(
             Some("wait for supervised daemon".to_string()),
         )
     })?;
+    if state_dir_removed(state_path) {
+        // Termination evidence lives in the removed directory; there is no
+        // reader left for it and writing it would fail.
+        return Ok(());
+    }
     let state = super::validate_lease_file(&crate::paths::daemon_state_file()?)
         .ok()
         .and_then(|validation| validation.state);
@@ -267,6 +317,17 @@ fn wait_for_daemon_with_lifetime(
             // Do not wait for our stop command: it observes this supervisor's
             // exit after reaping the serving child. Waiting would be circular.
             return Ok(status);
+        }
+        if state_dir_removed(state_path) {
+            // Nothing can reach this daemon any more: no client can discover
+            // its lease, read its jobs, or run the lease-scoped stop, which
+            // itself needs this directory. Without this, the unreadable lease
+            // below counts as activity forever and the pair leaks, which is
+            // how tests whose TempDir home was dropped left hundreds of
+            // supervisors behind (#15590). We own the child handle, so this
+            // kill cannot hit a reused PID.
+            child.kill()?;
+            return child.wait();
         }
         let state = super::validate_lease_file(state_path)
             .ok()
@@ -325,6 +386,18 @@ fn wait_for_daemon_with_lifetime(
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// True only when the daemon's state directory is provably gone.
+///
+/// A missing or unreadable `state.json` is normal during startup, before the
+/// child publishes its lease, so only the directory's absence counts. An
+/// existence check that errors (permissions, I/O) is not proof of removal and
+/// keeps the daemon alive.
+fn state_dir_removed(state_path: &Path) -> bool {
+    state_path
+        .parent()
+        .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
 }
 
 fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
@@ -1892,6 +1965,7 @@ pub fn reconcile_dead_lease_orphans(
     job_ids: &[uuid::Uuid],
     confirm_workload_processes_absent: bool,
     addr: &str,
+    start_replacement: bool,
 ) -> Result<DaemonExactOrphanRecoveryResult> {
     if !confirm_workload_processes_absent {
         return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
@@ -1911,7 +1985,16 @@ pub fn reconcile_dead_lease_orphans(
                 )?;
                 store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
             },
-            start: || start_or_return_live_unlocked(addr),
+            // A remote attested reconcile targets one dead generation that is
+            // being retired; starting a daemon in its directory would revive
+            // it. The controller's own reconcile owns what serves next (#15556).
+            start: || {
+                if start_replacement {
+                    start_or_return_live_unlocked(addr).map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
         },
     )
 }
@@ -1957,7 +2040,7 @@ where
     AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
     ProveNoOwner: FnOnce() -> Result<Vec<String>>,
     Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
+    Start: FnOnce() -> Result<Option<super::DaemonStartResult>>,
 {
     let DeadLeaseOrphanRecoveryOperations {
         status,

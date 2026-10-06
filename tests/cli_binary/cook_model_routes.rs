@@ -140,6 +140,10 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         "git worktree add: {}",
         String::from_utf8_lossy(&linked.stderr)
     );
+    let provider_config = home.join("provider-config.json");
+    std::fs::write(&provider_config, r#"{"provider":"anthropic"}"#)
+        .expect("write file-backed provider configuration");
+    let provider_config_ref = format!("@{}", provider_config.display());
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
         .args([
@@ -159,7 +163,7 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
             "--model",
             ALTERNATIVE,
             "--provider-config",
-            r#"{"provider":"anthropic"}"#,
+            &provider_config_ref,
             "--acknowledge-model-override",
             "--cwd",
             workspace.to_str().expect("workspace path"),

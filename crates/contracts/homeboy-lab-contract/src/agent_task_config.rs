@@ -311,7 +311,7 @@ pub struct AgentTaskScheduleOptions {
     pub retry: AgentTaskRetryPolicy,
     /// Truthful operator budget for all provider executions of one task.
     /// This is independent from deterministic cook gate attempts.
-    #[serde(default = "legacy_execution_budget")]
+    #[serde(default)]
     pub execution_budget: AgentTaskExecutionBudget,
     /// Per-plan provider rotation policy. Takes precedence over the global
     /// Homeboy config `agent_task.rotation`; a per-task
@@ -465,7 +465,6 @@ pub struct AgentTaskRetryPolicy {
 /// across same-provider retries and cross-provider rotations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskExecutionBudget {
-    #[serde(default)]
     pub version: u32,
     /// Absolute UTC Unix timestamp in milliseconds at which the entire task
     /// lifecycle must stop. Unlike `timeout_ms`, this is not reset for retries,
@@ -489,13 +488,6 @@ impl Default for AgentTaskExecutionBudget {
     }
 }
 
-fn legacy_execution_budget() -> AgentTaskExecutionBudget {
-    AgentTaskExecutionBudget {
-        version: 0,
-        ..AgentTaskExecutionBudget::default()
-    }
-}
-
 impl AgentTaskExecutionBudget {
     pub const VERSION: u32 = 1;
 
@@ -514,24 +506,10 @@ impl AgentTaskExecutionBudget {
     }
 
     /// Remaining total lifecycle budget at `now_unix_ms`. `Some(0)` means the
-    /// absolute deadline has expired; `None` preserves legacy unbounded plans.
+    /// absolute deadline has expired; `None` means no absolute deadline.
     pub fn remaining_deadline_ms(&self, now_unix_ms: u64) -> Option<u64> {
         self.deadline_unix_ms
             .map(|deadline| deadline.saturating_sub(now_unix_ms))
-    }
-
-    pub fn migrate_legacy(&mut self) -> std::result::Result<bool, String> {
-        match self.version {
-            Self::VERSION => Ok(false),
-            0 => {
-                self.version = Self::VERSION;
-                Ok(true)
-            }
-            version => Err(format!(
-                "unsupported agent-task execution budget version {version}; this Homeboy build supports version {}",
-                Self::VERSION
-            )),
-        }
     }
 }
 

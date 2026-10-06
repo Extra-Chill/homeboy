@@ -663,7 +663,7 @@ fn provider_timeout_heartbeat_detail(
 /// at the observer boundary. Passing a struct means adding a fact is an
 /// additive change here rather than a signature change at every call site, so
 /// the boundary stops being the place state goes to die (#11482).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CookProgressEvent<'a> {
     pub phase: &'a str,
     pub cook_id: &'a str,
@@ -672,6 +672,10 @@ pub struct CookProgressEvent<'a> {
     pub attempt: u32,
     /// Controller-owned description of the phase.
     pub detail: Option<&'a str>,
+    /// Time since this durable phase began, as observed by its lifecycle owner.
+    pub elapsed_ms: u64,
+    /// Subsystem that owns the current wait (provider, worktree, queue, etc.).
+    pub wait_owner: String,
     /// The terminal Cook result, when this is the terminal progress event.
     ///
     /// This remains separate from `detail`, which is persisted as the Cook's
@@ -728,19 +732,25 @@ fn report_cook_progress_with_activity(
     terminal_success: Option<bool>,
     terminal_retry_command: Option<&str>,
 ) -> Result<()> {
-    lifecycle_store.record_cook_progress_with_activity(
+    let record = lifecycle_store.record_cook_progress_with_activity(
         run_id,
         phase,
         attempt,
         detail,
         activity.and_then(CookProviderActivity::to_record_value),
     )?;
+    let progress = &record.metadata["cook_progress"];
     let event = CookProgressEvent {
         phase,
         cook_id,
         run_id,
         attempt,
         detail,
+        elapsed_ms: progress["elapsed_ms"].as_u64().unwrap_or_default(),
+        wait_owner: progress["wait_owner"]
+            .as_str()
+            .unwrap_or("cook_controller")
+            .to_string(),
         terminal_success,
         terminal_retry_command,
         activity,
@@ -6232,7 +6242,7 @@ fn dispatch_provider_ci_remediation(
 
     let result: Result<AgentTaskRunResult<AgentTaskCookReport>> = (|| {
         let record = lifecycle_store.read_record(run_id)?;
-        let plan = lifecycle_store.read_controller_plan_for_execution(run_id)?;
+        let plan = lifecycle_store.read_controller_plan(run_id)?;
         let aggregate = lifecycle_store.read_aggregate(run_id)?;
         let promotion: AgentTaskPromotionReport = serde_json::from_value(
             record.metadata["latest_promotion"].clone(),
@@ -8265,7 +8275,7 @@ fn run_cook_spine(
                 invocation_latest_run_id: Some(&run_id),
             }));
         }
-        let plan = lifecycle_store.read_controller_plan_for_execution(&run_id)?;
+        let plan = lifecycle_store.read_controller_plan(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let Some(source_request) = plan.tasks.first().cloned() else {
             return Ok(cook_report(CookReportInput {

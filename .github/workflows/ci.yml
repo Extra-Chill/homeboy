@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: v2
+          ref: 8194050639aeb51728460051884f183aa74eade5
           path: .homeboy-action
       - name: Generate GitHub App token
         id: app-token
@@ -74,6 +74,7 @@ jobs:
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
+      # Released cache ownership repair, including native colored-retry coverage.
       action-ref: e598b0f6c53407b2680517ff36802daabdc30947
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .

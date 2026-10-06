@@ -524,16 +524,28 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                         classification: sanitize_classification(&verdict.classification),
                         retryable: verdict.retryable,
                         remediation,
-                        cache_identity: (!verdict.cache_key.is_empty()).then(|| {
-                            homeboy_engine_primitives::content_hash::sha256_hex(
-                                verdict.cache_key.as_bytes(),
-                            )
-                        }),
-                        provider_identity: (!verdict.identity.is_null()).then(|| {
-                            homeboy_engine_primitives::content_hash::sha256_hex(
-                                &serde_json::to_vec(&verdict.identity).unwrap_or_default(),
-                            )
-                        }),
+                        cache_identity: verdict
+                            .durable_identity
+                            .as_ref()
+                            .and_then(|identity| identity.cache_key_sha256.clone())
+                            .or_else(|| {
+                                (!verdict.cache_key.is_empty()).then(|| {
+                                    homeboy_engine_primitives::content_hash::sha256_hex(
+                                        verdict.cache_key.as_bytes(),
+                                    )
+                                })
+                            }),
+                        provider_identity: verdict
+                            .durable_identity
+                            .as_ref()
+                            .and_then(|identity| identity.identity_sha256.clone())
+                            .or_else(|| {
+                                (!verdict.identity.is_null()).then(|| {
+                                    homeboy_engine_primitives::content_hash::sha256_hex(
+                                        &serde_json::to_vec(&verdict.identity).unwrap_or_default(),
+                                    )
+                                })
+                            }),
                         capacity: capacity_readiness_from_probe_result(&verdict),
                     };
                     (
