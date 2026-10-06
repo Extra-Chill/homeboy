@@ -6381,14 +6381,15 @@ fn retry_descends_from_recipe(
                 None,
             ));
         }
-        let record = lifecycle_store.read_record(&current)?;
-        let Some(parent) = record.metadata.get("retry_of").and_then(Value::as_str) else {
+        // Both retries and remediations are lineage edges (#15567).
+        let Some(parent) = super::cook_lineage::lineage_parent_in_store(lifecycle_store, &current)?
+        else {
             return Ok(false);
         };
-        if recipe_runs.contains(parent) {
+        if recipe_runs.contains(parent.as_str()) {
             return Ok(true);
         }
-        current = parent.to_string();
+        current = parent;
     }
     Err(Error::validation_invalid_argument(
         "retry_of",
