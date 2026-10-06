@@ -452,7 +452,10 @@ fn compact_control_plane_status(value: Value) -> Value {
     // Retain the prior canonical blocker and safe retry guidance attached by
     // this command, but never duplicate the complete eligibility matrix.
     if let Some(blocker_summary) = value.get("blocker_summary") {
-        compact["blocker_summary"] = blocker_summary.clone();
+        compact["blocker_summary"] = blocker_summary
+            .as_str()
+            .map(bounded_diagnostic_message)
+            .unwrap_or_else(|| bounded_value(blocker_summary));
     }
     compact
 }
@@ -464,12 +467,9 @@ fn deduplicate_control_plane_evidence(value: &mut Value) {
         };
         let mut seen = HashSet::new();
         items.retain(|item| {
-            let identity = item
-                .get("id")
-                .or_else(|| item.get("uri"))
-                .unwrap_or(item)
-                .to_string();
-            seen.insert(identity)
+            // Only collapse byte-identical records. Repeated IDs can carry
+            // distinct facts in the full evidence view and must survive.
+            seen.insert(item.to_string())
         });
     }
 }
@@ -497,6 +497,7 @@ mod compact_status_tests {
             "state": "failed",
             "phase": "provider_start",
             "blocker": { "code": "runner.transport", "message": "upload failed" },
+            "blocker_summary": format!("provider failed: {}", "x".repeat(8 * 1024)),
             "candidate": { "state": "unavailable" },
             "gates": (0..20).map(|index| json!({"id": format!("gate-{index}"), "state": "passed"})).collect::<Vec<_>>(),
             "action_eligibility": { "actions": [
@@ -510,6 +511,15 @@ mod compact_status_tests {
         assert_eq!(compact["state"], "failed");
         assert_eq!(compact["phase"], "provider_start");
         assert_eq!(compact["blocker"]["code"], "runner.transport");
+        assert_eq!(
+            compact["blocker_summary"].as_str().unwrap().chars().count(),
+            513
+        );
+        assert!(compact["blocker_summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("provider failed:"));
+        assert!(compact["blocker_summary"].as_str().unwrap().ends_with('…'));
         assert_eq!(compact["candidate"]["state"], "unavailable");
         assert_eq!(
             compact["gates"].as_array().unwrap().len(),
@@ -573,8 +583,9 @@ mod compact_status_tests {
 
         let mut full = value;
         deduplicate_control_plane_evidence(&mut full);
-        assert_eq!(full["artifacts"].as_array().unwrap().len(), 50);
+        assert_eq!(full["artifacts"].as_array().unwrap().len(), 100);
         assert_eq!(full["artifacts"][0]["content"], "large evidence body");
+        assert_eq!(full["artifacts"][1]["uri"], duplicate_artifacts_uri(1));
         assert_eq!(
             full["action_eligibility"]["actions"]
                 .as_array()
@@ -586,6 +597,10 @@ mod compact_status_tests {
             full["action_eligibility"]["actions"][0]["reason"],
             "not retryable"
         );
+    }
+
+    fn duplicate_artifacts_uri(index: usize) -> String {
+        format!("homeboy://{}-{index}", "u".repeat(8 * 1024))
     }
 }
 
