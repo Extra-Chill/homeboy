@@ -471,7 +471,8 @@ fn submit_detached_handoff_placeholder_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+    let mut plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+    plan.metadata["caller_workspace"] = Value::Null;
     submit_plan_with_runtime_admission_in_store_without_runtime(
         lifecycle_store,
         &plan,
@@ -934,7 +935,11 @@ fn record_unmaterialized_cook_admission_locked(
 
     let cook_id = sanitize_run_id(cook_id);
     if lifecycle_store.read_record(&cook_id).is_err() {
-        let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+        let mut plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+        plan.metadata["caller_workspace"] = binding
+            .get("caller_workspace")
+            .cloned()
+            .unwrap_or(Value::Null);
         let mut submission_metadata = metadata;
         submission_metadata.insert(
             "detached_cook_handoff".to_string(),
@@ -992,6 +997,11 @@ fn record_unmaterialized_cook_admission_locked(
             // The first immutable admission owns retry/lease state. An
             // idempotent duplicate must not erase an active replay claim.
             return false;
+        }
+        if record.metadata["caller_workspace"].is_null() {
+            if let Some(workspace) = binding_for_write.get("caller_workspace") {
+                record.metadata["caller_workspace"] = workspace.clone();
+            }
         }
         record.metadata["unmaterialized_cook_admission"] = json!({
             "schema": SCHEMA,
@@ -3193,12 +3203,10 @@ where
     if let Some(caller) = plan.metadata.pointer("/client_context/caller_context") {
         metadata["client_context"] = json!({"caller_context": caller});
     }
-    if let Some(workspace) = plan
-        .metadata
-        .get("caller_workspace")
-        .filter(|value| !value.is_null())
-    {
+    if let Some(workspace) = plan.metadata.get("caller_workspace") {
         metadata["caller_workspace"] = workspace.clone();
+    } else if plan.metadata["repo"].as_str().is_some() {
+        metadata["caller_workspace"] = Value::Null;
     }
     let activity_contexts = plan
         .tasks

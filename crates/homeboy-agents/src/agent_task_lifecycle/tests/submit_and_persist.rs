@@ -377,6 +377,89 @@ fn spawned_local_retry_child_is_reclaimed_without_a_second_spawn() {
 }
 
 #[test]
+fn caller_ownership_survives_follow_up_submission_and_source_expiry() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let workspace = context.data_dir().join("controller-checkout");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut source = AgentTaskPlan::new("source", Vec::new());
+    source.metadata = json!({
+        "client_context": {"caller_context": "original-caller"},
+        "caller_workspace": {"repository": "repo", "working_directory": workspace},
+    });
+    store
+        .submit_plan_with_runtime_admission(&source, "source", |_| Ok(json!({})))
+        .unwrap();
+    let mut follow_up = AgentTaskPlan::new("retry", Vec::new());
+    crate::caller_context::inherit_ownership(&mut follow_up.metadata, &source.metadata);
+    crate::caller_context::inherit_ownership(
+        &mut follow_up.metadata,
+        &json!({
+            "client_context": {"caller_context": "ambient-worker"},
+            "caller_workspace": {"repository": "baseline", "working_directory": "/worker/baseline"},
+        }),
+    );
+    store
+        .submit_plan_with_runtime_admission(&follow_up, "retry", |_| Ok(json!({})))
+        .unwrap();
+    store
+        .mutate_record("source", |record| {
+            record.state = AgentTaskRunState::Cancelled;
+            true
+        })
+        .unwrap();
+    let observation = store.open_observation_initialized().unwrap();
+    let scope = observation.active_task_scope("original-caller").unwrap();
+    assert_eq!(scope["pending_run_ids"], json!([]));
+    assert_eq!(
+        scope["workspaces"][0]["working_directory"],
+        json!(workspace)
+    );
+    assert_eq!(scope["workspaces"][0]["run_ids"], json!(["retry"]));
+    assert_eq!(
+        observation.active_task_scope("ambient-worker").unwrap()["workspaces"],
+        json!([])
+    );
+}
+
+#[test]
+fn queued_lab_admission_projects_its_verified_existing_checkout() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let workspace = context.data_dir().join("existing-checkout");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let binding = json!({
+        "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "caller_workspace": {"repository": "repo", "working_directory": workspace},
+        "worktree_ref": "repo@existing",
+    });
+    let record = record_unmaterialized_cook_admission_with_metadata_in_store(
+        &store,
+        "queued-lab",
+        binding,
+        "blocked_runner_unavailable",
+        "no capacity",
+        serde_json::Map::from_iter([(
+            "client_context".into(),
+            json!({"caller_context": "lab-caller"}),
+        )]),
+    )
+    .unwrap();
+    assert_eq!(record.state, AgentTaskRunState::Queued);
+    let scope = store
+        .open_observation_initialized()
+        .unwrap()
+        .active_task_scope("lab-caller")
+        .unwrap();
+    assert_eq!(scope["pending_run_ids"], json!([]));
+    assert_eq!(
+        scope["workspaces"][0]["working_directory"],
+        json!(workspace)
+    );
+    assert_eq!(record.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
 fn unmaterialized_cook_admission_is_typed_secret_free_and_idempotent() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

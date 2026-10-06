@@ -472,6 +472,25 @@ const MIGRATIONS: &[Migration] = &[
           AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running');
         "#,
     },
+    Migration {
+        version: 27,
+        sql: r#"
+        DROP INDEX idx_agent_task_active_scope;
+        CREATE INDEX idx_agent_task_active_scope
+        ON runs (
+            json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),
+            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
+            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
+            id
+        )
+        WHERE kind = 'agent-task'
+          AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+          AND (json_type(metadata_json, '$.agent_task_run.metadata.caller_workspace') IS NOT NULL
+               OR json_type(metadata_json, '$.agent_task_run.metadata.detached_cook_handoff') = 'object'
+               OR json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'
+               OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text');
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

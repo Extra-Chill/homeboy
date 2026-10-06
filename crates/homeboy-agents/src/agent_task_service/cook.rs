@@ -4605,6 +4605,11 @@ pub(crate) fn dispatch_cook_follow_up(
                 vec![follow_up_request],
             );
             follow_up_plan.options = plan.options.clone();
+            crate::caller_context::inherit_ownership(&mut follow_up_plan.metadata, &plan.metadata);
+            crate::caller_context::inherit_ownership(
+                &mut follow_up_plan.metadata,
+                &options.identity.initial_plan.metadata,
+            );
             // Gate-feedback is a child execution, not a fresh one-shot policy.
             // Review-only continuations retain their separately bounded plan.
             follow_up_plan.options.execution_budget =
