@@ -3391,11 +3391,29 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     ) {
                         Ok(cancelled) => {
                             let (observed, result) = self.converge_cancellation(&cancelled);
+                            let pending = !result.terminal;
+                            let outcome = if pending {
+                                ControlPlaneActionOutcome::Failed
+                            } else if result.disposition
+                                == ControlPlaneCancelDisposition::TerminalWithoutCancellation
+                            {
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            } else {
+                                ControlPlaneActionOutcome::Succeeded
+                            };
+                            let message = pending.then(|| {
+                                result.observation_error.clone().unwrap_or_else(|| {
+                                    format!(
+                                        "cancellation is pending for run '{}'; retry with `homeboy agent-task cancel {}`",
+                                        observed.run_id, observed.run_id
+                                    )
+                                })
+                            });
                             (
-                                ControlPlaneActionOutcome::Succeeded,
+                                outcome,
                                 project_record(&observed, None)?,
                                 cancel_result_payload(result),
-                                None,
+                                message,
                             )
                         }
                         Err(error)
@@ -4875,6 +4893,77 @@ fn cancel_result_for_record(
     } else {
         ControlPlaneCancelDisposition::Requested
     };
+    let observation_error = if record.state.is_terminal() {
+        observation_error
+    } else {
+        observation_error.or_else(|| {
+            let (blocker, recovery_action) = if record
+                .metadata
+                .pointer("/controller_job_cancellation/phase")
+                .and_then(Value::as_str)
+                == Some("requested")
+            {
+                (
+                    record
+                        .metadata
+                        .pointer("/controller_job_cancellation/controller_job_id")
+                        .and_then(Value::as_str)
+                        .map(|id| format!("controller staging job {id} is still cancelling")),
+                    record
+                        .metadata
+                        .pointer("/controller_job_cancellation/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .pointer("/runner_cancellation_pending/state")
+                .and_then(Value::as_str)
+                == Some("requested")
+            {
+                (
+                    record
+                        .metadata
+                        .pointer("/runner_cancellation_pending/runner_job_id")
+                        .and_then(Value::as_str)
+                        .map(|id| format!("runner job {id} is still cancelling")),
+                    record
+                        .metadata
+                        .pointer("/runner_cancellation_pending/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .pointer("/runner_submission_intent/last_lookup_error")
+                .is_some()
+            {
+                (
+                    Some("runner submission acceptance could not be resolved".to_string()),
+                    record
+                        .metadata
+                        .pointer("/runner_submission_cancellation/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .get("cancellation_deferred_for_terminal_provider")
+                .is_some()
+            {
+                (
+                    Some("provider success is awaiting terminal aggregate import".to_string()),
+                    Some("homeboy agent-task status <run-id>"),
+                )
+            } else {
+                (None, None)
+            };
+            blocker.map(|blocker| {
+                format!(
+                    "{blocker}; recovery action: {}",
+                    recovery_action
+                        .unwrap_or("inspect the exact run with homeboy agent-task status")
+                )
+            })
+        })
+    };
     ControlPlaneCancelResult {
         schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
         disposition,
@@ -5125,26 +5214,19 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    // The same dispatch the daemon's `POST /v1/control-plane/runs/:id/actions`
+    // uses: fanout batch, loop, mission-bound observation run, then the
+    // lifecycle record with the default delegates. Only batches used to take
+    // this path, so loop and observation-run actions from the CLI were
+    // refused as unknown agent-task runs (#13697).
     let requested = parse_run_id(run_id)?;
-    if AgentTaskBatchStore::from_current_data_root()?
-        .batch_path(run_id)
-        .exists()
-    {
-        register();
-        return homeboy_core::control_plane::execute_action(
-            &requested,
-            request,
-            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-        )
-        .map_err(control_plane_error_to_homeboy);
-    }
-    execute_action_from_current_environment_with_delegates(
-        run_id,
+    register();
+    homeboy_core::control_plane::execute_action(
+        &requested,
         request,
-        |resolved, parameters, _intent| default_retry(resolved, parameters),
-        |resolved, _intent| default_resume(resolved),
-        |promotion, _intent| default_promote(promotion),
+        &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
     )
+    .map_err(|error| run_boundary_error_to_homeboy(error, "action", None))
 }
 
 /// `run` is the caller's execution intent, not part of the immutable retry
@@ -5285,6 +5367,21 @@ fn default_retry(
     run_id: &str,
     parameters: &ControlPlaneRetryParameters,
 ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult> {
+    if let Some(timeout_ms) = parameters.timeout_ms {
+        if parameters.provider_route.is_some() || parameters.force {
+            return Err(homeboy_core::Error::validation_invalid_argument(
+                "timeout_ms",
+                "a timeout-override retry cannot also set provider_route or force",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        return crate::agent_task_service::retry_with_timeout_override(
+            run_id,
+            parameters.new_run_id.as_deref(),
+            timeout_ms,
+        );
+    }
     let route = parameters.provider_route.as_ref().map(|route| {
         crate::agent_task_service::CookProviderRouteOverride {
             backend: route.backend.clone(),
@@ -6441,14 +6538,9 @@ fn bind_extension_owners(
 }
 
 fn generic_observation_state(status: &str) -> ControlPlaneRunState {
-    match status {
-        "running" => ControlPlaneRunState::Running,
-        "pass" => ControlPlaneRunState::Succeeded,
-        "fail" | "error" => ControlPlaneRunState::Failed,
-        "cancelled" => ControlPlaneRunState::Cancelled,
-        "skipped" => ControlPlaneRunState::Skipped,
-        _ => ControlPlaneRunState::Unknown,
-    }
+    homeboy_core::observation::RunStatus::from_label(status)
+        .map(homeboy_core::observation::RunStatus::control_plane_state)
+        .unwrap_or(ControlPlaneRunState::Unknown)
 }
 
 fn generic_task_state(value: &str) -> ControlPlaneState {
@@ -7992,6 +8084,47 @@ mod loop_control_plane_tests {
                 stale_error.class,
                 homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
             );
+        });
+    }
+
+    /// A CLI action on a loop id reaches the loop delegate exactly as the
+    /// daemon's action route does. The CLI entry point used to route only
+    /// fanout batches through the registry, so a loop id fell through to the
+    /// agent-task lifecycle and was refused as an unknown run (#13697).
+    #[test]
+    fn cli_action_entry_point_dispatches_loop_actions_like_the_daemon() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop/cli-action", "repair", "v1").expect("created");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("cli-loop-stop:{}", canonical),
+                actor: "test".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "cli stop" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement =
+                super::execute_action_from_current_environment(canonical.as_str(), &request)
+                    .expect("the CLI dispatches a loop action");
+
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert_eq!(acknowledgement.run, canonical);
         });
     }
 
@@ -10051,6 +10184,99 @@ mod tests {
     }
 
     #[test]
+    fn pending_runner_cancel_effect_never_reports_success_or_terminal_cancellation() {
+        with_isolated_home(|_| {
+            crate::agent_task_lifecycle::tests::ensure_runner_continuation_provider_reset_hook();
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let run_id = AGENT_TASK_RUN;
+            let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+            crate::agent_task_lifecycle::record_lab_offload_planned(
+                crate::agent_task_lifecycle::LabOffloadProxyPlan {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    remote_workspace: "/runner/workspace/repo",
+                    remote_command: &command,
+                    durable_plan: None,
+                },
+            )
+            .expect("pending runner proxy");
+            crate::agent_task_lifecycle::record_lab_offload_submission_intent_in_store(
+                &store,
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/repo",
+                &command,
+                &[],
+            )
+            .expect("submission intent");
+            let replay = crate::agent_task_lifecycle::tests::replay_request(run_id, &command);
+            store
+                .mutate_record(run_id, |record| {
+                    record.metadata["runner_submission_intent"]["state"] = json!("pending");
+                    record.metadata["runner_submission_intent"]["replay_request"] = json!(replay);
+                    true
+                })
+                .expect("pending request");
+            let _provider = crate::agent_task_lifecycle::RunnerContinuationTestGuard::install(
+                Box::new(crate::agent_task_lifecycle::tests::ConnectedRunnerProvider),
+            );
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(run_id).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-pending-runner-effect".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-pending-runner-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "test pending cancellation" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement = service
+                .execute_action(&run, &request)
+                .expect("cancel action");
+            assert_eq!(
+                acknowledgement.result.schema,
+                homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+                "action acknowledgement: {acknowledgement:?}"
+            );
+            let result: ControlPlaneCancelResult =
+                serde_json::from_value(acknowledgement.result.data.clone())
+                    .expect("typed pending cancellation result");
+            assert_eq!(acknowledgement.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(acknowledgement.resource.state, ControlPlaneRunState::Queued);
+            assert_eq!(result.disposition, ControlPlaneCancelDisposition::Requested);
+            assert!(!result.terminal);
+            assert!(result
+                .observation_error
+                .as_deref()
+                .is_some_and(|detail| detail.contains("recovery action")));
+            assert_eq!(
+                service
+                    .execute_action(&run, &request)
+                    .expect("idempotent effect replay"),
+                acknowledgement,
+                "retrying the same effect must not repeat transport work"
+            );
+            let event_kinds = store
+                .open_observation_readonly()
+                .expect("event store")
+                .control_plane_event_stream(&run)
+                .expect("action events")
+                .expect("ledger")
+                .into_iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>();
+            assert!(event_kinds.iter().any(|kind| kind == "action.failed"));
+            assert!(!event_kinds.iter().any(|kind| kind == "action.succeeded"));
+        });
+    }
+
+    #[test]
     fn cancel_action_is_already_satisfied_when_the_run_finishes_after_admission() {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
@@ -11335,6 +11561,24 @@ mod tests {
             .run(&RunId::new(AGENT_TASK_COOK).expect("Cook alias"))
             .expect_err("mission alias must use a mission resource");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
+    }
+
+    /// A handed-off or stale observation run is settled; the control-plane run
+    /// resource used to project both as `Unknown`, an open state, so they never
+    /// left the open set.
+    #[test]
+    fn settled_observation_statuses_are_terminal_control_plane_states() {
+        for status in ["handed_off", "stale", "pass", "fail", "error", "skipped"] {
+            assert!(
+                super::generic_observation_state(status).is_terminal(),
+                "{status} is terminal for the observation run"
+            );
+        }
+        assert!(!super::generic_observation_state("running").is_terminal());
+        assert_eq!(
+            super::generic_observation_state("not-a-status"),
+            homeboy_control_plane_contract::ControlPlaneRunState::Unknown
+        );
     }
 
     #[test]

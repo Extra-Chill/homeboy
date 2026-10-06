@@ -85,21 +85,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod serde_label_pins {
-    use super::*;
-
-    #[test]
-    fn runner_lifecycle_owner_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                RunnerLifecycleOwner::Controller,
-                RunnerLifecycleOwner::Runner,
-                RunnerLifecycleOwner::Broker,
-                RunnerLifecycleOwner::Local,
-            ]
-        );
-    }
-}

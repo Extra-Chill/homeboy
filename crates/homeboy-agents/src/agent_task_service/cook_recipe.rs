@@ -574,10 +574,8 @@ pub struct AgentTaskCookRecipeAttempt {
     pub attempt: u32,
     pub run_id: String,
     pub plan: AgentTaskPlan,
-    /// The attempt this one continues, recorded in the same write that
-    /// appends it (#15567). Absent on an initial attempt and on attempts
-    /// recorded before lineage was persisted; read it through
-    /// `cook_lineage::recipe_attempt_lineage`, which derives those.
+    /// The immutable parent edge written atomically with this attempt.
+    /// Roots have no parent. An absent edge grants no lineage authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<super::cook_lineage::CookAttemptLineage>,
 }
@@ -720,10 +718,18 @@ pub fn persist_initial_recipe_in_store(
             .unwrap_or(0)
             .saturating_add(1);
         recipe.attempts = existing.attempts.clone();
-        recipe.attempts.push(AgentTaskCookRecipeAttempt {
-            attempt: next_attempt,
-            ..requested_attempt
-        });
+        let previous = existing.attempts.last().expect("validated previous recipe");
+        if requested_attempt.run_id != previous.run_id
+            || !initial_attempt_inputs_match(previous, &requested_attempt)
+        {
+            recipe.attempts.push(AgentTaskCookRecipeAttempt {
+                attempt: next_attempt,
+                lineage: Some(super::cook_lineage::CookAttemptLineage::replacement(
+                    &previous.run_id,
+                )),
+                ..requested_attempt
+            });
+        }
         recipe.sensitive_mappings = recipe
             .attempts
             .iter()
@@ -1432,7 +1438,7 @@ pub fn record_recipe_attempt_in_store(
 
 /// The one writer of appended-attempt lineage (#15567): the edge lands in the
 /// same recipe write as the attempt, and `validate_recipe` checks it.
-fn record_recipe_attempt_with_lineage_in_store(
+pub(crate) fn record_recipe_attempt_with_lineage_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
     attempt: u32,
@@ -1452,16 +1458,9 @@ fn record_recipe_attempt_with_lineage_in_store(
         .iter()
         .find(|existing| existing.attempt == attempt || existing.run_id == run_id)
     {
-        // An attempt bound by an older Homeboy has no lineage record; it is
-        // still the same attempt when everything else matches. Replaying it
-        // must converge, not fail as a conflicting binding.
-        let mut comparable = candidate.clone();
-        if existing.lineage.is_none() {
-            comparable.lineage = None;
-        }
         let existing_value = serde_json::to_value(existing)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let candidate_value = serde_json::to_value(&comparable)
+        let candidate_value = serde_json::to_value(&candidate)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         if existing_value == candidate_value {
             return Ok(recipe);
@@ -3407,11 +3406,20 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
     {
         return Err(Error::validation_invalid_argument("cook_recipe", "cook recipe requires cook_id, at least one exact attempt, and pinned runtime generation", None, None));
     }
+    let mut run_ids = std::collections::BTreeSet::new();
     for (index, attempt) in recipe.attempts.iter().enumerate() {
         if attempt.run_id.is_empty() || attempt.plan.tasks.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "each cook attempt requires an exact run id and compiled non-empty plan",
+                Some(attempt.run_id.clone()),
+                None,
+            ));
+        }
+        if !run_ids.insert(&attempt.run_id) {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "each Cook run id has one immutable attempt binding",
                 Some(attempt.run_id.clone()),
                 None,
             ));
@@ -3424,7 +3432,12 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
                 .find(|earlier| earlier.run_id == lineage.source_run_id);
             let ordered = source.is_some_and(|source| match lineage.kind {
                 super::cook_lineage::CookLineageKind::Replacement => {
-                    source.attempt == attempt.attempt
+                    recipe
+                        .attempts
+                        .get(index.wrapping_sub(1))
+                        .is_some_and(|latest| latest.run_id == source.run_id)
+                        && (source.attempt == attempt.attempt
+                            || source.attempt.checked_add(1) == Some(attempt.attempt))
                 }
                 _ => source.attempt < attempt.attempt,
             });
@@ -3785,18 +3798,19 @@ mod tests {
         );
     }
 
-    /// An attempt bound by an older Homeboy has no lineage. Replaying the same
-    /// binding with lineage must converge rather than conflict.
+    /// A stored attempt cannot gain a different parent authority on replay.
     #[test]
-    fn replaying_a_legacy_binding_with_lineage_converges() {
+    fn replay_cannot_rebind_lineage_and_leaves_recipe_bytes_unchanged() {
         let (_context, store, plan) = lineage_store();
         store
             .record_recipe_attempt("cook", 2, "run-2", &plan)
             .unwrap();
         assert_eq!(store.load_recipe("cook").unwrap().attempts[1].lineage, None);
+        let before = std::fs::read(store.recipe_path("cook")).unwrap();
         store
             .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
-            .expect("legacy binding replays");
+            .expect_err("lineage is part of immutable attempt identity");
+        assert_eq!(std::fs::read(store.recipe_path("cook")).unwrap(), before);
     }
 
     #[test]

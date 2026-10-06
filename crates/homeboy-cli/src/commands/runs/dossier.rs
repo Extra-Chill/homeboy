@@ -7,7 +7,7 @@ use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy_engine_primitives::shell::shell_arg;
 
 use super::common::RunSummary;
-use super::{reconcile, run_summary, CmdResult, RunsOutput};
+use super::{run_summary, CmdResult, RunsOutput};
 
 #[derive(Serialize)]
 pub struct RunsDossierOutput {
@@ -106,11 +106,11 @@ pub(crate) fn runs_dossier_in_store(
     let run = runs_service::require_run(store, run_id)?;
     runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
     let run = runs_service::require_run(store, run_id)?;
-    reconcile::reconcile_owned_stale_running_run(store, &run)?;
+    runs_service::reconcile_owned_stale_running_run(store, &run)?;
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);
     let failure = evidence_report::evidence_failure_summary(&run);
-    let stale_reason = reconcile::running_status_note(&run);
+    let stale_reason = runs_service::running_status_note(&run);
     let env = env_summary(&run);
     let validation_progress = ValidationProgressLedger::from_run(&run);
 

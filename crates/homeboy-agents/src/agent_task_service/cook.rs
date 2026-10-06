@@ -663,7 +663,7 @@ fn provider_timeout_heartbeat_detail(
 /// at the observer boundary. Passing a struct means adding a fact is an
 /// additive change here rather than a signature change at every call site, so
 /// the boundary stops being the place state goes to die (#11482).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CookProgressEvent<'a> {
     pub phase: &'a str,
     pub cook_id: &'a str,
@@ -672,6 +672,10 @@ pub struct CookProgressEvent<'a> {
     pub attempt: u32,
     /// Controller-owned description of the phase.
     pub detail: Option<&'a str>,
+    /// Time since this durable phase began, as observed by its lifecycle owner.
+    pub elapsed_ms: u64,
+    /// Subsystem that owns the current wait (provider, worktree, queue, etc.).
+    pub wait_owner: String,
     /// The terminal Cook result, when this is the terminal progress event.
     ///
     /// This remains separate from `detail`, which is persisted as the Cook's
@@ -728,19 +732,25 @@ fn report_cook_progress_with_activity(
     terminal_success: Option<bool>,
     terminal_retry_command: Option<&str>,
 ) -> Result<()> {
-    lifecycle_store.record_cook_progress_with_activity(
+    let record = lifecycle_store.record_cook_progress_with_activity(
         run_id,
         phase,
         attempt,
         detail,
         activity.and_then(CookProviderActivity::to_record_value),
     )?;
+    let progress = &record.metadata["cook_progress"];
     let event = CookProgressEvent {
         phase,
         cook_id,
         run_id,
         attempt,
         detail,
+        elapsed_ms: progress["elapsed_ms"].as_u64().unwrap_or_default(),
+        wait_owner: progress["wait_owner"]
+            .as_str()
+            .unwrap_or("cook_controller")
+            .to_string(),
         terminal_success,
         terminal_retry_command,
         activity,
@@ -2790,7 +2800,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_cook_report_omits_the_retired_lifecycle_projection() {
+    fn a_terminal_failure_cook_projects_retryable_failed_lifecycle() {
         let report = report("durable_failure", CookDisposition::Terminal);
         let lifecycle = report.lifecycle();
         let value = serde_json::to_value(report).expect("serialize");
@@ -2799,9 +2809,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(lifecycle.terminal);
         assert!(lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value.get("terminal").is_none());
-        assert!(value.get("retryable").is_none());
         // Unchanged fields must still be present and still be skipped when
         // absent, exactly as the derived implementation did.
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
@@ -2857,8 +2864,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(value["exit_code"], 1);
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(!lifecycle.terminal);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value["result"].get("terminal").is_none());
     }
 
     /// A child that failed before producing any Cook report has no declared
@@ -2873,7 +2878,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(lifecycle.terminal);
         assert!(lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
         assert!(value.get("result").is_none());
     }
 
@@ -2917,7 +2921,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_batch_report_omits_the_retired_lifecycle_projection() {
+    fn a_partial_failure_batch_projects_terminal_nonretryable_lifecycle() {
         let report = AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
             batch_id: "batch-projection".to_string(),
@@ -2942,9 +2946,6 @@ mod run_lifecycle_projection_tests {
         );
         assert!(lifecycle.terminal);
         assert!(!lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value.get("terminal").is_none());
-        assert!(value.get("retryable").is_none());
     }
 
     #[test]
@@ -4359,58 +4360,113 @@ pub(crate) fn dispatch_cook_follow_up(
 ) -> Result<CookFollowUpDispatch> {
     let (recipe_store, lifecycle_store) = stores;
     validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
+    let _driver = recipe_store
+        .try_acquire_cook_driver(cook_id)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_id",
+                "Cook is already being driven by another controller",
+                Some(cook_id.to_string()),
+                None,
+            )
+            .with_retryable(true)
+        })?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }
     let recipe = recipe_store.load_recipe(cook_id)?;
-    let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
-        super::cook_lineage::recipe_attempt_lineage(recipe_attempt, None)
-            .is_some_and(|lineage| lineage.source_run_id == source_run_id)
-    });
-    let replay = related_attempts
-        .clone()
-        .max_by_key(|recipe_attempt| recipe_attempt.attempt)
-        .filter(|recipe_attempt| recipe_attempt.attempt > attempt)
-        .filter(|recipe_attempt| {
-            recipe_attempt.plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true
-                && retryable_provider_discovery_failure_with_store(
-                    lifecycle_store,
-                    &recipe_attempt.run_id,
-                )
-        })
-        .cloned();
-    // Remediation is idempotent per candidate. A second controller pass over
-    // the same source attempt — a foreground `--wait` supervisor and the
-    // continuation scheduler both draining one timed-out candidate — used to
-    // fall through to fresh allocation and append an identical gate-fix
-    // attempt beside the live one. Both then executed against the same
-    // worktree and the later promotion failed to apply on top of the earlier,
-    // reporting a Cook that had in fact gone green as a durable failure.
-    if replay.is_none() {
-        if let Some(existing_run_id) = existing_candidate_remediation(
-            related_attempts.clone().filter_map(|recipe_attempt| {
-                super::cook_lineage::recipe_attempt_lineage(recipe_attempt, None).map(|lineage| {
-                    (
-                        recipe_attempt.attempt,
-                        recipe_attempt.run_id.as_str(),
-                        lineage,
-                    )
-                })
-            }),
-            attempt,
-            promotion.patch_artifact.sha256.as_deref(),
-            |run_id| {
-                lifecycle_store.read_record(run_id).ok().map(|record| {
-                    record.state.is_terminal()
-                        && record.state != agent_task_lifecycle::AgentTaskRunState::Succeeded
-                })
-            },
-        ) {
+    let requested_edge = super::cook_lineage::CookAttemptLineage {
+        source_run_id: source_run_id.to_string(),
+        kind: if follow_up_request.inputs["cook_loop"]["review_form_required"] == true {
+            super::cook_lineage::CookLineageKind::ReviewForm
+        } else {
+            super::cook_lineage::CookLineageKind::GateFix
+        },
+        source_patch_sha256: promotion.patch_artifact.sha256.clone(),
+    };
+    if requested_edge.kind == super::cook_lineage::CookLineageKind::GateFix
+        && requested_edge
+            .source_patch_sha256
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        return Ok(CookFollowUpDispatch::PolicyFailure {
+            reason: "a gate-fix intent requires an authenticated source patch digest".to_string(),
+        });
+    }
+    let mut execution_recovery = None;
+    for bound in recipe.attempts.iter().rev().filter(|bound| {
+        bound.attempt > attempt
+            && super::cook_lineage::execution_lineage(bound, &recipe.attempts).as_ref()
+                == Some(&requested_edge)
+    }) {
+        let authority = &bound.plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"];
+        let scope_matches = if budget_scope == CookFollowUpBudgetScope::Cook {
+            authority.is_null()
+        } else {
+            budget_authority_matches_scope(authority, budget_scope)
+        };
+        if !scope_matches {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "persisted follow-up admission scope differs from replay",
+                Some(bound.run_id.clone()),
+                None,
+            ));
+        }
+        let mut incoming = follow_up_request.clone();
+        incoming.task_id = bound.plan.tasks[0].task_id.clone();
+        incoming.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+            "source_run_id": source_run_id,
+            "source_task_id": promotion.source.task_id,
+            "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
+        });
+        let mut frozen = bound.plan.tasks[0].clone();
+        for request in [&mut incoming, &mut frozen] {
+            if let Some(inputs) = request.inputs["cook_loop"].as_object_mut() {
+                inputs.remove("execution_budget_authority");
+            }
+        }
+        if incoming != frozen {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "persisted follow-up intent conflicts with replay inputs",
+                Some(bound.run_id.clone()),
+                None,
+            ));
+        }
+        if agent_task_lifecycle::run_record_exists_readonly_in_store(
+            lifecycle_store,
+            &bound.run_id,
+        )? {
+            if requested_edge.kind == super::cook_lineage::CookLineageKind::ReviewForm
+                && retryable_provider_discovery_failure_with_store(lifecycle_store, &bound.run_id)
+            {
+                execution_recovery = Some(bound.clone());
+                break;
+            }
             return Ok(CookFollowUpDispatch::Dispatched {
-                run_id: existing_run_id,
+                run_id: bound.run_id.clone(),
             });
         }
+        return dispatch_bound_cook_follow_up(
+            recipe_store,
+            lifecycle_store,
+            options,
+            executor,
+            cook_id,
+            bound.clone(),
+            source_run_id,
+            promotion,
+            budget_scope,
+            remediation_category_usage,
+            ExecutionBudgetUsage::default(),
+        );
     }
+    let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
+        super::cook_lineage::execution_lineage(recipe_attempt, &recipe.attempts)
+            .is_some_and(|lineage| lineage.source_run_id == source_run_id)
+    });
     let persisted_budget_authority = plan
         .tasks
         .first()
@@ -4425,7 +4481,7 @@ pub(crate) fn dispatch_cook_follow_up(
     );
     let mut authority_run_ids = std::collections::BTreeSet::new();
     if let Some(authority) = persisted_budget_authority.as_ref() {
-        let mut ancestor_run_id = Some(source_run_id);
+        let mut ancestor_run_id = Some(source_run_id.to_string());
         while let Some(run_id) = ancestor_run_id {
             let Some(recipe_attempt) = recipe
                 .attempts
@@ -4439,18 +4495,15 @@ pub(crate) fn dispatch_cook_follow_up(
                 break;
             };
             authority_run_ids.insert(recipe_attempt.run_id.as_str());
-            ancestor_run_id = recipe_attempt.plan.tasks[0].inputs["cook_loop"]
-                ["artifact_provenance"]["source_run_id"]
-                .as_str();
+            ancestor_run_id = super::cook_lineage::recipe_attempt_lineage(recipe_attempt)
+                .map(|edge| edge.source_run_id);
         }
     }
     for recipe_attempt in recipe.attempts.iter().filter(|recipe_attempt| {
         authority_run_ids.contains(recipe_attempt.run_id.as_str())
             || (persisted_budget_authority.is_none()
-                && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
-                    ["source_run_id"]
-                    .as_str()
-                    == Some(source_run_id))
+                && super::cook_lineage::execution_lineage(recipe_attempt, &recipe.attempts)
+                    .is_some_and(|edge| edge.source_run_id == source_run_id))
     }) {
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
@@ -4499,7 +4552,7 @@ pub(crate) fn dispatch_cook_follow_up(
                 .to_string(),
         });
     };
-    let reservation = if replay.is_some() {
+    let reservation = if execution_recovery.is_some() {
         ExecutionBudgetUsage::default()
     } else {
         match reserve_remediation_budget(&remaining_budget, same_provider) {
@@ -4521,14 +4574,15 @@ pub(crate) fn dispatch_cook_follow_up(
         follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
             review_budget_authority(budget_scope, persisted_budget_authority.as_ref());
     }
-    let (next_attempt, next_run_id, mut follow_up_plan, replaced_run_id) = match replay {
-        Some(recipe_attempt) => (
-            recipe_attempt.attempt,
-            agent_task_lifecycle::cook_attempt_run_id(cook_id, recipe_attempt.attempt),
-            recipe_attempt.plan.clone(),
-            Some(recipe_attempt.run_id.clone()),
-        ),
-        None => {
+    let (next_attempt, next_run_id, follow_up_plan, replaced_run_id) =
+        if let Some(previous) = execution_recovery {
+            (
+                previous.attempt,
+                agent_task_lifecycle::cook_attempt_run_id(cook_id, previous.attempt),
+                previous.plan.clone(),
+                Some(previous.run_id),
+            )
+        } else {
             let next_attempt = recipe
                 .attempts
                 .iter()
@@ -4559,20 +4613,95 @@ pub(crate) fn dispatch_cook_follow_up(
                 follow_up_plan.options.retry.max_attempts = 1;
             }
             (next_attempt, next_run_id, follow_up_plan, None)
-        }
-    };
-    let review_form_only =
-        follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
-    if let Some(replaced_run_id) = replaced_run_id {
+        };
+    if let Some(previous) = replaced_run_id {
         recipe_store.record_recipe_attempt_replacement_with_plan(
             cook_id,
-            &replaced_run_id,
+            &previous,
             &next_run_id,
             &follow_up_plan,
         )?;
     } else {
-        recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+        super::cook_recipe::record_recipe_attempt_with_lineage_in_store(
+            recipe_store,
+            cook_id,
+            next_attempt,
+            &next_run_id,
+            &follow_up_plan,
+            Some(requested_edge),
+        )?;
     }
+    let bound = recipe_store
+        .load_recipe(cook_id)?
+        .attempts
+        .into_iter()
+        .find(|bound| bound.run_id == next_run_id)
+        .expect("attempt was atomically recorded with its lineage");
+    dispatch_bound_cook_follow_up(
+        recipe_store,
+        lifecycle_store,
+        options,
+        executor,
+        cook_id,
+        bound,
+        source_run_id,
+        promotion,
+        budget_scope,
+        remediation_category_usage,
+        reservation,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dispatch consumes one persisted attempt and its existing admission context"
+)]
+fn dispatch_bound_cook_follow_up(
+    recipe_store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    executor: SharedAgentTaskExecutor,
+    cook_id: &str,
+    bound: super::cook_recipe::AgentTaskCookRecipeAttempt,
+    source_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    budget_scope: CookFollowUpBudgetScope,
+    remediation_category_usage: &mut ExecutionBudgetUsage,
+    reservation: ExecutionBudgetUsage,
+) -> Result<CookFollowUpDispatch> {
+    let recipe = recipe_store.load_recipe(cook_id)?;
+    let lineage =
+        super::cook_lineage::execution_lineage(&bound, &recipe.attempts).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts.lineage",
+                "follow-up has no persisted lineage authority",
+                Some(bound.run_id.clone()),
+                None,
+            )
+        })?;
+    if lineage.source_run_id != source_run_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts.lineage",
+            "follow-up parent does not match its dispatch context",
+            Some(bound.run_id),
+            None,
+        ));
+    }
+    let review_form_only = match lineage.kind {
+        super::cook_lineage::CookLineageKind::GateFix => false,
+        super::cook_lineage::CookLineageKind::ReviewForm => true,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts.lineage",
+                "bound attempt is not a remediation",
+                Some(bound.run_id),
+                None,
+            ))
+        }
+    };
+    let next_attempt = bound.attempt;
+    let next_run_id = bound.run_id;
+    let mut follow_up_plan = bound.plan;
     if attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
         let baseline = materialize_follow_up_baseline_in_root(
             promotion,
@@ -4726,40 +4855,6 @@ pub(crate) fn dispatch_cook_follow_up(
     Ok(CookFollowUpDispatch::Dispatched {
         run_id: next_run_id,
     })
-}
-
-/// The run id of a substantive remediation already durably bound for this exact
-/// candidate, if one exists and can still carry the Cook forward.
-///
-/// `related` yields `(attempt, run_id, cook_loop inputs)` for recipe attempts
-/// whose provenance names the same source run. A match must be newer than the
-/// source attempt, must not be a review-form-only follow-up (those have their
-/// own replay rule), and must name the same source patch digest — a candidate
-/// without a digest cannot prove identity, so it is never deduplicated.
-///
-/// `failed_terminal(run_id)` answers `Some(true)` for a terminally failed run,
-/// `Some(false)` for a live or succeeded one, and `None` when no lifecycle
-/// record exists yet. Only a live or succeeded remediation is reused: a failed
-/// one keeps its existing re-dispatch semantics, and an unrecorded one (a
-/// crash between recipe append and plan submission) is not something a caller
-/// could drive.
-fn existing_candidate_remediation<'a>(
-    related: impl IntoIterator<Item = (u32, &'a str, super::cook_lineage::CookAttemptLineage)>,
-    source_attempt: u32,
-    source_patch_sha256: Option<&str>,
-    failed_terminal: impl Fn(&str) -> Option<bool>,
-) -> Option<String> {
-    let source_patch_sha256 = source_patch_sha256?;
-    related
-        .into_iter()
-        .filter(|(attempt, _, lineage)| {
-            *attempt > source_attempt
-                && lineage.kind == super::cook_lineage::CookLineageKind::GateFix
-                && lineage.source_patch_sha256.as_deref() == Some(source_patch_sha256)
-        })
-        .max_by_key(|(attempt, _, _)| *attempt)
-        .filter(|(_, run_id, _)| failed_terminal(run_id) == Some(false))
-        .map(|(_, run_id, _)| run_id.to_string())
 }
 
 pub(crate) fn ensure_cook_attempt_admitted(
@@ -6202,7 +6297,7 @@ fn dispatch_provider_ci_remediation(
 
     let result: Result<AgentTaskRunResult<AgentTaskCookReport>> = (|| {
         let record = lifecycle_store.read_record(run_id)?;
-        let plan = lifecycle_store.read_controller_plan_for_execution(run_id)?;
+        let plan = lifecycle_store.read_controller_plan(run_id)?;
         let aggregate = lifecycle_store.read_aggregate(run_id)?;
         let promotion: AgentTaskPromotionReport = serde_json::from_value(
             record.metadata["latest_promotion"].clone(),
@@ -8235,7 +8330,7 @@ fn run_cook_spine(
                 invocation_latest_run_id: Some(&run_id),
             }));
         }
-        let plan = lifecycle_store.read_controller_plan_for_execution(&run_id)?;
+        let plan = lifecycle_store.read_controller_plan(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let Some(source_request) = plan.tasks.first().cloned() else {
             return Ok(cook_report(CookReportInput {
@@ -10748,6 +10843,14 @@ pub fn bind_materialized_cook_component_workspace(
     repository_root: &Path,
     selected_component_id: Option<&str>,
 ) -> Result<()> {
+    if plan.metadata["caller_workspace"].is_null() {
+        if let Some(repository) = plan.metadata["repo"].as_str() {
+            plan.metadata["caller_workspace"] = serde_json::json!({
+                "repository": repository,
+                "working_directory": repository_root,
+            });
+        }
+    }
     let Some(component_id) = selected_component_id
         .map(str::to_string)
         .or_else(|| cook_repository_identity_component_id(plan))
@@ -11704,128 +11807,5 @@ mod io_error_attribution_tests {
         let diagnostic = bounded_error_diagnostic(&error);
 
         assert_eq!(diagnostic["deepest_cause"]["message"], error.message);
-    }
-}
-
-/// Remediation idempotence: a second controller pass over one candidate must
-/// reuse the gate-fix attempt already bound for it rather than append a twin.
-#[cfg(test)]
-mod candidate_remediation_idempotence_tests {
-    use super::existing_candidate_remediation;
-    use crate::agent_task_service::cook_lineage::{CookAttemptLineage, CookLineageKind};
-
-    fn lineage(review_form: bool, sha: &str) -> CookAttemptLineage {
-        CookAttemptLineage {
-            source_run_id: "run-1".to_string(),
-            kind: if review_form {
-                CookLineageKind::ReviewForm
-            } else {
-                CookLineageKind::GateFix
-            },
-            source_patch_sha256: Some(sha.to_string()),
-        }
-    }
-
-    fn gate_fix(sha: &str) -> CookAttemptLineage {
-        lineage(false, sha)
-    }
-
-    /// The observed double-booking: attempt 2 is the live gate fix for the
-    /// timed-out attempt 1, and a second pass over attempt 1 must get it back.
-    #[test]
-    fn a_live_gate_fix_for_the_same_candidate_is_reused() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [(2, "run-2", loop_inputs.clone())],
-            1,
-            Some("abc"),
-            |_| Some(false),
-        );
-        assert_eq!(found.as_deref(), Some("run-2"));
-    }
-
-    #[test]
-    fn the_newest_matching_remediation_wins() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [
-                (2, "run-2", loop_inputs.clone()),
-                (3, "run-3", loop_inputs.clone()),
-            ],
-            1,
-            Some("abc"),
-            |_| Some(false),
-        );
-        assert_eq!(found.as_deref(), Some("run-3"));
-    }
-
-    #[test]
-    fn a_failed_remediation_keeps_its_redispatch_semantics() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [(2, "run-2", loop_inputs.clone())],
-            1,
-            Some("abc"),
-            |_| Some(true),
-        );
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn an_unrecorded_remediation_is_not_reused() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [(2, "run-2", loop_inputs.clone())],
-            1,
-            Some("abc"),
-            |_| None,
-        );
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn a_different_candidate_patch_is_a_different_remediation() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [(2, "run-2", loop_inputs.clone())],
-            1,
-            Some("def"),
-            |_| Some(false),
-        );
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn a_candidate_without_a_digest_is_never_deduplicated() {
-        let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(2, "run-2", loop_inputs.clone())], 1, None, |_| {
-                Some(false)
-            });
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn review_form_follow_ups_are_left_to_their_own_replay_rule() {
-        let loop_inputs = lineage(true, "abc");
-        let found = existing_candidate_remediation(
-            [(2, "run-2", loop_inputs.clone())],
-            1,
-            Some("abc"),
-            |_| Some(false),
-        );
-        assert_eq!(found, None);
-    }
-
-    #[test]
-    fn attempts_not_newer_than_the_source_are_ignored() {
-        let loop_inputs = gate_fix("abc");
-        let found = existing_candidate_remediation(
-            [(1, "run-1", loop_inputs.clone())],
-            1,
-            Some("abc"),
-            |_| Some(false),
-        );
-        assert_eq!(found, None);
     }
 }

@@ -723,6 +723,26 @@ fn uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery() 
         store.get(job_id).expect("still running").status,
         JobStatus::Running
     );
+
+    // Chaos case 2 (#15556): the automatic path above refuses, and one
+    // operator attestation over the exact job set terminalizes this
+    // driver-owned job with the attestation recorded as evidence.
+    let diagnostics = store
+        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job_id], 4242)
+        .expect("one attestation recovers uncheckpointed driver work");
+    assert_eq!(diagnostics.matching_job_ids, vec![job_id]);
+    assert_eq!(
+        store.get(job_id).expect("terminal job").status,
+        JobStatus::Failed
+    );
+    assert!(store
+        .events(job_id)
+        .expect("durable events")
+        .iter()
+        .any(|event| event.data.as_ref().is_some_and(|data| {
+            data["operator_confirmed_workload_processes_absent"] == true
+                && data["daemon_lease_id"] == "lease-dead"
+        })));
 }
 
 #[test]

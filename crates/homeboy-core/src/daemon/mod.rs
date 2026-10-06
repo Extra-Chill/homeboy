@@ -46,6 +46,7 @@ pub mod controller_job_driver;
 mod controller_terminal_regression;
 mod daemon_lease;
 mod generation_store;
+pub mod lifecycle;
 mod lifetime;
 pub mod orchestration;
 mod patch_capture;
@@ -56,6 +57,9 @@ mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod stop;
+/// Idle window, in seconds, for automatically launched daemons; `0` selects a
+/// resident launch. See `lifetime::launch_idle_timeout`.
+pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
 pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
@@ -178,6 +182,7 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
 pub struct LocalControllerJobClient {
     endpoint: String,
+    job_router_dir: Option<PathBuf>,
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
@@ -358,6 +363,30 @@ impl LocalControllerJobClient {
                 None,
             )
         })?;
+        Self::connect_to_existing_endpoint(endpoint, None)
+    }
+
+    /// Connect to an existing controller job using the daemon-generation
+    /// registry rooted at `config_root`. This is the lifecycle-store transport:
+    /// an injected lifecycle root cannot route by consulting ambient HOME.
+    pub fn connect_existing_job_in_root(job_id: &str, config_root: &Path) -> Result<Self> {
+        let endpoint =
+            generation_store::endpoint_for_job_in_router_dir(job_id, &config_root.join("daemon"))?
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                "controller_job_id",
+                "controller job has no recorded daemon generation in the selected lifecycle root",
+                Some(job_id.to_string()),
+                None,
+            )
+                })?;
+        Self::connect_to_existing_endpoint(endpoint, Some(config_root.join("daemon")))
+    }
+
+    fn connect_to_existing_endpoint(
+        endpoint: generation_store::LocalDaemonEndpoint,
+        job_router_dir: Option<PathBuf>,
+    ) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -367,6 +396,7 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", endpoint.address),
+            job_router_dir,
             client,
             _admission_guard: None,
         })
@@ -383,13 +413,20 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
+            job_router_dir: None,
             client,
             _admission_guard: admission_guard,
         })
     }
 
     fn endpoint_for_job(&self, job_id: &str) -> Result<String> {
-        Ok(generation_store::endpoint_for_job(job_id)?
+        let endpoint = match self.job_router_dir.as_deref() {
+            Some(router_dir) => {
+                generation_store::endpoint_for_job_in_router_dir(job_id, router_dir)?
+            }
+            None => generation_store::endpoint_for_job(job_id)?,
+        };
+        Ok(endpoint
             .map(|endpoint| format!("http://{}", endpoint.address))
             .unwrap_or_else(|| self.endpoint.clone()))
     }
@@ -1055,7 +1092,11 @@ pub struct DaemonExactOrphanRecoveryResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub termination_evidence: Option<DaemonTerminationEvidence>,
     pub ownership_proof: Vec<String>,
-    pub replacement: DaemonStartResult,
+    /// The daemon started after recovery. `None` when the caller asked for no
+    /// replacement (`--no-replacement`), as the remote attested reconcile does
+    /// for a generation that is being retired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<DaemonStartResult>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2254,6 +2295,17 @@ fn orchestration_tick_loop(
             });
             isolated_tick(|| {
                 let _ = orchestration::drain_work_intents();
+            });
+            // Observation runs (`runs` table) are reconciled here — one rule,
+            // one cadence — not as a side effect of reads. HTTP GETs on runs
+            // only read; stale-running settlement belongs to this pass.
+            isolated_tick(|| {
+                let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
+                    return;
+                };
+                let _ = crate::observation::runs_service::reconcile_owned_stale_running_runs(
+                    &store, 1000,
+                );
             });
         }
         // Terminalization of a linked durable run must deterministically

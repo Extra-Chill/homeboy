@@ -664,7 +664,7 @@ fn process_baseline(
             source_path,
             &args.component_id,
             lint_findings,
-            Some(&provenance),
+            &provenance,
         )?;
         eprintln!(
             "[lint] Baseline saved to {} ({} findings)",
@@ -674,9 +674,8 @@ fn process_baseline(
     }
 
     if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
-        if let Some(existing) =
-            lint_baseline::load_baseline_for_scope_or_legacy_full(source_path, &mut provenance)
-        {
+        if let Some(existing) = lint_baseline::load_baseline_for_scope(source_path, &provenance) {
+            provenance.resolution = lint_baseline::LintBaselineResolution::Scoped;
             provenance.compared = true;
             let comparison = lint_baseline::compare(lint_findings, &existing);
 
@@ -698,12 +697,6 @@ fn process_baseline(
             }
 
             baseline_comparison = Some(comparison);
-        } else if provenance.resolution
-            == lint_baseline::LintBaselineResolution::LegacyEmptyIncomparable
-        {
-            eprintln!(
-                "[lint] Legacy full baseline is incomparable: it has no fingerprints or scope provenance"
-            );
         }
     }
 

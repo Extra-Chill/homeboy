@@ -86,6 +86,18 @@ fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminal
 }
 
 impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl {
+    fn durable_run_is_cancelled(&self, run_id: &str) -> bool {
+        let Ok(store) =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        else {
+            return false;
+        };
+        store.read_record_bounded(run_id).is_ok_and(|record| {
+            record.run_id == run_id
+                && record.state == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+        })
+    }
+
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob> {
         if let Some(loop_id) = run_id.strip_prefix("loop-command:") {
             return recover_loop_command(loop_id, run_id);
@@ -288,6 +300,22 @@ mod tests {
             );
             assert_eq!(calls.load(Ordering::SeqCst), 0);
 
+            assert!(!AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled(run_id));
+            assert!(!AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled("missing-run"));
+            let mut cancelled = record.clone();
+            cancelled.run_id = "cancelled-without-aggregate".to_string();
+            cancelled.state = AgentTaskRunState::Cancelled;
+            cancelled.lifecycle =
+                RunLifecycleRecord::with_execution_state(RunExecutionState::Cancelled);
+            store
+                .write_record(&cancelled)
+                .expect("write canonical cancellation");
+            assert!(
+                AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled(&cancelled.run_id)
+            );
+            assert!(!AgentTaskTerminalRecoveryProviderImpl
+                .durable_run_is_cancelled("cook-alias-for-terminal-recovery"));
+
             let mut terminal_record = record;
             terminal_record.state = AgentTaskRunState::Succeeded;
             terminal_record.lifecycle =
@@ -318,6 +346,7 @@ mod tests {
             assert!(AgentTaskTerminalRecoveryProviderImpl
                 .recovered_terminal_agent_task_job("cook-alias-for-terminal-recovery")
                 .is_some());
+            assert!(!AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled(run_id));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         });
     }

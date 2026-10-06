@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 use crate::controller_pin_reference::{ControllerPinProtectionReason, ReferencedControllerPin};
@@ -214,6 +214,93 @@ fn admission_busy_wait() -> Duration {
 }
 static ADMISSION_LOCK_PROCESS_GUARDS: OnceLock<Mutex<BTreeMap<PathBuf, &'static Mutex<()>>>> =
     OnceLock::new();
+#[derive(Debug, Clone)]
+struct RuntimePinDeadline {
+    deadline: Instant,
+    request_id: String,
+    timeout: Duration,
+    started: Instant,
+}
+
+thread_local! {
+    static RUNTIME_PIN_DEADLINE: std::cell::RefCell<Option<RuntimePinDeadline>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_runtime_pin_deadline<T>(
+    context: RuntimePinDeadline,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    RUNTIME_PIN_DEADLINE.with(|deadline| {
+        let previous = deadline.replace(Some(context));
+        let _restore = RuntimePinDeadlineRestore(previous);
+        operation()
+    })
+}
+
+struct RuntimePinDeadlineRestore(Option<RuntimePinDeadline>);
+
+impl Drop for RuntimePinDeadlineRestore {
+    fn drop(&mut self) {
+        RUNTIME_PIN_DEADLINE.with(|deadline| {
+            deadline.replace(self.0.take());
+        });
+    }
+}
+
+fn runtime_pin_checkpoint(stage: &str, path: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if matches!(stage, "hash_executable" | "copy_executable") {
+        if let Ok(delay_ms) =
+            std::env::var("HOMEBOY_TEST_CONTROLLER_RUNTIME_SEAL_CHECKPOINT_DELAY_MS")
+        {
+            if let Ok(delay_ms) = delay_ms.parse::<u64>() {
+                std::thread::sleep(Duration::from_millis(delay_ms.min(5_000)));
+            }
+        }
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if stage == "hash_executable"
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".homeboy-"))
+    {
+        if let Ok(delay_ms) = std::env::var("HOMEBOY_TEST_CONTROLLER_RUNTIME_STAGED_HASH_DELAY_MS")
+        {
+            if let Ok(delay_ms) = delay_ms.parse::<u64>() {
+                std::thread::sleep(Duration::from_millis(delay_ms.min(5_000)));
+            }
+        }
+    }
+    RUNTIME_PIN_DEADLINE.with(|deadline| {
+        let deadline = deadline.borrow();
+        let Some(context) = deadline.as_ref() else {
+            return Ok(());
+        };
+        if Instant::now() < context.deadline {
+            return Ok(());
+        }
+        let status_command = format!("homeboy agent-task status {}", context.request_id);
+        let retry_command = format!("homeboy agent-task retry {} --run", context.request_id);
+        let mut error = Error::internal_unexpected(format!(
+            "Cook controller runtime seal exceeded {}ms during {stage} for {}; inspect {status_command} and retry with {retry_command}",
+            context.timeout.as_millis(),
+            path.display(),
+        ))
+        .with_retryable(true)
+        .with_hint(format!("Inspect the durable Cook admission with: {status_command}"))
+        .with_hint(format!("Retry the same Cook after the runtime admission blocker clears: {retry_command}"));
+        error.details["controller_admission_phase"] = json!("cook_runtime_seal");
+        error.details["controller_admission_request_id"] = json!(context.request_id);
+        error.details["controller_runtime_stage"] = json!(stage);
+        error.details["waited_ms"] = json!(context.started.elapsed().as_millis() as u64);
+        error.details["wait_timeout_ms"] = json!(context.timeout.as_millis() as u64);
+        error.details["status_command"] = json!(status_command);
+        error.details["retry_command"] = json!(retry_command);
+        Err(error)
+    })
+}
+
 #[cfg(test)]
 static TEST_ADMISSION_HEAD_BARRIER: OnceLock<Mutex<Option<std::sync::Arc<std::sync::Barrier>>>> =
     OnceLock::new();
@@ -993,6 +1080,7 @@ pub fn pin_current_in_root(root: &Path) -> Result<Value> {
 }
 
 fn pin_current_unlocked(root: &Path) -> Result<Value> {
+    runtime_pin_checkpoint("resolve_executable", root)?;
     let identity = build_identity::current();
     let executable = current_executable()?;
     pin_executable_with_source_in_root(
@@ -1042,6 +1130,56 @@ pub fn pin_current_queued_in_root(
     let runtime = pin_current_unlocked(root)?;
     drop(lock);
     Ok(runtime)
+}
+
+/// [`pin_current_queued_in_root`] with a caller-owned finite admission deadline.
+/// Cook startup uses this after persisting its status identity, so an older
+/// controller pin cannot hold an otherwise addressable invocation indefinitely.
+pub fn pin_current_queued_in_root_with_timeout(
+    root: &Path,
+    request_id: &str,
+    wait_timeout: Duration,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<Value> {
+    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "controller_admission",
+            "controller admission request ID is required",
+            None,
+            None,
+        ));
+    }
+    let started = Instant::now();
+    let deadline = started + wait_timeout;
+    with_runtime_pin_deadline(
+        RuntimePinDeadline {
+            deadline,
+            request_id: request_id.to_string(),
+            timeout: wait_timeout,
+            started,
+        },
+        || {
+            runtime_pin_checkpoint("enqueue_admission", &lock_path)?;
+            enqueue_admission_request(&lock_path, request_id)?;
+            let lock = match acquire_queued_admission_lock_with_timeout(
+                &lock_path,
+                request_id,
+                deadline.saturating_duration_since(Instant::now()),
+                &cancellation_requested,
+            ) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let _ = remove_admission_request(&lock_path, request_id);
+                    return Err(error);
+                }
+            };
+            let runtime = pin_current_unlocked(root)?;
+            drop(lock);
+            Ok(runtime)
+        },
+    )
 }
 
 fn current_executable() -> Result<PathBuf> {
@@ -1129,12 +1267,15 @@ fn pin_executable_with_source_in_root(
     identity: &str,
     source: Value,
 ) -> Result<Value> {
+    runtime_pin_checkpoint("begin_seal", executable)?;
     let digest = controller_executable_digest(executable)?;
+    runtime_pin_checkpoint("publish_pin", executable)?;
     let pinned_path = pinned_path_in_root(root, identity, &digest);
     publish_pin(executable, &pinned_path, &digest)?;
 
     let runtime = runtime_pin(identity, executable, &pinned_path, &digest, source);
     validate_pin(&runtime)?;
+    runtime_pin_checkpoint("complete_seal", executable)?;
     Ok(runtime)
 }
 
@@ -2228,6 +2369,7 @@ fn admission_wait_timeout_error(
         None => "an unknown number of other waiters".to_string(),
     };
     let retry_command = format!("homeboy agent-task retry {request_id} --run");
+    let status_command = format!("homeboy agent-task status {request_id}");
     // The millisecond form of the timeout is retained verbatim so existing
     // operator greps and assertions on this message keep matching.
     let mut error = Error::internal_unexpected(format!(
@@ -2236,6 +2378,7 @@ fn admission_wait_timeout_error(
         format_admission_duration(waited),
     ))
     .with_retryable(true)
+    .with_hint(format!("Inspect this durable request with: {status_command}"))
     .with_hint(format!(
         "This request was never admitted, so no task work was dispatched for it. Resume it with: {retry_command} (for cook submissions the admission request ID is the agent-task run ID)."
     ))
@@ -2253,6 +2396,7 @@ fn admission_wait_timeout_error(
     error.details["waiters_ahead"] = json!(ahead);
     error.details["queue_depth"] = json!(queue_depth);
     error.details["retry_command"] = json!(retry_command);
+    error.details["status_command"] = json!(status_command);
     // Explicit: nothing retried this for you.
     error.details["automatic_retry"] = json!(false);
     Ok(error)
@@ -2368,18 +2512,58 @@ fn update_admission_queue(lock_path: &Path, mutate: impl FnOnce(&mut Value)) -> 
                 Some("open controller admission queue lock".to_string()),
             )
         })?;
-    lock_file.lock_exclusive().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("lock controller admission queue".to_string()),
-        )
-    })?;
+    lock_admission_queue_file(&lock_file, lock_path)?;
     let mut queue = read_admission_queue(lock_path)?;
     reclaim_stale_admission_entries(lock_path, &mut queue);
     mutate(&mut queue);
     write_admission_queue(lock_path, &queue)?;
     let _ = lock_file.unlock();
     Ok(())
+}
+
+fn lock_admission_queue_file(file: &fs::File, lock_path: &Path) -> Result<()> {
+    let deadline = RUNTIME_PIN_DEADLINE
+        .with(|deadline| deadline.borrow().as_ref().map(|context| context.deadline));
+    let Some(deadline) = deadline else {
+        return file.lock_exclusive().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("lock controller admission queue".to_string()),
+            )
+        });
+    };
+    if Instant::now() >= deadline {
+        match file.try_lock_exclusive() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                return runtime_pin_checkpoint("controller_admission_queue_lock", lock_path)
+            }
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock controller admission queue".to_string()),
+                ))
+            }
+        }
+    }
+    loop {
+        runtime_pin_checkpoint("controller_admission_queue_lock", lock_path)?;
+        match file.try_lock_exclusive() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some("lock controller admission queue".to_string()),
+                ));
+            }
+        }
+    }
 }
 
 fn write_admission_queue(lock_path: &Path, queue: &Value) -> Result<()> {
@@ -3065,7 +3249,13 @@ fn executable_digest(path: &Path) -> Result<String> {
     EXECUTABLE_DIGEST_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(unix)]
     let hashing_started = std::time::Instant::now();
-    let digest = content_hash::sha256_file(path).map_err(|error| {
+    let digest = content_hash::sha256_file_with_checkpoint(path, || {
+        runtime_pin_checkpoint("hash_executable", path)
+    })
+    .map_err(|error| {
+        if error.details["controller_admission_phase"] == "cook_runtime_seal" {
+            return error;
+        }
         // `sha256_file` already carries the failing path and the OS error in
         // its details. `Error`'s Display is only its generic message ("IO
         // error"), so re-wrapping via `to_string()` discarded both (#15403).
@@ -3218,6 +3408,7 @@ fn recovered_pinned_path_in_root(root: &Path, identity: &str, digest: &str) -> P
 }
 
 fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Result<()> {
+    runtime_pin_checkpoint("inspect_existing_pin", destination)?;
     if destination.exists() {
         let actual = executable_digest(destination)?;
         if actual == expected_digest {
@@ -3236,6 +3427,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         ));
     }
     let parent = destination.parent().expect("pinned runtime has parent");
+    runtime_pin_checkpoint("create_pin_directory", parent)?;
     fs::create_dir_all(parent).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -3247,15 +3439,13 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    fs::copy(source, &staging).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("stage controller runtime pin".to_string()),
-        )
-    })?;
+    if let Err(error) = copy_executable_with_deadline(source, &staging) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+    let mut staging_cleanup = StagedPinCleanup::new(&staging);
     let actual = executable_digest(&staging)?;
     if actual != expected_digest {
-        let _ = fs::remove_file(&staging);
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
             format!(
@@ -3266,15 +3456,16 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         ));
     }
     make_executable_read_only(&staging)?;
+    runtime_pin_checkpoint("publish_pin_link", destination)?;
     match fs::hard_link(&staging, destination) {
         Ok(()) => {
-            let _ = fs::remove_file(&staging);
+            staging_cleanup.remove_now();
             register_test_fixture_candidate(source, destination, expected_digest);
             memoize_published_pin(destination, expected_digest);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&staging);
+            staging_cleanup.remove_now();
             let actual = executable_digest(destination)?;
             if actual == expected_digest {
                 register_test_fixture_candidate(source, destination, expected_digest);
@@ -3293,13 +3484,87 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
             }
         }
         Err(error) => {
-            let _ = fs::remove_file(&staging);
+            staging_cleanup.remove_now();
             Err(Error::internal_io(
                 error.to_string(),
                 Some("publish controller runtime pin".to_string()),
             ))
         }
     }
+}
+
+struct StagedPinCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> StagedPinCleanup<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn remove_now(&mut self) {
+        let _ = fs::remove_file(self.path);
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedPinCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
+/// Copy an executable in bounded chunks so a Cook seal deadline can interrupt
+/// slow local storage between reads/writes. The staging file is removed by the
+/// caller on every error path and is never published before full validation.
+fn copy_executable_with_deadline(source: &Path, destination: &Path) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let mut input = fs::File::open(source).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("open controller runtime source".to_string()),
+        )
+    })?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create staged controller runtime pin".to_string()),
+            )
+        })?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        runtime_pin_checkpoint("copy_executable", source)?;
+        let read = input.read(&mut buffer).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read controller runtime source".to_string()),
+            )
+        })?;
+        if read == 0 {
+            runtime_pin_checkpoint("copy_executable", source)?;
+            break;
+        }
+        output.write_all(&buffer[..read]).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write staged controller runtime pin".to_string()),
+            )
+        })?;
+    }
+    output.sync_all().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("sync staged controller runtime pin".to_string()),
+        )
+    })
 }
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
@@ -3495,6 +3760,105 @@ mod identity_probe_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn runtime_pin_copy_honors_expired_seal_deadline() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let source = temporary.path().join("source-homeboy");
+        let destination = temporary.path().join("staging-homeboy");
+        fs::write(&source, vec![0x5a; 128 * 1024]).expect("write source executable");
+        let started = Instant::now() - Duration::from_millis(1);
+        let context = RuntimePinDeadline {
+            deadline: started,
+            request_id: "cook-copy-deadline".to_string(),
+            timeout: Duration::from_millis(1),
+            started,
+        };
+        let error = with_runtime_pin_deadline(context, || {
+            copy_executable_with_deadline(&source, &destination)
+        })
+        .expect_err("copy stops at the expired seal deadline");
+        assert_eq!(error.details["controller_runtime_stage"], "copy_executable");
+        assert_eq!(
+            error.details["controller_admission_request_id"],
+            "cook-copy-deadline"
+        );
+        assert!(error
+            .message
+            .contains("retry with homeboy agent-task retry"));
+    }
+
+    #[test]
+    fn runtime_pin_deadline_is_restored_after_panic() {
+        let started = Instant::now();
+        let context = RuntimePinDeadline {
+            deadline: started + Duration::from_secs(30),
+            request_id: "cook-panic-deadline".to_string(),
+            timeout: Duration::from_secs(30),
+            started,
+        };
+        let panic = std::panic::catch_unwind(|| {
+            let _ = with_runtime_pin_deadline(context, || -> Result<()> {
+                panic!("simulated panic during runtime sealing");
+            });
+        });
+        assert!(panic.is_err());
+        assert!(RUNTIME_PIN_DEADLINE.with(|deadline| deadline.borrow().is_none()));
+    }
+
+    #[test]
+    fn publish_pin_cleans_staging_after_post_copy_hash_deadline() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let source = temporary.path().join("source-homeboy");
+        let root = temporary.path().join("runtime");
+        let destination = root.join("test-pin").join("homeboy");
+        fs::write(&source, vec![0x5a; 1024 * 1024]).expect("write source executable");
+        let expected_digest = executable_digest(&source).expect("hash source executable");
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let delay_variable = "HOMEBOY_TEST_CONTROLLER_RUNTIME_STAGED_HASH_DELAY_MS";
+        let previous_delay = std::env::var_os(delay_variable);
+        std::env::set_var(delay_variable, "100");
+        let context = RuntimePinDeadline {
+            deadline,
+            request_id: "cook-staged-hash-cleanup".to_string(),
+            timeout: Duration::from_millis(25),
+            started: Instant::now(),
+        };
+        let result = with_runtime_pin_deadline(context, || {
+            publish_pin(&source, &destination, &expected_digest)
+        });
+        if let Some(previous_delay) = previous_delay {
+            std::env::set_var(delay_variable, previous_delay);
+        } else {
+            std::env::remove_var(delay_variable);
+        }
+        let error = result.expect_err("staged hash crosses the finite deadline");
+        assert_eq!(error.details["controller_runtime_stage"], "hash_executable");
+        assert!(
+            !destination.exists(),
+            "failed staged hash is never published"
+        );
+        let pin_parent = destination.parent().expect("pin parent");
+        assert!(
+            fs::read_dir(pin_parent)
+                .expect("read pin parent")
+                .all(|entry| !entry
+                    .expect("staging directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".homeboy-")),
+            "publish_pin must remove its actual staged executable after hash failure"
+        );
+    }
+
+    #[test]
+    fn unbounded_queued_admission_still_rejects_empty_request_ids() {
+        let temporary = tempfile::tempdir().expect("temporary runtime root");
+        let error = pin_current_queued_in_root(temporary.path(), "  ", || Ok(false))
+            .expect_err("empty request ID is rejected");
+        assert!(error.message.contains("request ID is required"));
+        assert!(!temporary.path().join(ADMISSION_LOCK_DIR).exists());
+    }
 
     /// A long-lived process whose binary was replaced sees `<path> (deleted)`
     /// from `current_exe()`. Pinning it must name the cause and the repair

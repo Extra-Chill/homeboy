@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use super::generation_store;
 use crate::error::Result;
 
-pub(super) const IDLE_TIMEOUT_ENV: &str = "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS";
+pub const IDLE_TIMEOUT_ENV: &str = "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS";
 pub(super) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 /// Idle time before a daemon whose binary was replaced stops itself.
 const REPLACED_BINARY_STOP_AFTER: Duration = Duration::from_secs(30);

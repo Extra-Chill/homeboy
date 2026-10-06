@@ -643,6 +643,51 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     Err(error)
 }
 
+/// Transfer pre-supervisor custody to the pinned controller that inherited the
+/// launcher's opaque token. This makes the durable owner PID identify the
+/// process that can finish/repair the handoff after its original caller exits.
+pub fn transfer_detached_cook_handoff_launcher_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let launcher_pid = std::process::id();
+    let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+        .ok()
+        .flatten();
+    let updated = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if record.state.is_terminal()
+            || handoff["cook_id"] != cook_id
+            || handoff["launcher_id"] != launcher_id
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["cancellation_fence"]["state"] != "open"
+        {
+            return false;
+        }
+        let handoff = &mut record.ensure_metadata_object()["detached_cook_handoff"];
+        handoff["launcher_pid"] = json!(launcher_pid);
+        handoff["launcher_start_identity"] =
+            serde_json::to_value(&launcher_start_identity).unwrap_or(Value::Null);
+        handoff["admission_deadline_at"] = json!((chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+        .to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    updated.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "pinned controller could not take custody of the pre-supervisor Cook handoff",
+            Some(cook_id),
+            None,
+        )
+    })
+}
+
 fn detached_cook_launcher_is_live(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -1261,10 +1306,12 @@ pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
     cook_id: &str,
     fence: u64,
     token: &str,
+    diagnostic: Option<&Value>,
 ) -> Result<bool> {
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
+    let diagnostic = diagnostic.map(homeboy_core::redaction::redact_json);
     let released = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
             return false;
@@ -1284,10 +1331,25 @@ pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
         {
             return false;
         }
-        admission["state"] = json!("queued");
-        admission["reason"] = json!("replay worker exited before attempt publication");
+        let worker_requeued = admission["lease"]["state"] != "claimed"
+            && matches!(
+                admission["state"].as_str(),
+                Some("queued" | "blocked_runner_unavailable" | "blocked_runner_stale")
+            );
+        if !worker_requeued {
+            admission["state"] = json!("queued");
+            admission["reason"] = json!("replay worker exited before attempt publication");
+            admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+        }
+        if let Some(diagnostic) = &diagnostic {
+            if let Some(message) = diagnostic["message"].as_str() {
+                admission["reason"] = json!(message);
+            }
+        }
         admission["lease"]["state"] = json!("released");
-        admission["retry"]["next_attempt_at"] = json!(chrono::Utc::now().to_rfc3339());
+        if let Some(diagnostic) = &diagnostic {
+            record.metadata["cook_controller_failure"] = diagnostic.clone();
+        }
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1301,8 +1363,7 @@ pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
 /// argument — fails identically on every retry; retrying it for up to an hour
 /// only delays the operator from seeing the real blocker, which the bounded
 /// admission budget then reports as a generic "runner shortage" once
-/// exhausted. `reason` is the worker's own typed error message, surfaced
-/// verbatim so `agent-task status` shows the real cause.
+/// exhausted. Preserve the worker's typed diagnostic for status and diagnosis.
 ///
 /// Mirrors [`release_unmaterialized_cook_replay_claim_after_worker_exit`]'s
 /// ownership guard exactly; only the terminal disposition differs. A
@@ -1312,11 +1373,23 @@ pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
     cook_id: &str,
     fence: u64,
     token: &str,
-    reason: &str,
+    diagnostic: &Value,
 ) -> Result<bool> {
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     let token = token.to_string();
+    let diagnostic = homeboy_core::redaction::redact_json(diagnostic);
+    let reason = diagnostic["message"]
+        .as_str()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_admission.diagnostic",
+                "replay failure requires a typed diagnostic message",
+                None,
+                None,
+            )
+        })?
+        .to_string();
     let failed = store.mutate_record(&cook_id, |record| {
         if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
             return false;
@@ -1337,17 +1410,24 @@ pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
             return false;
         }
         admission["state"] = json!("failed");
-        admission["reason"] = json!(homeboy_core::redaction::redact_string(reason));
+        admission["reason"] = json!(reason);
+        admission["commands"] = json!({
+            "status": format!("homeboy agent-task status {cook_id}"),
+            "diagnose": format!("homeboy agent-task diagnose {cook_id}"),
+            "retry": format!("homeboy agent-task retry {cook_id}"),
+        });
         admission
             .as_object_mut()
             .expect("unmaterialized admission object")
             .remove("lease");
+        record.metadata["cook_controller_failure"] = diagnostic.clone();
+        record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
+        record.metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
+        record.metadata["detached_cook_handoff"]["reason"] = json!(reason);
+        set_run_state(record, AgentTaskRunState::Failed);
         record.updated_at = Some(now_timestamp());
         true
     })?;
-    if failed.is_some() {
-        let _ = fail_detached_cook_handoff_parent_in_store(&store, &cook_id, reason);
-    }
     Ok(failed.is_some())
 }
 
@@ -3056,6 +3136,20 @@ where
 {
     let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
+    if std::env::var("HOMEBOY_CALLER_CONTEXT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        let context = crate::caller_context::capture(
+            normalized_plan
+                .metadata
+                .get("client_context")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )?;
+        normalized_plan.metadata["client_context"] = context;
+    }
     if normalized_plan.workspace_identity.is_none() {
         normalized_plan.workspace_identity = identity_for_plan(&normalized_plan)?;
     }
@@ -3094,6 +3188,18 @@ where
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
     });
+    // Persist only the compact ownership projection; the complete client
+    // context remains in the immutable plan rather than the hot lookup row.
+    if let Some(caller) = plan.metadata.pointer("/client_context/caller_context") {
+        metadata["client_context"] = json!({"caller_context": caller});
+    }
+    if let Some(workspace) = plan
+        .metadata
+        .get("caller_workspace")
+        .filter(|value| !value.is_null())
+    {
+        metadata["caller_workspace"] = workspace.clone();
+    }
     let activity_contexts = plan
         .tasks
         .iter()
@@ -3709,8 +3815,7 @@ pub fn load_controller_plan_in_store(
     lifecycle_store.read_controller_plan(&run_id)
 }
 
-/// Load a durable plan for a scheduler or provider execution. This is the only
-/// read path allowed to upgrade a legacy execution-budget envelope.
+/// Load a durable plan for a scheduler or provider execution without mutation.
 pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     load_plan_for_execution_in_store(&lifecycle_store, run_id)
@@ -3719,17 +3824,13 @@ pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
 /// [`load_plan_for_execution`] against explicitly injected durable lifecycle
 /// roots.
 ///
-/// Both halves follow the injected root, and the second one is a write: the
-/// legacy execution-budget upgrade rewrites `plan.json` under this store's
-/// config lock. Resolving the Cook alias against one home's index and
-/// migrating another home's plan file would rewrite a plan this caller never
-/// read (#7505).
+/// Alias resolution and canonical plan validation follow the same rooted store.
 pub fn load_plan_for_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskPlan> {
     let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
-    lifecycle_store.read_controller_plan_for_execution(&run_id)
+    lifecycle_store.read_controller_plan(&run_id)
 }
 
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
@@ -4202,6 +4303,36 @@ pub fn record_provider_launch_context_in_store(
     })
 }
 
+/// Seal the current controller with a caller-owned bound on FIFO admission.
+/// The request ID is also the durable Cook identity, so the queue timeout points
+/// back to the record that the caller can inspect and retry.
+pub fn pin_current_controller_runtime_with_timeout(
+    data_root: &std::path::Path,
+    request_id: &str,
+    wait_timeout: std::time::Duration,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<std::path::PathBuf> {
+    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
+    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root_with_timeout(
+        &runtime_root,
+        request_id,
+        wait_timeout,
+        cancellation_requested,
+    )?;
+    runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "new controller runtime pin has no immutable executable",
+                None,
+                None,
+            )
+        })
+}
+
 /// Bind a reserved provider execution to the subprocess that actually runs it.
 ///
 /// Fanout workers are threads and therefore share the coordinator PID. The
@@ -4406,11 +4537,37 @@ pub fn record_cook_progress_with_activity_in_store(
             {
                 return true;
             }
+            let phase_started_at = previous
+                .as_ref()
+                .filter(|previous| previous["phase"].as_str() == Some(phase))
+                .and_then(|previous| previous["phase_started_at"].as_str())
+                .unwrap_or(&now)
+                .to_string();
+            let elapsed_ms = chrono::DateTime::parse_from_rfc3339(&now)
+                .ok()
+                .zip(chrono::DateTime::parse_from_rfc3339(&phase_started_at).ok())
+                .map(|(now, started)| now.signed_duration_since(started).num_milliseconds().max(0))
+                .unwrap_or_default() as u64;
+            let wait_owner = match phase {
+                phase if phase.starts_with("worktree") => "worktree_provider",
+                phase if phase.starts_with("runtime_promotion") => "runtime_promotion",
+                phase if phase.starts_with("queue") || phase == "queued" => "cook_queue",
+                "provider_start" | "retry" => "provider_execution",
+                phase if phase.contains("readiness") || phase == "provider_ready" => {
+                    "provider_readiness"
+                }
+                phase if phase.starts_with("provider") => "provider_execution",
+                phase if phase.starts_with("gate") || phase == "promotion" => "gate_or_promotion",
+                _ => "cook_controller",
+            };
             let mut progress = json!({
                 "phase": phase,
                 "attempt": attempt,
                 "detail": detail,
                 "updated_at": now,
+                "phase_started_at": phase_started_at,
+                "elapsed_ms": elapsed_ms,
+                "wait_owner": wait_owner,
             });
             match activity {
                 Some(activity) => {

@@ -76,6 +76,11 @@ homeboy cleanup --include shared-cargo-targets --apply
 
 Managed runs with an explicit `CARGO_TARGET_DIR` appear in this inventory at their actual path with a caller-owned retention reason and active lease state. Homeboy keeps that lifecycle state under its managed root and never deletes the explicit path, including source-tree targets. Raw Cargo commands run outside Homeboy are not intercepted; use a managed component capability run when lifecycle visibility is required.
 
+Shared-store recency comes from Homeboy's last-used lifecycle metadata. Stores
+without it are reported as skipped and retained, even if their names resemble
+old Homeboy cache slots or their files are stale. Cleanup does not reconstruct
+ownership from names or recursively scan timestamps to migrate old stores.
+
 ## Runtime Temp
 
 Runtime temp cleanup defaults to `retention.runtime_tmp_days`. Under disk

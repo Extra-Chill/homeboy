@@ -7,13 +7,13 @@
 //! | # | Incident | Where it is covered |
 //! |---|----------|---------------------|
 //! | 1 | SIGKILL mid checkpointed in-daemon job resumes (#15420) | in-process: `checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_lease` |
-//! | 2 | SIGKILL mid uncheckpointed job, one attestation terminalizes | ignored below until #15556 |
+//! | 2 | SIGKILL mid uncheckpointed job, one attestation terminalizes (#15556) | in-process: `uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery` (automatic refusal, then one attestation) |
 //! | 3 | Binary replaced under an idle daemon converges (#15403) | `replaced_binary_under_an_idle_daemon_converges` |
 //! | 4 | Binary replaced under a busy daemon waits for work | in-process: `daemon::lifetime` tests (`replaced_and_settled`) |
 //! | 5 | Foreground `daemon serve`: SIGTERM and stop-by-lease (#15436) | `daemon_serve_lifecycle.rs` |
 //! | 6 | Accepted stop with a helper mid-pass exits in bound (#15443) | in-process: `helper_drain_tests` |
 //! | 7 | Restart in place over a dead admission owner (#15456) | `restart_in_place_takes_admission_from_a_dead_generation` |
-//! | 8 | Dead generation with a stale read-only job reconciles | ignored below until #15556 |
+//! | 8 | Dead remote generation with a stale job reconciles (#15556) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --confirm-workload-processes-absent`) |
 //! | 9 | Host-service teardown (whole process group SIGKILL) recovers | `whole_daemon_process_group_killed_recovers_without_edits` |
 
 use std::path::{Path, PathBuf};
@@ -344,15 +344,3 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
         .args(["daemon", "stop"])
         .status();
 }
-
-/// Case 2: SIGKILL mid uncheckpointed in-daemon job. Needs one operator
-/// attestation accepted for every job kind of an exact dead generation.
-#[test]
-#[ignore = "needs #15556 (one attestation for every job kind of a dead generation)"]
-fn uncheckpointed_job_of_a_killed_daemon_terminalizes_with_one_attestation() {}
-
-/// Case 8: a dead remote generation still records a `running` read-only
-/// controller job, blocking `runner reconcile` (Lab inventory incident).
-#[test]
-#[ignore = "needs #15556 (attestation path for remote generations)"]
-fn dead_generation_with_a_stale_read_only_job_reconciles() {}

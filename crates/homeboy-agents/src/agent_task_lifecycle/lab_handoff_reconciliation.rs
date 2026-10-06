@@ -267,8 +267,18 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     run_id: &str,
 ) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let record = lifecycle_store.read_record(&run_id)?;
     if !has_pending_runner_submission_intent(&record) {
+        return Ok(false);
+    }
+    if record.state.is_terminal()
+        || record
+            .metadata
+            .pointer("/runner_submission_cancellation/state")
+            .and_then(Value::as_str)
+            == Some("requested")
+    {
         return Ok(false);
     }
     let intent = record
@@ -319,7 +329,7 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
         provider.submit_runner_api_request(&runner_id, submission)
     }) {
         Ok(job) => {
-            record_detached_lab_run_in_store(
+            record_detached_lab_run_locked_in_store(
                 lifecycle_store,
                 DetachedLabRunRecord {
                     run_id: &run_id,
@@ -344,6 +354,88 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
             Ok(false)
         }
     }
+}
+
+/// Admit the irreversible runner POST only while this exact rooted pending
+/// handoff remains open. The per-run lock spans `submit`, so cancellation either
+/// fences first and refuses the POST, or waits for this POST and resolves its
+/// acceptance receipt before deciding whether it can terminalize the run.
+#[derive(Debug)]
+pub enum PendingRunnerSubmissionAdmissionError {
+    Rejected(Error),
+    Submission(Error),
+}
+
+impl From<Error> for PendingRunnerSubmissionAdmissionError {
+    fn from(error: Error) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+pub fn with_pending_runner_submission_admission_in_store<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    submission: &RunnerApiSubmitRequest,
+    submit: impl FnOnce() -> Result<T>,
+) -> std::result::Result<T, PendingRunnerSubmissionAdmissionError> {
+    let run_id = sanitize_run_id(run_id);
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
+    let blocked = || {
+        Error::validation_invalid_argument(
+            "runner_submission",
+            format!(
+                "runner submission for '{run_id}' was fenced before POST; inspect or retry cancellation with: homeboy agent-task cancel {run_id}"
+            ),
+            Some(run_id.clone()),
+            None,
+        )
+    };
+    if record.state.is_terminal()
+        || record
+            .metadata
+            .pointer("/runner_submission_cancellation/state")
+            .and_then(Value::as_str)
+            == Some("requested")
+        || !has_live_pending_runner_submission_intent(&record, chrono::Utc::now())
+    {
+        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
+    }
+    let intent = record
+        .metadata
+        .get("runner_submission_intent")
+        .and_then(Value::as_object)
+        .ok_or_else(blocked)?;
+    let runner_id = intent
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(blocked)?;
+    let submission_key = intent
+        .get("submission_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(blocked)?;
+    let dispatch = submission.envelope.dispatch.as_ref().ok_or_else(blocked)?;
+    let durable_run_id = submission
+        .envelope
+        .lifecycle
+        .as_ref()
+        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref());
+    let fingerprint =
+        homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(submission)?;
+    if durable_run_id != Some(run_id.as_str())
+        || submission.submission_key != submission_key
+        || dispatch.runner_id != runner_id
+        || intent.get("payload_fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str())
+        || record.lab_handoff.as_ref().is_none_or(|handoff| {
+            handoff.submission_key.as_deref() != Some(submission_key)
+                || handoff.payload_fingerprint.as_deref() != Some(fingerprint.as_str())
+        })
+    {
+        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
+    }
+    submit().map_err(PendingRunnerSubmissionAdmissionError::Submission)
 }
 
 /// Bind a direct-daemon job whose accepted response was lost after the daemon
@@ -421,6 +513,15 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
     run_id: &str,
 ) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
+    bind_pending_runner_submission_if_accepted_locked_in_store(lifecycle_store, &run_id)
+}
+
+pub(crate) fn bind_pending_runner_submission_if_accepted_locked_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
     let record = lifecycle_store.read_record(&run_id)?;
     if record.runner_job_id().is_some()
         || record
@@ -460,9 +561,23 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
     let lookup = runner_continuation::with_runner_continuation(|provider| {
         provider.lookup_reverse_broker_submission(&runner_id, &submission_key)
     });
+    if lookup.is_ok() {
+        lifecycle_store.mutate_record(&run_id, |record| {
+            if let Some(intent) = record
+                .ensure_metadata_object()
+                .get_mut("runner_submission_intent")
+                .and_then(Value::as_object_mut)
+            {
+                intent.remove("last_lookup_error");
+                true
+            } else {
+                false
+            }
+        })?;
+    }
     match lookup {
         Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Accepted { job }) => {
-            record_detached_lab_run_in_store(
+            record_detached_lab_run_locked_in_store(
                 lifecycle_store,
                 DetachedLabRunRecord {
                     run_id: &run_id,
@@ -479,16 +594,25 @@ pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
             | homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Expired { .. },
         ) => Ok(false),
         Err(error) => {
-            let _ =
-                lifecycle_store.mutate_record(&run_id, |record| {
-                    record.ensure_metadata_object()["runner_submission_intent"]
-                        ["last_lookup_error"] = json!({
-                        "code": error.code.as_str(),
-                        "message": error.message.clone(),
-                        "retryable": true,
-                    });
+            let lookup_error = json!({
+                "code": error.code.as_str(),
+                "message": error.message.clone(),
+                "retryable": true,
+            });
+            lifecycle_store.mutate_record(&run_id, |record| {
+                if let Some(intent) = record
+                    .ensure_metadata_object()
+                    .get_mut("runner_submission_intent")
+                    .and_then(Value::as_object_mut)
+                {
+                    intent.insert("last_lookup_error".to_string(), lookup_error.clone());
                     true
-                })?;
+                } else {
+                    false
+                }
+            })?;
+            let mut error = error;
+            error.retryable = Some(true);
             Err(error)
         }
     }
@@ -549,14 +673,11 @@ pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
 
 /// The store-rooted counterpart of [`expire_unaccepted_lab_handoff`].
 ///
-/// This is the operation the handoff lock exists for: expiry and acceptance
-/// race for the same run, and only one may win. That is why the lock and the
-/// cancellation spine had to be rooted in the same change (#7505) — a lock
-/// resolved from `paths::homeboy_data()` while the acceptance check, the
-/// cancellation, and the terminal record write all followed an injected store
-/// would be held in an installation nobody else contends in. Acceptance and
-/// expiry would each believe they were exclusive, and expiry would terminalize
-/// a run a runner had just accepted.
+/// Expiry and acceptance race for the same run, and only one may win. The
+/// cancellation operation owns the store-rooted handoff lock across its final
+/// acceptance lookup, cancellation fence, and terminal write, so a submission
+/// cannot be admitted between those decisions. The initial lookup here is only
+/// an optimization; cancellation repeats it under that shared lock.
 pub(crate) fn expire_unaccepted_lab_handoff_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -566,9 +687,9 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
     if bind_pending_runner_submission_if_accepted_in_store(lifecycle_store, run_id)? {
         return Ok(true);
     }
-    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, run_id)?;
-    // Re-read while holding the handoff lock: an accepted job is runner-owned
-    // and must never be terminalized by controller deadline recovery.
+    // Cancellation repeats the acceptance lookup under the handoff lock before
+    // terminalizing, so acceptance between this read and cancellation remains
+    // authoritative.
     let record = lifecycle_store.read_record(run_id)?;
     if !has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         return Ok(false);
@@ -576,6 +697,9 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
 
     let mut record =
         cancel_run_in_store(lifecycle_store, run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
+    if record.state != AgentTaskRunState::Cancelled {
+        return Ok(false);
+    }
     let expired_at = now_timestamp();
     let record_run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();

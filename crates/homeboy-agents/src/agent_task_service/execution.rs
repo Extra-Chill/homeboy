@@ -1265,19 +1265,28 @@ pub fn retry(
 /// the append-only Cook recipe before the provider can be dispatched.
 pub fn retry_with_timeout_override(
     run_id: &str,
+    new_run_id: Option<&str>,
     timeout_ms: u64,
 ) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(run_id, None, false, false, Some(timeout_ms), None, |plan| {
-        if plan.metadata.get("generic_lab_command_replay").is_some() {
-            return Err(Error::validation_invalid_argument(
-                "generic_lab_command_replay",
-                "generic Lab replay requires controller workspace preflight",
-                Some(plan.plan_id.clone()),
-                None,
-            ));
-        }
-        Ok(())
-    })
+    retry_with_preflight_and_timeout(
+        run_id,
+        new_run_id,
+        false,
+        false,
+        Some(timeout_ms),
+        None,
+        |plan| {
+            if plan.metadata.get("generic_lab_command_replay").is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "generic_lab_command_replay",
+                    "generic Lab replay requires controller workspace preflight",
+                    Some(plan.plan_id.clone()),
+                    None,
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 /// An explicit, operator-authorized provider-route change for a new Cook
@@ -2473,12 +2482,10 @@ fn retryable_cook_attempt(
                 }
             }
         }
-        // Read through the single lineage reader: a gate-fix successor carries
-        // its source in plan provenance, not `retry_of`, and used to be
-        // rejected here as not continuing the attempt it continues (#15567).
-        let continues_source =
-            super::cook_lineage::recipe_attempt_lineage(recipe_attempt, Some(&record.metadata))
-                .is_some_and(|lineage| lineage.source_run_id == source.run_id);
+        // Recipe-owned retries and remediations share one persisted parent
+        // authority; lifecycle metadata and artifact evidence do not grant it.
+        let continues_source = super::cook_lineage::recipe_attempt_lineage(recipe_attempt)
+            .is_some_and(|lineage| lineage.source_run_id == source.run_id);
         if !owned_replacement && !continues_source {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",

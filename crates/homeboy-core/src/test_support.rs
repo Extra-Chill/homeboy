@@ -555,6 +555,10 @@ impl HermeticTestContext {
             // never to fixture subprocesses unless a test explicitly injects it.
             .env_remove(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV)
             .env_remove(crate::observation::LAB_OFFLOAD_METADATA_ENV)
+            .env_remove(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV)
+            .env_remove(crate::runner_job_execution_context::RUNNER_JOB_ID_ENV)
+            .env_remove(crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV)
+            .env_remove(crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV)
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
@@ -3218,7 +3222,18 @@ mod tests {
         let _lock = env_lock();
         let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
         let lab = crate::observation::LAB_OFFLOAD_METADATA_ENV;
-        let _restore = EnvRestore::capture(&[source, lab]);
+        let runner_identity = [
+            crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV,
+            crate::runner_job_execution_context::RUNNER_JOB_ID_ENV,
+            crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV,
+            crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV,
+        ];
+        let mut inherited = vec![source, lab];
+        inherited.extend(runner_identity);
+        let _restore = EnvRestore::capture(&inherited);
+        for variable in runner_identity {
+            std::env::set_var(variable, "operator-runner-identity");
+        }
 
         for (source_value, lab_value) in [
             (Some(r#"{"source":"only"}"#), None),
@@ -3237,6 +3252,9 @@ mod tests {
             let command = HermeticTestContext::new().command(TestBinary::CurrentTest);
             assert_eq!(command_env(&command, source), Some(None));
             assert_eq!(command_env(&command, lab), Some(None));
+            for variable in runner_identity {
+                assert_eq!(command_env(&command, variable), Some(None));
+            }
         }
     }
 

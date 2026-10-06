@@ -58,6 +58,79 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
 }
 
 #[test]
+fn replay_admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence() {
+    with_isolated_home(|_| {
+        let run_id = "run-cli-replay-admission-diagnostic";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("store"),
+            run_id,
+            json!({ "request_ref": "sha256:fixture" }),
+            "queued",
+            "eligible",
+        )
+        .expect("admission");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "consumed", "fence": 1, "token": "fixture-token",
+            });
+        })
+        .expect("replay claim");
+        let message = "native task worktree registration no longer matches the requested branch";
+        assert!(
+            !agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
+                run_id,
+                99,
+                "stale-token",
+                &json!({ "code": "validation.invalid_argument", "message": "stale worker" }),
+            )
+            .expect("stale worker is fenced out")
+        );
+        let untouched = agent_task_lifecycle::exact_record(run_id).expect("active admission");
+        assert!(!untouched.state.is_terminal());
+        assert!(untouched.metadata.get("cook_controller_failure").is_none());
+        assert!(agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
+            run_id, 1, "fixture-token", &json!({
+                "code": "validation.invalid_argument", "message": message,
+                "details": { "cook_phase": "controller_target_preparation", "field": "to_worktree", "api_key": "fixture-private-key" },
+            }),
+        ).expect("terminal replay failure"));
+
+        let (diagnosis, exit) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnosis");
+        assert_eq!(exit, 0);
+        assert_eq!(diagnosis["diagnosis_outcome"], "root_cause_identified");
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(diagnosis["root_cause"]["message"], message);
+        assert_eq!(
+            diagnosis["root_cause"]["cook_phase"],
+            "controller_target_preparation"
+        );
+        let (report, exit) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            full: false,
+            exact: true,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("status");
+        assert_eq!(exit, 0);
+        let rendered = serde_json::to_string(&report).expect("status JSON");
+        assert!(rendered.contains(message));
+        assert!(!rendered.contains("fixture-private-key"));
+        assert!(!rendered.contains("agent-task resume"));
+    });
+}
+
+#[test]
 fn diagnose_projects_causal_pre_execution_provider_evidence() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-provider-pre-execution";
@@ -1769,6 +1842,20 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
         assert_eq!(successor.state, AgentTaskRunState::Queued, "{successor:#?}");
         assert_eq!(successor.metadata["retry_of"], source_run_id);
         assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+        // The successor is reserved through the control-plane Retry action, so
+        // the source run carries an accepted retry action in its event log.
+        homeboy::agents::orchestration::register();
+        let events = homeboy::core::control_plane::events(
+            &homeboy_control_plane_contract::RunId::new(source_run_id).expect("run id"),
+            None,
+        )
+        .expect("source events");
+        assert!(
+            events.events.iter().any(|event| {
+                event.kind == "action.accepted" && event.data["action"] == "retry"
+            }),
+            "cook-continue must reserve its successor through the Retry action"
+        );
 
         let executions = Arc::new(AtomicUsize::new(0));
         let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
@@ -5699,7 +5786,8 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
         })
         .expect("cancellation request accepted");
 
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, 1);
+        assert_eq!(value["outcome"], "failed");
         assert_eq!(
             value["result"]["data"]["disposition"],
             "deferred_for_terminal_provider"

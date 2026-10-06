@@ -4,6 +4,100 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.412.0] - 2026-10-06
+
+### Added
+- Retry action carries a timeout override; cook-continue --timeout-ms reserves through it
+
+### Changed
+- publish fixture identity atomically and bound capture
+- retire unscoped baseline fallback and optional scope
+- retire inferred Cargo lifecycle and migration
+- prune retired lifecycle wire absence assertions
+
+### Fixed
+- launch rotation candidate generations resident
+- reconcile cancelled queued generation handoffs
+- publish existing checkout ownership before runtime sealing
+
+## [0.411.0] - 2026-10-06
+
+### Added
+- operator-attested recovery for dead remote generations
+
+### Changed
+- prune retired status flag absence assertions
+- prune retired composition key compatibility fixture
+- replace gate parity with evaluated wire oracles
+- synchronize foreground proof through lifecycle state
+- retire staging retention adapter and store migration
+- isolate runner-owned fixture identity
+- use canonical CLI fixtures in cancellation gates
+- bound native cancellation proof
+- reflect deferred cancellation failure
+- verify fanout readiness cache sharing
+
+### Fixed
+- keep the connected runner daemon resident
+- serialize cancellation with pending admission
+- share fanout readiness across processes
+- fence pending runner cancellation
+- root pending cancellation transport
+
+## [0.410.0] - 2026-10-06
+
+### Changed
+- consolidate trace labels into literal wire oracles
+- cook-continue reserves retry successors through the control-plane Retry action
+- retire the actual owned generation in recovery fixture
+- consolidate bench artifact optional field fixtures
+- retire execution-budget migration and mutating plan reads
+- retire legacy readiness probe command descriptors
+- CLI actions dispatch through the same registry as the daemon
+- recover persisted follow-up intent through canonical lineage
+
+### Fixed
+- supervisor exits when its state directory is deleted
+- restore native destinations and retain replay diagnostics
+- adopt compatible source build cache ownership
+- keep recovery on registered generation
+- fence recovery against stale authority
+
+## [0.409.0] - 2026-10-06
+
+### Added
+- add indexed active caller ownership
+
+### Changed
+- one stale-run reconciler in core; HTTP reads no longer write, the daemon tick reconciles
+- consolidate cleanup labels and verify manifest round trips
+- prune lifecycle label pin covered by literal wire assertions
+
+### Fixed
+- bound pre-routing runtime seal admission
+- document active scope caller reference
+
+## [0.408.1] - 2026-10-06
+
+### Changed
+- one RunStatus→control-plane state mapping; handed-off and stale runs are terminal
+
+## [0.408.0] - 2026-10-06
+
+### Added
+- observe() returns one total lifecycle view of every generation (#15557 C1)
+
+### Changed
+- agent-task status reads a run through the same resolver as the daemon
+- consolidate artifact type parity into envelope wire checks
+
+### Fixed
+- the run list includes every agent-task run, not only mission-bound ones
+- retain verification across PR metadata edits
+- persist attempt lineage in the recipe, written with the attempt
+- preserve the shared liveness deadline and observation
+- adopt color-safe exact test retry classification
+
 ## [0.407.4] - 2026-10-06
 
 ### Changed
