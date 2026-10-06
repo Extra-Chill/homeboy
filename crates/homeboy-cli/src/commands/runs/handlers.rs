@@ -37,7 +37,7 @@ use super::types::{
     RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
     RunsStaleRunSummary,
 };
-use super::{reconcile, remote, remote_artifact, CmdResult};
+use super::{remote, remote_artifact, CmdResult};
 
 #[cfg(test)]
 /// The observation store the enclosing isolated home installs.
@@ -655,17 +655,20 @@ fn stale_run_summary(
         .iter()
         .filter(|run| {
             run.status == RunStatus::Running.as_str()
-                && reconcile::stale_running_reason(run, &homeboy::core::process::pid_is_running)
-                    .is_some()
+                && runs_service::stale_running_reason(
+                    run,
+                    &homeboy::core::process::pid_is_running,
+                )
+                .is_some()
                 // A direct daemon snapshot is authoritative for runner-backed
                 // rows. Never call one stale while that job is live or unknown —
                 // but "unknown" cannot mean "forever". Past the reconciliation
                 // exemption ceiling, an absent snapshot stops being evidence of
                 // a live job and becomes evidence of a lost one (#11107).
                 && !active_durable_run_ids.contains(&run.id)
-                && (!reconcile::runner_backed_run(run)
+                && (!runs_service::runner_backed_run(run)
                     || active_runner_jobs_complete
-                    || reconcile::runner_backed_exemption_expired(run))
+                    || runs_service::runner_backed_exemption_expired(run))
         })
         .map(|run| run.id.clone())
         .collect::<Vec<_>>();
@@ -787,7 +790,7 @@ pub(crate) fn show_run_in_store(store: &ObservationStore, run_id: &str) -> CmdRe
     let run = runs_service::require_run(store, run_id)?;
     runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
     let run = runs_service::require_run(store, run_id)?;
-    reconcile::reconcile_owned_stale_running_run(store, &run)?;
+    runs_service::reconcile_owned_stale_running_run(store, &run)?;
     let run = run_detail(store, run_id)?;
     let actionable = actionable_for_run_detail(&run);
     Ok((
@@ -801,7 +804,7 @@ pub(crate) fn show_run_in_store(store: &ObservationStore, run_id: &str) -> CmdRe
 }
 
 pub(crate) fn resume_plan(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
-    reconcile::reconcile_owned_stale_running_runs(store, 1000)?;
+    runs_service::reconcile_owned_stale_running_runs(store, 1000)?;
     let run = runs_service::require_run(store, run_id)?;
     let Some(ledger) = validation_progress_ledger_for_run(&run) else {
         return Err(Error::validation_invalid_argument(
@@ -1620,7 +1623,7 @@ pub(super) fn run_detail(
 }
 
 pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
-    let status_note = reconcile::running_status_note(&run);
+    let status_note = runs_service::running_status_note(&run);
     RunSummary {
         id: run.id,
         kind: run.kind,

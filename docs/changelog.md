@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.409.0] - 2026-10-06
+
+### Added
+- add indexed active caller ownership
+
+### Changed
+- one stale-run reconciler in core; HTTP reads no longer write, the daemon tick reconciles
+- consolidate cleanup labels and verify manifest round trips
+- prune lifecycle label pin covered by literal wire assertions
+
+### Fixed
+- bound pre-routing runtime seal admission
+- document active scope caller reference
+
 ## [0.408.1] - 2026-10-06
 
 ### Changed

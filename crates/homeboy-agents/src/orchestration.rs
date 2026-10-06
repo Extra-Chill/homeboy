@@ -5214,26 +5214,19 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    // The same dispatch the daemon's `POST /v1/control-plane/runs/:id/actions`
+    // uses: fanout batch, loop, mission-bound observation run, then the
+    // lifecycle record with the default delegates. Only batches used to take
+    // this path, so loop and observation-run actions from the CLI were
+    // refused as unknown agent-task runs (#13697).
     let requested = parse_run_id(run_id)?;
-    if AgentTaskBatchStore::from_current_data_root()?
-        .batch_path(run_id)
-        .exists()
-    {
-        register();
-        return homeboy_core::control_plane::execute_action(
-            &requested,
-            request,
-            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-        )
-        .map_err(control_plane_error_to_homeboy);
-    }
-    execute_action_from_current_environment_with_delegates(
-        run_id,
+    register();
+    homeboy_core::control_plane::execute_action(
+        &requested,
         request,
-        |resolved, parameters, _intent| default_retry(resolved, parameters),
-        |resolved, _intent| default_resume(resolved),
-        |promotion, _intent| default_promote(promotion),
+        &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
     )
+    .map_err(|error| run_boundary_error_to_homeboy(error, "action", None))
 }
 
 /// `run` is the caller's execution intent, not part of the immutable retry
@@ -8076,6 +8069,47 @@ mod loop_control_plane_tests {
                 stale_error.class,
                 homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
             );
+        });
+    }
+
+    /// A CLI action on a loop id reaches the loop delegate exactly as the
+    /// daemon's action route does. The CLI entry point used to route only
+    /// fanout batches through the registry, so a loop id fell through to the
+    /// agent-task lifecycle and was refused as an unknown run (#13697).
+    #[test]
+    fn cli_action_entry_point_dispatches_loop_actions_like_the_daemon() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop/cli-action", "repair", "v1").expect("created");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("cli-loop-stop:{}", canonical),
+                actor: "test".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "cli stop" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement =
+                super::execute_action_from_current_environment(canonical.as_str(), &request)
+                    .expect("the CLI dispatches a loop action");
+
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert_eq!(acknowledgement.run, canonical);
         });
     }
 

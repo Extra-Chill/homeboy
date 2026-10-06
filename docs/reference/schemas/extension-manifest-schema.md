@@ -55,7 +55,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`external_check_detail_resolvers`** (array): Declares bounded, extension-owned hydration of failed external CI statuses
 - **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
 - **`contract_producers`** (array): Declares generic producer invocations Homeboy can call at explicit lifecycle phases
-- **`toolchain_readiness`** (array): Declares structured `program` plus `args` usability probes for execution admission. Public placement preflight reads runner-advertised capabilities and never executes these probes. A legacy `command` string is recognized only to return an `extension upgrade required` diagnostic and is never executed.
+- **`toolchain_readiness`** (array): Declares a required `program` and optional literal `args` vector for each usability probe used in execution admission. Public placement preflight reads runner-advertised capabilities; execution admission uses the extension's structured probe declaration.
 - **`fuzz`** (object): Declares fuzz workload metadata, optional runner script, and optional campaign portability metadata
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`

@@ -756,10 +756,37 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         .as_u64()
         .and_then(|pid| i32::try_from(pid).ok())
         .expect("persisted launcher owner PID");
+    assert_ne!(
+        launcher_owner_pid as u32,
+        launcher.id(),
+        "pinned runtime must take durable pre-projection launcher custody"
+    );
 
     let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
     assert_eq!(killed, 0, "crash routed launcher owner");
     launcher.wait().expect("reap crashed launcher");
+    let after_crash = lifecycle_store
+        .read_record(cook_id)
+        .expect("read owner after killing the launcher");
+    let launcher_start_identity: homeboy_core::process::ProcessStartIdentity =
+        serde_json::from_value(
+            after_crash.metadata["detached_cook_handoff"]["launcher_start_identity"].clone(),
+        )
+        .expect("persisted launcher start identity");
+    assert_eq!(
+        after_crash.metadata["detached_cook_handoff"]["launcher_pid"],
+        launcher_owner_pid,
+        "no descendant should take over while its local launch token is unpublished: {after_crash:?}"
+    );
+    assert_eq!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            launcher_owner_pid as u32,
+            None,
+            Some(&launcher_start_identity),
+        ),
+        homeboy_core::process::ProcessIdentityState::Dead,
+        "the exact persisted pre-projection owner died"
+    );
 
     let mut status = context.command(TestBinary::HomeboyFixture);
     // Action eligibility is part of the full report, not compact status (#15550).
@@ -782,6 +809,26 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         !lifecycle_store.cook_index_path(cook_id).exists(),
         "a crashed pre-projection launcher must not admit an executable Cook"
     );
+    let owner_before_replacement = lifecycle_store
+        .read_record(cook_id)
+        .expect("read owner before replacement");
+    let owner_pid_before_replacement = owner_before_replacement.metadata["detached_cook_handoff"]
+        ["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("current owner PID");
+    let owner_identity_before_replacement: homeboy_core::process::ProcessStartIdentity =
+        serde_json::from_value(
+            owner_before_replacement.metadata["detached_cook_handoff"]["launcher_start_identity"]
+                .clone(),
+        )
+        .expect("current owner start identity");
+    let owner_liveness_before_replacement =
+        homeboy_core::process::process_identity_state_with_start_identity(
+            owner_pid_before_replacement,
+            None,
+            Some(&owner_identity_before_replacement),
+        );
 
     let mut replacement = context.controller_runtime_command(TestBinary::HomeboyFixture);
     replacement
@@ -812,7 +859,11 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
     let replacement = bounded_output(replacement);
     assert!(
         replacement.status.success(),
-        "replacement launcher failed: stdout={} stderr={}",
+        "replacement launcher failed: owner_pid={launcher_owner_pid} owner_state={:?} owner_identity={} current_pid={owner_pid_before_replacement} current_state={owner_liveness_before_replacement:?} current_identity={:?} original_pid={} stdout={} stderr={} previous status={status_stdout}",
+        homeboy_core::process::process_identity_state(launcher_owner_pid as u32, None),
+        claimed.metadata["detached_cook_handoff"]["launcher_start_identity"],
+        owner_identity_before_replacement,
+        launcher.id(),
         String::from_utf8_lossy(&replacement.stdout),
         String::from_utf8_lossy(&replacement.stderr)
     );
