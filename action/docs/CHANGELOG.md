@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.16] - 2026-10-06
+
+### Changed
+- require native nextest retry coverage under forced color
+
 ## [2.20.15] - 2026-10-06
 
 ### Fixed
