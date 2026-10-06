@@ -30,7 +30,7 @@ fn stopped_command_cannot_mutate_or_resurrect_controller() {
             serde_json::from_slice::<Value>(&output.stdout).expect("CLI JSON")["data"].clone()
         };
         let spec = json!({
-            "schema": "homeboy/controller-spec/v1", "controller_id": "command-cancel-proof",
+            "schema": "homeboy/controller-spec/v1", "loop_id": "command-cancel-proof",
             "phase": "prove", "config_version": "v1",
             "workflows": [{"workflow_id": "command", "tasks": ["Run command cancellation fixture"],
                 "runtime_execution": {"kind":"command", "command":"/bin/sh",

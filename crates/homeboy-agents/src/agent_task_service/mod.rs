@@ -14,6 +14,7 @@ pub(crate) mod cook_batch_job;
 mod cook_budget;
 /// Daemon-owned durable lifecycle for a locally-placed detached Cook.
 mod cook_job;
+mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_promotion;
 mod cook_recipe;
