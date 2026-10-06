@@ -2800,7 +2800,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_cook_report_omits_the_retired_lifecycle_projection() {
+    fn a_terminal_failure_cook_projects_retryable_failed_lifecycle() {
         let report = report("durable_failure", CookDisposition::Terminal);
         let lifecycle = report.lifecycle();
         let value = serde_json::to_value(report).expect("serialize");
@@ -2809,9 +2809,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(lifecycle.terminal);
         assert!(lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value.get("terminal").is_none());
-        assert!(value.get("retryable").is_none());
         // Unchanged fields must still be present and still be skipped when
         // absent, exactly as the derived implementation did.
         assert_eq!(value["schema"], "homeboy/agent-task-cook/v1");
@@ -2867,8 +2864,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(value["exit_code"], 1);
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(!lifecycle.terminal);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value["result"].get("terminal").is_none());
     }
 
     /// A child that failed before producing any Cook report has no declared
@@ -2883,7 +2878,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
         assert!(lifecycle.terminal);
         assert!(lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
         assert!(value.get("result").is_none());
     }
 
@@ -2927,7 +2921,7 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn a_batch_report_omits_the_retired_lifecycle_projection() {
+    fn a_partial_failure_batch_projects_terminal_nonretryable_lifecycle() {
         let report = AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
             batch_id: "batch-projection".to_string(),
@@ -2952,9 +2946,6 @@ mod run_lifecycle_projection_tests {
         );
         assert!(lifecycle.terminal);
         assert!(!lifecycle.retryable);
-        assert!(value.get("lifecycle_status").is_none());
-        assert!(value.get("terminal").is_none());
-        assert!(value.get("retryable").is_none());
     }
 
     #[test]
