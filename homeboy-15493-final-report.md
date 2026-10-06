@@ -22,15 +22,15 @@ Local verification passed:
 - `cargo test -p homeboy-core --lib daemon::generation_store::tests` — 17 passed.
 - `cargo check -p homeboy-lab-runner`
 
-Isolated Linux source/build was created at `/home/chubes/Developer/homeboy-15493-integrated-20261005` from the merged candidate before `origin/main` advanced to `9802738dd`. Logs are in that source's `logs/` directory. Candidate Linux results from that earlier integrated revision:
+Isolated Linux source/build is at `/home/chubes/Developer/homeboy-15493-integrated-20261005`; after the second merge it was refreshed from exact `HEAD` (`369987a3a`) and the relevant gates were rerun. Logs are in that source's `logs/` directory:
 
-- Terminal/reconcile: 86 passed.
-- Action eligibility: 10 passed.
-- Rooted daemon routing: 17 passed.
-- Focused staging cancellation guard: 1 passed.
-- Homeboy binary build: passed.
-- `cargo fmt --all -- --check`: passed.
-- `cargo clippy -p homeboy-agents -p homeboy-core -p homeboy-lab-runner --lib`: completed with existing warnings. `-D warnings` fails in unchanged `crates/homeboy-error/src/lib.rs:244` (`should_implement_trait` for `ErrorCode::from_str`).
+- Latest-main terminal/reconcile: 86 passed (`final-terminal-and-reconcile.log`).
+- Latest-main action eligibility: 10 passed (`final-action-eligibility.log`).
+- Latest-main rooted daemon routing: 17 passed (`final-rooted-daemon-routing.log`).
+- Latest-main reverse-broker handoff subset: 3 passed (`final-reverse-broker-handoff.log`).
+- Latest-main focused staging cancellation guard: 1 passed (`final-staging-cancel.log`).
+- Latest-main `cargo build --bin homeboy` and `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p homeboy-agents -p homeboy-core -p homeboy-lab-runner --lib`: completed with warnings. `-D warnings` fails in unchanged `crates/homeboy-error/src/lib.rs:244` (`should_implement_trait` for `ErrorCode::from_str`).
 
 The Linux `execution::tests::handoff` partition ran 39/41; two daemon-exec error-message assertions failed at `handoff.rs:2019` and `:2431`. They concern missing error-detail wording and an empty-envelope error phrase. They are recorded in `logs/reverse-broker-handoff.log`; no immutable baseline comparison was completed, so these are not classified as environmental or pre-existing.
 
@@ -40,8 +40,8 @@ This report records the work completed and the verification still needed; it doe
 
 - The specific broker HTTP ownership regression matrix (accepted response lost, unavailable lookup, fenced-before-POST, cleanup failure, and acceptance/cancel race) was not added. Existing reverse-broker handoff tests passed locally but do not exercise those lease transitions over actual broker requests.
 - The earlier native CLI proof log at `/var/folders/lr/c_cmmt7s0592m4njz99v5yb40000gn/T/opencode/homeboy-15493-native-proof.log` records a successful controlled run against an earlier candidate, but the private fixture source was deleted. It was not restored into repository tests or rerun against the current integrated candidate. A tests-only baseline failure for that native harness was therefore not established.
-- The Linux integration source predates the second `origin/main` merge (`369987a3a`); required Linux gates must be repeated on the exact final tree.
+- The two Linux daemon-exec message assertion failures remain unclassified because an immutable baseline comparison was not completed.
 - The broad `lab_staging_controller::tests` invocation was stopped after 20 minutes because numerous parallel tests remained blocked; only the focused cancellation guard passed. `runner_staging_store` and `runner_staging_operation` were not reached.
-- No final build/clippy/test run was performed after `369987a3a`.
+- The exact-current Linux reverse-broker coverage was limited to the three reverse-broker subset tests; the wider handoff partition still has the two recorded daemon-exec failures.
 
-The worktree should be left clean after committing this report. These outstanding checks need completion before PR publication.
+The worktree is clean after committing this report. The outstanding proof and regression tests need completion before PR publication.
