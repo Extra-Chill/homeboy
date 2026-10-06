@@ -5506,7 +5506,8 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
         })
         .expect("cancellation request accepted");
 
-        assert_eq!(exit_code, 0);
+        assert_eq!(exit_code, 1);
+        assert_eq!(value["outcome"], "failed");
         assert_eq!(
             value["result"]["data"]["disposition"],
             "deferred_for_terminal_provider"
