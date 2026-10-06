@@ -48,7 +48,7 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
             );
             Some(SourceMetadataRepair {
                 source_url: source_url.clone(),
-                reason: "restored .source-url from manifest sourceUrl".to_string(),
+                reason: "restored .source-url from manifest source_url".to_string(),
                 repair_command: repair_command(extension_id, &source_url),
             })
         } else {
@@ -88,17 +88,7 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
 fn manifest_source_url(
     extension: &homeboy_extension_contract::ExtensionManifest,
 ) -> Option<String> {
-    extension
-        .source_url
-        .clone()
-        .and_then(normalize_source_url)
-        .or_else(|| {
-            extension
-                .extra
-                .get("sourceUrl")
-                .and_then(|value| value.as_str())
-                .and_then(normalize_source_url)
-        })
+    extension.source_url.clone().and_then(normalize_source_url)
 }
 
 fn normalize_source_url(value: impl AsRef<str>) -> Option<String> {
@@ -110,7 +100,7 @@ fn missing_source_url_error(extension_id: &str, extension_path: Option<&str>) ->
     let mut err = Error::validation_invalid_argument(
         "extension_id",
         format!(
-            "Extension '{}' has no sourceUrl or .source-url metadata, so Homeboy cannot determine where to update it from.",
+            "Extension '{}' has no source_url or .source-url metadata, so Homeboy cannot determine where to update it from.",
             extension_id
         ),
         Some(extension_id.to_string()),

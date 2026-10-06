@@ -112,7 +112,7 @@ homeboy extension install <source> [--id <extension_id>] [--ref <git-ref>] [--re
 
 Installs an extension into Homeboy's extensions directory.
 
-- If `<source>` is a git URL, Homeboy clones it and writes `sourceUrl` into the installed extension's `<extension_id>.json` manifest.
+- If `<source>` is a git URL, Homeboy clones it and writes `source_url` into the installed extension's `<extension_id>.json` manifest.
 - For git URL installs, `--ref` checks out a branch, tag, or commit after cloning. The installed metadata still records the resolved `source_revision` SHA.
 - If `<source>` is a local path, Homeboy symlinks the directory into the extensions directory.
 - By default, install refuses to overwrite an existing extension. Use `--replace` to explicitly replace an existing install or link.
@@ -161,7 +161,7 @@ Updates a git-cloned extension.
 - Update runs without an extra confirmation flag.
 - By default, update runs against the local installed extension even when a preferred Lab runner is configured.
 - To update the extension installed on a runner, pass explicit Lab intent with the global runner flag, for example `homeboy --runner <runner-id> extension update <extension_id>`.
-- Homeboy reads `sourceUrl` from the extension's manifest to report the extension URL in JSON output.
+- Homeboy reads typed `source_url` from the extension's manifest to report the extension URL in JSON output. The retired `sourceUrl` spelling in opaque manifest data does not supply update provenance.
 
 ### `converge`
 
