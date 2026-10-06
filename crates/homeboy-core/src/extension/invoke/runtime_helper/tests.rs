@@ -35,10 +35,6 @@ mod general {
                 "write test results helper should be in pairs"
             );
             assert!(
-                pairs.iter().any(|(k, _)| k == EMIT_LINT_FINDING_ENV),
-                "emit lint finding helper should be in pairs"
-            );
-            assert!(
                 pairs.iter().any(|(k, _)| k == EMIT_TEST_FAILURE_ENV),
                 "emit test failure helper should be in pairs"
             );
@@ -330,90 +326,6 @@ homeboy_cleanup_step_capture "$captured_path"
             .next()
             .expect("hash field")
             .to_string()
-    }
-
-    #[test]
-    fn emit_lint_finding_shim_emits_normalized_record() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("emit-lint-finding.sh");
-        std::fs::write(&helper_path, assets::EMIT_LINT_FINDING_SH).expect("write helper");
-
-        // Line 1 is long enough to prove the 240-char excerpt truncation; line 2 is a
-        // normal short line.
-        let src_dir = dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).expect("src dir");
-        let long_line = "a".repeat(300);
-        std::fs::write(src_dir.join("lib.rs"), format!("{long_line}\nlet x = 1;\n"))
-            .expect("write source");
-
-        let identity = "rust:clippy:src/lib.rs:1:5:unused:unused variable";
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_emit_lint_finding --root {} --id '{}' --file src/lib.rs --line 1 --column 5 --severity warning --source clippy --code unused --category correctness --message 'unused variable' --fixable false",
-            helper_path.display(),
-            dir.path().display(),
-            identity
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let record: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("record is valid json");
-        assert_eq!(record["id"], identity);
-        assert_eq!(record["file"], "src/lib.rs");
-        assert_eq!(record["line"], 1);
-        assert_eq!(record["column"], 5);
-        assert_eq!(record["severity"], "warning");
-        assert_eq!(record["source"], "clippy");
-        assert_eq!(record["code"], "unused");
-        assert_eq!(record["category"], "correctness");
-        assert_eq!(record["message"], "unused variable");
-        assert_eq!(record["fixable"], false);
-
-        // Fingerprint matches the per-language builders byte-for-byte: sha1 of identity.
-        assert_eq!(
-            record["fingerprint"].as_str().expect("fingerprint string"),
-            shasum_hex("1", identity)
-        );
-
-        // Excerpt is the first 240 characters of the source line, like the reference builders.
-        let excerpt = record["excerpt"].as_str().expect("excerpt string");
-        assert_eq!(excerpt.chars().count(), 240);
-        assert_eq!(excerpt, "a".repeat(240));
-    }
-
-    #[test]
-    fn emit_lint_finding_shim_null_excerpt_when_line_out_of_range() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("emit-lint-finding.sh");
-        std::fs::write(&helper_path, assets::EMIT_LINT_FINDING_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_emit_lint_finding --root {} --id 'go:gofmt:missing.go:1' --file missing.go --line 1 --source gofmt --code formatting --category format --message 'File is not gofmt-formatted' --fixable true",
-            helper_path.display(),
-            dir.path().display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let record: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("record is valid json");
-        assert!(record["excerpt"].is_null(), "excerpt should be null");
-        assert_eq!(record["fixable"], true);
     }
 
     #[test]
