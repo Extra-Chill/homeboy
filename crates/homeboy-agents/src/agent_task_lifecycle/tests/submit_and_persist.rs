@@ -38,6 +38,111 @@ fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Valu
 }
 
 #[test]
+fn detached_admission_preserves_live_launcher_past_deadline_until_supervision() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "slow-runtime-seal-launcher";
+    let launcher_id = "runtime-seal-owner";
+    let claimed = claim_detached_cook_handoff_parent_in_store(&store, cook_id, launcher_id)
+        .expect("claim launcher custody");
+    let identity = homeboy_core::process::process_start_identity(std::process::id())
+        .expect("read launcher process identity")
+        .expect("launcher identity is observable");
+    assert_eq!(
+        claimed.metadata["detached_cook_handoff"]["launcher_start_identity"],
+        json!(identity)
+    );
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                json!("2020-01-01T00:00:00Z");
+            true
+        })
+        .expect("simulate runtime sealing longer than the initial lease");
+
+    assert!(
+        !expire_detached_cook_admission_in_store(&store, cook_id).expect("reconcile admission"),
+        "an observed live launcher still owns the admission after its fallback deadline"
+    );
+    let supervised = record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        launcher_id,
+        std::process::id(),
+        identity,
+        "runtime-seal-supervisor",
+    )
+    .expect("the original launcher can still publish supervision");
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    assert!(!supervised.state.is_terminal());
+}
+
+#[test]
+fn detached_admission_expires_dead_launcher_even_before_fallback_deadline() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "dead-runtime-seal-launcher";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "dead-owner")
+        .expect("claim launcher custody");
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn owner");
+    let identity = homeboy_core::process::process_start_identity(child.id())
+        .expect("read owner identity")
+        .expect("owner identity is observable");
+    let pid = child.id();
+    child.kill().expect("terminate owner");
+    child.wait().expect("reap owner");
+    store
+        .mutate_record(cook_id, |record| {
+            let handoff = &mut record.metadata["detached_cook_handoff"];
+            handoff["launcher_pid"] = json!(pid);
+            handoff["launcher_start_identity"] = json!(identity);
+            handoff["admission_deadline_at"] =
+                json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+            true
+        })
+        .expect("persist dead owner with an unexpired fallback lease");
+    assert!(
+        expire_detached_cook_admission_in_store(&store, cook_id).expect("reconcile dead admission")
+    );
+    assert_eq!(
+        store.read_record(cook_id).unwrap().state,
+        AgentTaskRunState::Failed
+    );
+}
+
+#[test]
+fn detached_admission_without_observable_launcher_identity_uses_deadline() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "unverifiable-runtime-seal-launcher";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "unverifiable-owner")
+        .expect("claim launcher custody");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["launcher_start_identity"] = Value::Null;
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+            true
+        })
+        .expect("persist unavailable process identity");
+    assert!(!expire_detached_cook_admission_in_store(&store, cook_id).unwrap());
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                json!("2020-01-01T00:00:00Z");
+            true
+        })
+        .expect("expire fallback lease");
+    assert!(expire_detached_cook_admission_in_store(&store, cook_id).unwrap());
+}
+
+#[test]
 fn detached_placeholder_is_discoverable_while_runtime_admission_is_locked() {
     with_isolated_home(|_| {
         let store = Arc::new(test_lifecycle_store());
