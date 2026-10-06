@@ -22410,6 +22410,7 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
             .push(homeboy_core::deps::DependencyHydrationOutcome {
                 schema: "homeboy/dependency-hydration-outcome/v1".to_string(),
                 workspace: "manual_finalization_checkout".to_string(),
+                missing_outputs: Vec::new(),
                 package_root: ".".to_string(),
                 provider_id: "fixture".to_string(),
                 command: vec!["fixture-install".to_string()],
