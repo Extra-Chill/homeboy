@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.413.0] - 2026-10-06
+
+### Added
+- lifecycle plan() picks exactly one next action from DaemonView (#15557 C2)
+
+### Changed
+- consolidate default and inline label oracles
+- batch prune obsolete absence and parity fixtures
+- retire sourceUrl read from opaque manifest data
+- exercise both historical Cook runtime retries
+
+### Fixed
+- bind hydration readiness to install roots
+- preserve observed launcher custody during runtime sealing
+- initialize policy override when resuming private plans
+- preserve caller checkout ownership through admission and retries
+- stop the release consumer check from filing findings issues
+- preserve submitted provider policy across machines
+- paginate scratch resource inspection
+- recover zero-execution retries across runtime pins
+- preflight Cook runtime before retry action admission
+- validate Cook retry runtime before reservation
+
 ## [0.412.0] - 2026-10-06
 
 ### Added
