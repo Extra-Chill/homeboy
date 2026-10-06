@@ -1,0 +1,171 @@
+//! The single reader of Cook attempt lineage (#15567).
+//!
+//! "Attempt N continues attempt M" is written in two places today, by two
+//! different producers:
+//!
+//! - `metadata.retry_of` on the lifecycle record, written by the lifecycle
+//!   retry reserver;
+//! - `inputs.cook_loop.artifact_provenance` on the attempt's plan, written by
+//!   gate-fix and review-form remediation.
+//!
+//! Each decision site used to read only the representation its own producer
+//! writes. So a gate-fix successor, which carries provenance and no
+//! `retry_of`, was rejected by retry admission as "not the durable retry of its
+//! source attempt", and was invisible to the retry-lineage walk. Every lineage
+//! decision now reads through [`attempt_lineage`], which understands both.
+
+use serde_json::Value;
+
+use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
+use crate::agent_task_scheduler::AgentTaskPlan;
+use homeboy_core::Result;
+
+/// How an attempt came to continue its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CookLineageKind {
+    /// A lifecycle retry of the same plan.
+    Retry,
+    /// A remediation built from the source's promoted candidate: a gate fix,
+    /// or a review-form follow-up.
+    Remediation { review_form: bool },
+}
+
+/// One attempt's edge back to the attempt it continues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CookAttemptLineage {
+    pub source_run_id: String,
+    pub kind: CookLineageKind,
+    /// The candidate patch a remediation was built from. A retry has none.
+    pub source_patch_sha256: Option<String>,
+}
+
+/// The lineage edge of one attempt, from its lifecycle metadata and plan.
+///
+/// `retry_of` wins when both are present: it is written by the lifecycle
+/// reserver with the record itself, so it is the stronger evidence.
+pub(crate) fn attempt_lineage(
+    metadata: &Value,
+    plan: Option<&AgentTaskPlan>,
+) -> Option<CookAttemptLineage> {
+    if let Some(source) = metadata
+        .get("retry_of")
+        .and_then(Value::as_str)
+        .filter(|source| !source.is_empty())
+    {
+        return Some(CookAttemptLineage {
+            source_run_id: source.to_string(),
+            kind: CookLineageKind::Retry,
+            source_patch_sha256: None,
+        });
+    }
+    plan.and_then(plan_lineage)
+}
+
+/// The remediation edge carried by a plan alone. Recipe attempts carry their
+/// plan before any lifecycle record exists, so this is also what recipe-only
+/// decisions read.
+pub(crate) fn plan_lineage(plan: &AgentTaskPlan) -> Option<CookAttemptLineage> {
+    let [task] = plan.tasks.as_slice() else {
+        return None;
+    };
+    let cook_loop = &task.inputs["cook_loop"];
+    let provenance = &cook_loop["artifact_provenance"];
+    let source = provenance["source_run_id"]
+        .as_str()
+        .filter(|source| !source.is_empty())?;
+    Some(CookAttemptLineage {
+        source_run_id: source.to_string(),
+        kind: CookLineageKind::Remediation {
+            review_form: cook_loop["review_form_required"] == true,
+        },
+        source_patch_sha256: provenance["source_patch_artifact_sha256"]
+            .as_str()
+            .map(str::to_string),
+    })
+}
+
+/// The run `run_id` continues, read from its durable record and plan.
+pub(crate) fn lineage_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let record = lifecycle_store.read_record(run_id)?;
+    let plan = agent_task_lifecycle::load_plan_in_store(lifecycle_store, run_id).ok();
+    Ok(attempt_lineage(&record.metadata, plan.as_ref()).map(|lineage| lineage.source_run_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_task::AgentTaskRequest;
+    use serde_json::json;
+
+    fn plan_with(cook_loop: Value) -> AgentTaskPlan {
+        let mut task: AgentTaskRequest = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-request/v1",
+            "task_id": "cook-x-gate-fix-2",
+            "group_key": "x",
+            "executor": { "backend": "opencode" },
+            "instructions": "fix",
+        }))
+        .unwrap();
+        task.inputs = json!({ "cook_loop": cook_loop });
+        AgentTaskPlan::new("plan", vec![task])
+    }
+
+    fn gate_fix_plan(source: &str, sha: &str) -> AgentTaskPlan {
+        plan_with(json!({
+            "review_form_required": false,
+            "artifact_provenance": {
+                "source_run_id": source,
+                "source_patch_artifact_sha256": sha,
+            },
+        }))
+    }
+
+    /// The incident: a gate-fix successor has provenance and no `retry_of`.
+    /// It must still be recognized as continuing its source.
+    #[test]
+    fn a_gate_fix_without_retry_of_still_continues_its_source() {
+        let lineage = attempt_lineage(&json!({}), Some(&gate_fix_plan("run-1", "abc"))).unwrap();
+        assert_eq!(lineage.source_run_id, "run-1");
+        assert_eq!(
+            lineage.kind,
+            CookLineageKind::Remediation { review_form: false }
+        );
+        assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn retry_of_is_a_retry_and_wins_over_provenance() {
+        let lineage = attempt_lineage(
+            &json!({ "retry_of": "run-0" }),
+            Some(&gate_fix_plan("run-1", "abc")),
+        )
+        .unwrap();
+        assert_eq!(lineage.source_run_id, "run-0");
+        assert_eq!(lineage.kind, CookLineageKind::Retry);
+        assert_eq!(lineage.source_patch_sha256, None);
+    }
+
+    #[test]
+    fn review_form_follow_ups_are_marked() {
+        let plan = plan_with(json!({
+            "review_form_required": true,
+            "artifact_provenance": { "source_run_id": "run-1" },
+        }));
+        assert_eq!(
+            plan_lineage(&plan).unwrap().kind,
+            CookLineageKind::Remediation { review_form: true }
+        );
+    }
+
+    #[test]
+    fn an_initial_attempt_has_no_lineage() {
+        assert_eq!(
+            attempt_lineage(&json!({}), Some(&plan_with(json!({})))),
+            None
+        );
+        assert_eq!(attempt_lineage(&json!({ "retry_of": "" }), None), None);
+    }
+}

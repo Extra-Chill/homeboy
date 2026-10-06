@@ -104,7 +104,6 @@ fn rig_spec(id: &str) -> RigSpec {
         trace_workloads: HashMap::new(),
         fuzz_workloads: Default::default(),
         trace_workload_defaults: HashMap::new(),
-        trace_phase_templates: HashMap::new(),
         trace_variants: HashMap::new(),
         trace_profiles: HashMap::new(),
         trace_experiments: HashMap::new(),
@@ -112,7 +111,6 @@ fn rig_spec(id: &str) -> RigSpec {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
-        toolchain: None,
     }
 }
 

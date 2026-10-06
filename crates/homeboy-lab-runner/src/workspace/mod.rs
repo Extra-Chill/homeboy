@@ -47,10 +47,6 @@ pub use types::{
 pub(crate) use materialized::{
     MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
 };
-pub(crate) use materializer::{
-    dependency_cache_manifest_command, dependency_cache_restore_command,
-    dependency_cache_save_command,
-};
 pub(crate) use provenance::{
     materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace,
     verify_lab_workspace_from_env, verify_lab_workspace_git_root,
@@ -67,7 +63,7 @@ pub use snapshot::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 pub use snapshot_provider::register as register_workspace_snapshot_provider;
 pub(crate) use types::{canonical_workspace_path, default_excludes_for, DEFAULT_EXCLUDES};
 pub(crate) use util::{
-    git_output, parent_remote_path, run_shell_capture, run_shell_command, sanitize_path_segment,
+    git_output, parent_remote_path, run_shell_capture, sanitize_path_segment,
     shell_command_for_runner,
 };
 

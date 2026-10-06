@@ -333,7 +333,9 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         None => None,
     }
     .or_else(|| {
-        agent_task_lifecycle::reconcile_status(source_spec)
+        // Only the resolved run id is needed; reconciling here wrote state as a
+        // side effect of identifying the source.
+        agent_task_lifecycle::status(source_spec)
             .ok()
             .map(|record| record.run_id)
     });

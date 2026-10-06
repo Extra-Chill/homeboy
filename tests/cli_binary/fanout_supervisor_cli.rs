@@ -276,6 +276,43 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
             summary.contains("worktree_preflight"),
             "summary names the blocker: {summary}"
         );
+
+        for _ in 0..2 {
+            let output = Command::new(homeboy_bin())
+                .args(["agent-task", "fanout", "resume", batch_id])
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .output()
+                .expect("resume pre-admission intent in a subprocess");
+            assert!(
+                output.status.success(),
+                "stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let resumed: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("fanout resume JSON output");
+            assert_eq!(resumed["data"]["status"], "queued");
+            assert_eq!(resumed["data"]["summary"]["failed"], 0);
+            assert_eq!(resumed["data"]["cooks"][0]["terminal"], false);
+            assert_eq!(
+                resumed["data"]["recovery_action"],
+                "re-run the original fanout run-plan"
+            );
+        }
+        let persisted = homeboy::agents::agent_tasks::batch::read_batch_record(batch_id)
+            .expect("batch remains durable after repeated CLI resume");
+        assert_eq!(
+            persisted.state,
+            homeboy::agents::agent_tasks::batch::AgentTaskBatchState::Queued
+        );
+        assert_eq!(
+            persisted.metadata["admission_blocker"]["stage"],
+            "worktree_preflight"
+        );
+        assert!(persisted.metadata.get("child_finalizations").is_none());
+        assert!(persisted.child_runs.iter().all(|child| {
+            child.state == homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Queued
+        }));
     });
 }
 

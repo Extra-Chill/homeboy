@@ -207,7 +207,7 @@ impl DependencyMaterializationCache {
             source,
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             environment_sha256,
-            tools: resolved_tool_identities(rig, step)?,
+            tools: resolved_tool_identities(step)?,
             inputs,
         };
         let key = hash_bytes(
@@ -432,10 +432,7 @@ pub(crate) fn cache_root_in_roots(data_root: &Path) -> PathBuf {
         .join("v1")
 }
 
-fn resolved_tool_identities(
-    rig: &RigSpec,
-    step: &DependencyMaterializationStepSpec,
-) -> Result<Vec<ToolIdentity>> {
+fn resolved_tool_identities(step: &DependencyMaterializationStepSpec) -> Result<Vec<ToolIdentity>> {
     let Some(command) = step.command.as_deref() else {
         return Ok(step
             .provider
@@ -453,7 +450,7 @@ fn resolved_tool_identities(
     if command.is_empty() {
         return Ok(Vec::new());
     }
-    let resolved = crate::toolchain::command_step_path(Some(rig))
+    let resolved = homeboy_engine_primitives::command_path::command_step_path()
         .as_deref()
         .and_then(|path| {
             std::env::split_paths(path)

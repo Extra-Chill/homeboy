@@ -18,6 +18,66 @@ pub const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 1_200_000;
 /// budget so a silent executor cannot consume the full attempt timeout.
 pub const DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS: u64 = 300_000;
 
+/// How far past its base `timeout_ms` a provider that is still making progress
+/// may run, as a multiple of that base, when `max_timeout_ms` is unset.
+///
+/// A fixed wall-clock budget cannot tell a hung agent from a busy one, and the
+/// liveness deadline already catches the hung one. What the wall clock is left
+/// to catch is the runaway: an agent producing output forever without
+/// finishing. That needs a ceiling, not a guess at how long real work takes. A
+/// 20-minute default killed a Cook that was mid-edit at minute 20 (the
+/// wp-coding-agents#692 Cook, 2026-10-06), throwing away the attempt.
+pub const DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR: u64 = 3;
+
+/// Each extension granted to a provider that is still making progress.
+pub const PROVIDER_TIMEOUT_EXTENSION_STEP_MS: u64 = 600_000;
+
+/// A provider counts as "still making progress" at its deadline only if its
+/// last observed progress is at most this old (bounded by the liveness
+/// window). Anything staler would be about to stall out anyway.
+pub const PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS: u64 = 120_000;
+
+/// The hard ceiling a provider's wall-clock budget can be extended to.
+///
+/// `base_timeout_ms` is the already-resolved per-attempt budget. An explicit
+/// `max_timeout_ms` wins; setting it equal to (or below) the base disables
+/// extension. The ceiling is never below the base.
+pub fn effective_provider_max_timeout_ms(base_timeout_ms: u64, max_timeout_ms: Option<u64>) -> u64 {
+    max_timeout_ms
+        .unwrap_or_else(|| {
+            base_timeout_ms.saturating_mul(DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR)
+        })
+        .max(base_timeout_ms)
+}
+
+/// Decide whether a provider that has reached `deadline_ms` (elapsed since it
+/// started) earns another extension.
+///
+/// Returns the new deadline, or `None` when the attempt should time out: no
+/// headroom left under `cap_ms`, or no progress within `recent_progress_ms`.
+/// Extensions are granted in steps rather than straight to the cap, so a
+/// provider that goes quiet after an extension is still stopped promptly.
+pub fn extended_provider_deadline_ms(
+    deadline_ms: u64,
+    elapsed_ms: u64,
+    last_progress_ms: u64,
+    cap_ms: u64,
+    recent_progress_ms: u64,
+) -> Option<u64> {
+    if deadline_ms >= cap_ms {
+        return None;
+    }
+    if elapsed_ms.saturating_sub(last_progress_ms) > recent_progress_ms {
+        return None;
+    }
+    Some(
+        deadline_ms
+            .max(elapsed_ms)
+            .saturating_add(PROVIDER_TIMEOUT_EXTENSION_STEP_MS)
+            .min(cap_ms),
+    )
+}
+
 pub(crate) fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -305,5 +365,78 @@ mod tests {
             DEFAULT_PROVIDER_LIVENESS_TIMEOUT_MS
         );
         assert_eq!(effective_provider_liveness_timeout_ms(Some(45_000)), 45_000);
+    }
+
+    #[test]
+    fn provider_max_timeout_defaults_to_a_multiple_and_never_drops_below_base() {
+        assert_eq!(
+            effective_provider_max_timeout_ms(1_200_000, None),
+            1_200_000 * DEFAULT_PROVIDER_TIMEOUT_EXTENSION_FACTOR
+        );
+        assert_eq!(
+            effective_provider_max_timeout_ms(1_200_000, Some(2_000_000)),
+            2_000_000
+        );
+        // Equal to the base disables extension; below it is clamped up.
+        assert_eq!(
+            effective_provider_max_timeout_ms(1_200_000, Some(1_200_000)),
+            1_200_000
+        );
+        assert_eq!(
+            effective_provider_max_timeout_ms(1_200_000, Some(5)),
+            1_200_000
+        );
+    }
+
+    #[test]
+    fn a_provider_with_recent_progress_is_extended_in_steps_up_to_the_cap() {
+        let recent = PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS;
+        // At the base deadline with progress 10s ago: one step.
+        assert_eq!(
+            extended_provider_deadline_ms(1_200_000, 1_200_000, 1_190_000, 3_600_000, recent),
+            Some(1_200_000 + PROVIDER_TIMEOUT_EXTENSION_STEP_MS)
+        );
+        // The last step is clamped to the cap.
+        assert_eq!(
+            extended_provider_deadline_ms(3_300_000, 3_300_000, 3_299_000, 3_600_000, recent),
+            Some(3_600_000)
+        );
+        // At the cap: no more extensions.
+        assert_eq!(
+            extended_provider_deadline_ms(3_600_000, 3_600_000, 3_599_000, 3_600_000, recent),
+            None
+        );
+    }
+
+    #[test]
+    fn a_provider_without_recent_progress_times_out_at_its_deadline() {
+        let recent = PROVIDER_TIMEOUT_EXTENSION_RECENT_PROGRESS_MS;
+        assert_eq!(
+            extended_provider_deadline_ms(
+                1_200_000,
+                1_200_000,
+                1_200_000 - recent - 1,
+                3_600_000,
+                recent
+            ),
+            None
+        );
+        // Exactly at the window edge still counts as recent.
+        assert!(extended_provider_deadline_ms(
+            1_200_000,
+            1_200_000,
+            1_200_000 - recent,
+            3_600_000,
+            recent
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn extension_is_disabled_when_the_cap_equals_the_base() {
+        assert_eq!(
+            extended_provider_deadline_ms(1_200_000, 1_200_000, 1_200_000, 1_200_000, 120_000),
+            None
+        );
     }
 }

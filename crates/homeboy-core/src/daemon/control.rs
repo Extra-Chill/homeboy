@@ -1712,14 +1712,7 @@ pub(super) fn stop_registered_generation(
     })?;
     let mut command = Command::new(exe);
     command
-        .args([
-            "--format",
-            "json",
-            "daemon",
-            "stop",
-            "--lease-id",
-            &endpoint.lease_id,
-        ])
+        .args(["daemon", "stop", "--lease-id", &endpoint.lease_id])
         .env(crate::paths::DAEMON_STATE_DIR_ENV, &endpoint.state_dir)
         .env(DAEMON_ROUTER_DIR_ENV, generation_store::router_dir()?)
         .env(DAEMON_ROUTER_BYPASS_ENV, "1")
@@ -1736,7 +1729,11 @@ pub(super) fn stop_registered_generation(
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         Error::internal_json(
             error.to_string(),
-            Some("read generation-bound daemon stop".to_string()),
+            Some(format!(
+                "read generation-bound daemon stop (exit {}; stderr: {})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
         )
     })?;
     if !output.status.success() {
