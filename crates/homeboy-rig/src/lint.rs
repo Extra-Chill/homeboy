@@ -338,6 +338,47 @@ fn component_path_env_agreement_failures(rigs: &[MaterializedRig]) -> Vec<String
                 ));
             }
         }
+        failures.extend(redundant_component_path_failures(rig, rig_id));
+    }
+    failures
+}
+
+/// A component's own `path: "${env.HOMEBOY_RIG_COMPONENT_PATH__<RIG>__<C>}"` or
+/// `path_setting: "HOMEBOY_RIG_COMPONENT_PATH__<RIG>__<C>"` restates the
+/// override Homeboy already derives and checks before `path`
+/// (`component_resolution.rs`): set, it wins first; unset, the reference
+/// expands to empty and resolution falls through exactly as with no `path`.
+/// The copy can only go stale when the rig is renamed (#11150), so it is
+/// rejected rather than tolerated.
+fn redundant_component_path_failures(rig: &MaterializedRig, rig_id: &str) -> Vec<String> {
+    let Some(components) = rig
+        .value
+        .get("components")
+        .and_then(|components| components.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut failures = Vec::new();
+    for (component, spec) in components {
+        let derived = crate::expand::rig_component_path_override_env_name(rig_id, component);
+        let restated_path = format!("${{env.{derived}}}");
+        let redundant_fields = [
+            ("path", restated_path.as_str()),
+            ("path_setting", derived.as_str()),
+        ];
+        for (field, restated) in redundant_fields {
+            if spec
+                .get(field)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                == Some(restated)
+            {
+                failures.push(format!(
+                    "{}: /components/{component}/{field} restates `{derived}`, which Homeboy applies automatically before `path`; delete the field",
+                    rig.rel
+                ));
+            }
+        }
     }
     failures
 }
@@ -2092,7 +2133,12 @@ mod tests {
                 "id": "gutenberg-pattern-assets",
                 "components": {
                     "gutenberg": {
-                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                        "checkout_root": "${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__GUTENBERG_PATTERN_ASSETS__GUTENBERG}",
+                        "extensions": {
+                            "wordpress": {
+                                "wp_codebox_source_root": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                            }
+                        }
                     }
                 },
                 "resources": {
@@ -2137,6 +2183,57 @@ mod tests {
             .as_ref()
             .expect("contract error")
             .contains("`HOMEBOY_RIG_COMPONENT_PATH__RENAMED__<COMPONENT>`"));
+    }
+
+    #[test]
+    fn package_lint_rejects_component_path_that_restates_the_automatic_override() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-fuzz");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "studio-fuzz",
+                "components": {
+                    "studio": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__STUDIO_FUZZ__STUDIO}",
+                        "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__STUDIO_FUZZ__STUDIO"
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("/components/studio/path restates"),
+            "{error}"
+        );
+        assert!(
+            error.contains("/components/studio/path_setting restates"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_accepts_a_component_without_a_restated_path() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-fuzz");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "id": "studio-fuzz", "components": { "studio": { "component_id": "studio" } } }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
     }
 
     fn reference_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
