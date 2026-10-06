@@ -5030,10 +5030,11 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         let orphaned_preview = crate::controller_scratch::cleanup(
             crate::controller_scratch::ControllerScratchCleanupOptions {
                 apply: false,
-                limit: 1,
+                limit: 2,
                 full: false,
                 retention_override_seconds: Some(0),
             },
+            None,
         )
         .expect("orphan stale resource");
         assert_eq!(orphaned_preview.candidate_count, 0);
@@ -5051,12 +5052,13 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 full: false,
                 retention_override_seconds: Some(0),
             },
+            None,
         )
         .expect("recovery-backed cleanup preview");
-        assert_eq!(preview.candidate_count, 2);
+        assert_eq!(preview.candidate_count, 1);
         assert_eq!(preview.candidates.len(), 1);
-        assert_eq!(preview.remaining_candidate_count, 1);
-        assert!(preview.estimated_bytes >= 178_650_000_000);
+        assert_eq!(preview.uninspected_resource_count, 1);
+        assert!(preview.estimated_bytes > 0);
 
         let first = crate::controller_scratch::cleanup(
             crate::controller_scratch::ControllerScratchCleanupOptions {
@@ -5065,6 +5067,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 full: false,
                 retention_override_seconds: Some(0),
             },
+            None,
         )
         .expect("first bounded cleanup");
         assert_eq!(first.applied_count, 1);
@@ -5075,9 +5078,11 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
                 full: false,
                 retention_override_seconds: Some(0),
             },
+            first.next_cursor.as_deref(),
         )
         .expect("second bounded cleanup");
         assert_eq!(second.applied_count, 1);
+        assert!(first.reclaimed_bytes + second.reclaimed_bytes >= 178_650_000_000);
         assert!(!released.path.exists());
         assert!(!orphaned.path.exists());
     });

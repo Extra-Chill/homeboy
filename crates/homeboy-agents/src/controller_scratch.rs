@@ -587,9 +587,11 @@ pub struct ControllerScratchCleanupOutput {
     pub skipped: Vec<ControllerScratchSkipped>,
     pub skipped_detail: OutputTruncation,
     pub retention_reasons: Vec<ControllerScratchRetentionReason>,
-    pub remaining_candidate_count: usize,
-    pub remaining_candidate_bytes: u64,
     pub has_more: bool,
+    /// Counts and byte estimates describe this inspected page, not the whole store.
+    pub inspected_count: usize,
+    pub uninspected_resource_count: usize,
+    pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_command: Option<String>,
     pub drain_command: String,
@@ -927,19 +929,23 @@ fn finalize_run_unlocked(
     Ok(())
 }
 
-pub fn cleanup(options: ControllerScratchCleanupOptions) -> Result<ControllerScratchCleanupOutput> {
+pub fn cleanup(
+    options: ControllerScratchCleanupOptions,
+    cursor: Option<&str>,
+) -> Result<ControllerScratchCleanupOutput> {
     let index_path = index_path()?;
     let observation = ObservationStore::open_initialized()?;
-    cleanup_at_index(&index_path, &observation, options)
+    cleanup_at_index(&index_path, &observation, options, cursor)
 }
 
 fn cleanup_at_index(
     index_path: &Path,
     observation: &ObservationStore,
     options: ControllerScratchCleanupOptions,
+    cursor: Option<&str>,
 ) -> Result<ControllerScratchCleanupOutput> {
     with_index_lock(index_path, || {
-        cleanup_unlocked(index_path, observation, options)
+        cleanup_unlocked(index_path, observation, options, cursor)
     })
 }
 
@@ -947,8 +953,52 @@ fn cleanup_unlocked(
     index_path: &Path,
     observation: &ObservationStore,
     options: ControllerScratchCleanupOptions,
+    cursor: Option<&str>,
 ) -> Result<ControllerScratchCleanupOutput> {
+    if options.limit == 0 {
+        return Err(Error::validation_invalid_argument(
+            "controller_scratch.limit",
+            "inspection limit must be positive",
+            None,
+            None,
+        ));
+    }
+    let cursor_key = cursor
+        .map(|cursor| {
+            cursor
+                .strip_prefix("controller-scratch:")
+                .filter(|key| {
+                    key.len() == 64
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                })
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "controller_scratch.cursor",
+                        "expected a controller-scratch continuation cursor",
+                        Some(cursor.to_string()),
+                        None,
+                    )
+                })
+        })
+        .transpose()?;
     let mut index = read_index_at_unlocked(index_path)?;
+    // Enumerate identity only before admitting the page. Filesystem walks, Git
+    // probes and lifecycle lookups happen only for admitted resources. A stable
+    // path digest survives removal of earlier rows and avoids offset starvation.
+    let mut ordered: Vec<_> = index
+        .resources
+        .iter()
+        .enumerate()
+        .map(|(position, resource)| (sha256(resource.path.as_bytes()), position))
+        .filter(|(key, _)| cursor_key.is_none_or(|cursor| key.as_str() > cursor))
+        .collect();
+    ordered.sort_unstable();
+    let inspected_count = ordered.len().min(options.limit);
+    let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
+    let next_cursor = (uninspected_resource_count > 0)
+        .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
@@ -971,7 +1021,8 @@ fn cleanup_unlocked(
     // stranded in its source repository indefinitely (#10568).
     let mut stranded: Vec<usize> = Vec::new();
     let mut registered_worktree_count = 0;
-    for (position, resource) in index.resources.iter_mut().enumerate() {
+    for (_, position) in ordered.into_iter().take(options.limit) {
+        let resource = &mut index.resources[position];
         let path = PathBuf::from(&resource.path);
         if !path.exists() {
             // Only a finalized lease is a converged one. An unfinalized row
@@ -1069,16 +1120,9 @@ fn cleanup_unlocked(
     }
     let candidate_count = eligible.len();
     let estimated_bytes = eligible.iter().map(|candidate| candidate.size_bytes).sum();
-    let remaining: Vec<_> = eligible.iter().skip(options.limit).collect();
-    let remaining_candidate_count = remaining.len();
-    let remaining_candidate_bytes = remaining.iter().map(|candidate| candidate.size_bytes).sum();
-    let has_more = remaining_candidate_count > 0;
-    let mutation_candidate_count = candidate_count.min(options.limit);
-    let mutation_candidates = eligible
-        .iter()
-        .take(options.limit)
-        .cloned()
-        .collect::<Vec<_>>();
+    let has_more = uninspected_resource_count > 0;
+    let mutation_candidate_count = candidate_count;
+    let mutation_candidates = eligible;
     for candidate in &mutation_candidates {
         if options.apply {
             let removal = remove_candidate_from_index(
@@ -1127,7 +1171,7 @@ fn cleanup_unlocked(
         mutation_candidates,
         options.full,
         mutation_candidate_count,
-        format!("{} --full", cleanup_command(options)),
+        format!("{} --full", cleanup_page_command(options, cursor)),
     )?;
     let skipped_count = all_skips.len();
     let skipped_detail = skipped_detail_metadata(
@@ -1135,7 +1179,7 @@ fn cleanup_unlocked(
         skipped_count,
         skipped_bytes,
         options.full,
-        format!("{} --full", cleanup_command(options)),
+        format!("{} --full", cleanup_page_command(options, cursor)),
     );
     Ok(ControllerScratchCleanupOutput {
         command: "cleanup.controller-scratch",
@@ -1155,10 +1199,13 @@ fn cleanup_unlocked(
         retention_reasons: summarize_retention(&all_skips),
         skipped,
         skipped_detail,
-        remaining_candidate_count,
-        remaining_candidate_bytes,
         has_more,
-        next_command: has_more.then(|| cleanup_command(options)),
+        inspected_count,
+        uninspected_resource_count,
+        next_command: next_cursor
+            .as_ref()
+            .map(|cursor| format!("{} --cursor {cursor}", cleanup_command(options))),
+        next_cursor,
         drain_command: cleanup_command(ControllerScratchCleanupOptions {
             apply: true,
             limit: options.limit.saturating_mul(10).max(1),
@@ -2170,6 +2217,13 @@ fn sha256(bytes: &[u8]) -> String {
     content_hash::sha256_hex(bytes)
 }
 
+fn cleanup_page_command(options: ControllerScratchCleanupOptions, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!("{} --cursor {cursor}", cleanup_command(options)),
+        None => cleanup_command(options),
+    }
+}
+
 fn scratch_recovery_command(resource: &ControllerScratchResource) -> Option<String> {
     (resource.lifecycle_state == "interrupted")
         .then(|| format!("homeboy agent-task cancel {}", resource.run_id))
@@ -2520,6 +2574,7 @@ mod tests {
             &data_root.join("controller-scratch/resources.json"),
             observation,
             options,
+            None,
         )
         .expect("cleanup")
     }
@@ -3493,7 +3548,7 @@ mod tests {
             &observation,
             ControllerScratchCleanupOptions {
                 apply: false,
-                limit: 1,
+                limit: total,
                 full: false,
                 retention_override_seconds: None,
             },
@@ -3524,7 +3579,7 @@ mod tests {
             &observation,
             ControllerScratchCleanupOptions {
                 apply: false,
-                limit: 1,
+                limit: total,
                 full: true,
                 retention_override_seconds: None,
             },
@@ -3578,7 +3633,7 @@ mod tests {
             total - preview.candidates.len()
         );
         assert!(preview.candidate_detail.truncated);
-        assert_eq!(preview.remaining_candidate_count, 0);
+        assert_eq!(preview.uninspected_resource_count, 0);
 
         let applied = cleanup_at(
             data_root.path(),
@@ -3902,15 +3957,16 @@ mod tests {
                 retention_override_seconds: None,
             },
         );
-        assert_eq!(output.candidate_count, 2);
+        assert_eq!(output.candidate_count, 1);
         assert_eq!(output.candidates.len(), 1);
-        assert_eq!(output.remaining_candidate_count, 1);
-        assert!(output.remaining_candidate_bytes > 0);
+        assert_eq!(output.inspected_count, 1);
+        assert_eq!(output.uninspected_resource_count, 1);
         assert!(output.has_more);
-        assert_eq!(
-            output.next_command.as_deref(),
-            Some("homeboy cleanup --include controller-scratch --limit 1")
-        );
+        assert!(output
+            .next_command
+            .as_deref()
+            .expect("continuation")
+            .contains("--cursor controller-scratch:"));
         assert_eq!(
             output.drain_command,
             "homeboy cleanup --include controller-scratch --limit 10 --apply"
@@ -4274,6 +4330,144 @@ mod tests {
             !String::from_utf8_lossy(&listed.stdout).contains(worktree.to_str().expect("worktree")),
             "the source repository must no longer list the attempt worktree"
         );
+    }
+
+    #[test]
+    fn scratch_limit_bounds_inspection_before_candidate_accounting() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let resources = (0..32)
+            .map(|number| {
+                let path = root.path().join(format!("lease-{number:02}"));
+                fs::create_dir(&path).expect("lease");
+                fs::write(path.join("evidence"), "retained evidence").expect("evidence");
+                let mut stored = resource(&path, root.path());
+                stored.lifecycle_state = "released".to_string();
+                stored.ephemeral = true;
+                stored
+            })
+            .collect();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources,
+            },
+        );
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                full: true,
+                retention_override_seconds: None,
+            },
+        );
+        assert_eq!(
+            output.candidate_count, 1,
+            "limit must bound inspection, not only returned rows"
+        );
+        assert!(output
+            .next_command
+            .as_deref()
+            .is_some_and(|command| command.contains("--cursor")));
+        assert_eq!(fs::read_dir(root.path()).expect("leases").count(), 32);
+    }
+
+    #[test]
+    fn scratch_cursor_advances_past_retained_rows_and_survives_apply_deletions() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let mut protected = Vec::new();
+        let resources = (0..8)
+            .map(|number| {
+                let path = root.path().join(format!("lease-{number}"));
+                fs::create_dir(&path).expect("lease");
+                fs::write(path.join("evidence"), "evidence").expect("evidence");
+                let mut stored = resource(&path, root.path());
+                stored.lifecycle_state = "released".to_string();
+                stored.ephemeral = true;
+                if number % 2 == 0 {
+                    stored.owner_pid = std::process::id();
+                    protected.push(path);
+                }
+                stored
+            })
+            .collect();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources,
+            },
+        );
+        let options = ControllerScratchCleanupOptions {
+            apply: true,
+            limit: 1,
+            full: false,
+            retention_override_seconds: Some(0),
+        };
+        let mut cursor = None;
+        let mut removed = 0;
+        let mut inspected = 0;
+        let mut skipped = 0;
+        for _ in 0..8 {
+            let page = cleanup_at_index(
+                &data_root.path().join("controller-scratch/resources.json"),
+                &observation,
+                options,
+                cursor.as_deref(),
+            )
+            .expect("page");
+            assert_eq!(page.inspected_count, 1);
+            if let Some(cursor) = cursor.as_deref() {
+                assert!(page.candidate_detail.export_command.contains(cursor));
+                assert!(page.skipped_detail.export_command.contains(cursor));
+            }
+            removed += page.applied_count;
+            inspected += page.inspected_count;
+            skipped += page.skipped_count;
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!((inspected, removed, skipped), (8, 4, 4));
+        assert!(cursor.is_none());
+        assert!(protected.iter().all(|path| path.join("evidence").is_file()));
+        assert_eq!(
+            fs::read_dir(root.path()).expect("remaining leases").count(),
+            4
+        );
+    }
+
+    #[test]
+    fn scratch_pagination_rejects_zero_limit_and_foreign_cursors() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let index = data_root.path().join("controller-scratch/resources.json");
+        let options = ControllerScratchCleanupOptions {
+            apply: false,
+            limit: 1,
+            full: false,
+            retention_override_seconds: None,
+        };
+        assert!(
+            cleanup_at_index(&index, &observation, options, Some("other-category:cursor")).is_err()
+        );
+        assert!(cleanup_at_index(
+            &index,
+            &observation,
+            ControllerScratchCleanupOptions {
+                limit: 0,
+                ..options
+            },
+            None
+        )
+        .is_err());
     }
 
     /// Unpushed, unmerged work is sacred: it is reported, never reclaimed.

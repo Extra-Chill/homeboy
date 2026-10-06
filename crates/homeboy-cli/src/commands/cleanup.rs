@@ -2524,6 +2524,7 @@ fn cleanup_inventory_with_deadline(
                             .older_than_days
                             .map(|days| days.saturating_mul(86_400)),
                     },
+                    args.cursor.as_deref(),
                 )?;
                 category_from_output(
                     CONTROLLER_SCRATCH_METADATA,
@@ -2537,7 +2538,14 @@ fn cleanup_inventory_with_deadline(
                     },
                     output,
                 )
-                .map(|category| vec![category])
+                .map(|mut category| {
+                    if let Some(next) = category.output.get("next_command").and_then(Value::as_str)
+                    {
+                        category.inventory_completeness = "partial".to_string();
+                        category.continuation_command = next.to_string();
+                    }
+                    vec![category]
+                })
             },
         );
     }
