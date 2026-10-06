@@ -1448,7 +1448,7 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
         );
         object.insert(
             "postcondition".to_string(),
-            json!("reports the selected durable records against authoritative provider state without persisted mutation"),
+            json!("reports the selected durable records as stored, without persisted mutation; --apply re-reads authoritative provider state before acting"),
         );
     }
     Ok((value, exit))

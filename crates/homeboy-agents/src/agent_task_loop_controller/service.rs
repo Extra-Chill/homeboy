@@ -1682,7 +1682,8 @@ fn failed_child_action_diagnostic(
     let child_run_id = action_referenced_run_id(action, record);
     let child_run = child_run_id
         .as_deref()
-        .and_then(|run_id| agent_task_lifecycle::reconcile_status(run_id).ok());
+        // `loop status` is a read; reconciling the child here persisted it.
+        .and_then(|run_id| agent_task_lifecycle::status(run_id).ok());
     let child_run_status = child_run
         .as_ref()
         .map(|run| format!("{:?}", run.state).to_ascii_lowercase());
