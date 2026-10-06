@@ -774,6 +774,271 @@ fn rooted_pending_submission_cancellation_fences_only_its_own_root() {
 }
 
 #[test]
+fn rooted_preparing_submission_cancellation_fences_later_pending_transition() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "preparing-submission-cancel-fences-pending-transition";
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    record_lab_offload_planned_in_store(
+        &lifecycle_store,
+        LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        },
+    )
+    .expect("persist rooted pending-run proxy");
+    record_lab_offload_submission_intent_in_store(
+        &lifecycle_store,
+        run_id,
+        "homeboy-lab",
+        "/runner/workspace/homeboy",
+        &command,
+        &[],
+    )
+    .expect("persist preparing runner intent");
+
+    let cancelled = cancel_exact_run_in_store(
+        &lifecycle_store,
+        run_id,
+        Some("cancel during submission preparation"),
+    )
+    .expect("cancel preparing submission");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(
+        cancelled.metadata["runner_submission_cancellation"]["state"],
+        json!("requested")
+    );
+    assert_eq!(
+        cancelled.metadata["runner_submission_intent"]["state"],
+        json!("preparing")
+    );
+
+    let legacy = replay_request(run_id, &command);
+    let mut envelope = legacy.execution_envelope();
+    envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+        source: Some("reverse_broker".to_string()),
+        kind: Some("runner.exec".to_string()),
+        durable_run_id: Some(run_id.to_string()),
+        ..Default::default()
+    });
+    let request = homeboy_runner_contract::RunnerApiSubmitRequest {
+        schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+        api_version: homeboy_runner_contract::RUNNER_API_V1,
+        submission_key: legacy.submission_key().expect("stable key").to_string(),
+        envelope,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        credential_delivery: None,
+    };
+    let mut post_called = false;
+    let admission = with_pending_runner_submission_admission_in_store(
+        &lifecycle_store,
+        run_id,
+        &request,
+        || {
+            post_called = true;
+            Ok(())
+        },
+    );
+    assert!(admission.is_err());
+    assert!(
+        !post_called,
+        "terminal cancellation must prevent POST admission"
+    );
+}
+
+#[test]
+fn pending_reverse_broker_post_guard_serializes_with_rooted_cancellation() {
+    with_isolated_home(|_| {
+        ensure_runner_continuation_provider_reset_hook();
+        let store = test_lifecycle_store();
+        let run_id = "cancel-before-reverse-broker-post";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned_in_store(
+            &store,
+            LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("controller proxy");
+        record_lab_offload_submission_intent_in_store(
+            &store,
+            run_id,
+            "homeboy-lab",
+            "/runner/workspace/homeboy",
+            &command,
+            &[],
+        )
+        .expect("preflight submission intent");
+        let legacy = replay_request(run_id, &command);
+        let mut envelope = legacy.execution_envelope();
+        envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+            source: Some("reverse_broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some(run_id.to_string()),
+            ..Default::default()
+        });
+        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: legacy.submission_key().expect("stable key").to_string(),
+            envelope,
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: None,
+        };
+        record_lab_offload_submission_envelope(run_id, &submission)
+            .expect("persist exact pending broker request");
+
+        let post_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let allowed_count = Arc::clone(&post_count);
+        assert_eq!(
+            with_pending_runner_submission_admission_in_store(
+                &store,
+                run_id,
+                &submission,
+                move || {
+                    allowed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok("submitted")
+                },
+            )
+            .expect("open pending handoff admits its exact POST"),
+            "submitted"
+        );
+        assert_eq!(post_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let cancellation = cancel_run_in_store(&store, run_id, Some("cancel before POST"))
+            .expect("unresolved runner lookup remains typed pending");
+        assert_eq!(cancellation.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            cancellation.metadata["runner_submission_cancellation"]["state"],
+            "requested"
+        );
+        let denied_count = Arc::clone(&post_count);
+        assert!(with_pending_runner_submission_admission_in_store(
+            &store,
+            run_id,
+            &submission,
+            move || {
+                denied_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("must not submit")
+            },
+        )
+        .is_err());
+        assert_eq!(
+            post_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cancellation fence refuses a later broker POST"
+        );
+    });
+}
+
+#[test]
+fn cancellation_waits_while_the_initial_runner_post_owns_the_handoff_fence() {
+    with_isolated_home(|_| {
+        ensure_runner_continuation_provider_reset_hook();
+        let store = test_lifecycle_store();
+        let run_id = "runner-post-lock-cancel-race";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned_in_store(
+            &store,
+            LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("proxy");
+        record_lab_offload_submission_intent_in_store(
+            &store,
+            run_id,
+            "homeboy-lab",
+            "/runner/workspace/homeboy",
+            &command,
+            &[],
+        )
+        .expect("intent");
+        let legacy = replay_request(run_id, &command);
+        let mut envelope = legacy.execution_envelope();
+        envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+            source: Some("reverse_broker".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some(run_id.to_string()),
+            ..Default::default()
+        });
+        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
+            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: homeboy_runner_contract::RUNNER_API_V1,
+            submission_key: legacy.submission_key().expect("submission key").to_string(),
+            envelope,
+            workspace_claim_binding: None,
+            workspace_owner_lease: None,
+            credential_delivery: None,
+        };
+        record_lab_offload_submission_envelope(run_id, &submission)
+            .expect("durable write-ahead request");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let cancellation_store = store.clone();
+        let post_store = store.clone();
+        let post_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let post_count_for_submit = Arc::clone(&post_count);
+        let cancellation = with_pending_runner_submission_admission_in_store(
+            &store,
+            run_id,
+            &submission,
+            move || {
+                let cancellation = std::thread::spawn(move || {
+                    started_tx.send(()).expect("announce cancellation attempt");
+                    let result = cancel_run_in_store(
+                        &cancellation_store,
+                        run_id,
+                        Some("cancel races initial runner POST"),
+                    );
+                    result
+                });
+                started_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("cancellation thread started");
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                assert!(
+                    !cancellation.is_finished(),
+                    "cancellation must wait for the pending POST owner lock"
+                );
+                assert!(post_store
+                    .read_record(run_id)
+                    .expect("read during initial POST")
+                    .metadata
+                    .get("runner_submission_cancellation")
+                    .is_none());
+                post_count_for_submit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(cancellation)
+            },
+        )
+        .expect("initial POST owns handoff lock");
+        let cancelled = cancellation
+            .join()
+            .expect("cancellation worker finishes after POST fence release")
+            .expect("unresolved owner remains an inspectable pending cancellation");
+        assert_eq!(post_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(cancelled.state, AgentTaskRunState::Queued);
+        assert_eq!(
+            cancelled.metadata["runner_submission_cancellation"]["state"],
+            "requested"
+        );
+    });
+}
+
+#[test]
 fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
     use std::io::{Read, Write};
     use std::net::TcpListener;

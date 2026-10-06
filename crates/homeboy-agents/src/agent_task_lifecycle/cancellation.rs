@@ -302,17 +302,20 @@ pub(crate) fn cancel_exact_run_in_store(
     let run_id = sanitize_run_id(run_id);
     let mut rooted_record = lifecycle_store.read_record(&run_id)?;
     ensure_rooted_exact_cancellation_supported(&rooted_record)?;
-    let pending_submission = rooted_record
+    let submission_state = rooted_record
         .metadata
         .pointer("/runner_submission_intent/state")
         .and_then(Value::as_str)
-        == Some("pending");
-    let _pending_handoff_lock = if pending_submission {
+        .map(str::to_string);
+    let pending_submission = submission_state.as_deref() == Some("pending");
+    let submission_handoff_open =
+        matches!(submission_state.as_deref(), Some("preparing" | "pending"));
+    let mut pending_handoff_lock = if submission_handoff_open {
         Some(LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?)
     } else {
         None
     };
-    if pending_submission {
+    if submission_handoff_open {
         let requested_at = now_timestamp();
         lifecycle_store.mutate_record(&run_id, |record| {
             if record.state.is_terminal() {
@@ -329,21 +332,40 @@ pub(crate) fn cancel_exact_run_in_store(
             );
             true
         })?;
-        if let Err(error) = super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_locked_in_store(
-            lifecycle_store,
-            &run_id,
-        ) {
-            if error.retryable.unwrap_or(false) {
-                return Ok(lifecycle_store.read_record(&run_id)?);
+        if pending_submission {
+            if let Err(error) = super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_locked_in_store(
+                lifecycle_store,
+                &run_id,
+            ) {
+                if error.retryable.unwrap_or(false) {
+                    rooted_record = lifecycle_store.read_record(&run_id)?;
+                    if rooted_record
+                        .metadata
+                        .get("lab_staging_controller_job_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .is_none()
+                    {
+                        return Ok(rooted_record);
+                    }
+                } else {
+                    return Err(error);
+                }
             }
-            return Err(error);
         }
         rooted_record = lifecycle_store.read_record(&run_id)?;
-        if rooted_record
-            .metadata
-            .pointer("/runner_submission_intent/last_lookup_error")
-            .is_some()
+        if pending_submission
+            && rooted_record
+                .metadata
+                .pointer("/runner_submission_intent/last_lookup_error")
+                .is_some()
             && !rooted_record.state.is_terminal()
+            && rooted_record
+                .metadata
+                .get("lab_staging_controller_job_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .is_none()
         {
             return Ok(rooted_record);
         }
@@ -357,6 +379,11 @@ pub(crate) fn cancel_exact_run_in_store(
         .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
     {
+        // Fence pending runner admission before dropping the handoff lock. The
+        // controller owner may synchronously reconcile its child during this
+        // cancellation request, and must not deadlock trying to take the same
+        // per-run lock from its worker.
+        drop(pending_handoff_lock.take());
         let job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job_in_root(
             &controller_job_id,
             lifecycle_store.roots().config(),
@@ -680,12 +707,15 @@ fn cancel_resolved_run_in_store(
     // materialized attempt once one exists; before then the handoff parent is
     // the direct record and remains cancellable.
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let pending_submission = record
+    let submission_state = record
         .metadata
         .pointer("/runner_submission_intent/state")
         .and_then(Value::as_str)
-        == Some("pending");
-    let _pending_handoff_lock = if pending_submission {
+        .map(str::to_string);
+    let pending_submission = submission_state.as_deref() == Some("pending");
+    let submission_handoff_open =
+        matches!(submission_state.as_deref(), Some("preparing" | "pending"));
+    let mut pending_handoff_lock = if submission_handoff_open {
         Some(LabHandoffLock::lock_in_store(
             lifecycle_store,
             &record.run_id,
@@ -693,14 +723,14 @@ fn cancel_resolved_run_in_store(
     } else {
         None
     };
-    if pending_submission {
+    if submission_handoff_open {
         record = lifecycle_store.read_record(&record.run_id)?;
         if !record.state.is_terminal()
             && record
                 .metadata
                 .pointer("/runner_submission_intent/state")
                 .and_then(Value::as_str)
-                == Some("pending")
+                == submission_state.as_deref()
         {
             let requested_at = now_timestamp();
             let record_run_id = record.run_id.clone();
@@ -858,19 +888,20 @@ fn cancel_resolved_run_in_store(
     // its key before cancellation so the original job is cancelled rather than
     // left running on the runner. Preparing intents have no replay request and
     // deliberately do not reach this lookup.
-    let bound_pending_submission = if matches!(
-        record.state,
-        AgentTaskRunState::Queued | AgentTaskRunState::Running
-    ) {
+    let mut pending_submission_lookup_error = false;
+    let bound_pending_submission = if pending_submission
+        && matches!(
+            record.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) {
         match super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_locked_in_store(
             lifecycle_store,
             &record.run_id,
         ) {
             Ok(bound) => bound,
             Err(error) if pending_submission && error.retryable.unwrap_or(false) => {
-                return Ok(CancelResolvedOutcome::Cancelled(
-                    lifecycle_store.read_record(&record.run_id)?,
-                ));
+                pending_submission_lookup_error = true;
+                false
             }
             Err(error) => return Err(error),
         }
@@ -880,14 +911,22 @@ fn cancel_resolved_run_in_store(
     if bound_pending_submission {
         record = lifecycle_store.read_record(&record.run_id)?;
     }
-    if pending_submission
-        && record
-            .metadata
-            .pointer("/runner_submission_intent/last_lookup_error")
-            .is_some()
-        && !record.state.is_terminal()
+    if pending_submission_lookup_error
+        || (pending_submission
+            && record
+                .metadata
+                .pointer("/runner_submission_intent/last_lookup_error")
+                .is_some()
+            && !record.state.is_terminal())
     {
-        return Ok(CancelResolvedOutcome::Cancelled(record));
+        let has_staging_owner = record
+            .metadata
+            .get("lab_staging_controller_job_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+        if !has_staging_owner {
+            return Ok(CancelResolvedOutcome::Cancelled(record));
+        }
     }
     if record.state == AgentTaskRunState::Cancelled {
         let cancelled_at = record
@@ -949,6 +988,10 @@ fn cancel_resolved_run_in_store(
         .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
     {
+        // The durable fence prevents any later runner submission. Release this
+        // per-run lock before the controller can synchronously ask its worker to
+        // cancel/reconcile the same run.
+        drop(pending_handoff_lock.take());
         let cancellation_reason = reason.unwrap_or("agent-task cancellation requested");
         let requested_at = now_timestamp();
         let marked = lifecycle_store.mutate_record(&record.run_id, |record| {

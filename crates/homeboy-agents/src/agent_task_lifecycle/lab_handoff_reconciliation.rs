@@ -356,6 +356,88 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     }
 }
 
+/// Admit the irreversible runner POST only while this exact rooted pending
+/// handoff remains open. The per-run lock spans `submit`, so cancellation either
+/// fences first and refuses the POST, or waits for this POST and resolves its
+/// acceptance receipt before deciding whether it can terminalize the run.
+#[derive(Debug)]
+pub enum PendingRunnerSubmissionAdmissionError {
+    Rejected(Error),
+    Submission(Error),
+}
+
+impl From<Error> for PendingRunnerSubmissionAdmissionError {
+    fn from(error: Error) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+pub fn with_pending_runner_submission_admission_in_store<T>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    submission: &RunnerApiSubmitRequest,
+    submit: impl FnOnce() -> Result<T>,
+) -> std::result::Result<T, PendingRunnerSubmissionAdmissionError> {
+    let run_id = sanitize_run_id(run_id);
+    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
+    let record = lifecycle_store.read_record(&run_id)?;
+    let blocked = || {
+        Error::validation_invalid_argument(
+            "runner_submission",
+            format!(
+                "runner submission for '{run_id}' was fenced before POST; inspect or retry cancellation with: homeboy agent-task cancel {run_id}"
+            ),
+            Some(run_id.clone()),
+            None,
+        )
+    };
+    if record.state.is_terminal()
+        || record
+            .metadata
+            .pointer("/runner_submission_cancellation/state")
+            .and_then(Value::as_str)
+            == Some("requested")
+        || !has_live_pending_runner_submission_intent(&record, chrono::Utc::now())
+    {
+        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
+    }
+    let intent = record
+        .metadata
+        .get("runner_submission_intent")
+        .and_then(Value::as_object)
+        .ok_or_else(blocked)?;
+    let runner_id = intent
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(blocked)?;
+    let submission_key = intent
+        .get("submission_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(blocked)?;
+    let dispatch = submission.envelope.dispatch.as_ref().ok_or_else(blocked)?;
+    let durable_run_id = submission
+        .envelope
+        .lifecycle
+        .as_ref()
+        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref());
+    let fingerprint =
+        homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(submission)?;
+    if durable_run_id != Some(run_id.as_str())
+        || submission.submission_key != submission_key
+        || dispatch.runner_id != runner_id
+        || intent.get("payload_fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str())
+        || record.lab_handoff.as_ref().is_none_or(|handoff| {
+            handoff.submission_key.as_deref() != Some(submission_key)
+                || handoff.payload_fingerprint.as_deref() != Some(fingerprint.as_str())
+        })
+    {
+        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
+    }
+    submit().map_err(PendingRunnerSubmissionAdmissionError::Submission)
+}
+
 /// Bind a direct-daemon job whose accepted response was lost after the daemon
 /// admitted it. Direct Lab admission records the reservation before `/exec`,
 /// and the daemon indexes active jobs by the durable run id, so this lookup

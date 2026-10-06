@@ -4921,72 +4921,77 @@ fn cancel_result_for_record(
     } else {
         ControlPlaneCancelDisposition::Requested
     };
-    let observation_error = observation_error.or_else(|| {
-        let (blocker, recovery_action) = if record
-            .metadata
-            .pointer("/controller_job_cancellation/phase")
-            .and_then(Value::as_str)
-            == Some("requested")
-        {
-            (
-                record
-                    .metadata
-                    .pointer("/controller_job_cancellation/controller_job_id")
-                    .and_then(Value::as_str)
-                    .map(|id| format!("controller staging job {id} is still cancelling")),
-                record
-                    .metadata
-                    .pointer("/controller_job_cancellation/recovery_action")
-                    .and_then(Value::as_str),
-            )
-        } else if record
-            .metadata
-            .pointer("/runner_cancellation_pending/state")
-            .and_then(Value::as_str)
-            == Some("requested")
-        {
-            (
-                record
-                    .metadata
-                    .pointer("/runner_cancellation_pending/runner_job_id")
-                    .and_then(Value::as_str)
-                    .map(|id| format!("runner job {id} is still cancelling")),
-                record
-                    .metadata
-                    .pointer("/runner_cancellation_pending/recovery_action")
-                    .and_then(Value::as_str),
-            )
-        } else if record
-            .metadata
-            .pointer("/runner_submission_intent/last_lookup_error")
-            .is_some()
-        {
-            (
-                Some("runner submission acceptance could not be resolved".to_string()),
-                record
-                    .metadata
-                    .pointer("/runner_submission_cancellation/recovery_action")
-                    .and_then(Value::as_str),
-            )
-        } else if record
-            .metadata
-            .get("cancellation_deferred_for_terminal_provider")
-            .is_some()
-        {
-            (
-                Some("provider success is awaiting terminal aggregate import".to_string()),
-                Some("homeboy agent-task status <run-id>"),
-            )
-        } else {
-            (None, None)
-        };
-        blocker.map(|blocker| {
-            format!(
-                "{blocker}; recovery action: {}",
-                recovery_action.unwrap_or("inspect the exact run with homeboy agent-task status")
-            )
+    let observation_error = if record.state.is_terminal() {
+        observation_error
+    } else {
+        observation_error.or_else(|| {
+            let (blocker, recovery_action) = if record
+                .metadata
+                .pointer("/controller_job_cancellation/phase")
+                .and_then(Value::as_str)
+                == Some("requested")
+            {
+                (
+                    record
+                        .metadata
+                        .pointer("/controller_job_cancellation/controller_job_id")
+                        .and_then(Value::as_str)
+                        .map(|id| format!("controller staging job {id} is still cancelling")),
+                    record
+                        .metadata
+                        .pointer("/controller_job_cancellation/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .pointer("/runner_cancellation_pending/state")
+                .and_then(Value::as_str)
+                == Some("requested")
+            {
+                (
+                    record
+                        .metadata
+                        .pointer("/runner_cancellation_pending/runner_job_id")
+                        .and_then(Value::as_str)
+                        .map(|id| format!("runner job {id} is still cancelling")),
+                    record
+                        .metadata
+                        .pointer("/runner_cancellation_pending/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .pointer("/runner_submission_intent/last_lookup_error")
+                .is_some()
+            {
+                (
+                    Some("runner submission acceptance could not be resolved".to_string()),
+                    record
+                        .metadata
+                        .pointer("/runner_submission_cancellation/recovery_action")
+                        .and_then(Value::as_str),
+                )
+            } else if record
+                .metadata
+                .get("cancellation_deferred_for_terminal_provider")
+                .is_some()
+            {
+                (
+                    Some("provider success is awaiting terminal aggregate import".to_string()),
+                    Some("homeboy agent-task status <run-id>"),
+                )
+            } else {
+                (None, None)
+            };
+            blocker.map(|blocker| {
+                format!(
+                    "{blocker}; recovery action: {}",
+                    recovery_action
+                        .unwrap_or("inspect the exact run with homeboy agent-task status")
+                )
+            })
         })
-    });
+    };
     ControlPlaneCancelResult {
         schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
         disposition,
