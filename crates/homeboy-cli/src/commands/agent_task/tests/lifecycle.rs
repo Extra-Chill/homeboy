@@ -469,6 +469,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             format!("private evidence upload {}", missing_evidence.display()),
         )
         .with_retryable(true);
+        assert_eq!(source.retryable, Some(true));
         let error = preacceptance_transport_error(
             run_id,
             "homeboy-lab",
