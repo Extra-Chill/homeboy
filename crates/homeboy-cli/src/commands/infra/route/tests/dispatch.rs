@@ -4093,6 +4093,10 @@ fn replay_worker_supervisor_terminalizes_a_deterministic_validation_failure() {
                     "diagnostics": {
                         "code": "validation.invalid_argument",
                         "message": real_message,
+                        "details": {
+                            "cook_phase": "controller_target_preparation",
+                            "field": "to_worktree",
+                        },
                     },
                 })
             ),
@@ -4128,6 +4132,22 @@ fn replay_worker_supervisor_terminalizes_a_deterministic_validation_failure() {
         assert_eq!(
             record.metadata["detached_cook_handoff"]["reason"],
             real_message
+        );
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["code"],
+            "validation.invalid_argument"
+        );
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["details"]["cook_phase"],
+            "controller_target_preparation"
+        );
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["details"]["field"],
+            "to_worktree"
+        );
+        assert!(record.metadata["unmaterialized_cook_admission"]["commands"]["resume"].is_null());
+        assert!(
+            record.metadata["unmaterialized_cook_admission"]["commands"]["diagnose"].is_string()
         );
     });
 }
@@ -4181,7 +4201,7 @@ fn replay_worker_supervisor_still_requeues_a_retryable_diagnostic() {
             cook_id.to_string(),
             1,
             "retryable-token".to_string(),
-            worker_log,
+            worker_log.clone(),
             child,
         )
         .join()
@@ -4193,12 +4213,84 @@ fn replay_worker_supervisor_still_requeues_a_retryable_diagnostic() {
         // release-and-requeue path, not be terminalized.
         assert!(!record.state.is_terminal());
         assert_eq!(
+            record.metadata["cook_controller_failure"]["code"],
+            "runner.lab_transport_failure"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["reason"],
+            "the Lab runner dropped mid-dispatch"
+        );
+        assert!(std::fs::read_to_string(&worker_log)
+            .expect("worker observations")
+            .contains("homeboy/cook-replay-observation/v1"));
+        assert_eq!(
             record.metadata["unmaterialized_cook_admission"]["state"],
             "queued"
         );
         assert_eq!(
             record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
             "released"
+        );
+    });
+}
+
+#[test]
+fn replay_worker_supervisor_keeps_backpressure_reason_and_logs_an_empty_worker_exit() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "supervised-replay-worker-backpressure";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("store"),
+            cook_id,
+            serde_json::json!({ "request_ref": "sha256:request" }),
+            "queued",
+            "eligible",
+        )
+        .expect("admission");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            let admission = &mut record.metadata["unmaterialized_cook_admission"];
+            admission["state"] = serde_json::json!("blocked_runner_unavailable");
+            admission["reason"] = serde_json::json!("runner observation timed out before admission");
+            admission["retry"]["next_attempt_at"] = serde_json::json!("2999-01-01T00:00:00+00:00");
+            admission["lease"] = serde_json::json!({ "state": "consumed", "fence": 1, "token": "backpressure-token" });
+        }).expect("worker backpressure observation");
+        let directory = tempfile::tempdir().expect("worker log directory");
+        let worker_log = directory.path().join("backpressure.log");
+        std::fs::write(&worker_log, "").expect("empty worker log");
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("worker");
+        supervise_replay_worker(
+            cook_id.to_string(),
+            1,
+            "backpressure-token".to_string(),
+            worker_log.clone(),
+            child,
+        )
+        .join()
+        .expect("supervisor");
+        let record = agent_task_lifecycle::exact_record(cook_id).expect("released claim");
+        let admission = &record.metadata["unmaterialized_cook_admission"];
+        assert_eq!(admission["state"], "blocked_runner_unavailable");
+        assert_eq!(
+            admission["reason"],
+            "runner observation timed out before admission"
+        );
+        assert_eq!(
+            admission["retry"]["next_attempt_at"],
+            "2999-01-01T00:00:00+00:00"
+        );
+        assert_eq!(admission["lease"]["state"], "released");
+        let observation: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(worker_log).expect("worker log"))
+                .expect("typed replay observation");
+        assert_eq!(observation["worker_exit_code"], 0);
+        assert_eq!(observation["worker_exit_success"], true);
+        assert_eq!(observation["reason"], admission["reason"]);
+        assert_eq!(
+            observation["next_attempt_at"],
+            admission["retry"]["next_attempt_at"]
         );
     });
 }

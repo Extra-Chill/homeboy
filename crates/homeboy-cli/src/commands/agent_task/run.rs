@@ -3746,6 +3746,65 @@ mod preview_tests {
     }
 
     #[test]
+    fn cook_preview_and_provision_defer_restoration_of_a_missing_native_task_checkout() {
+        crate::test_support::with_isolated_home(|home| {
+            let (_root, source) =
+                homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::test_support::write_component_registration(
+                home.path(),
+                "fixture",
+                &source,
+            );
+            let created =
+                homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                    component_id: "fixture".to_string(),
+                    branch: "fix/restore".to_string(),
+                    from: Some("main".to_string()),
+                    task_url: Some("https://example.test/issues/15565".to_string()),
+                    run_id: None,
+                    cleanup_policy: None,
+                    require_handoff_freshness: false,
+                    source_path: None,
+                })
+                .expect("native task checkout");
+            let path = PathBuf::from(&created.record.worktree_path);
+            std::fs::remove_dir_all(&path).expect("simulate deleted checkout");
+            let args = cook(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://example.test/issues/15565",
+                "--head",
+                "fix/restore",
+                "--base",
+                "main",
+                "--to-worktree",
+                "fixture@fix-restore",
+                "--prompt",
+                "repair the task",
+                "--verify",
+                "true",
+                "--no-finalize",
+            ]);
+            let (preview, exit) = preview_cook(args.clone(), None).expect("restoration preview");
+            assert_eq!(exit, 0);
+            assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
+            let provision = provision_cook_destination(&args).expect("deferred restoration");
+            assert_eq!(provision["action"], "lookup_pending");
+            assert_eq!(provision["handle"], created.record.id);
+            assert!(!path.exists(), "restoration waits for durable admission");
+        });
+    }
+
+    #[test]
     fn read_only_evidence_projection_uses_the_controller_store() {
         crate::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
