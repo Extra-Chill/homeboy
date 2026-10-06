@@ -123,6 +123,7 @@ pub trait CliCapability: Sync {
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 pub(crate) const COOK_STARTUP_LAUNCHER_ID_ENV: &str = "HOMEBOY_COOK_STARTUP_LAUNCHER_ID";
+pub(crate) const COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(any(test, feature = "test-support"))]
 const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV: &str =
@@ -187,6 +188,8 @@ impl CookStartupAdmission {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut owns_launcher = inherited_launcher_id.is_none();
+        let is_local_detached_child =
+            std::env::var_os(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV).is_some();
         if cook.dispatch.run_id.is_none() {
             cook.dispatch.run_id = Some(cook_id.clone());
             let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
@@ -194,19 +197,27 @@ impl CookStartupAdmission {
         }
 
         let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        let mut record =
+        let mut record = if inherited_launcher_id.is_some() && is_local_detached_child {
+            // The detached child is held behind its launch token until the
+            // pinned launcher publishes the supervisor. It inherits that
+            // launcher's token for the eventual handoff, but is not permitted
+            // to reclaim custody while waiting: a killed pre-projection parent
+            // must remain reclaimable by the next operator invocation.
+            store.read_record_bounded(&cook_id)?
+        } else {
             homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
                 &store,
                 &cook_id,
                 &launcher_id,
-            )?;
+            )?
+        };
         // The original launcher delegates to the pinned runtime before local
         // supervision. Transfer the same unforgeable launcher claim to that
         // child so recovery observes the process actually waiting at the
         // pre-projection boundary, not its caller that can disappear first.
         if inherited_launcher_id.is_some()
             && std::env::var_os(COOK_PINNED_RUNTIME_ENV).is_some()
-            && std::env::var_os("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN").is_none()
+            && !is_local_detached_child
         {
             record = homeboy::agents::agent_task_lifecycle::transfer_detached_cook_handoff_launcher_in_store(
                 &store,

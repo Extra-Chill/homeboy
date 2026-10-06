@@ -66,7 +66,6 @@ const CHILD_DIAGNOSTIC_TEXT_CHARS: usize = 2_048;
 
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
-const LOCAL_COOK_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH";
 const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID";
 // Hermetic E2E control: keep the launcher observable after ownership was
@@ -627,21 +626,21 @@ fn local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> 
 
 fn consume_local_cook_launch_token() -> bool {
     let (Some(token), Some(path)) = (
-        std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV),
+        std::env::var_os(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV),
         std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV),
     ) else {
         return false;
     };
     let consumed = consume_local_cook_launch_token_at(&token, &PathBuf::from(path));
     if consumed {
-        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_ENV);
+        std::env::remove_var(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
         std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV);
     }
     consumed
 }
 
 fn local_cook_launch_token_is_present() -> bool {
-    std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV).is_some()
+    std::env::var_os(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV).is_some()
         && std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV).is_some()
 }
 
@@ -1373,7 +1372,10 @@ fn spawn_detached_cook(
     let mut command = Command::new(exe);
     command
         .args(args)
-        .env(LOCAL_COOK_LAUNCH_TOKEN_ENV, &launch_token.0)
+        .env(
+            crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV,
+            &launch_token.0,
+        )
         .env(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV, &launch_token.1)
         .envs(homeboy::core::notification_route::child_env(route))
         .stdin(Stdio::null())
@@ -2015,7 +2017,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary token directory");
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         let _env = super::super::tests::EnvGuard::set_many(&[
-            (LOCAL_COOK_LAUNCH_TOKEN_ENV, Some(token.as_str())),
+            (
+                crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV,
+                Some(token.as_str()),
+            ),
             (
                 LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV,
                 Some(path.to_str().expect("UTF-8 token path")),
