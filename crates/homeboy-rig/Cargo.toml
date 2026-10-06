@@ -16,7 +16,6 @@ homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primi
 homeboy-stack = { version = "0.1.0", path = "../homeboy-stack" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-contract" }
-homeboy-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-runner-contract" }
 homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }

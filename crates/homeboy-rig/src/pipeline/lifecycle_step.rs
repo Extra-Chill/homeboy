@@ -433,7 +433,7 @@ fn phase_env(
 ) -> Vec<(String, String)> {
     let mut env = Vec::new();
 
-    if let Some(path) = toolchain::command_step_path(Some(rig)) {
+    if let Some(path) = toolchain::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().into_owned()));
     }
 

@@ -209,43 +209,13 @@ pub fn compile_lab_admission_plan(
             .map(|capability| capability.name.clone())
             .collect(),
     });
-    let mut toolchain = crate::lab_capabilities::toolchain_readiness_preflight(command)?;
-    if let Some(workload) = command.workload.as_ref() {
-        for rig_id in &workload.rig_ids {
-            let Some(rig) = load_admission_rig(source_path, rig_id)? else {
-                continue;
-            };
-            merge_runner_capability_preflight(
-                &mut toolchain,
-                homeboy_rig::runner_capability_preflight(&rig, command.hot_label),
-            );
-        }
-    }
+    let toolchain = crate::lab_capabilities::toolchain_readiness_preflight(command)?;
     Ok(LabAdmissionPlan {
         source_path: source_path.to_path_buf(),
         toolchain,
         capability,
         executable_probe_required: false,
     })
-}
-
-fn load_admission_rig(
-    source_path: &std::path::Path,
-    rig_id: &str,
-) -> Result<Option<homeboy_rig::RigSpec>> {
-    if !source_path.join("rig.json").is_file() && !source_path.join("rigs").is_dir() {
-        return Ok(None);
-    }
-    let Some(discovered) = homeboy_rig::discover_rigs(source_path)?
-        .into_iter()
-        .find(|candidate| candidate.id == rig_id)
-    else {
-        return Ok(None);
-    };
-    Ok(Some(homeboy_rig::load_local_source(
-        &discovered.rig_path.to_string_lossy(),
-        Some(discovered.id.as_str()),
-    )?))
 }
 
 pub(crate) fn merge_runner_capability_preflight(
