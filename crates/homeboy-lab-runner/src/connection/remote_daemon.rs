@@ -1650,7 +1650,7 @@ mod tests {
             crate::connection::controller_scope_segment(&crate::connection::controller_id());
         assert_eq!(
             remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
         );
         assert_eq!(
             remote_daemon_command("runner/a", "/opt/homeboy", "daemon status"),
@@ -2265,7 +2265,14 @@ pub(super) fn remote_daemon_ensure_running_command(
     runner_id: &str,
     replacement_operation_id: Option<&str>,
 ) -> String {
-    remote_daemon_command(
+    // The admission generation behind a connected runner session must stay
+    // resident. An automatic launch otherwise defaults to a 300s idle window
+    // (#15288), and only durable jobs count as activity: a Cook that spends
+    // longer than that preparing on the controller then finds its connected
+    // session pointing at a daemon that already stopped itself, on a port its
+    // tunnel can no longer reach (#15585). Replaced generations still drain
+    // under the bounded default, so this does not keep superseded daemons.
+    remote_resident_daemon_command(
         runner_id,
         homeboy,
         &format!(
@@ -2281,6 +2288,15 @@ fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
     let state_dir = remote_daemon_state_dir(runner_id, &crate::connection::controller_id());
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} {args}",
+        shell::quote_arg(homeboy),
+    )
+}
+
+fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
+    let state_dir = remote_daemon_state_dir(runner_id, &crate::connection::controller_id());
+    format!(
+        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} {args}",
+        homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
         shell::quote_arg(homeboy),
     )
 }
