@@ -1303,6 +1303,58 @@ impl ObservationStore {
     /// exist" must use [`ObservationStore::list_runs_page`] and honour
     /// `RunPage::truncated`, or [`ObservationStore::list_runs_all`] to walk
     /// every matching row. See #11177 (and #11116, the outage it caused).
+    /// Read only the indexed ownership projection, never task payloads or
+    /// historical rows. Lifecycle writes maintain this covering index atomically.
+    pub fn active_task_scope(&self, caller_context: &str) -> Result<serde_json::Value> {
+        validate_required("caller_context", caller_context)?;
+        let mut statement = self.connection.prepare(
+            "SELECT id, \
+             json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'), \
+             json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory') \
+             FROM runs INDEXED BY idx_agent_task_active_scope \
+             WHERE kind = 'agent-task' \
+             AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running') \
+             AND json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context') = ?1 \
+             LIMIT 33"
+        ).map_err(sqlite_error("prepare indexed active task scope"))?;
+        let rows = statement
+            .query_map(params![caller_context], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(sqlite_error("read indexed active task scope"))?;
+        let rows = collect_rows(rows, "collect indexed active task scope")?;
+        if rows.len() > 32 {
+            return Err(Error::internal_unexpected(
+                "Active task scope exceeds 32 owners; refusing a truncated ownership answer",
+            ));
+        }
+        let mut workspaces = std::collections::BTreeMap::<(String, String), Vec<String>>::new();
+        let mut pending_run_ids = Vec::new();
+        for (id, repository, directory) in rows {
+            match (repository, directory) {
+                (Some(repository), Some(directory))
+                    if !repository.is_empty() && std::path::Path::new(&directory).is_absolute() =>
+                {
+                    workspaces
+                        .entry((repository, directory))
+                        .or_default()
+                        .push(id);
+                }
+                _ => pending_run_ids.push(id),
+            }
+        }
+        Ok(serde_json::json!({
+            "schema": "homeboy/agent-task-active-scope/v1",
+            "caller_context": caller_context,
+            "workspaces": workspaces.into_iter().map(|((repository, working_directory), run_ids)| serde_json::json!({"repository": repository, "working_directory": working_directory, "run_ids": run_ids})).collect::<Vec<_>>(),
+            "pending_run_ids": pending_run_ids,
+        }))
+    }
+
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
         Ok(self.list_runs_page(filter)?.runs)
     }
@@ -2119,6 +2171,105 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    fn scoped_run(id: &str, caller: &str, state: &str, repo: Option<&str>) -> RunRecord {
+        let mut run = imported_run(
+            id,
+            if state == "running" || state == "queued" {
+                "running"
+            } else {
+                "pass"
+            },
+        );
+        run.metadata_json = serde_json::json!({ "agent_task_run": {
+            "state": state,
+            "metadata": {
+                "client_context": { "caller_context": caller },
+                "caller_workspace": repo.map(|repo| serde_json::json!({ "repository": repo, "working_directory": format!("/fixtures/{repo}") })),
+            }
+        }});
+        run
+    }
+
+    #[test]
+    fn active_scope_is_indexed_reopens_and_expires_terminal_owners() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            for number in 0..1000 {
+                store
+                    .upsert_imported_run(&scoped_run(
+                        &format!("history-{number}"),
+                        "other-caller",
+                        "succeeded",
+                        Some("old"),
+                    ))
+                    .unwrap();
+            }
+            store
+                .upsert_imported_run(&scoped_run("task-A", "caller", "running", Some("repo-A")))
+                .unwrap();
+            let scope = store.active_task_scope("caller").unwrap();
+            assert_eq!(scope["workspaces"][0]["repository"], "repo-A");
+            assert_eq!(scope["workspaces"].as_array().unwrap().len(), 1);
+            let mut explain = store.connection.prepare("EXPLAIN QUERY PLAN SELECT id FROM runs INDEXED BY idx_agent_task_active_scope WHERE kind='agent-task' AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued','running') AND json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context')=?1 LIMIT 33").unwrap();
+            let details = explain
+                .query_map(params!["caller"], |row| row.get::<_, String>(3))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                details.iter().any(|detail| detail.contains("SEARCH")
+                    && detail.contains("idx_agent_task_active_scope")),
+                "{details:?}"
+            );
+            store
+                .upsert_imported_run(&scoped_run("task-B", "caller", "running", Some("repo-B")))
+                .unwrap();
+            assert_eq!(
+                store.active_task_scope("caller").unwrap()["workspaces"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            store
+                .upsert_imported_run(&scoped_run("task-A", "caller", "succeeded", Some("repo-A")))
+                .unwrap();
+            let reopened = ObservationStore::open_readonly().unwrap();
+            let scope = reopened.active_task_scope("caller").unwrap();
+            assert_eq!(scope["workspaces"].as_array().unwrap().len(), 1);
+            assert_eq!(scope["workspaces"][0]["repository"], "repo-B");
+            assert!(reopened.active_task_scope("missing").unwrap()["workspaces"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    #[test]
+    fn active_scope_reports_pending_and_never_silently_truncates() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            store
+                .upsert_imported_run(&scoped_run("pending", "caller", "queued", None))
+                .unwrap();
+            assert_eq!(
+                store.active_task_scope("caller").unwrap()["pending_run_ids"],
+                serde_json::json!(["pending"])
+            );
+            for number in 0..33 {
+                store
+                    .upsert_imported_run(&scoped_run(
+                        &format!("active-{number}"),
+                        "crowded",
+                        "running",
+                        Some("repo"),
+                    ))
+                    .unwrap();
+            }
+            assert!(store.active_task_scope("crowded").is_err());
+        });
+    }
 
     #[test]
     fn progress_patch_preserves_owner_and_context_for_interrupted_run_detection() {

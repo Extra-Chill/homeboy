@@ -38,6 +38,34 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
 }
 
 #[test]
+fn active_scope_original_owner_survives_metadata_updates_and_cannot_be_reassigned() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut owned = record(&store, "owned-scope", "original");
+    owned.metadata["client_context"] = json!({"caller_context": "source-A"});
+    owned.metadata["caller_workspace"] =
+        json!({"repository": "repo-A", "working_directory": store.roots().data().join("repo-A")});
+    store.write_record(&owned).unwrap();
+    owned.metadata = json!({"update": true});
+    store.write_record(&owned).unwrap();
+    let preserved = store.read_record("owned-scope").unwrap();
+    assert_eq!(
+        preserved.metadata["client_context"]["caller_context"],
+        "source-A"
+    );
+    assert_eq!(
+        preserved.metadata["caller_workspace"]["repository"],
+        "repo-A"
+    );
+    owned.metadata["client_context"] = json!({"caller_context": "source-B"});
+    assert!(store.write_record(&owned).is_err());
+    assert_eq!(
+        store.read_record("owned-scope").unwrap().metadata["client_context"]["caller_context"],
+        "source-A"
+    );
+}
+
+#[test]
 fn lifecycle_store_rejects_metadata_only_lab_acceptance() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

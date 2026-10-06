@@ -458,6 +458,20 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_work_intents(created_at, id) WHERE state = 'pending';
         "#,
     },
+    Migration {
+        version: 26,
+        sql: r#"
+        CREATE INDEX IF NOT EXISTS idx_agent_task_active_scope
+        ON runs (
+            json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),
+            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
+            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
+            id
+        )
+        WHERE kind = 'agent-task'
+          AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running');
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

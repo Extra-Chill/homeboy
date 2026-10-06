@@ -108,6 +108,7 @@ pub(super) fn agent_task_resource_behavior(
         // poll over the activity read model, not an admitted workload.
         | agent_task::AgentTaskCommand::Watch(_)
         | agent_task::AgentTaskCommand::List(_)
+        | agent_task::AgentTaskCommand::ActiveScope(_)
         | agent_task::AgentTaskCommand::Latest(_)
         | agent_task::AgentTaskCommand::Logs(_)
         | agent_task::AgentTaskCommand::Artifacts(_)

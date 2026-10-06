@@ -10595,6 +10595,14 @@ pub fn bind_materialized_cook_component_workspace(
     repository_root: &Path,
     selected_component_id: Option<&str>,
 ) -> Result<()> {
+    if plan.metadata["caller_workspace"].is_null() {
+        if let Some(repository) = plan.metadata["repo"].as_str() {
+            plan.metadata["caller_workspace"] = serde_json::json!({
+                "repository": repository,
+                "working_directory": repository_root,
+            });
+        }
+    }
     let Some(component_id) = selected_component_id
         .map(str::to_string)
         .or_else(|| cook_repository_identity_component_id(plan))
