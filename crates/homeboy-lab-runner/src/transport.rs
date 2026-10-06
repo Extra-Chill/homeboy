@@ -13,6 +13,7 @@ use sha2::Digest;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::server::{self, SshClient};
+use homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error;
 
 use super::session::{RunnerSession, RunnerStatusReport, RunnerTunnelMode};
 use super::{broker_http, Runner, RunnerKind};
@@ -737,28 +738,6 @@ fn private_evidence_snapshot(
     Ok(snapshot)
 }
 
-fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error {
-    const DIAGNOSTIC_LIMIT: usize = 512;
-    let redact_and_bound = |value: &str| {
-        homeboy_core::redaction::redact_string(value)
-            .chars()
-            .take(DIAGNOSTIC_LIMIT)
-            .collect::<String>()
-    };
-    let operation = redact_and_bound(&operation);
-    let cause = redact_and_bound(&error.to_string());
-    // Keep homeboy-error's ENOSPC/StorageFull classification and its
-    // retryability/hints. Only refine the operator-facing message and redact
-    // the two diagnostic strings placed in the structured details.
-    let mut diagnostic = Error::from_io_error(&error, Some(operation.clone()));
-    diagnostic.message = format!("{cause} (operation: {operation})");
-    if let Some(details) = diagnostic.details.as_object_mut() {
-        details.insert("context".to_string(), json!(operation));
-        details.insert("error".to_string(), json!(cause));
-    }
-    diagnostic.with_source(error)
-}
-
 fn private_file_bytes_with_expected_digest(
     local_path: &str,
     expected_sha256: &str,
@@ -1053,22 +1032,23 @@ fn http_file_transfer_error(
     source: Error,
     transport: &str,
 ) -> Error {
-    let remote_path = bounded_redacted_text(remote_path, 3 * 1024);
+    let remote_path = homeboy_core::redaction::redact_string(remote_path);
     let source_cause = ["cause", "reason", "error"]
         .iter()
         .find_map(|key| source.details.get(*key).and_then(Value::as_str))
         .filter(|cause| !cause.is_empty() && !source.message.contains(cause))
-        .map(|cause| bounded_redacted_text(cause, 512));
-    let source_message = bounded_redacted_text(&source.message, 512);
+        .map(homeboy_core::redaction::redact_string);
+    let source_message = homeboy_core::redaction::redact_string(&source.message);
     let diagnostic_cause = source_cause
         .clone()
         .unwrap_or_else(|| source_message.clone());
-    let source_details = bounded_transport_error_details(&source.details, source_cause.as_deref());
+    let source_details = homeboy_core::redaction::redact_json(&source.details);
+    let summary = format!(
+        "{diagnostic_cause} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {source_message})"
+    );
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
-        format!(
-            "{diagnostic_cause} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {source_message})",
-        ),
+        bounded_redacted_text(&summary, 512),
         json!({
             "runner_id": runner_id,
             "operation": operation,
@@ -1087,22 +1067,6 @@ fn bounded_redacted_text(value: &str, limit: usize) -> String {
         .chars()
         .take(limit)
         .collect()
-}
-
-fn bounded_transport_error_details(details: &Value, cause: Option<&str>) -> Value {
-    const DETAIL_BYTE_LIMIT: usize = 4 * 1024;
-    let details = homeboy_core::redaction::RedactionPolicy::default().redact_json(details);
-    let original_bytes =
-        serde_json::to_vec(&details).map_or(DETAIL_BYTE_LIMIT + 1, |bytes| bytes.len());
-    if original_bytes <= DETAIL_BYTE_LIMIT {
-        details
-    } else {
-        json!({
-            "truncated": true,
-            "original_bytes": original_bytes,
-            "cause": cause.map(|cause| bounded_redacted_text(cause, 512)),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1378,11 +1342,30 @@ mod tests {
     fn denied_private_upload_keeps_the_daemon_response_cause() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
+        let cause = format!(
+            "Authorization: Bearer http-fixture-secret; {}",
+            "remote policy detail ".repeat(80)
+        );
+        assert!(cause.contains("http-fixture-secret"));
+        let large_detail = "complete daemon rejection detail ".repeat(180);
+        let body = serde_json::to_string(&json!({
+            "success": false,
+            "error": {
+                "error": "runner.lab_transport_failure",
+                "message": format!("private upload parent rejected: {cause}"),
+                "details": {
+                    "operation": "private evidence upload",
+                    "cause": cause,
+                    "diagnostic_payload": large_detail,
+                }
+            }
+        }))
+        .expect("serialize large daemon rejection");
+        assert!(body.len() > 4 * 1024);
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut request = [0_u8; 4096];
             let _ = stream.read(&mut request).expect("read request");
-            let body = r#"{"success":false,"error":{"error":"runner.lab_transport_failure","message":"private upload parent rejected: group/world writable","details":{"operation":"private evidence upload","cause":"upload parent must be daemon-owned and not group/world writable"}}}"#;
             write!(
                 stream,
                 "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1422,23 +1405,20 @@ mod tests {
             "daemon_http",
         );
 
-        assert!(error.message.contains("group/world writable"));
+        let redacted_cause = homeboy_core::redaction::redact_string(&cause);
+        assert!(error.message.contains("remote policy detail"));
         assert_eq!(error.details["operation"], "private evidence upload");
-        assert_eq!(
-            error.details["source"]["cause"],
-            "upload parent must be daemon-owned and not group/world writable"
-        );
+        assert_eq!(error.details["source"]["cause"], redacted_cause);
+        assert_eq!(error.details["source"]["diagnostic_payload"], large_detail);
         let source = std::error::Error::source(&error)
             .and_then(|source| source.downcast_ref::<Error>())
             .expect("daemon response error remains in the source chain");
         assert_eq!(
             source.message,
-            "private upload parent rejected: group/world writable"
+            format!("private upload parent rejected: {redacted_cause}")
         );
-        assert_eq!(
-            source.details["cause"],
-            "upload parent must be daemon-owned and not group/world writable"
-        );
+        assert_eq!(source.details["cause"], redacted_cause);
+        assert_eq!(source.details["diagnostic_payload"], large_detail);
         let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
             "attempt-denied-private-upload",
             "test-runner",
@@ -1449,8 +1429,19 @@ mod tests {
         assert!(
             persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("upload parent must be daemon-owned"))
+                .is_some_and(|message| message.contains("remote policy detail"))
         );
+        let source_error = &persisted_candidate.details["source_error"];
+        assert_eq!(source_error["code"], "runner.lab_transport_failure");
+        assert_eq!(source_error["details"]["source"]["cause"], redacted_cause);
+        assert_eq!(
+            source_error["details"]["source"]["diagnostic_payload"],
+            large_detail
+        );
+        let full_evidence = serde_json::to_string(&persisted_candidate.details)
+            .expect("serialize complete daemon failure");
+        assert!(full_evidence.contains("complete daemon rejection detail"));
+        assert!(!full_evidence.contains("http-fixture-secret"));
         assert!(
             persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["context"]
                 .as_str()
@@ -1462,9 +1453,9 @@ mod tests {
             persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["causes"]
                 .as_array()
                 .is_some_and(|causes| causes.iter().any(|cause| {
-                    cause["message"].as_str().is_some_and(|message| {
-                        message.contains("upload parent must be daemon-owned")
-                    })
+                    cause["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("remote policy detail"))
                 }))
         );
     }

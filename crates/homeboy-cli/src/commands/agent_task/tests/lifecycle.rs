@@ -448,23 +448,26 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         .expect("persist selected runner");
         let long_path_root = tempfile::tempdir().expect("long evidence path root");
         let mut evidence_parent = long_path_root.path().to_path_buf();
-        for index in 0..7 {
+        for index in 0..6 {
             evidence_parent.push(format!("segment-{index}-{}", "p".repeat(76)));
             std::fs::create_dir(&evidence_parent).expect("create long path component");
         }
+        evidence_parent.push("Authorization: Bearer status-fixture-secret");
+        std::fs::create_dir(&evidence_parent).expect("create credential-bearing path component");
         let missing_evidence = evidence_parent.join("missing-evidence.json");
         assert!(missing_evidence.to_string_lossy().len() > 512);
+        assert!(missing_evidence
+            .to_string_lossy()
+            .contains("status-fixture-secret"));
+        let redacted_missing_evidence =
+            homeboy_core::redaction::redact_string(&missing_evidence.to_string_lossy());
         let io_error = std::fs::File::open(&missing_evidence)
             .expect_err("fixture exercises a real filesystem open failure");
         assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
-        let source = Error::internal_io(
-            io_error.to_string(),
-            Some(format!(
-                "private evidence upload {}; Authorization: Bearer status-fixture-secret",
-                missing_evidence.display(),
-            )),
+        let source = homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error(
+            io_error,
+            format!("private evidence upload {}", missing_evidence.display()),
         )
-        .with_source(io_error)
         .with_retryable(true);
         let error = preacceptance_transport_error(
             run_id,
@@ -507,10 +510,29 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             .is_some_and(
                 |message| message.contains("No such file") || message.contains("not found")
             ));
+        let source_error = &record.metadata["pre_execution_failure"]["details"]["source_error"];
+        assert_eq!(source_error["code"], "internal.io_error");
+        assert!(source_error["details"]["context"]
+            .as_str()
+            .is_some_and(|context| context.chars().count() > 512));
+        assert_eq!(
+            source_error["details"]["context"],
+            format!(
+                "private evidence upload {}",
+                redacted_missing_evidence.clone()
+            )
+        );
+        assert_eq!(
+            source_error["details"]["error"],
+            "No such file or directory (os error 2)"
+        );
+        assert!(!serde_json::to_string(&(record.clone(), aggregate.clone()))
+            .expect("serialize durable source evidence")
+            .contains("status-fixture-secret"));
         assert!(persisted_receipt["error"]["context"]
             .as_str()
             .is_some_and(|context| context.len() <= 4 * 1024
-                && context.contains(missing_evidence.to_string_lossy().as_ref())
+                && context.contains(&redacted_missing_evidence)
                 && context.contains("[REDACTED]")));
 
         let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
@@ -576,7 +598,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             assert!(receipt["error"]["context"]
                 .as_str()
                 .is_some_and(|context| context.contains("private evidence upload")
-                    && context.contains(missing_evidence.to_string_lossy().as_ref())
+                    && context.contains(&redacted_missing_evidence)
                     && context.contains("[REDACTED]")));
             assert_eq!(receipt["retryable"], true);
             assert!(receipt["error"]["causes"]
@@ -585,7 +607,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             assert!(receipt["error"]["context"]
                 .as_str()
                 .is_some_and(|context| context.len() <= 4 * 1024
-                    && context.contains(missing_evidence.to_string_lossy().as_ref())));
+                    && context.contains(&redacted_missing_evidence)));
         }
         assert_eq!(
             compact_diagnosis["root_cause"]["class"],
@@ -619,8 +641,33 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         assert!(
             full_evidence_text.contains("No such file") || full_evidence_text.contains("not found")
         );
-        assert!(full_evidence_text.contains(missing_evidence.to_string_lossy().as_ref()));
+        assert!(full_evidence_text.contains(&redacted_missing_evidence));
         assert!(!full_evidence_text.contains("status-fixture-secret"));
+        assert_eq!(
+            full_diagnosis["root_cause"]["details"]["source_error"]["details"]["context"],
+            source_error["details"]["context"]
+        );
+        assert_eq!(
+            full_evidence["pre_execution_failure"]["details"]["source_error"]["details"]["context"],
+            source_error["details"]["context"]
+        );
+        let summary_message = record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .expect("bounded durable failure summary");
+        assert!(summary_message.chars().count() <= 512);
+        assert_eq!(compact_diagnosis["root_cause"]["message"], summary_message);
+        assert_eq!(full_diagnosis["root_cause"]["message"], summary_message);
+        assert_eq!(status_output["blocker"]["message"], summary_message);
+        for output in [
+            serde_json::to_string(&record).expect("record JSON"),
+            serde_json::to_string(&aggregate).expect("aggregate JSON"),
+            serde_json::to_string(&compact_diagnosis).expect("compact diagnosis JSON"),
+            serde_json::to_string(&full_diagnosis).expect("full diagnosis JSON"),
+            full_evidence_text,
+            serde_json::to_string(&status_output).expect("status JSON"),
+        ] {
+            assert!(!output.contains("status-fixture-secret"));
+        }
         let status_bytes = serde_json::to_vec(&status_output)
             .expect("serialize default status")
             .len();

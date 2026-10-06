@@ -211,13 +211,66 @@ pub fn preacceptance_transport_error(
         &error,
     );
     let retryable = receipt.retryable;
+    let source_error = full_source_error_evidence(&error);
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         receipt.error.message.clone(),
-        serde_json::json!({ "lab_transport_attempt_receipt": receipt }),
+        serde_json::json!({
+            "lab_transport_attempt_receipt": receipt,
+            "source_error": source_error,
+        }),
     )
     .with_retryable(retryable)
     .with_source(error)
+}
+
+/// Build the canonical, redacted error for a local provider-evidence I/O
+/// failure. Structured facts stay complete; the human summary is bounded.
+pub fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error {
+    const MESSAGE_LIMIT: usize = 512;
+    let operation = homeboy_redaction::redact_string(&operation);
+    let cause = homeboy_redaction::redact_string(&error.to_string());
+    let mut diagnostic = Error::from_io_error(&error, Some(operation.clone()));
+    diagnostic.message = format!("{cause} (operation: {operation})")
+        .chars()
+        .take(MESSAGE_LIMIT)
+        .collect();
+    if let Some(details) = diagnostic.details.as_object_mut() {
+        details.insert("context".to_string(), serde_json::json!(operation));
+        details.insert("error".to_string(), serde_json::json!(cause));
+    }
+    diagnostic.with_source(error)
+}
+
+fn full_source_error_evidence(error: &Error) -> serde_json::Value {
+    let mut causes = Vec::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(homeboy_error) = cause.downcast_ref::<Error>() {
+            causes.push(serde_json::json!({
+                "code": homeboy_error.code.as_str(),
+                "message": homeboy_redaction::redact_string(&homeboy_error.message),
+                "details": homeboy_redaction::redact_json(&homeboy_error.details),
+            }));
+        } else if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+            causes.push(serde_json::json!({
+                "kind": LabTransportErrorKind::from_io_kind(io_error.kind()),
+                "message": homeboy_redaction::redact_string(&io_error.to_string()),
+            }));
+        } else {
+            causes.push(serde_json::json!({
+                "message": homeboy_redaction::redact_string(&cause.to_string()),
+            }));
+        }
+        source = cause.source();
+    }
+
+    serde_json::json!({
+        "code": error.code.as_str(),
+        "message": homeboy_redaction::redact_string(&error.message),
+        "details": homeboy_redaction::redact_json(&error.details),
+        "causes": causes,
+    })
 }
 
 fn typed_error_kind(error: &Error) -> LabTransportErrorKind {
