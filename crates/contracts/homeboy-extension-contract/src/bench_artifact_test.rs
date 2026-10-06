@@ -1,26 +1,6 @@
 use super::{BenchArtifact, BenchPreviewLifecycleMetadata};
 
 #[test]
-fn bench_artifact_serializes_optional_fields_when_present() {
-    let artifact = BenchArtifact {
-        path: Some("artifacts/run-1/transcript.json".to_string()),
-        url: Some("https://example.test/transcript.json".to_string()),
-        artifact_type: None,
-        kind: Some("json".to_string()),
-        label: Some("Run 1 transcript".to_string()),
-        observation_artifact_id: None,
-        ..BenchArtifact::default()
-    };
-
-    let raw = serde_json::to_string(&artifact).unwrap();
-
-    assert_eq!(
-        raw,
-        r#"{"path":"artifacts/run-1/transcript.json","url":"https://example.test/transcript.json","kind":"json","label":"Run 1 transcript"}"#
-    );
-}
-
-#[test]
 fn bench_artifact_omits_absent_optional_fields() {
     let artifact = BenchArtifact {
         path: Some("artifacts/run-1/out.txt".to_string()),
@@ -84,11 +64,13 @@ fn bench_artifact_accepts_mixed_legacy_and_durable_records() {
 }
 
 #[test]
-fn bench_artifact_serializes_preview_metadata_when_present() {
+fn bench_artifact_serializes_optional_fields_and_flattened_preview_metadata() {
     let artifact = BenchArtifact {
         path: Some("artifacts/preview.json".to_string()),
+        url: Some("https://example.test/preview.json".to_string()),
         artifact_type: Some("preview".to_string()),
         kind: Some("preview".to_string()),
+        label: Some("Baseline preview".to_string()),
         role: Some("baseline".to_string()),
         preview_url: Some("https://preview.example.test/".to_string()),
         public_url: Some("https://preview.example.test/".to_string()),
@@ -105,17 +87,26 @@ fn bench_artifact_serializes_preview_metadata_when_present() {
         ..BenchArtifact::default()
     };
 
-    let value = serde_json::to_value(&artifact).unwrap();
-
-    assert_eq!(value["role"], "baseline");
-    assert_eq!(value["preview_url"], "https://preview.example.test/");
-    assert_eq!(value["status"], "running");
-    assert_eq!(value["expires_at"], "2026-06-08T12:00:00Z");
-    assert_eq!(value["cleanup_status"], "pending");
-    assert_eq!(value["service_lifecycle"]["service_id"], "site-preview");
     assert_eq!(
-        value["browser_origin_evidence"]["browser_effective_origin"],
-        "https://preview.example.test/"
+        serde_json::to_value(&artifact).unwrap(),
+        serde_json::json!({
+            "path": "artifacts/preview.json",
+            "url": "https://example.test/preview.json",
+            "type": "preview",
+            "kind": "preview",
+            "label": "Baseline preview",
+            "role": "baseline",
+            "preview_url": "https://preview.example.test/",
+            "public_url": "https://preview.example.test/",
+            "local_url": "http://127.0.0.1:8080",
+            "status": "running",
+            "expires_at": "2026-06-08T12:00:00Z",
+            "cleanup_status": "pending",
+            "service_lifecycle": { "service_id": "site-preview" },
+            "browser_origin_evidence": {
+                "browser_effective_origin": "https://preview.example.test/"
+            }
+        })
     );
 }
 
