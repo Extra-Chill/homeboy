@@ -1499,6 +1499,12 @@ pub(crate) fn tombstone_dead_direct_generations(
 }
 
 trait GenerationEndpointOperations {
+    fn queued_jobs(&self, _session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
+        None
+    }
+    fn cancel_job(&self, _session: &RunnerSession, _job_id: &str) -> bool {
+        false
+    }
     fn evidence(&self, _session: &RunnerSession, _path: &str) -> Option<serde_json::Value> {
         None
     }
@@ -1518,6 +1524,50 @@ trait GenerationEndpointOperations {
     fn terminate_tunnel(&self, session: &RunnerSession);
 }
 
+fn queued_generation_jobs(
+    response: &serde_json::Value,
+    session: &RunnerSession,
+) -> Option<Vec<crate::RunnerJob>> {
+    let body = response.pointer("/data/body").unwrap_or(response);
+    let jobs: Vec<homeboy_core::api_jobs::ActiveRunnerJobSummary> =
+        serde_json::from_value(body.get("active_runner_jobs")?.clone()).ok()?;
+    Some(
+        jobs.iter()
+            .filter(|job| {
+                job.runner_id == session.runner_id
+                    && job.status == homeboy_core::api_jobs::JobStatus::Queued
+            })
+            .map(crate::RunnerJob::from)
+            .collect(),
+    )
+}
+
+/// Replay an existing controller cancellation to an unstarted handoff on its
+/// authenticated owning generation. A timeout or stale heartbeat is not proof
+/// of cancellation; absent, active and differently bound runs remain untouched.
+fn reconcile_cancelled_queued_jobs(
+    session: &RunnerSession,
+    operations: &impl GenerationEndpointOperations,
+    is_cancelled: impl Fn(&str) -> bool,
+) {
+    for job in operations.queued_jobs(session).unwrap_or_default() {
+        let Some(run_id) = job.durable_run_id.as_deref() else {
+            continue;
+        };
+        if job.status == homeboy_core::api_jobs::JobStatus::Queued
+            && job.runner_id == session.runner_id
+            && job
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.durable_run_id.as_deref())
+                == Some(run_id)
+            && is_cancelled(run_id)
+        {
+            operations.cancel_job(session, &job.job_id);
+        }
+    }
+}
+
 struct HttpGenerationEndpointOperations {
     client: reqwest::blocking::Client,
 }
@@ -1532,6 +1582,42 @@ struct FallbackGenerationEndpointOperations<'a, Primary, Fallback> {
 }
 
 impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
+    fn queued_jobs(&self, session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
+        if self.active_jobs(session)? == 0 {
+            return Some(Vec::new());
+        }
+        let response = self
+            .client
+            .get(format!(
+                "{}/jobs",
+                session.local_url.as_deref()?.trim_end_matches('/')
+            ))
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .ok()?;
+        queued_generation_jobs(&response, session)
+    }
+
+    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+        if self.active_jobs(session).is_none() {
+            return false;
+        }
+        let Some(url) = session.local_url.as_deref() else {
+            return false;
+        };
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        self.client
+            .post(format!(
+                "{}/jobs/{encoded}/cancel",
+                url.trim_end_matches('/')
+            ))
+            .send()
+            .is_ok_and(|response| response.status().is_success())
+    }
+
     fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
         let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
         self.client
@@ -1780,6 +1866,23 @@ mod projection_tests {
 }
 
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
+    fn queued_jobs(&self, session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
+        if self.active_jobs(session)? == 0 {
+            return Some(Vec::new());
+        }
+        let response = serde_json::from_str(&self.request("GET", session, "/jobs", None)?).ok()?;
+        queued_generation_jobs(&response, session)
+    }
+
+    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+        if self.authenticated_health(session).is_none() {
+            return false;
+        }
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        self.request("POST", session, &format!("/jobs/{encoded}/cancel"), None)
+            .is_some()
+    }
+
     fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
         let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
         serde_json::from_str(&self.request("GET", session, &format!("/jobs/{encoded}"), None)?).ok()
@@ -1846,6 +1949,16 @@ where
     Primary: GenerationEndpointOperations,
     Fallback: GenerationEndpointOperations,
 {
+    fn queued_jobs(&self, session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
+        self.primary
+            .queued_jobs(session)
+            .or_else(|| self.fallback.queued_jobs(session))
+    }
+
+    fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+        self.primary.cancel_job(session, job_id) || self.fallback.cancel_job(session, job_id)
+    }
+
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
         self.primary
             .evidence(session, path)
@@ -2172,6 +2285,13 @@ fn reconcile_with(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                if draining {
+                    reconcile_cancelled_queued_jobs(
+                        &session,
+                        operations,
+                        homeboy_core::api_jobs::agent_task_terminal_recovery::durable_run_is_cancelled,
+                    );
+                }
                 let terminal_settled = !draining || operations.reconcile_terminal_jobs(&session);
                 let raw_observed = operations.active_jobs(&session);
                 let unclaimed = draining && raw_observed.is_none() && live_idle;
@@ -3366,6 +3486,8 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEndpointOperations {
+        queued: RefCell<Vec<crate::RunnerJob>>,
+        cancelled: RefCell<Vec<(String, String)>>,
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
         terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
         stop_failures: RefCell<std::collections::BTreeSet<String>>,
@@ -3376,6 +3498,18 @@ mod tests {
     }
 
     impl GenerationEndpointOperations for FakeEndpointOperations {
+        fn queued_jobs(&self, _session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
+            Some(self.queued.borrow().clone())
+        }
+
+        fn cancel_job(&self, session: &RunnerSession, job_id: &str) -> bool {
+            self.cancelled.borrow_mut().push((
+                session.remote_daemon_lease_id.clone().expect("lease"),
+                job_id.to_string(),
+            ));
+            true
+        }
+
         fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
             let lease_id = session.remote_daemon_lease_id.clone().expect("lease");
             self.terminal_reconciled_leases
@@ -3411,6 +3545,104 @@ mod tests {
                 self.terminated_pids.borrow_mut().push(pid);
             }
         }
+    }
+
+    #[test]
+    fn queued_handoff_cancellation_replays_only_exact_durable_cancellation_to_its_generation() {
+        let endpoint = session("lease-draining", "daemon-draining", Some(101));
+        let operations = FakeEndpointOperations::default();
+        let summary = serde_json::json!({
+            "runner_id": endpoint.runner_id, "job_id": "cancelled-job", "operation": "runner_staged_execution",
+            "status": "queued", "command": "homeboy agent-task run-plan", "source": "sealed-staging",
+            "kind": "runner_staged_execution", "started_at_ms": 1, "updated_at_ms": 1,
+            "elapsed_ms": 100_000, "heartbeat_age_ms": 100_000,
+            "durable_run_id": "cancelled-run", "lifecycle": { "kind": "runner_staged_execution", "source": "sealed-staging", "durable_run_id": "cancelled-run" }
+        });
+        let response = serde_json::json!({"data":{"body":{"active_runner_jobs":[summary]}}});
+        let job = queued_generation_jobs(&response, &endpoint)
+            .expect("typed jobs")
+            .pop()
+            .expect("queued job");
+        let mut active = job.clone();
+        active.job_id = "active-run-job".to_string();
+        active.durable_run_id = Some("active-run".to_string());
+        active.lifecycle.as_mut().unwrap().durable_run_id = Some("active-run".to_string());
+        let mut unbound = job.clone();
+        unbound.job_id = "different-binding".to_string();
+        unbound.lifecycle.as_mut().unwrap().durable_run_id = Some("other-run".to_string());
+        let mut running = job.clone();
+        running.job_id = "running-job".to_string();
+        running.status = homeboy_core::api_jobs::JobStatus::Running;
+        operations
+            .queued
+            .replace(vec![job, active, unbound, running]);
+
+        reconcile_cancelled_queued_jobs(&endpoint, &operations, |run_id| run_id == "cancelled-run");
+
+        assert_eq!(
+            *operations.cancelled.borrow(),
+            vec![("lease-draining".to_string(), "cancelled-job".to_string())]
+        );
+        assert!(operations.stopped_leases.borrow().is_empty());
+        assert!(operations.terminated_pids.borrow().is_empty());
+        assert!(
+            queued_generation_jobs(&serde_json::json!({"data":{"body":{}}}), &endpoint).is_none()
+        );
+    }
+
+    #[test]
+    fn retained_generation_cancellation_uses_real_http_and_reobserves_idle() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&cancelled);
+        let server = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().expect("request");
+                let mut bytes = [0; 4096];
+                let count = stream.read(&mut bytes).expect("read request");
+                let request = String::from_utf8_lossy(&bytes[..count]);
+                let body = if request.starts_with("GET /health ") {
+                    serde_json::json!({"data":{"pid":42,"freshness":{"lease_id":"lease-http","active_jobs":usize::from(!observed.load(Ordering::SeqCst))}}})
+                } else if request.starts_with("GET /jobs ") {
+                    serde_json::json!({"data":{"body":{"active_runner_jobs":[{
+                        "runner_id":"runner-a","job_id":"queued-http","operation":"runner_staged_execution","status":"queued",
+                        "source":"sealed-staging","kind":"runner_staged_execution","command":"fixture","started_at_ms":1,"updated_at_ms":1,"elapsed_ms":1,"heartbeat_age_ms":1,
+                        "durable_run_id":"cancelled-http","lifecycle":{"kind":"runner_staged_execution","source":"sealed-staging","durable_run_id":"cancelled-http"}
+                    }]}}})
+                } else {
+                    assert!(
+                        request.starts_with("POST /jobs/queued-http/cancel "),
+                        "{request}"
+                    );
+                    observed.store(true, Ordering::SeqCst);
+                    serde_json::json!({"data":{"body":{"job":{"status":"cancelled"}}}})
+                };
+                let body = body.to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).expect("response");
+            }
+        });
+        let mut endpoint = session("lease-http", "daemon-http", Some(101));
+        endpoint.local_url = Some(format!("http://{address}"));
+        let operations = HttpGenerationEndpointOperations {
+            client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("client"),
+        };
+        reconcile_cancelled_queued_jobs(&endpoint, &operations, |run_id| {
+            run_id == "cancelled-http"
+        });
+        assert_eq!(operations.active_jobs(&endpoint), Some(0));
+        assert!(cancelled.load(Ordering::SeqCst));
+        server.join().expect("fixture server");
     }
 
     /// Relaxing the global fence for a dangling job owner must still retire only

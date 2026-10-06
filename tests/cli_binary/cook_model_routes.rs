@@ -1,4 +1,4 @@
-use homeboy::core::test_support::{HermeticTestContext, TestBinary};
+use homeboy::core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -140,6 +140,10 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         "git worktree add: {}",
         String::from_utf8_lossy(&linked.stderr)
     );
+    let provider_config = home.join("provider-config.json");
+    std::fs::write(&provider_config, r#"{"provider":"anthropic"}"#)
+        .expect("write file-backed provider configuration");
+    let provider_config_ref = format!("@{}", provider_config.display());
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
         .args([
@@ -159,7 +163,7 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
             "--model",
             ALTERNATIVE,
             "--provider-config",
-            r#"{"provider":"anthropic"}"#,
+            &provider_config_ref,
             "--acknowledge-model-override",
             "--cwd",
             workspace.to_str().expect("workspace path"),
@@ -178,7 +182,7 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("OPENAI_API_KEY", "test-only-unusable-key")
         .env("PATH", prepend_path(&bin));
-    let output = command.output().expect("execute acknowledged Cook CLI");
+    let output = bounded_output(command);
     let capture = std::fs::read_to_string(&capture).unwrap_or_else(|error| {
         panic!(
             "Cook did not spawn fake OpenCode (status={:?}, error={error}): stdout={} stderr={}",

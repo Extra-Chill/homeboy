@@ -5954,6 +5954,15 @@ fn collected_diagnostic_value_with_details(
             value["field"] = field;
         }
     }
+    if let Some(phase) = item
+        .data
+        .get("cook_phase")
+        .filter(|phase| phase.is_string())
+    {
+        if let Some(phase) = bounded_diagnostic_value(phase) {
+            value["cook_phase"] = phase;
+        }
+    }
     value
 }
 

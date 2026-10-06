@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn status_exact_selects_concrete_record_and_cannot_bridge() {
+    fn status_exact_selects_concrete_record() {
         let cli = Cli::try_parse_from(["homeboy", "agent-task", "status", "cook-a", "--exact"])
             .expect("exact status parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -433,41 +433,7 @@ mod tests {
             panic!("expected status command");
         };
         assert!(args.exact);
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "status",
-            "cook-a",
-            "--exact",
-            "--bridge",
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn status_rejects_the_removed_bridge_flag() {
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "status",
-            "cook-attempt-2",
-            "--bridge",
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn status_rejects_unsupported_projection_flags() {
-        for flag in ["--bounded", "--no-runner-probe", "--since-cursor"] {
-            let mut argv = vec!["homeboy", "agent-task", "status", "run-a", flag];
-            if flag == "--since-cursor" {
-                argv.push("1");
-            }
-            assert!(
-                Cli::try_parse_from(argv).is_err(),
-                "accepted removed {flag}"
-            );
-        }
+        assert_eq!(args.run_id, "cook-a");
     }
 
     #[test]

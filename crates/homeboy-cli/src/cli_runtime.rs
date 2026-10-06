@@ -122,6 +122,12 @@ pub trait CliCapability: Sync {
 }
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
+pub(crate) const COOK_STARTUP_LAUNCHER_ID_ENV: &str = "HOMEBOY_COOK_STARTUP_LAUNCHER_ID";
+pub(crate) const COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
+const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(test, feature = "test-support"))]
+const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV: &str =
+    "HOMEBOY_TEST_COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_MS";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
 const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD";
 const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBACK_RECONCILIATION";
@@ -131,6 +137,280 @@ const RELEASE_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
 const RELEASE_EXECUTION_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 
 const RELEASE_EXECUTION_STAGE: &str = "executing release pipeline";
+
+fn cook_runtime_seal_admission_timeout() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(milliseconds) = std::env::var(COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV) {
+        if let Ok(milliseconds) = milliseconds.parse::<u64>() {
+            return Duration::from_millis(milliseconds.clamp(1, 30_000));
+        }
+    }
+    COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT
+}
+
+/// Holds a local Cook's caller-visible identity while the executable is being
+/// sealed. Runtime pin admission can wait behind another invocation; publish a
+/// lifecycle parent first so the wait has a status/cancel handle.
+struct CookStartupAdmission {
+    store: homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: String,
+    launcher_id: String,
+    owns_launcher: bool,
+    replay_run_id: String,
+}
+
+impl CookStartupAdmission {
+    fn establish(
+        cli: &mut Cli,
+        normalized_args: &mut Vec<String>,
+    ) -> homeboy::core::Result<Option<Self>> {
+        if cli.placement != crate::cli_surface::Placement::Local {
+            return Ok(None);
+        }
+        let Commands::AgentTask(agent_task) = &mut cli.command else {
+            return Ok(None);
+        };
+        let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &mut agent_task.command
+        else {
+            return Ok(None);
+        };
+        if cook.preview {
+            return Ok(None);
+        }
+
+        let caller_workspace =
+            crate::commands::agent_task::run::existing_cook_caller_workspace(cook)?;
+
+        let cook_id = cook
+            .dispatch
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-task-{}", Uuid::new_v4()));
+        let inherited_launcher_id = std::env::var(COOK_STARTUP_LAUNCHER_ID_ENV).ok();
+        let launcher_id = inherited_launcher_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let mut owns_launcher = inherited_launcher_id.is_none();
+        let is_local_detached_child =
+            std::env::var_os(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV).is_some();
+        if cook.dispatch.run_id.is_none() {
+            cook.dispatch.run_id = Some(cook_id.clone());
+            let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
+            normalized_args.splice(owned..owned, ["--run-id".to_string(), cook_id.clone()]);
+        }
+
+        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let mut record = if inherited_launcher_id.is_some() && is_local_detached_child {
+            // The detached child is held behind its launch token until the
+            // pinned launcher publishes the supervisor. It inherits that
+            // launcher's token for the eventual handoff, but is not permitted
+            // to reclaim custody while waiting: a killed pre-projection parent
+            // must remain reclaimable by the next operator invocation.
+            store.read_record_bounded(&cook_id)?
+        } else {
+            homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                &store,
+                &cook_id,
+                &launcher_id,
+            )?
+        };
+        if let Some(workspace) = caller_workspace {
+            record = match store.mutate_record(&cook_id, |current| {
+                if current.state.is_terminal() || !current.metadata["caller_workspace"].is_null() {
+                    return false;
+                }
+                current.metadata["caller_workspace"] = workspace.clone();
+                true
+            })? {
+                Some(updated) => updated,
+                None => store.read_record_bounded(&cook_id)?,
+            };
+            if !record.state.is_terminal() && record.metadata["caller_workspace"] != workspace {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "caller_workspace",
+                    "Cook admission checkout differs from its original caller ownership",
+                    Some(cook_id),
+                    None,
+                ));
+            }
+        }
+        // The original launcher delegates to the pinned runtime before local
+        // supervision. Transfer the same unforgeable launcher claim to that
+        // child so recovery observes the process actually waiting at the
+        // pre-projection boundary, not its caller that can disappear first.
+        if inherited_launcher_id.is_some()
+            && std::env::var_os(COOK_PINNED_RUNTIME_ENV).is_some()
+            && !is_local_detached_child
+        {
+            record = homeboy::agents::agent_task_lifecycle::transfer_detached_cook_handoff_launcher_in_store(
+                &store,
+                &cook_id,
+                &launcher_id,
+            )?;
+            owns_launcher = true;
+        }
+        std::env::set_var(COOK_STARTUP_LAUNCHER_ID_ENV, &launcher_id);
+        let handoff = &record.metadata["detached_cook_handoff"];
+        let progress_is_current =
+            record.metadata["cook_progress"]["phase"] == "controller_runtime_seal";
+        if !record.state.is_terminal()
+            && handoff["state"] == "pending"
+            && handoff["admission_state"] == "pre_supervisor"
+            && handoff["launcher_id"] == launcher_id
+            && !progress_is_current
+        {
+            if let Err(error) = homeboy::agents::agent_task_lifecycle::record_cook_progress_in_store(
+                &store,
+                &cook_id,
+                "controller_runtime_seal",
+                0,
+                Some("Cook identity is durable; waiting for bounded controller runtime admission"),
+            ) {
+                let _ = homeboy::agents::agent_task_lifecycle::fail_claimed_detached_cook_handoff_parent_in_store(
+                    &store,
+                    &cook_id,
+                    &launcher_id,
+                    &error.message,
+                );
+                return Err(error);
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-admission-progress/v1",
+                    "run_id": cook_id,
+                    "launcher_id": launcher_id,
+                    "state": "pending",
+                    "phase": "controller_runtime_seal",
+                    "status_command": format!("homeboy agent-task status {cook_id}"),
+                })
+            );
+        }
+        Ok(Some(Self {
+            store,
+            cook_id,
+            launcher_id,
+            owns_launcher,
+            replay_run_id: format!("agent-task-replay-{}", Uuid::new_v4()),
+        }))
+    }
+
+    fn fail(&mut self, reason: &str) {
+        if !self.owns_launcher {
+            return;
+        }
+        let Ok(record) = self.store.read_record_bounded(&self.cook_id) else {
+            return;
+        };
+        let handoff = &record.metadata["detached_cook_handoff"];
+        // The pinning process may fail only the startup claim it owns. A replay
+        // or a transferred local launcher has a different token and must retain
+        // its own handoff custody.
+        if record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["launcher_id"] != self.launcher_id
+            || handoff["launcher_pid"].as_u64() != Some(u64::from(std::process::id()))
+            || handoff["materializing_attempt_run_id"].is_string()
+        {
+            return;
+        }
+        let _ = homeboy::agents::agent_task_lifecycle::fail_claimed_detached_cook_handoff_parent_in_store(
+            &self.store,
+            &self.cook_id,
+            &self.launcher_id,
+            reason,
+        );
+    }
+}
+
+fn persist_cook_stdin_replay_prompt(
+    data_root: &std::path::Path,
+    cook_id: &str,
+    prompt: &str,
+) -> homeboy::core::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let category = data_root.join("cook-replay-inputs");
+    let cook_root = category.join(homeboy::core::paths::sanitize_path_segment(cook_id));
+    let root = cook_root.join(Uuid::new_v4().to_string());
+    for directory in [&category, &cook_root, &root] {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create Cook replay input directory {}",
+                    directory.display()
+                )),
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [&category, &cook_root, &root] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).map_err(
+                |error| {
+                    homeboy::core::Error::internal_io(
+                        error.to_string(),
+                        Some(format!(
+                            "protect Cook replay input directory {}",
+                            directory.display()
+                        )),
+                    )
+                },
+            )?;
+        }
+    }
+    let path = root.join("prompt.stdin");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&path).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        file.write_all(prompt.as_bytes()).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "write Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "sync Cook replay prompt snapshot {}",
+                    path.display()
+                )),
+            )
+        })?;
+        Ok(path.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    result
+}
+
+impl Drop for CookStartupAdmission {
+    fn drop(&mut self) {
+        self.fail("local Cook exited before runtime admission or handoff materialization");
+    }
+}
 
 fn release_stage_deadline(stage: &str) -> Duration {
     if stage == RELEASE_EXECUTION_STAGE {
@@ -1243,7 +1523,7 @@ impl CliRuntime {
     fn run_matches_with_capability_admission(
         &self,
         matches: ArgMatches,
-        normalized: Vec<String>,
+        mut normalized: Vec<String>,
         capability_admission: Option<
             crate::core::parsed_command_preflight::ResourceAdmissionEvidence,
         >,
@@ -1646,10 +1926,31 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
-        match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
+        let mut cook_startup_admission =
+            match CookStartupAdmission::establish(&mut cli, &mut normalized) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(error),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
+
+        match delegate_agent_task_cook_to_pinned_runtime(
+            &cli,
+            &normalized,
+            cook_startup_admission.as_ref(),
+        ) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
             Err(err) => {
+                if let Some(admission) = cook_startup_admission.as_mut() {
+                    admission.fail(&err.message);
+                }
                 output_runtime::emit_json_result_for_identity(
                     Err(err),
                     output_file.as_deref(),
@@ -2238,12 +2539,12 @@ fn schedule_controller_fallback_reconciliation() {
     let _ = command.spawn();
 }
 
-/// A cook has no durable run record until controller admission. Re-exec before
-/// routing so every subsequent local phase uses the immutable controller that
-/// started the cook rather than a globally replaced executable.
+/// Re-exec before routing so every subsequent local phase uses the immutable
+/// controller that started the cook rather than a globally replaced executable.
 fn delegate_agent_task_cook_to_pinned_runtime(
     cli: &Cli,
     normalized_args: &[String],
+    startup_admission: Option<&CookStartupAdmission>,
 ) -> homeboy::core::Result<Option<i32>> {
     let is_cook_preview = matches!(
         &cli.command,
@@ -2299,15 +2600,53 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         }
     }
 
-    let request_id = format!("seal-{}", Uuid::new_v4());
-    // Boundary: sealing the controller for a cook is one unit of work (#7505).
+    let cook_id = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                cook.dispatch.run_id.clone()
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let request_id = cook_id
+        .clone()
+        .unwrap_or_else(|| format!("seal-{}", Uuid::new_v4()));
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
-    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
-        roots.data(),
-        &request_id,
-        || Ok(false),
-    )
-    .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
+    let pin = if cook_id.is_some() && cli.placement == crate::cli_surface::Placement::Local {
+        crate::agents::agent_task_lifecycle::pin_current_controller_runtime_with_timeout(
+            roots.data(),
+            &request_id,
+            cook_runtime_seal_admission_timeout(),
+            || Ok(false),
+        )
+    } else {
+        crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
+            roots.data(),
+            &request_id,
+            || Ok(false),
+        )
+    };
+    let pinned = pin.map_err(|error| {
+        annotate_cook_seal_failure(
+            error,
+            &request_id,
+            normalized_args,
+            roots.data(),
+            match &cli.command {
+                Commands::AgentTask(agent_task) => match &agent_task.command {
+                    crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
+                        .prompt_snapshot
+                        .as_ref()
+                        .filter(|snapshot| snapshot.source == "stdin")
+                        .map(|snapshot| snapshot.content.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            startup_admission.map(|admission| admission.replay_run_id.as_str()),
+        )
+    })?;
     let prompt_snapshot = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
@@ -2322,6 +2661,9 @@ fn delegate_agent_task_cook_to_pinned_runtime(
     command
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned);
+    if let Some(admission) = startup_admission {
+        command.env(COOK_STARTUP_LAUNCHER_ID_ENV, &admission.launcher_id);
+    }
     let status = if let Some(prompt) = prompt_snapshot {
         command.stdin(std::process::Stdio::piped());
         let mut child = command.spawn().map_err(|error| {
@@ -2380,17 +2722,86 @@ fn annotate_cook_seal_failure(
     mut error: homeboy::core::Error,
     request_id: &str,
     normalized_args: &[String],
+    data_root: &std::path::Path,
+    stdin_prompt_snapshot: Option<&str>,
+    replay_run_id: Option<&str>,
 ) -> homeboy::core::Error {
     if !error.details.is_object() {
         error.details = serde_json::json!({});
     }
     error.details["controller_admission_phase"] = serde_json::json!("cook_runtime_seal");
     error.details["controller_admission_request_id"] = serde_json::json!(request_id);
-    error.details["next_actions"] =
-        serde_json::json!([homeboy::core::engine::shell::quote_args(normalized_args)]);
-    error.with_hint(
-        "Controller admission is FIFO: re-running the identical cook command queues behind the current owner instead of racing it.",
-    )
+    let normalized_args = crate::command_capability::homeboy_owned_args(normalized_args);
+    let replay_args = replay_run_id.map_or_else(
+        || normalized_args.to_vec(),
+        |replay_run_id| {
+            let mut args = normalized_args.to_vec();
+            let mut index = 0;
+            while index < args.len() {
+                if args[index] == "--run-id" {
+                    if args.get(index + 1).is_some_and(|value| value == request_id) {
+                        args[index + 1] = replay_run_id.to_string();
+                    }
+                    break;
+                }
+                if args[index].starts_with("--run-id=") {
+                    if args[index] == format!("--run-id={request_id}") {
+                        args[index] = format!("--run-id={replay_run_id}");
+                    }
+                    break;
+                }
+                index += 1;
+            }
+            args
+        },
+    );
+    let mut replay_command = homeboy::core::engine::shell::quote_args(&replay_args);
+    let mut replay_ready = true;
+    if let Some(prompt) = stdin_prompt_snapshot {
+        match persist_cook_stdin_replay_prompt(data_root, request_id, prompt) {
+            Ok(prompt_path) => {
+                replay_command.push_str(" < ");
+                replay_command.push_str(&homeboy::core::engine::shell::quote_args(&[prompt_path
+                    .display()
+                    .to_string()]));
+            }
+            Err(snapshot_error) => {
+                error.details["stdin_replay_snapshot_error"] =
+                    serde_json::json!(snapshot_error.message);
+                error.details["stdin_replay_required"] = serde_json::json!(true);
+                replay_ready = false;
+            }
+        }
+    }
+    if replay_ready {
+        if let Some(previous_retry) = error.details["retry_command"].as_str() {
+            error.message = error.message.replace(previous_retry, &replay_command);
+        }
+        error.details["retry_command"] = serde_json::json!(replay_command);
+        error.details["next_actions"] = serde_json::json!([replay_command]);
+    } else {
+        if let Some(details) = error.details.as_object_mut() {
+            let _ = details.remove("retry_command");
+        }
+        error.details["next_actions"] = serde_json::json!([]);
+    }
+    error.hints.retain(|hint| {
+        !hint.message.contains("agent-task retry") || !hint.message.contains("--run")
+    });
+    error.details["replay_command_kind"] = serde_json::json!("original_cook_invocation");
+    error.details["source_run_id"] = serde_json::json!(request_id);
+    if let Some(replay_run_id) = replay_run_id {
+        error.details["replay_run_id"] = serde_json::json!(replay_run_id);
+    }
+    if replay_ready {
+        error.with_hint(
+            "Replay the original Cook invocation shown in next_actions after the controller admission blocker clears. It creates a fresh Cook ID and preserves the failed pre-seal ID for status inspection.",
+        )
+    } else {
+        error.with_hint(
+            "The original prompt was captured but its private replay snapshot could not be saved; resubmit the original Cook with its prompt input after resolving the controller admission blocker.",
+        )
+    }
 }
 
 /// Durable lifecycle mutations remain owned by the runtime that admitted the
@@ -5306,7 +5717,7 @@ mod tests {
             let before = std::fs::read_dir(home).expect("read isolated home").count();
 
             assert_eq!(
-                delegate_agent_task_cook_to_pinned_runtime(&cli, &args)
+                delegate_agent_task_cook_to_pinned_runtime(&cli, &args, None)
                     .expect("preview bypasses runtime sealing"),
                 None
             );
@@ -5315,6 +5726,174 @@ mod tests {
                 before,
                 "preview must not create controller runtime state before runner routing"
             );
+        });
+    }
+
+    #[test]
+    fn cook_startup_admission_projects_existing_checkout_before_runtime_seal() {
+        crate::test_support::with_isolated_home(|home| {
+            let repository = home.path().join("repository");
+            let checkout = home.path().join("repository@candidate");
+            std::fs::create_dir_all(&repository).unwrap();
+            let git = |args: &[&str]| {
+                let result = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&repository)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            };
+            git(&["init", "-b", "main"]);
+            git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.org",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ]);
+            git(&[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/repository.git",
+            ]);
+            git(&[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                checkout.to_str().unwrap(),
+            ]);
+            std::env::set_var("HOMEBOY_CALLER_CONTEXT", "existing-checkout-caller");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            let mut normalized = vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--repo",
+                "fixture/repository",
+                "--to-worktree",
+                checkout.to_str().unwrap(),
+                "--run-id",
+                "existing-checkout-admission",
+                "--prompt",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let mut cli = Cli::parse_from(&normalized);
+            let mut primary_argv = normalized.clone();
+            let destination = primary_argv
+                .iter()
+                .position(|arg| arg == "--to-worktree")
+                .unwrap()
+                + 1;
+            primary_argv[destination] = repository.to_str().unwrap().to_string();
+            let mut primary_cli = Cli::parse_from(&primary_argv);
+            assert!(CookStartupAdmission::establish(&mut primary_cli, &mut primary_argv).is_err());
+            assert!(
+                !homeboy::core::paths::observation_db().unwrap().exists(),
+                "unverified checkout must not create a caller owner"
+            );
+            let admission = CookStartupAdmission::establish(&mut cli, &mut normalized)
+                .unwrap()
+                .expect("durable admission");
+            let observation = homeboy::core::observation::ObservationStore::open_readonly_at(
+                homeboy::core::paths::observation_db().unwrap(),
+            )
+            .unwrap();
+            let scope = observation
+                .active_task_scope("existing-checkout-caller")
+                .unwrap();
+            assert_eq!(scope["pending_run_ids"], serde_json::json!([]));
+            assert_eq!(
+                scope["workspaces"][0]["working_directory"],
+                serde_json::json!(checkout.canonicalize().unwrap())
+            );
+            assert_eq!(
+                scope["workspaces"][0]["run_ids"][0],
+                "existing-checkout-admission"
+            );
+            let record = admission
+                .store
+                .read_record_bounded(&admission.cook_id)
+                .unwrap();
+            assert_eq!(
+                record.metadata["cook_progress"]["phase"],
+                "controller_runtime_seal"
+            );
+            assert!(record.metadata["provider_run_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            drop(admission);
+            assert_eq!(
+                observation
+                    .active_task_scope("existing-checkout-caller")
+                    .unwrap()["workspaces"],
+                serde_json::json!([])
+            );
+            std::env::remove_var("HOMEBOY_CALLER_CONTEXT");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+        });
+    }
+
+    #[test]
+    fn cook_startup_unmaterialized_destination_retains_pending_ownership() {
+        crate::test_support::with_isolated_home(|home| {
+            std::env::set_var("HOMEBOY_CALLER_CONTEXT", "unmaterialized-checkout-caller");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
+            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            let destination = home.path().join("repository@unmaterialized");
+            let mut normalized = vec![
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--repo",
+                "repository",
+                "--to-worktree",
+                destination.to_str().unwrap(),
+                "--run-id",
+                "unmaterialized-checkout-admission",
+                "--prompt",
+                "fixture",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let mut cli = Cli::parse_from(&normalized);
+            let admission = CookStartupAdmission::establish(&mut cli, &mut normalized)
+                .unwrap()
+                .unwrap();
+            let observation = homeboy::core::observation::ObservationStore::open_readonly_at(
+                homeboy::core::paths::observation_db().unwrap(),
+            )
+            .unwrap();
+            let scope = observation
+                .active_task_scope("unmaterialized-checkout-caller")
+                .unwrap();
+            assert_eq!(scope["workspaces"], serde_json::json!([]));
+            assert_eq!(
+                scope["pending_run_ids"],
+                serde_json::json!(["unmaterialized-checkout-admission"])
+            );
+            assert!(!destination.exists());
+            drop(admission);
+            std::env::remove_var("HOMEBOY_CALLER_CONTEXT");
+            std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
         });
     }
 

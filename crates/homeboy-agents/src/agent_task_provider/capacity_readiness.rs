@@ -348,6 +348,7 @@ mod tests {
             cache_key: "test".to_string(),
             identity: Value::Null,
             capacity,
+            durable_identity: None,
         }
     }
 

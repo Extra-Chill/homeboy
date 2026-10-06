@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.407.1"
+version = "0.412.0"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -97,6 +97,7 @@ homeboy-extension-contract = { version = "0.1.0", path = "crates/contracts/homeb
 # Parses `.github/workflows/*.yml` in trigger-semantics tests; version mirrors
 # homeboy-core's production edge to keep a single yaml implementation in the lock.
 serde_yml = "0.0.12"
+shlex = "1.3"
 
 [features]
 default = []

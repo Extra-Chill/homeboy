@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.407.1"
+version = "0.412.0"
 dependencies = [
  "base64",
  "chrono",
@@ -732,6 +732,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "serde_yml",
+ "shlex",
  "tempfile",
  "uuid",
 ]
@@ -1043,7 +1044,6 @@ dependencies = [
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
  "homeboy-refactor-contract",
- "homeboy-serde-pin",
  "semver",
  "serde",
  "serde_json",
@@ -1305,7 +1305,6 @@ version = "0.1.0"
 dependencies = [
  "homeboy-error",
  "homeboy-redaction",
- "homeboy-serde-pin",
  "homeboy-source-snapshot-contract",
  "serde",
  "serde_json",

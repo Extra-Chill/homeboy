@@ -2726,6 +2726,14 @@ pub struct ProviderReadinessInvocationResult {
     /// that is not evidence of unavailability, only silence (#14858).
     #[serde(default)]
     pub capacity: Option<ProviderReadinessInvocationCapacity>,
+    #[serde(skip)]
+    pub(crate) durable_identity: Option<DurableProviderReadinessIdentity>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DurableProviderReadinessIdentity {
+    pub cache_key_sha256: Option<String>,
+    pub identity_sha256: Option<String>,
 }
 
 /// Provider-declared capacity for the connected account/route the readiness
@@ -2813,6 +2821,7 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
             cache_key: String::new(),
             identity: Value::Null,
             capacity: None,
+            durable_identity: None,
         });
     };
     run_provider_readiness_invocation_with_timeout(

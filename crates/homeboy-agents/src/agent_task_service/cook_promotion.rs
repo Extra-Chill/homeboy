@@ -6248,6 +6248,8 @@ fn cook_ai_lineage_with_stores(
                 attempt,
                 run_id: successful_run_id.to_string(),
                 plan: agent_task_lifecycle::load_plan_in_store(lifecycle_store, successful_run_id)?,
+                // In-memory only: orders the lineage chain, never persisted.
+                lineage: None,
             });
             attempts.len() - 1
         }
@@ -6382,8 +6384,15 @@ fn retry_descends_from_recipe(
             ));
         }
         // Both retries and remediations are lineage edges (#15567).
-        let Some(parent) = super::cook_lineage::lineage_parent_in_store(lifecycle_store, &current)?
-        else {
+        let parent = match attempts.iter().find(|attempt| attempt.run_id == current) {
+            Some(attempt) => {
+                super::cook_lineage::recipe_attempt_lineage(attempt).map(|edge| edge.source_run_id)
+            }
+            None => {
+                super::cook_lineage::lifecycle_retry_parent_in_store(lifecycle_store, &current)?
+            }
+        };
+        let Some(parent) = parent else {
             return Ok(false);
         };
         if recipe_runs.contains(parent.as_str()) {

@@ -133,6 +133,9 @@ pub(crate) use stop_transport_recovery::{
     disconnect_with_session, disconnect_with_session_in_roots, recorded_session,
 };
 
+#[path = "connection_dead_lease_attestation.rs"]
+mod dead_lease_attestation;
+
 use super::daemon_http_get::daemon_get;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -387,6 +390,29 @@ pub fn connect_in_roots(
     )
 }
 
+/// Start command for a rotation candidate generation.
+///
+/// The candidate becomes the admission generation once promoted, so it must be
+/// resident like the one `runner connect` starts. Otherwise it idles out under
+/// the automatic 300s window and strands the connected session (#15585,
+/// #15610). Superseded generations still drain under the bounded default.
+fn candidate_daemon_start_command(state_dir: &str, candidate_homeboy: &str) -> String {
+    format!(
+        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} daemon ensure-running --addr 127.0.0.1:0",
+        homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
+        shell::quote_arg(candidate_homeboy),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn candidate_daemon_start_command_launches_a_resident_generation() {
+    assert_eq!(
+        candidate_daemon_start_command("$HOME/state/gen1", "/opt/homeboy"),
+        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/state/gen1\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --addr 127.0.0.1:0"
+    );
+}
+
 /// Start and validate a second daemon without touching the recorded admission
 /// daemon. Its state directory is generation-scoped while HOME and the normal
 /// runtime configuration remain shared, preserving runner credentials.
@@ -435,10 +461,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
     let state_dir = format!(
         "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
     );
-    let command = format!(
-        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(candidate_homeboy),
-    );
+    let command = candidate_daemon_start_command(&state_dir, candidate_homeboy);
     let output = client.execute_with_timeout(&command, REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !output.success {
         return Err(Error::validation_invalid_argument(
@@ -2275,8 +2298,8 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
-    let state = status_session_state_until(session.as_ref(), deadline);
+    let (session, state) =
+        read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
         stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;
@@ -2491,8 +2514,53 @@ pub struct RunnerReconcileStatusOutcome {
     pub retained_evidence_generation_count: usize,
 }
 
-/// Return the persisted controller-side session projection without reconnecting,
-/// probing a daemon, or reconciling generation state.
+/// The result of a reconcile that was allowed to apply the operator-attested
+/// remote dead-lease recovery: the post-attestation reconcile outcome plus the
+/// exact remote recovery that ran, if one did.
+#[derive(Debug)]
+pub struct RunnerReconcileWithAttestationOutcome {
+    pub outcome: RunnerReconcileStatusOutcome,
+    pub attested: Option<dead_lease_attestation::RemoteAttestedReconcileApplied>,
+}
+
+/// Reconcile a runner, and when that reconcile is blocked by a remote
+/// generation whose daemon PID is dead and whose active jobs lack automatic
+/// proof, apply the operator-attested remote dead-lease recovery
+/// (`daemon reconcile-dead-lease-orphans` on the runner, bound to that exact
+/// generation), then re-run the reconcile (#15556).
+///
+/// Without the blocker this is exactly [`reconcile_status_with_outcome`]. A
+/// refusal from the runner side — a live daemon PID, a live child, or a changed
+/// job set — is surfaced verbatim and nothing is retried.
+pub fn reconcile_status_with_outcome_with_remote_attestation(
+    runner_id: &str,
+) -> Result<RunnerReconcileWithAttestationOutcome> {
+    let first = reconcile_status_with_outcome(runner_id)?;
+    // Two blocked states can come from a dead generation whose jobs have no
+    // automatic proof: the admission daemon itself lacks ownership evidence,
+    // or a draining generation cannot retire (the Lab inventory incident,
+    // chaos case 8). Anything else has nothing to attest.
+    let blocked = dead_lease_attestation::blocked_by_daemon_ownership_evidence(&first.status)
+        || !first.retirement_blockers.is_empty();
+    if !blocked {
+        return Ok(RunnerReconcileWithAttestationOutcome {
+            outcome: first,
+            attested: None,
+        });
+    }
+    let attested = dead_lease_attestation::run_attested_dead_lease_reconcile(runner_id)?;
+    // The fresh observation is the authoritative postcondition: the attested
+    // recovery terminalized the exact job set, so the same reconcile that was
+    // blocked now reports the recovered state.
+    let outcome = reconcile_status_with_outcome(runner_id)?;
+    Ok(RunnerReconcileWithAttestationOutcome {
+        outcome,
+        attested: Some(attested),
+    })
+}
+
+/// Return the controller-side session projection with bounded liveness
+/// observation, without reconnecting or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
     persisted_status_until(
         runner_id,
@@ -2508,8 +2576,7 @@ pub fn persisted_status_until(
     deadline: std::time::Instant,
 ) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_for_status_until(runner_id, deadline)?;
-    let state = status_session_state_until(session.as_ref(), deadline);
+    let (session, state) = read_session_for_status_until(runner_id, deadline)?;
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -4513,8 +4580,8 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let session = read_session_for_status(&runner.id)?;
-        let connected = status_session_state(session.as_ref()) == RunnerSessionState::Connected;
+        let (session, state) = read_session_for_status(&runner.id)?;
+        let connected = state == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {

@@ -85,14 +85,56 @@ impl BenchGateOp {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod tests {
     use super::*;
 
     #[test]
-    fn bench_gate_op_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [BenchGateOp::Eq, BenchGateOp::Gte, BenchGateOp::Lte]
-        );
+    fn gate_results_and_diagnostics_use_fixed_operator_labels() {
+        for (op, label, failing_actual, passing_actual, reason) in [
+            (
+                BenchGateOp::Eq,
+                "eq",
+                0.0,
+                1.0,
+                "scenario `candidate` gate failed: rate eq 1 (actual 0)",
+            ),
+            (
+                BenchGateOp::Gte,
+                "gte",
+                0.0,
+                2.0,
+                "scenario `candidate` gate failed: rate gte 1 (actual 0)",
+            ),
+            (
+                BenchGateOp::Lte,
+                "lte",
+                2.0,
+                0.0,
+                "scenario `candidate` gate failed: rate lte 1 (actual 2)",
+            ),
+        ] {
+            let gate: BenchGate = serde_json::from_value(serde_json::json!({
+                "metric": "rate", "op": label, "value": 1.0
+            }))
+            .unwrap();
+            assert_eq!(gate.op, op);
+
+            for (actual, passed) in [(failing_actual, false), (passing_actual, true)] {
+                let metrics: BenchMetrics =
+                    serde_json::from_value(serde_json::json!({ "rate": actual })).unwrap();
+                let result = serde_json::to_value(gate.evaluate("candidate", &metrics)).unwrap();
+                let mut expected = serde_json::json!({
+                    "metric": "rate",
+                    "op": label,
+                    "expected": 1.0,
+                    "actual": actual,
+                    "passed": passed
+                });
+                if !passed {
+                    expected["reason"] = serde_json::json!(reason);
+                }
+                assert_eq!(result, expected);
+            }
+        }
     }
 }

@@ -37,7 +37,7 @@
 //! Spawning it here preserves the operator's environment exactly, which is why
 //! the daemon supervises a child it did not create.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -66,7 +66,6 @@ const CHILD_DIAGNOSTIC_TEXT_CHARS: usize = 2_048;
 
 /// Test and operator override for the bounded handoff wait.
 const HANDOFF_TIMEOUT_ENV: &str = "HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS";
-const LOCAL_COOK_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH";
 const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID";
 // Hermetic E2E control: keep the launcher observable after ownership was
@@ -94,7 +93,8 @@ struct DetachedCookAdmission {
 impl DetachedCookAdmission {
     fn establish(cook_id: &str) -> homeboy::core::Result<Self> {
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        let launcher_id = uuid::Uuid::new_v4().to_string();
+        let launcher_id = std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV)
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
             &store,
             cook_id,
@@ -324,19 +324,26 @@ pub(super) fn intercept_local_cook_retry(
         None => {
             let route = detached_route(cli);
             let child_args = retry_child_args(normalized_args, &run_id);
-            let mut child =
-                match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token) {
-                    Ok(child) => child,
-                    Err(error) => {
-                        record_retry_launcher_failure(
-                            &lifecycle_store,
-                            &run_id,
-                            &plan,
-                            "local Cook retry could not be spawned",
-                        );
-                        return Err(error);
-                    }
-                };
+            let startup_launcher_id =
+                std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV).ok();
+            let mut child = match spawn_detached_cook(
+                &child_args,
+                &log_path,
+                route.as_ref(),
+                &launch_token,
+                startup_launcher_id.as_deref(),
+            ) {
+                Ok(child) => child,
+                Err(error) => {
+                    record_retry_launcher_failure(
+                        &lifecycle_store,
+                        &run_id,
+                        &plan,
+                        "local Cook retry could not be spawned",
+                    );
+                    return Err(error);
+                }
+            };
             let pid = child.id();
             let start_identity = match detached_child_start_identity(pid) {
                 Ok(identity) => identity,
@@ -619,21 +626,21 @@ fn local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> 
 
 fn consume_local_cook_launch_token() -> bool {
     let (Some(token), Some(path)) = (
-        std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV),
+        std::env::var_os(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV),
         std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV),
     ) else {
         return false;
     };
     let consumed = consume_local_cook_launch_token_at(&token, &PathBuf::from(path));
     if consumed {
-        std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_ENV);
+        std::env::remove_var(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
         std::env::remove_var(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV);
     }
     consumed
 }
 
 fn local_cook_launch_token_is_present() -> bool {
-    std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_ENV).is_some()
+    std::env::var_os(crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV).is_some()
         && std::env::var_os(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV).is_some()
 }
 
@@ -772,7 +779,22 @@ pub(super) fn intercept_local_detached_cook(
     // A detached child cannot answer a `--prompt -`: its stdin is closed and the
     // bytes live only in the launcher's pipe. Capture them here so the exact
     // prompt survives the handoff instead of the cook stalling on an empty read.
-    materialize_stdin_prompt(&mut child_args, &session_root)?;
+    let stdin_prompt_snapshot = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
+                .prompt_snapshot
+                .as_ref()
+                .filter(|snapshot| snapshot.source == "stdin")
+                .map(|snapshot| snapshot.content.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(prompt) = stdin_prompt_snapshot {
+        materialize_stdin_prompt_content(&mut child_args, &session_root, prompt)?;
+    } else {
+        materialize_stdin_prompt(&mut child_args, &session_root)?;
+    }
     let log_path = session_root.join("cook.log");
 
     // This is still before the first durable Cook write, but the validated
@@ -807,8 +829,13 @@ pub(super) fn intercept_local_detached_cook(
     // Keep the token unpublished while the child starts. The child blocks in
     // this interceptor and therefore cannot persist a run before its daemon job.
     let launch_token = new_local_cook_launch_token(&session_root);
-    let mut child = match spawn_detached_cook(&child_args, &log_path, route.as_ref(), &launch_token)
-    {
+    let mut child = match spawn_detached_cook(
+        &child_args,
+        &log_path,
+        route.as_ref(),
+        &launch_token,
+        Some(&admission.launcher_id),
+    ) {
         Ok(child) => child,
         Err(error) => return Err(error),
     };
@@ -1128,9 +1155,9 @@ fn materialize_stdin_prompt(
     args: &mut [String],
     session_root: &Path,
 ) -> homeboy::core::Result<Option<PathBuf>> {
-    let Some(index) = stdin_prompt_index(args) else {
+    if stdin_prompt_index(args).is_none() {
         return Ok(None);
-    };
+    }
     let prompt =
         homeboy::agents::agent_task_prompts::read_prompt_input_bounded("-", handoff_timeout())?;
     if prompt.is_empty() {
@@ -1141,9 +1168,53 @@ fn materialize_stdin_prompt(
             None,
         ));
     }
+    materialize_stdin_prompt_content(args, session_root, &prompt)
+}
+
+fn materialize_stdin_prompt_content(
+    args: &mut [String],
+    session_root: &Path,
+    prompt: &str,
+) -> homeboy::core::Result<Option<PathBuf>> {
+    let Some(index) = stdin_prompt_index(args) else {
+        return Ok(None);
+    };
+    if prompt.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook --prompt - received empty stdin",
+            None,
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(session_root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| Error::internal_io(error.to_string(), Some(session_root.display().to_string())),
+        )?;
+    }
     let path = session_root.join("prompt.txt");
-    std::fs::write(&path, prompt)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    file.write_all(prompt.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| Error::internal_io(error.to_string(), Some(path.display().to_string())),
+        )?;
+    }
     args[index] = if args[index] == "-" {
         format!("@{}", path.display())
     } else {
@@ -1283,6 +1354,7 @@ fn spawn_detached_cook(
     log_path: &Path,
     route: Option<&homeboy::core::notification_route::NotificationRoute>,
     launch_token: &(String, PathBuf),
+    startup_launcher_id: Option<&str>,
 ) -> homeboy::core::Result<std::process::Child> {
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
@@ -1300,12 +1372,21 @@ fn spawn_detached_cook(
     let mut command = Command::new(exe);
     command
         .args(args)
-        .env(LOCAL_COOK_LAUNCH_TOKEN_ENV, &launch_token.0)
+        .env(
+            crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV,
+            &launch_token.0,
+        )
         .env(LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV, &launch_token.1)
         .envs(homeboy::core::notification_route::child_env(route))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
+    if let Some(launcher_id) = startup_launcher_id {
+        command.env(
+            crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV,
+            launcher_id,
+        );
+    }
     homeboy::core::process::detach_from_caller_session(&mut command);
     command.spawn().map_err(|error| {
         Error::internal_io(
@@ -1936,7 +2017,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary token directory");
         let (token, path) = create_local_cook_launch_token(directory.path()).expect("launch token");
         let _env = super::super::tests::EnvGuard::set_many(&[
-            (LOCAL_COOK_LAUNCH_TOKEN_ENV, Some(token.as_str())),
+            (
+                crate::cli_runtime::COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV,
+                Some(token.as_str()),
+            ),
             (
                 LOCAL_COOK_LAUNCH_TOKEN_PATH_ENV,
                 Some(path.to_str().expect("UTF-8 token path")),
@@ -2893,7 +2977,7 @@ mod tests {
                 "test-token".to_string(),
                 directory.path().join("launch-token"),
             );
-            assert!(spawn_detached_cook(&[], directory.path(), None, &token).is_err());
+            assert!(spawn_detached_cook(&[], directory.path(), None, &token, None).is_err());
             agent_task_lifecycle::fail_detached_cook_handoff_parent(
                 cook_id,
                 "detached Cook could not be spawned",

@@ -134,6 +134,11 @@ Stage payloads preserve the same structured data as invoking the stage directly:
 - `data.test.output`: `TestCommandOutput`, including test counts, failures, drift,
   and coverage fields when those modes are active.
 
+Persisted lint baselines use `lint:<population-digest>` keys. The population
+includes files, tools, scope and filters; `--baseline` saves the current key.
+Unscoped `lint` records are ignored. Lint baseline resolution is `unavailable`,
+`scoped` or `git_base`; changed-since comparisons continue to measure the Git base.
+
 ## Pre-result runner failures
 
 Lint and test extension runners also write structured fallback sidecars when the

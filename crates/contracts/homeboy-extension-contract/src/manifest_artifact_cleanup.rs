@@ -148,11 +148,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_assets_are_never_reconstructable() {
-        assert!(ArtifactCleanupCategory::Dependencies.is_reconstructable());
-        assert!(ArtifactCleanupCategory::BuildOutput.is_reconstructable());
-        assert!(ArtifactCleanupCategory::BuildCache.is_reconstructable());
-        assert!(!ArtifactCleanupCategory::ReleaseAsset.is_reconstructable());
+    fn category_wire_labels_and_reconstruction_eligibility_are_explicit() {
+        for (category, label, reconstructable) in [
+            (ArtifactCleanupCategory::Dependencies, "dependencies", true),
+            (ArtifactCleanupCategory::BuildOutput, "build_output", true),
+            (ArtifactCleanupCategory::BuildCache, "build_cache", true),
+            (
+                ArtifactCleanupCategory::ReleaseAsset,
+                "release_asset",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                category.is_reconstructable(),
+                reconstructable,
+                "eligibility for {label}"
+            );
+            assert_eq!(category.as_str(), label);
+            assert_eq!(
+                serde_json::to_value(category).expect("serialize category"),
+                label
+            );
+        }
     }
 
     #[test]
@@ -217,7 +234,8 @@ mod tests {
             ]
         });
 
-        let parsed: ArtifactCleanupConfig = serde_json::from_value(raw).expect("config parses");
+        let parsed: ArtifactCleanupConfig =
+            serde_json::from_value(raw.clone()).expect("config parses");
 
         assert_eq!(parsed.declarations.len(), 2);
         assert_eq!(
@@ -228,6 +246,10 @@ mod tests {
         assert_eq!(parsed.declarations[0].min_age_days, Some(7));
         assert!(!parsed.declarations[1].category.is_reconstructable());
         assert!(parsed.declarations[1].scopes.is_empty());
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("config serializes"),
+            raw
+        );
     }
 
     #[test]
@@ -239,23 +261,5 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<ArtifactCleanupConfig>(raw).is_err());
-    }
-}
-
-#[cfg(test)]
-mod serde_label_pins {
-    use super::*;
-
-    #[test]
-    fn artifact_cleanup_category_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                ArtifactCleanupCategory::Dependencies,
-                ArtifactCleanupCategory::BuildOutput,
-                ArtifactCleanupCategory::BuildCache,
-                ArtifactCleanupCategory::ReleaseAsset,
-            ]
-        );
     }
 }

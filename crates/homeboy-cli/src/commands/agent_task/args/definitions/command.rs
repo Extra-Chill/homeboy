@@ -46,6 +46,13 @@ pub struct AgentTaskArgs {
     pub command: AgentTaskCommand,
 }
 
+#[derive(Args, Debug)]
+pub struct ActiveScopeArgs {
+    /// Opaque caller reference whose active checkout ownership should be read.
+    #[arg(long)]
+    pub context: String,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
     /// Diagnose provider and runtime readiness on a runner, and optionally repair it.
@@ -119,6 +126,8 @@ pub enum AgentTaskCommand {
     /// search complete durable history and return the newest record matching the
     /// supplied list filters.
     List(ListArgs),
+    /// Read the indexed active checkout ownership for an opaque caller context.
+    ActiveScope(ActiveScopeArgs),
     /// List queued and running durable runs, newest first.
     ///
     /// `--reconcile` turns this into an explicit fleet operation: it previews

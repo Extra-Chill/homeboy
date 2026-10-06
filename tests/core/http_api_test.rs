@@ -2283,8 +2283,11 @@ fn run_artifacts_keeps_legacy_http_clients_exhaustive_and_pages_explicit_request
     });
 }
 
+/// GET is a read. Observation runs are reconciled by the daemon orchestration
+/// tick (`runs_service::reconcile_owned_stale_running_runs`), never as a side
+/// effect of listing them -- even a row the reconciler would settle.
 #[test]
-fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
+fn runs_list_leaves_old_ownerless_running_records_unchanged() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -2300,19 +2303,19 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
         })
         .expect("runs list");
 
-        assert!(response.body["runs"].as_array().expect("runs").is_empty());
+        let runs = response.body["runs"].as_array().expect("runs");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"], "legacy-ownerless-run");
+        assert_eq!(runs[0]["status"], RunStatus::Running.as_str());
         let stored = store
             .get_run("legacy-ownerless-run")
             .expect("get run")
             .expect("run exists");
-        assert_eq!(stored.status, "stale");
+        assert_eq!(stored.status, RunStatus::Running.as_str());
+        assert!(stored.finished_at.is_none());
         assert_eq!(
-            stored.metadata_json["homeboy_reconciled"]["reason"],
-            "owner_metadata_missing"
-        );
-        assert_eq!(
-            stored.metadata_json["homeboy_reconciled"]["source"],
-            "http_api_read_reconcile"
+            stored.metadata_json["homeboy_reconciled"],
+            serde_json::Value::Null
         );
     });
 }
@@ -2350,21 +2353,13 @@ fn runs_list_preserves_old_runner_backed_records_with_active_remote_status() {
 }
 
 #[test]
-fn show_run_reconciles_the_requested_old_row_beyond_the_fleet_read_limit() {
+fn show_run_leaves_an_old_dead_owner_running_row_unchanged() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
         let mut requested = sample_imported_running_run("review", "homeboy", "old-requested");
         requested.id = "0000-requested-old-run".to_string();
-        requested.metadata_json = serde_json::json!({ "source": "legacy-runner" });
         store.import_run(&requested).expect("import requested run");
-        for index in 0..1000 {
-            let mut run = sample_imported_running_run("review", "homeboy", "fleet-blocker");
-            run.id = format!("blocker-{index:04}");
-            run.metadata_json =
-                serde_json::json!({ "homeboy_run_owner": { "pid": std::process::id() } });
-            store.import_run(&run).expect("import fleet row");
-        }
 
         let response = http_api::handle(HttpApiRequest {
             method: HttpMethod::Get,
@@ -2373,14 +2368,20 @@ fn show_run_reconciles_the_requested_old_row_beyond_the_fleet_read_limit() {
         })
         .expect("show requested run");
 
-        assert_eq!(response.body["run"]["status"], RunStatus::Stale.as_str());
+        assert_eq!(response.body["run"]["status"], RunStatus::Running.as_str());
+        assert!(response.body["run"]["status_note"]
+            .as_str()
+            .expect("computed status note")
+            .contains("owner process is not running"));
+        let stored = store
+            .get_run(&requested.id)
+            .expect("read requested run")
+            .expect("requested run");
+        assert_eq!(stored.status, RunStatus::Running.as_str());
+        assert!(stored.finished_at.is_none());
         assert_eq!(
-            store
-                .get_run(&requested.id)
-                .expect("read requested run")
-                .expect("requested run")
-                .status,
-            RunStatus::Stale.as_str()
+            stored.metadata_json["homeboy_reconciled"],
+            serde_json::Value::Null
         );
     });
 }
@@ -2431,8 +2432,10 @@ fn runs_list_preserves_a_live_transferring_ownership_handoff() {
     });
 }
 
+/// An expired handoff is settled by the reconciler on its own cadence, not by
+/// a GET that happens to observe it.
 #[test]
-fn show_run_settles_an_expired_transferring_ownership_handoff() {
+fn show_run_leaves_an_expired_transferring_ownership_handoff_for_the_reconciler() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -2463,18 +2466,31 @@ fn show_run_settles_an_expired_transferring_ownership_handoff() {
             .expect("get run")
             .expect("run exists");
 
-        let error = "detached worker did not acknowledge ownership before the handoff deadline";
-        assert_eq!(response.body["run"]["status"], RunStatus::Error.as_str());
+        assert_eq!(response.body["run"]["status"], RunStatus::Running.as_str());
+        assert_eq!(stored.status, RunStatus::Running.as_str());
+        assert!(stored.finished_at.is_none());
         assert_eq!(
-            response.body["run"]["metadata"]["homeboy_ownership_handoff"]["state"],
-            "failed"
+            stored.metadata_json["homeboy_ownership_handoff"]["state"],
+            "transferring"
         );
-        assert_eq!(response.body["run"]["metadata"]["error"], error);
-        assert_eq!(stored.status, RunStatus::Error.as_str());
-        assert!(stored.finished_at.is_some());
-        assert_eq!(stored.metadata_json["error"], error);
+
+        let reconciled =
+            crate::observation::runs_service::reconcile_owned_stale_running_runs(&store, 1000)
+                .expect("reconcile");
+        let settled = store
+            .get_run(&run.id)
+            .expect("get run")
+            .expect("run exists");
+
+        assert!(reconciled.is_empty());
+        assert_eq!(settled.status, RunStatus::Error.as_str());
+        assert!(settled.finished_at.is_some());
         assert_eq!(
-            stored.metadata_json["homeboy_reconciled"],
+            settled.metadata_json["error"],
+            "detached worker did not acknowledge ownership before the handoff deadline"
+        );
+        assert_eq!(
+            settled.metadata_json["homeboy_reconciled"],
             serde_json::Value::Null
         );
     });

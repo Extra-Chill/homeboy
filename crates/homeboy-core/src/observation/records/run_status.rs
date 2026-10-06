@@ -112,6 +112,27 @@ impl RunStatus {
     pub fn defers_outcome_to_a_remote_run(self) -> bool {
         matches!(self, Self::HandedOff)
     }
+
+    /// The control-plane state of an observation run with this status. The
+    /// one mapping every projection reads: the control-plane run resource and
+    /// activity both derive from it, so a run cannot be terminal in one view
+    /// and open in another.
+    ///
+    /// `Stale` and `HandedOff` are terminal ([`Self::is_terminal`]); they used
+    /// to project as `Unknown`, which the control plane treats as still open,
+    /// so a handed-off run stayed an open resource nothing would ever close
+    /// (#11107). A handoff proves the dispatch succeeded; its remote outcome
+    /// is a separate run.
+    pub fn control_plane_state(self) -> homeboy_control_plane_contract::ControlPlaneRunState {
+        use homeboy_control_plane_contract::ControlPlaneRunState as State;
+        match self {
+            Self::Running => State::Running,
+            Self::Pass | Self::HandedOff => State::Succeeded,
+            Self::Fail | Self::Error => State::Failed,
+            Self::Skipped => State::Skipped,
+            Self::Stale => State::Stale,
+        }
+    }
 }
 
 /// Pins that each running-staleness threshold is defined exactly once, so the
@@ -123,6 +144,29 @@ mod run_staleness_guard_test;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_terminal_status_is_a_terminal_control_plane_state() {
+        for status in [
+            RunStatus::Running,
+            RunStatus::Pass,
+            RunStatus::Fail,
+            RunStatus::Error,
+            RunStatus::Skipped,
+            RunStatus::Stale,
+            RunStatus::HandedOff,
+        ] {
+            assert_eq!(
+                status.control_plane_state().is_terminal(),
+                status.is_terminal(),
+                "{status:?}: the control plane must agree with RunStatus on terminality"
+            );
+        }
+        assert_eq!(
+            RunStatus::HandedOff.control_plane_state(),
+            homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+        );
+    }
 
     /// The two thresholds are asserted **separately and never against each
     /// other**. They share a value today and are still two concepts: one

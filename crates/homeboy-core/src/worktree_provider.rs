@@ -158,6 +158,12 @@ pub enum WorktreeFinalizationLookup {
 /// validation, provisioning, and terminal finalization in one authority.
 pub struct NativeWorktreeProvider;
 
+fn missing_active_task(record: &worktree::WorkspaceRefRecord) -> bool {
+    matches!(record, worktree::WorkspaceRefRecord::Task(record)
+        if record.state == worktree::TaskWorktreeState::Active
+            && !Path::new(&record.worktree_path).exists())
+}
+
 impl NativeWorktreeProvider {
     pub fn resolve(&self, handle: &str) -> Result<Option<WorktreeOwnership>> {
         let Some(record) = worktree::resolve_workspace_ref_if_present(handle)? else {
@@ -167,6 +173,9 @@ impl NativeWorktreeProvider {
             return Err(handle_mismatch_error(record.handle(), handle));
         }
         if record.state() == &worktree::TaskWorktreeState::Removed {
+            return Ok(None);
+        }
+        if missing_active_task(&record) {
             return Ok(None);
         }
         let path = PathBuf::from(record.path());
@@ -309,6 +318,9 @@ impl NativeWorktreeProvider {
                 Some(reference.to_string()),
                 None,
             ));
+        }
+        if missing_active_task(&record) {
+            return Ok(None);
         }
         let path = PathBuf::from(record.path());
         if !path.is_dir() {
@@ -668,6 +680,9 @@ mod tests {
                     .expect("adopted finalization"),
                 WorktreeFinalizationLookup::Unsupported
             ));
+            std::fs::remove_dir(&path).expect("simulate missing adopted checkout");
+            assert!(NativeWorktreeProvider.resolve("fixture@adopted").is_err());
+            assert!(resolve_native_worktree_mutation_target("fixture@adopted").is_err());
         });
     }
 
@@ -799,6 +814,78 @@ mod tests {
                 .resolve("fixture@a?b")
                 .expect_err("colliding handle must not resolve another manifest");
             assert!(error.message.contains("does not match requested handle"));
+        });
+    }
+
+    #[test]
+    fn native_provider_restores_missing_worktree_with_its_original_commits_and_record() {
+        crate::test_support::with_isolated_home(|home| {
+            let (_root, source) = crate::test_support::shared_committed_git_repo_fixture("fixture");
+            crate::test_support::write_component_registration(home.path(), "fixture", &source);
+            let intent = WorktreeProvisionIntent {
+                handle: "fixture@fix-restore".to_string(),
+                repo: "fixture".to_string(),
+                base: "main".to_string(),
+                head: "fix/restore".to_string(),
+                task_url: Some("https://example.test/issues/15565".to_string()),
+            };
+            let lifecycle = WorktreeProvisionLifecycle {
+                purpose: "agent_task_cook".to_string(),
+                owner_run_ref: "restore-test".to_string(),
+                cleanup_policy: WorktreeCleanupPolicy::PreserveOnFailure,
+            };
+            let first = ensure_worktree_provision(&intent, &lifecycle).expect("initial provision");
+            let path = PathBuf::from(&first.destination.ownership.path);
+            std::fs::write(path.join("candidate.txt"), "retained commit\n")
+                .expect("candidate content");
+            crate::test_support::run_git_fixture_command(&path, &["add", "candidate.txt"]);
+            crate::test_support::run_git_fixture_command(
+                &path,
+                &["commit", "-q", "-m", "retained candidate"],
+            );
+            let head = crate::test_support::git_fixture_output(&path, &["rev-parse", "HEAD"]);
+            let Some(worktree::WorkspaceRefRecord::Task(record)) =
+                worktree::resolve_workspace_ref_if_present(&intent.handle)
+                    .expect("initial registry")
+            else {
+                panic!("registered task");
+            };
+            std::fs::remove_dir_all(&path).expect("simulate deleted checkout");
+
+            assert!(matches!(
+                plan_worktree_provision(&intent).expect("restoration plan"),
+                WorktreeProvisionPlan::Planned(_)
+            ));
+            assert!(!path.exists(), "planning remains read-only");
+            assert!(resolve_native_worktree_mutation_target(&intent.handle)
+                .expect("unmaterialized task lookup")
+                .is_none());
+            let restored = ensure_worktree_provision(&intent, &lifecycle).expect("restore task");
+            assert_eq!(restored.destination.ownership, first.destination.ownership);
+            assert_eq!(
+                crate::test_support::git_fixture_output(&path, &["rev-parse", "HEAD"]),
+                head
+            );
+            assert_eq!(
+                std::fs::read_to_string(path.join("candidate.txt")).expect("restored content"),
+                "retained commit\n"
+            );
+            let Some(worktree::WorkspaceRefRecord::Task(restored_record)) =
+                worktree::resolve_workspace_ref_if_present(&intent.handle)
+                    .expect("restored registry")
+            else {
+                panic!("restored task");
+            };
+            assert_eq!(
+                serde_json::to_value(restored_record).expect("restored record"),
+                serde_json::to_value(record).expect("initial record")
+            );
+            assert_eq!(
+                ensure_worktree_provision(&intent, &lifecycle)
+                    .expect("repeated provision")
+                    .action,
+                WorktreeProvisionAction::Admitted
+            );
         });
     }
 

@@ -245,9 +245,6 @@ pub struct ExtensionManifest {
 /// provide the same capability, an extension that composes all the others is
 /// resolved as the primary owner. See
 /// `homeboy_core::extension::resolve::disambiguate_capability_owner`.
-///
-/// Unknown keys are ignored rather than rejected, so manifests still carrying
-/// the retired `roles`/`optional`/`conflicts` metadata continue to load.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositionConfig {
     /// Extensions this one composes with. Used to resolve capability ownership.
@@ -836,7 +833,7 @@ mod composition_tests {
     use super::*;
 
     #[test]
-    fn deserializes_includes() {
+    fn composition_includes_round_trips_with_canonical_wire_shape() {
         let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": "wordpress",
             "version": "1.0.0",
@@ -846,29 +843,10 @@ mod composition_tests {
 
         let composition = manifest.composition.expect("composition present");
         assert_eq!(composition.includes, vec!["nodejs".to_string()]);
-    }
-
-    /// Manifests published before `roles`/`optional`/`conflicts` were retired
-    /// must still load — the keys are simply ignored rather than rejected.
-    #[test]
-    fn retired_composition_keys_are_tolerated() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "wordpress",
-            "version": "1.0.0",
-            "composition": {
-                "includes": ["nodejs"],
-                "optional": ["dependency-adapters/nodejs-package-managers"],
-                "roles": {
-                    "javascript": "nodejs",
-                    "project": ["wordpress-plugin", "wordpress-theme"]
-                },
-                "conflicts": []
-            }
-        }))
-        .expect("manifest with retired composition keys still deserializes");
-
-        let composition = manifest.composition.expect("composition present");
-        assert_eq!(composition.includes, vec!["nodejs".to_string()]);
+        assert_eq!(
+            serde_json::to_value(&composition).unwrap(),
+            serde_json::json!({ "includes": ["nodejs"] })
+        );
     }
 
     #[test]

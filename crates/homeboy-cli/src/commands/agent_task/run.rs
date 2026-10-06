@@ -3746,6 +3746,65 @@ mod preview_tests {
     }
 
     #[test]
+    fn cook_preview_and_provision_defer_restoration_of_a_missing_native_task_checkout() {
+        crate::test_support::with_isolated_home(|home| {
+            let (_root, source) =
+                homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::test_support::write_component_registration(
+                home.path(),
+                "fixture",
+                &source,
+            );
+            let created =
+                homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                    component_id: "fixture".to_string(),
+                    branch: "fix/restore".to_string(),
+                    from: Some("main".to_string()),
+                    task_url: Some("https://example.test/issues/15565".to_string()),
+                    run_id: None,
+                    cleanup_policy: None,
+                    require_handoff_freshness: false,
+                    source_path: None,
+                })
+                .expect("native task checkout");
+            let path = PathBuf::from(&created.record.worktree_path);
+            std::fs::remove_dir_all(&path).expect("simulate deleted checkout");
+            let args = cook(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://example.test/issues/15565",
+                "--head",
+                "fix/restore",
+                "--base",
+                "main",
+                "--to-worktree",
+                "fixture@fix-restore",
+                "--prompt",
+                "repair the task",
+                "--verify",
+                "true",
+                "--no-finalize",
+            ]);
+            let (preview, exit) = preview_cook(args.clone(), None).expect("restoration preview");
+            assert_eq!(exit, 0);
+            assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
+            let provision = provision_cook_destination(&args).expect("deferred restoration");
+            assert_eq!(provision["action"], "lookup_pending");
+            assert_eq!(provision["handle"], created.record.id);
+            assert!(!path.exists(), "restoration waits for durable admission");
+        });
+    }
+
+    #[test]
     fn read_only_evidence_projection_uses_the_controller_store() {
         crate::test_support::with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -4046,12 +4105,13 @@ where
                 None,
             ));
         }
-        let retry = agent_task_service::retry_with_provider_route_override(
+        let (_, retry) = reserve_retry_through_action(
             &record.run_id,
             None,
             false,
-            false,
-            route_override,
+            &route_override,
+            None,
+            uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
@@ -4111,7 +4171,14 @@ where
         ));
     }
     if let Some(timeout_ms) = args.review_form_timeout_ms.or(args.timeout_ms) {
-        let retry = agent_task_service::retry_with_timeout_override(&run_id, timeout_ms)?;
+        let (_, retry) = reserve_retry_through_action(
+            &run_id,
+            None,
+            false,
+            &Default::default(),
+            Some(timeout_ms),
+            uuid::Uuid::new_v4().to_string(),
+        )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
             return dispatch_queued_cook_retry(
@@ -4139,7 +4206,14 @@ where
         // Reserve its replacement through the retry owner rather than rerunning
         // the terminal record. The normal queue owner then dispatches the
         // successor, preserving append-only Cook lineage and budget.
-        let retry = agent_task_service::retry(&record.run_id, None, false, false)?;
+        let (_, retry) = reserve_retry_through_action(
+            &record.run_id,
+            None,
+            false,
+            &Default::default(),
+            None,
+            uuid::Uuid::new_v4().to_string(),
+        )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
@@ -6639,6 +6713,30 @@ fn cook_workspace_path(value: &str) -> homeboy::core::Result<Option<PathBuf>> {
     )
 }
 
+/// Publish an already materialized destination before runtime sealing. Reuse
+/// Cook's repository and linked-worktree validators; unresolved destinations
+/// remain pending until the normal provisioning owner materializes them.
+pub(crate) fn existing_cook_caller_workspace(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<Option<Value>> {
+    let Some(destination) = args.dispatch.cwd.as_deref().or(args.to_worktree.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(path) = cook_workspace_path(destination)? else {
+        return Ok(None);
+    };
+    let mut resolved = args.clone();
+    normalize_cook_repository_identity(&mut resolved)?;
+    validate_cook_destination_identity(&resolved, &path)?;
+    if let (Some(_), Some(handle)) = (&args.dispatch.cwd, &args.to_worktree) {
+        validate_cook_cwd_destination_identity(&path, handle)?;
+    }
+    Ok(Some(serde_json::json!({
+        "repository": resolved.dispatch.repo,
+        "working_directory": path,
+    })))
+}
+
 pub(crate) fn canonical_remote_identity(remote_url: &str) -> Option<String> {
     let remote_url = remote_url.trim();
     let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
@@ -7560,6 +7658,10 @@ fn run_preflight_cook_execution(
         // struct on, so foreground clients (TTY, machine log, `--output` file)
         // all describe a running provider with the same bounded sentence.
         let activity = event.activity_summary();
+        let phase_wait = format!(
+            "elapsed={}ms; wait_owner={}",
+            event.elapsed_ms, event.wait_owner
+        );
         let terminal_outcome =
             event
                 .terminal_success
@@ -7571,10 +7673,10 @@ fn run_preflight_cook_execution(
                     Some(event.cook_id),
                     Some(event.run_id),
                     terminal_outcome.or_else(|| {
-                        (event.phase == "heartbeat")
-                            .then_some(event.detail)
-                            .flatten()
+                        event
+                            .detail
                             .or(activity.as_deref())
+                            .or(Some(phase_wait.as_str()))
                     }),
                     event.terminal_retry_command,
                 )
@@ -10859,6 +10961,58 @@ fn reconstruct_local_cook_attempt_dispatcher(
     crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(recipe)
 }
 
+/// Reserve a retry successor through the control-plane Retry action: the one
+/// legal-action entry point with idempotent acknowledgement, eligibility and
+/// audit. `agent-task retry` and `cook-continue` both reserve through here, so
+/// a Cook continuation is no longer a side door around the action outbox.
+fn reserve_retry_through_action(
+    run_id: &str,
+    new_run_id: Option<String>,
+    force: bool,
+    route_override: &homeboy::agents::agent_task_service::CookProviderRouteOverride,
+    timeout_ms: Option<u64>,
+    idempotency_key: String,
+) -> homeboy::core::Result<(
+    homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
+    homeboy::agents::agent_task_action_result::RetryActionResult,
+)> {
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                run_id,
+                "retry",
+                &idempotency_key,
+            ),
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({
+                    "new_run_id": new_run_id,
+                    "force": force,
+                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
+                        "backend": route_override.backend,
+                        "selector": route_override.selector,
+                        "model": route_override.model,
+                        "allow_provider_rotation": route_override.allow_provider_rotation,
+                        "provider_rotations": route_override.provider_rotations,
+                    })),
+                    "timeout_ms": timeout_ms,
+                }),
+            },
+            confirmed: true,
+        },
+    )?;
+    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
+    Ok((acknowledgement, retry))
+}
+
 pub(super) fn retry_with<F>(
     args: RetryArgs,
     executor: SharedAgentTaskExecutor,
@@ -10887,39 +11041,14 @@ where
         .idempotency_key
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+    let (acknowledgement, retry) = reserve_retry_through_action(
         &args.run_id,
-        &homeboy_control_plane_contract::ControlPlaneActionRequest {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            effect_id: homeboy_control_plane_contract::action_effect_id(
-                "cli",
-                &args.run_id,
-                "retry",
-                &idempotency_key,
-            ),
-            idempotency_key,
-            actor: "homeboy-cli".to_string(),
-            expected_updated_at: None,
-            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
-                    .to_string(),
-                data: serde_json::json!({
-                    "new_run_id": args.new_run_id,
-                    "force": args.force,
-                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
-                        "backend": route_override.backend,
-                        "selector": route_override.selector,
-                        "model": route_override.model,
-                        "allow_provider_rotation": route_override.allow_provider_rotation,
-                        "provider_rotations": route_override.provider_rotations,
-                    })),
-                }),
-            },
-            confirmed: true,
-        },
+        args.new_run_id.clone(),
+        args.force,
+        &route_override,
+        None,
+        idempotency_key,
     )?;
-    let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
     // Reservation is acknowledged independently from execution. Only the call
     // that created the successor may dispatch it; a replayed acknowledgement
     // must be inspected or resumed through the durable lifecycle instead.

@@ -1,8 +1,13 @@
 use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::agent_task_scheduler::AgentTaskPlan;
@@ -10,8 +15,8 @@ use homeboy_core::{Error, Result};
 
 use super::command_runner::{
     run_provider_readiness_invocation_with_env_and_timeout,
-    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationResult,
-    PROVIDER_READINESS_CAPACITY_MODE,
+    validate_provider_immediate_failure_patterns, DurableProviderReadinessIdentity,
+    ProviderReadinessInvocationResult, PROVIDER_READINESS_CAPACITY_MODE,
 };
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
@@ -128,6 +133,403 @@ const PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL: Duration = Duration::from_secs(5)
 const PROVIDER_RUNTIME_READINESS_ERROR_TTL: Duration = Duration::from_secs(2);
 const PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS: usize = 2;
 const MAX_CONCURRENT_PROVIDER_READINESS_PROBES: usize = 4;
+const DURABLE_FANOUT_READINESS_DIR: &str = "runtime/provider-readiness/v1";
+const DURABLE_FANOUT_READINESS_LOCK_SHARDS: u8 = 64;
+const MAX_DURABLE_FANOUT_READINESS_ENTRIES: usize = 128;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DurableFanoutReadinessEntry {
+    schema: String,
+    request_identity: String,
+    checked_at_unix_ms: u64,
+    ready: bool,
+    cache_key_sha256: Option<String>,
+    identity_sha256: Option<String>,
+}
+
+fn durable_fanout_readiness_paths(request_key: &str) -> Option<(PathBuf, PathBuf)> {
+    let root = homeboy_core::paths::homeboy_data().ok()?;
+    let directory = root.join(DURABLE_FANOUT_READINESS_DIR);
+    let name = content_hash::sha256_hex(request_key.as_bytes());
+    let shard = u8::from_str_radix(&name[..2], 16).unwrap_or_default()
+        % DURABLE_FANOUT_READINESS_LOCK_SHARDS;
+    Some((
+        directory.join(format!("{name}.json")),
+        directory.join(format!("{shard:02x}.lock")),
+    ))
+}
+
+fn read_durable_fanout_readiness(
+    path: &std::path::Path,
+    request_key: &str,
+) -> Option<ProviderReadinessInvocationResult> {
+    let entry: DurableFanoutReadinessEntry =
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if entry.schema != "homeboy/provider-readiness-cache/v1"
+        || entry.request_identity != request_key
+        || entry.checked_at_unix_ms > now
+        || now.saturating_sub(entry.checked_at_unix_ms)
+            > PROVIDER_RUNTIME_READINESS_READY_TTL.as_millis() as u64
+        || !entry.ready
+    {
+        return None;
+    }
+    Some(ProviderReadinessInvocationResult {
+        ready: true,
+        classification: "ready".to_string(),
+        retryable: false,
+        remediation: String::new(),
+        reason: String::new(),
+        cache_key: String::new(),
+        identity: Value::Null,
+        capacity: None,
+        durable_identity: Some(DurableProviderReadinessIdentity {
+            cache_key_sha256: entry.cache_key_sha256,
+            identity_sha256: entry.identity_sha256,
+        }),
+    })
+}
+
+fn write_durable_fanout_readiness(
+    path: &std::path::Path,
+    request_key: &str,
+    result: &ProviderReadinessInvocationResult,
+) {
+    if !result.ready || result.capacity.is_some() || result.classification == "capacity" {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Ok(checked_at_unix_ms) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    let cache_key_sha256 = (!result.cache_key.is_empty())
+        .then(|| content_hash::sha256_hex(result.cache_key.as_bytes()));
+    let identity_sha256 = (!result.identity.is_null()).then(|| {
+        let identity = serde_json::to_vec(&result.identity).unwrap_or_default();
+        content_hash::sha256_hex(&identity)
+    });
+    let Ok(contents) = serde_json::to_vec(&DurableFanoutReadinessEntry {
+        schema: "homeboy/provider-readiness-cache/v1".to_string(),
+        request_identity: request_key.to_string(),
+        checked_at_unix_ms: checked_at_unix_ms.as_millis() as u64,
+        ready: true,
+        cache_key_sha256,
+        identity_sha256,
+    }) else {
+        return;
+    };
+    let _ = homeboy_core::io::write_output_file_atomically(
+        path,
+        contents,
+        homeboy_core::io::OutputWriteOptions::artifact(),
+    );
+    #[cfg(unix)]
+    if let Ok(metadata) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(metadata.permissions().mode() & 0o600),
+        );
+    }
+    if let Some(parent) = path.parent() {
+        prune_durable_fanout_readiness(parent, path);
+    }
+}
+
+fn prune_durable_fanout_readiness(directory: &std::path::Path, current: &std::path::Path) {
+    let index_lock = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(directory.join("index.lock"))
+    {
+        Ok(lock) => lock,
+        Err(_) => return,
+    };
+    if !matches!(index_lock.try_lock_exclusive(), Ok(true)) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            directory.join("index.lock"),
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64);
+    let mut entries = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            let raw = std::fs::read(&path).ok()?;
+            let parsed: DurableFanoutReadinessEntry = serde_json::from_slice(&raw).ok()?;
+            let fresh = now.is_some_and(|now| {
+                parsed.checked_at_unix_ms <= now
+                    && now.saturating_sub(parsed.checked_at_unix_ms)
+                        <= PROVIDER_RUNTIME_READINESS_READY_TTL.as_millis() as u64
+            });
+            if parsed.schema != "homeboy/provider-readiness-cache/v1" || !parsed.ready || !fresh {
+                let _ = std::fs::remove_file(path);
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            Some((path, modified))
+        })
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_DURABLE_FANOUT_READINESS_ENTRIES {
+        entries.sort_by_key(|(_, modified)| *modified);
+        let remove_count = entries.len() - MAX_DURABLE_FANOUT_READINESS_ENTRIES;
+        for (path, _) in entries.into_iter().take(remove_count) {
+            if path != current {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn run_durable_fanout_readiness_probe(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    probe_gate: &ProviderReadinessProbeGate,
+    deadline: Instant,
+    timeout_ms: u64,
+    mode: Option<&str>,
+    request_key: &str,
+) -> (
+    std::result::Result<ProviderReadinessInvocationResult, String>,
+    bool,
+) {
+    let Some((cache_path, lock_path)) = durable_fanout_readiness_paths(request_key) else {
+        return (
+            run_readiness_probe_with_gate(
+                provider,
+                config,
+                credential_env,
+                probe_gate,
+                deadline,
+                timeout_ms,
+                mode,
+            ),
+            false,
+        );
+    };
+    let Some(parent) = lock_path.parent() else {
+        return (
+            Err("provider readiness cache has no parent directory".to_string()),
+            false,
+        );
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        return (
+            run_readiness_probe_with_gate(
+                provider,
+                config,
+                credential_env,
+                probe_gate,
+                deadline,
+                timeout_ms,
+                mode,
+            )
+            .map_err(|probe| format!("{probe}; readiness cache unavailable: {error}")),
+            false,
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    let lock = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(lock) => lock,
+        Err(_) => {
+            return (
+                run_readiness_probe_with_gate(
+                    provider,
+                    config,
+                    credential_env,
+                    probe_gate,
+                    deadline,
+                    timeout_ms,
+                    mode,
+                ),
+                false,
+            )
+        }
+    };
+    #[cfg(unix)]
+    let lock = {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+        lock
+    };
+    let lock_wait_started = Instant::now();
+    let mut reported_lock_wait = false;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => {
+                if reported_lock_wait {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "phase": "provider_readiness",
+                            "state": "shared_cache_lock_acquired",
+                            "wait_owner": "durable_cache_lock",
+                            "elapsed_ms": lock_wait_started.elapsed().as_millis(),
+                        })
+                    );
+                }
+                break;
+            }
+            Ok(false) => {
+                if !reported_lock_wait {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "phase": "provider_readiness",
+                            "state": "waiting",
+                            "wait_owner": "durable_cache_lock",
+                            "elapsed_ms": lock_wait_started.elapsed().as_millis(),
+                        })
+                    );
+                    reported_lock_wait = true;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if !reported_lock_wait {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "phase": "provider_readiness",
+                            "state": "waiting",
+                            "wait_owner": "durable_cache_lock",
+                            "elapsed_ms": lock_wait_started.elapsed().as_millis(),
+                        })
+                    );
+                    reported_lock_wait = true;
+                }
+            }
+            Err(_) => {
+                return (
+                    run_readiness_probe_with_gate(
+                        provider,
+                        config,
+                        credential_env,
+                        probe_gate,
+                        deadline,
+                        timeout_ms,
+                        mode,
+                    ),
+                    false,
+                )
+            }
+        }
+        if Instant::now() >= deadline {
+            return (
+                Err("provider readiness shared-cache wait timed out".to_string()),
+                false,
+            );
+        }
+        std::thread::sleep(
+            Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    if let Some(result) = read_durable_fanout_readiness(&cache_path, request_key) {
+        return (Ok(result), true);
+    }
+    let result = run_readiness_probe_with_gate(
+        provider,
+        config,
+        credential_env,
+        probe_gate,
+        deadline,
+        timeout_ms,
+        mode,
+    );
+    if let Ok(verdict) = &result {
+        write_durable_fanout_readiness(&cache_path, request_key, verdict);
+    }
+    (result, false)
+}
+
+pub(crate) fn invalidate_fanout_readiness(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &ProviderRuntimeReadinessCache,
+) {
+    let Ok(request_key) = readiness_cache_identity_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        true,
+        None,
+    ) else {
+        return;
+    };
+    {
+        let mut state = cache
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.by_request.remove(&request_key);
+        cache.shared.changed.notify_all();
+    }
+    let Some((cache_path, lock_path)) = durable_fanout_readiness_paths(&request_key) else {
+        return;
+    };
+    let Ok(lock) = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(_) => return,
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = std::fs::remove_file(cache_path);
+}
 
 #[derive(Debug)]
 struct ProviderReadinessProbePermit<'a>(&'a ProviderReadinessProbeGate);
@@ -465,6 +867,8 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                         "{}",
                         json!({
                             "event": "provider_readiness_progress",
+                            "phase": "provider_readiness",
+                            "wait_owner": "process_cache",
                             "provider_id": provider.id,
                             "backend": provider.backend,
                             "state": "waiting",
@@ -512,6 +916,8 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                         "{}",
                         json!({
                             "event": "provider_readiness_progress",
+                            "phase": "provider_readiness",
+                            "wait_owner": "readiness_cache",
                             "provider_id": provider.id,
                             "backend": provider.backend,
                             "state": "cache_hit",
@@ -606,10 +1012,13 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
         let probe_gate = Arc::clone(&cache.shared.probe_gate);
         let probe_request_key = request_key.clone();
         let probe_mode = mode.map(str::to_string);
+        let persistent_fanout = generated_fanout_context;
         eprintln!(
             "{}",
             json!({
                 "event": "provider_readiness_progress",
+                "phase": "provider_readiness",
+                "wait_owner": "provider_probe",
                 "provider_id": provider.id,
                 "backend": provider.backend,
                 "state": "started",
@@ -623,26 +1032,51 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
             .name("provider-readiness-probe".to_string())
             .spawn(move || {
                 let started = Instant::now();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_readiness_probe_with_gate(
-                        &provider,
-                        &config,
-                        &credential_env,
-                        probe_gate.as_ref(),
-                        probe_deadline,
-                        probe_timeout_ms,
-                        probe_mode.as_deref(),
+                let (result, durable_hit) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || {
+                        if persistent_fanout {
+                            run_durable_fanout_readiness_probe(
+                                &provider,
+                                &config,
+                                &credential_env,
+                                probe_gate.as_ref(),
+                                probe_deadline,
+                                probe_timeout_ms,
+                                probe_mode.as_deref(),
+                                &probe_request_key,
+                            )
+                        } else {
+                            (
+                                run_readiness_probe_with_gate(
+                                    &provider,
+                                    &config,
+                                    &credential_env,
+                                    probe_gate.as_ref(),
+                                    probe_deadline,
+                                    probe_timeout_ms,
+                                    probe_mode.as_deref(),
+                                ),
+                                false,
+                            )
+                        }
+                    },
+                ))
+                .unwrap_or_else(|_| {
+                    (
+                        Err("provider readiness invocation panicked".to_string()),
+                        false,
                     )
-                }))
-                .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
+                });
 
                 eprintln!(
                     "{}",
                     json!({
                         "event": "provider_readiness_progress",
+                        "phase": "provider_readiness",
+                        "wait_owner": if durable_hit { "durable_cache" } else { "provider_probe" },
                         "provider_id": provider.id,
                         "backend": provider.backend,
-                        "state": if result.is_ok() { "completed" } else { "failed" },
+                        "state": if durable_hit { "durable_cache_hit" } else if result.is_ok() { "completed" } else { "failed" },
                         "elapsed_ms": started.elapsed().as_millis(),
                         "cache": "miss",
                         "deadline_unix_ms": deadline_unix_ms,
@@ -758,7 +1192,10 @@ pub(crate) fn readiness_cache_identity_for_generated_fanout_context(
         .iter()
         .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
         .collect::<Vec<_>>();
-    let encoded = serde_json::to_vec(&(base_key, credential_identity))
+    let provider_contract = serde_json::to_vec(provider)
+        .map(|bytes| content_hash::sha256_hex(&bytes))
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let encoded = serde_json::to_vec(&(base_key, credential_identity, provider_contract))
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     Ok(content_hash::sha256_hex(&encoded))
 }
@@ -999,31 +1436,84 @@ mod tests {
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
         let config = json!({ "model": "ready" });
-        let mut cache = ProviderRuntimeReadinessCache::process_local();
+        let mut compile_cache = ProviderRuntimeReadinessCache::process_local();
+        let mut admission_cache = ProviderRuntimeReadinessCache::process_local();
 
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut cache,
+            &mut compile_cache,
         )
         .expect("first phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut cache,
+            &mut admission_cache,
         )
         .expect("same-credential phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "rotated".to_string())],
-            &mut cache,
+            &mut admission_cache,
         )
         .expect("rotated-credential phase verdict");
 
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+    }
+
+    #[test]
+    fn durable_fanout_cache_hashes_provider_identity_and_expires() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("entry.json");
+        let request_key = content_hash::sha256_hex(b"test-request");
+        let result = ProviderReadinessInvocationResult {
+            ready: true,
+            classification: "ready".to_string(),
+            retryable: false,
+            remediation: String::new(),
+            reason: String::new(),
+            cache_key: "private-provider-cache-key".to_string(),
+            identity: json!({ "account": "private-account-label" }),
+            capacity: None,
+            durable_identity: None,
+        };
+
+        write_durable_fanout_readiness(&path, &request_key, &result);
+        let bytes = std::fs::read_to_string(&path).expect("durable cache file");
+        assert!(!bytes.contains("private-provider-cache-key"));
+        assert!(!bytes.contains("private-account-label"));
+        let restored =
+            read_durable_fanout_readiness(&path, &request_key).expect("fresh canonical readiness");
+        let identity = restored.durable_identity.expect("opaque identity hashes");
+        assert_eq!(
+            identity.cache_key_sha256.as_deref(),
+            Some(content_hash::sha256_hex(b"private-provider-cache-key").as_str())
+        );
+        assert_eq!(
+            identity.identity_sha256.as_deref(),
+            Some(
+                content_hash::sha256_hex(&serde_json::to_vec(&result.identity).expect("identity"))
+                    .as_str()
+            )
+        );
+
+        let mut stale: Value = serde_json::from_str(&bytes).expect("cache entry");
+        stale["checked_at_unix_ms"] = json!(0);
+        std::fs::write(&path, serde_json::to_vec(&stale).expect("stale entry"))
+            .expect("age cache entry");
+        assert!(read_durable_fanout_readiness(&path, &request_key).is_none());
+
+        let capacity_path = root.path().join("capacity.json");
+        let mut capacity_result = result;
+        capacity_result.capacity = Some(Default::default());
+        write_durable_fanout_readiness(&capacity_path, &request_key, &capacity_result);
+        assert!(
+            !capacity_path.exists(),
+            "capacity evidence is never reusable"
+        );
     }
 
     #[test]

@@ -206,6 +206,51 @@ fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
     });
 }
 
+#[cfg(all(test, unix))]
+#[test]
+fn supervisor_stops_its_daemon_once_the_state_directory_is_removed() {
+    crate::test_support::with_isolated_home(|_| {
+        let scratch = tempfile::tempdir().unwrap();
+        let state_dir = scratch.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        let mut child = Command::new("sh")
+            .args(["-c", "trap 'exit 0' TERM; while :; do sleep 0.1; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter_path = state_path.clone();
+        let waiter = thread::spawn(move || {
+            let status = wait_for_daemon_with_lifetime(
+                &mut child,
+                Some(Duration::from_secs(300)),
+                &waiter_path,
+            );
+            done_tx.send(()).unwrap();
+            status
+        });
+
+        // Directory present, lease not yet published: the startup window.
+        // The supervisor must keep the daemon alive here.
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(3)).is_err(),
+            "supervisor must not stop a daemon whose lease is merely unpublished"
+        );
+        assert!(pid_is_running(pid));
+
+        std::fs::remove_dir_all(&state_dir).unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("supervisor must stop its daemon once the state directory is gone");
+        waiter.join().unwrap().unwrap();
+        assert!(!pid_is_running(pid), "orphaned daemon child must be reaped");
+    });
+}
+
 fn supervise_child_with_lifetime(
     mut child: std::process::Child,
     idle_timeout: Option<Duration>,
@@ -227,6 +272,11 @@ fn supervise_child_with_lifetime(
             Some("wait for supervised daemon".to_string()),
         )
     })?;
+    if state_dir_removed(state_path) {
+        // Termination evidence lives in the removed directory; there is no
+        // reader left for it and writing it would fail.
+        return Ok(());
+    }
     let state = super::validate_lease_file(&crate::paths::daemon_state_file()?)
         .ok()
         .and_then(|validation| validation.state);
@@ -267,6 +317,17 @@ fn wait_for_daemon_with_lifetime(
             // Do not wait for our stop command: it observes this supervisor's
             // exit after reaping the serving child. Waiting would be circular.
             return Ok(status);
+        }
+        if state_dir_removed(state_path) {
+            // Nothing can reach this daemon any more: no client can discover
+            // its lease, read its jobs, or run the lease-scoped stop, which
+            // itself needs this directory. Without this, the unreadable lease
+            // below counts as activity forever and the pair leaks, which is
+            // how tests whose TempDir home was dropped left hundreds of
+            // supervisors behind (#15590). We own the child handle, so this
+            // kill cannot hit a reused PID.
+            child.kill()?;
+            return child.wait();
         }
         let state = super::validate_lease_file(state_path)
             .ok()
@@ -325,6 +386,18 @@ fn wait_for_daemon_with_lifetime(
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// True only when the daemon's state directory is provably gone.
+///
+/// A missing or unreadable `state.json` is normal during startup, before the
+/// child publishes its lease, so only the directory's absence counts. An
+/// existence check that errors (permissions, I/O) is not proof of removal and
+/// keeps the daemon alive.
+fn state_dir_removed(state_path: &Path) -> bool {
+    state_path
+        .parent()
+        .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
 }
 
 fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
@@ -1562,6 +1635,12 @@ fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryRece
 /// process publishes its address (or a timeout elapses).
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
+    // Once admission is generation-routed, startup must use that same route.
+    // The router's original store may still have a live draining owner; its
+    // process and owner.lock are not evidence about the selected generation.
+    if !generation_store::bypassed() && generation_store::admitting()?.is_some() {
+        return ensure_running_with_idle_timeout(addr, 0);
+    }
     let _lock = acquire_daemon_operation_lock()?;
     start_or_return_live_unlocked_with_idle_timeout(addr, &uuid::Uuid::new_v4().to_string(), 0)
 }
@@ -1569,7 +1648,18 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// Return a live daemon under the lifecycle lock, or start one when its lease
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
-    if let Some(endpoint) = generation_store::admitting()? {
+    ensure_running_with_idle_timeout(addr, super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)
+}
+
+fn ensure_running_with_idle_timeout(
+    addr: &str,
+    default_idle_timeout: u64,
+) -> Result<DaemonStartResult> {
+    if let Some(endpoint) = (!generation_store::bypassed())
+        .then(generation_store::admitting)
+        .transpose()?
+        .flatten()
+    {
         let state_path = Path::new(&endpoint.state_dir).join("state.json");
         let validation = super::validate_lease_file(&state_path)?;
         if validation.fresh && validation.running && validation.reachable {
@@ -1581,13 +1671,37 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
                 lease_id: state.lease_id,
             });
         }
+        if validation.invalid_pid.is_some()
+            || (validation.state.is_none()
+                && validation.stale_reason.is_some()
+                && state_path.exists())
+        {
+            return Err(super::corrupt_daemon_lease_error(
+                &state_path,
+                validation.stale_reason,
+            ));
+        }
+        if !validation.running && super::try_acquire_daemon_owner_lock_at(&state_path)?.is_none() {
+            let mut error = Error::internal_unexpected(
+                "selected daemon generation has a live or starting owner without a valid lease; refusing replacement",
+            );
+            error.details = serde_json::json!({
+                "classification": "daemon_generation_owner_unverified",
+                "state_path": state_path,
+                "lease_id": endpoint.lease_id,
+            });
+            return Err(error);
+        }
+        // A dead or missing admission lease is still generation-routed. Start
+        // a verified successor in its own store instead of falling through to
+        // root-store cleanup, which can conflict with (or retire) a draining
+        // predecessor unrelated to this admission. Existing job custody stays
+        // registered until its own exact recovery proves it can be retired.
+        return start_admission_generation(addr, validation.state.as_ref(), default_idle_timeout);
     }
     let status = read_status()?;
     if status.running && !status.fresh {
-        return rotate_stale_generation(
-            addr,
-            status.state.as_ref().expect("running lease has state"),
-        );
+        return start_admission_generation(addr, status.state.as_ref(), default_idle_timeout);
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
 }
@@ -1595,10 +1709,16 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 /// Start B in an isolated state directory, then publish it as the admission
 /// owner. A remains untouched: its lease, job store, and endpoint continue to
 /// own all work admitted before this atomic registry update.
-fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<DaemonStartResult> {
+fn start_admission_generation(
+    addr: &str,
+    current: Option<&super::DaemonState>,
+    default_idle_timeout: u64,
+) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
-    generation_store::seed(current)?;
+    if let Some(current) = current {
+        generation_store::seed(current)?;
+    }
     if let Some(endpoint) = generation_store::admitting()? {
         let validation =
             super::validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))?;
@@ -1645,8 +1765,7 @@ fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<D
         .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
         .env(
             super::lifetime::IDLE_TIMEOUT_ENV,
-            super::lifetime::launch_idle_timeout(super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)?
-                .to_string(),
+            super::lifetime::launch_idle_timeout(default_idle_timeout)?.to_string(),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1846,6 +1965,7 @@ pub fn reconcile_dead_lease_orphans(
     job_ids: &[uuid::Uuid],
     confirm_workload_processes_absent: bool,
     addr: &str,
+    start_replacement: bool,
 ) -> Result<DaemonExactOrphanRecoveryResult> {
     if !confirm_workload_processes_absent {
         return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
@@ -1865,7 +1985,16 @@ pub fn reconcile_dead_lease_orphans(
                 )?;
                 store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
             },
-            start: || start_or_return_live_unlocked(addr),
+            // A remote attested reconcile targets one dead generation that is
+            // being retired; starting a daemon in its directory would revive
+            // it. The controller's own reconcile owns what serves next (#15556).
+            start: || {
+                if start_replacement {
+                    start_or_return_live_unlocked(addr).map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
         },
     )
 }
@@ -1911,7 +2040,7 @@ where
     AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
     ProveNoOwner: FnOnce() -> Result<Vec<String>>,
     Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
+    Start: FnOnce() -> Result<Option<super::DaemonStartResult>>,
 {
     let DeadLeaseOrphanRecoveryOperations {
         status,

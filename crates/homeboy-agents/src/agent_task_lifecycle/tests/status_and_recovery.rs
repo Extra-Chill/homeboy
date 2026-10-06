@@ -1054,7 +1054,7 @@ fn artifact_recovery_rejects_wrong_hash_and_identity_without_record_mutation() {
 /// a rejection resolved from another home would leave the byte comparison
 /// passing for the wrong reason.
 #[test]
-fn execution_budget_future_version_fails_closed_without_rewrite() {
+fn execution_budget_unsupported_versions_fail_closed_without_rewrite() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -1064,19 +1064,40 @@ fn execution_budget_future_version_fails_closed_without_rewrite() {
     let mut raw: Value =
         serde_json::from_str(&std::fs::read_to_string(&record.plan_path).expect("persisted plan"))
             .expect("plan json");
-    raw["options"]["execution_budget"]["version"] = json!(99);
-    let future = serde_json::to_string_pretty(&raw).expect("serialize future plan");
-    std::fs::write(&record.plan_path, &future).expect("replace plan");
-
-    let error = load_plan_for_execution_in_store(&lifecycle_store, &record.run_id)
-        .expect_err("future version rejected");
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    assert!(error
-        .message
-        .contains("unsupported agent-task execution budget version 99"));
+    for version in [0, 99] {
+        raw["options"]["execution_budget"]["version"] = json!(version);
+        let unsupported = serde_json::to_string_pretty(&raw).expect("serialize unsupported plan");
+        std::fs::write(&record.plan_path, &unsupported).expect("replace plan");
+        for result in [
+            load_plan_in_store(&lifecycle_store, &record.run_id),
+            load_plan_for_execution_in_store(&lifecycle_store, &record.run_id),
+        ] {
+            let error = result.expect_err("unsupported version rejected");
+            assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+            assert!(error.message.contains(&format!(
+                "unsupported agent-task execution budget version {version}"
+            )));
+        }
+        let invalid: AgentTaskPlan = serde_json::from_value(raw.clone()).unwrap();
+        lifecycle_store
+            .write_controller_plan(&record.run_id, &invalid)
+            .expect_err("store writes cannot restamp unsupported budgets");
+        assert_eq!(
+            std::fs::read_to_string(&record.plan_path).expect("unsupported plan retained"),
+            unsupported
+        );
+    }
+    raw["options"]["execution_budget"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    let unversioned = serde_json::to_string_pretty(&raw).unwrap();
+    std::fs::write(&record.plan_path, &unversioned).unwrap();
+    load_plan_for_execution_in_store(&lifecycle_store, &record.run_id)
+        .expect_err("an explicit budget requires its version");
     assert_eq!(
-        std::fs::read_to_string(&record.plan_path).expect("future plan retained"),
-        future
+        std::fs::read_to_string(&record.plan_path).unwrap(),
+        unversioned
     );
 }
 
@@ -1519,7 +1540,12 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                             assert_eq!(runner_id, "homeboy-lab");
                             assert_eq!(job_id, expected_job_id);
                             assert_eq!(durable_run_id, "accepted-then-cancelled");
-                            Ok((cancellation_store.get(job.id).expect("job"), Vec::new()))
+                            Ok((
+                                cancellation_store
+                                    .cancel(job.id, "operator cancellation")
+                                    .expect("cancel accepted runner job"),
+                                Vec::new(),
+                            ))
                         }
                     }),
                 );

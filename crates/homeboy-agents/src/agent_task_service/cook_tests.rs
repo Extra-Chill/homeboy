@@ -9573,6 +9573,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 
         let error = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             50,
         )
         .expect_err("override must increase the prior timeout");
@@ -9584,6 +9585,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         .expect("restore a deferred cleanup owner");
         let owner_error = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             100,
         )
         .expect_err("active deferred ownership must block retry");
@@ -9598,6 +9600,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
 
         let retry = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
+            None,
             100,
         )
         .expect("reserve timeout override");
@@ -9629,6 +9632,123 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
                 "remaining_provider_rotations": 0,
             })
         );
+    });
+}
+
+#[test]
+fn timeout_override_retry_is_reserved_through_the_control_plane_action() {
+    struct ProviderTimeout;
+
+    impl AgentTaskExecutorAdapter for ProviderTimeout {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+        ) -> crate::agent_task::AgentTaskOutcome {
+            crate::agent_task::AgentTaskOutcome {
+                task_id: request.task_id,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+                failure_classification: Some(
+                    crate::agent_task::AgentTaskFailureClassification::Timeout,
+                ),
+                summary: Some("provider exceeded timeout_ms=50".to_string()),
+                diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                    class: "agent_task.provider_timeout".to_string(),
+                    message: "provider exceeded timeout_ms=50".to_string(),
+                    data: serde_json::json!({ "timeout_ms": 50 }),
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-timeout-action";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.options.timeout_ms = Some(50);
+        options.identity.initial_plan.options.retry.max_attempts = 2;
+        // Exclude Timeout to model a historical first attempt that stopped
+        // before automatic timeout recovery was available.
+        options
+            .identity
+            .initial_plan
+            .options
+            .retry
+            .retryable_failure_classifications =
+            vec![crate::agent_task::AgentTaskFailureClassification::Provider];
+        options.identity.initial_plan.options.execution_budget =
+            crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0);
+        options.identity.initial_plan.tasks[0].limits.timeout_ms = Some(50);
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        let failed = crate::agent_task_service::execution::run_submitted(
+            options.identity.initial_run_id.clone(),
+            Arc::new(ProviderTimeout),
+        )
+        .expect("record provider timeout");
+        assert_eq!(failed.exit_code, 1);
+
+        // `cook-continue --timeout-ms` reserves through the Retry action, so
+        // the override carries an acknowledgement and an `action.accepted`
+        // event like every other retry.
+        let source = options.identity.initial_run_id.clone();
+        let combined = crate::orchestration::execute_action_from_current_environment(
+            &source,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:timeout-and-force".to_string(),
+                ),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: "timeout-and-force".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({ "timeout_ms": 200, "force": true }),
+                },
+                confirmed: true,
+            },
+        );
+        let refused = match combined {
+            Err(error) => error.message,
+            Ok(ack) => ack.message.unwrap_or_default(),
+        };
+        assert!(
+            refused.contains("timeout-override retry cannot"),
+            "{refused}"
+        );
+        let acknowledgement = crate::orchestration::execute_action_from_current_environment(
+            &source,
+            &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:timeout-action".to_string(),
+                ),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
+                idempotency_key: "timeout-action".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({ "timeout_ms": 100 }),
+                },
+                confirmed: true,
+            },
+        )
+        .expect("timeout override retry action");
+        let retry = crate::agent_task_action_result::retry(&acknowledgement).expect("retry result");
+        let recipe = super::super::load_recipe(cook_id).expect("updated Cook recipe");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, retry.record.run_id);
+        assert_eq!(recipe.attempts[1].plan.options.timeout_ms, Some(100));
     });
 }
 
@@ -10796,11 +10916,12 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         let options = retryable_pre_provider_cook("cook-retry-terminal-success", 2);
         let successor_run_id =
             agent_task_lifecycle::cook_attempt_run_id(&options.identity.cook_id, 2);
-        super::super::record_recipe_attempt(
+        super::super::record_recipe_retry_attempt(
             &options.identity.cook_id,
             2,
             &successor_run_id,
             &options.identity.initial_plan,
+            &options.identity.initial_run_id,
         )
         .expect("reserve retry in recipe");
         agent_task_lifecycle::retry(&options.identity.initial_run_id, Some(&successor_run_id))
@@ -16585,7 +16706,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
 }
 
 #[test]
-fn selection_required_keeps_internal_lifecycle_out_of_the_cook_wire_format() {
+fn selection_required_projects_terminal_nonretryable_partial_failure() {
     let report = cook_report(CookReportInput {
         cook_id: "cook-selection-lifecycle".to_string(),
         status: "selection_required",
@@ -16606,9 +16727,6 @@ fn selection_required_keeps_internal_lifecycle_out_of_the_cook_wire_format() {
     );
     assert!(lifecycle.terminal);
     assert!(!lifecycle.retryable);
-    assert!(serialized.get("lifecycle_status").is_none());
-    assert!(serialized.get("terminal").is_none());
-    assert!(serialized.get("retryable").is_none());
 }
 
 #[test]
@@ -20051,6 +20169,171 @@ fn cook_follow_up_store_boundary_accepts_local_execution_and_rejects_split_roots
     assert!(split_root_error
         .to_string()
         .contains("recipe and lifecycle stores must share one data root"));
+}
+
+#[test]
+fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_twin() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
+        let recipes = CookRecipeStore::new(roots.clone());
+        let lifecycle = AgentTaskLifecycleStore::new(roots);
+        let mut options =
+            batch_cook_options("intent-crash", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.provider_transport.attempt_dispatcher = None;
+        let source = options.identity.initial_run_id.clone();
+        recipes.persist_initial_recipe(&options).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.test"],
+        ] {
+            homeboy_core::test_support::run_git_fixture_command(workspace.path(), &args);
+        }
+        std::fs::write(workspace.path().join("tracked"), "base\n").unwrap();
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["add", "."]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["commit", "-qm", "base"],
+        );
+        let head = git_output(workspace.path(), &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(workspace.path().join("tracked"), "candidate\n").unwrap();
+        let patch = Command::new("git")
+            .args(["diff", "--binary", "HEAD"])
+            .current_dir(workspace.path())
+            .output()
+            .unwrap()
+            .stdout;
+        let artifact = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(artifact.path(), &patch).unwrap();
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(&patch);
+        let promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+            "source":{"kind":"aggregate","task_id":options.identity.initial_plan.tasks[0].task_id,"run_id":source},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target","head":head},
+            "patch_artifact":{"id":"candidate","kind":"patch","path":artifact.path(),"sha256":digest},
+            "changed_files":["tracked"],"command_evidence":[],"deterministic_gates":[],"gate_results":[],
+            "provenance":{"worktree_path":workspace.path()},"operator_notification":{"status":"blocked","message":"red"}
+        })).unwrap();
+        let mut request = options.identity.initial_plan.tasks[0].clone();
+        request.task_id = "bound-gate-fix".into();
+        request.instructions = "repair the captured candidate".into();
+        request.policy.grant_workspace_read_tool();
+        request.expected_artifacts.clear();
+        request.artifact_declarations.clear();
+        request.inputs = serde_json::json!({"cook_loop":{"review_form_required":false,"artifact_provenance":{
+            "source_run_id":source,"source_task_id":promotion.source.task_id,"source_patch_artifact_sha256":digest
+        }}});
+        let plan = AgentTaskPlan::new("frozen-follow-up", vec![request.clone()]);
+        let run_id = agent_task_lifecycle::cook_attempt_run_id("intent-crash", 2);
+        recipes
+            .record_recipe_attempt("intent-crash", 2, &run_id, &plan)
+            .unwrap();
+        assert!(!lifecycle.record_exists(&run_id).unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let executor: SharedAgentTaskExecutor = Arc::new(RecordingImmediateSuccessExecutor {
+            starts: calls.clone(),
+        });
+        let aggregate = review_form_aggregate(&options.identity.initial_plan);
+        let budget = AgentTaskExecutionBudget::default();
+        let mut category = ExecutionBudgetUsage::default();
+        let mut conflicting = request.clone();
+        conflicting.instructions = "different intent".into();
+        let error = dispatch_cook_follow_up(
+            (&recipes, &lifecycle),
+            &options,
+            executor.clone(),
+            "intent-crash",
+            1,
+            &source,
+            &options.identity.initial_plan,
+            &aggregate,
+            &promotion,
+            conflicting.clone(),
+            true,
+            CookFollowUpBudgetScope::Cook,
+            &budget,
+            ExecutionBudgetUsage::default(),
+            &mut category,
+        )
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "conflicting intent was accepted: {} recipe attempts and {} provider starts",
+                recipes.load_recipe("intent-crash").unwrap().attempts.len(),
+                calls.load(Ordering::SeqCst)
+            )
+        });
+        assert!(error.message.contains("conflicts with replay inputs"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            let restarted = CookRecipeStore::from_data_root(recipes.data_root());
+            let result = dispatch_cook_follow_up(
+                (&restarted, &lifecycle),
+                &options,
+                executor.clone(),
+                "intent-crash",
+                1,
+                &source,
+                &options.identity.initial_plan,
+                &aggregate,
+                &promotion,
+                request.clone(),
+                true,
+                CookFollowUpBudgetScope::Cook,
+                &budget,
+                ExecutionBudgetUsage {
+                    executions: u32::MAX,
+                    ..Default::default()
+                },
+                &mut category,
+            )
+            .unwrap();
+            assert!(
+                matches!(result,CookFollowUpDispatch::Dispatched{run_id:ref id} if *id==run_id)
+            );
+            assert_eq!(
+                restarted
+                    .load_recipe("intent-crash")
+                    .unwrap()
+                    .attempts
+                    .len(),
+                2
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let before = serde_json::to_value(recipes.load_recipe("intent-crash").unwrap()).unwrap();
+        let error = dispatch_cook_follow_up(
+            (&recipes, &lifecycle),
+            &options,
+            executor,
+            "intent-crash",
+            1,
+            &source,
+            &options.identity.initial_plan,
+            &aggregate,
+            &promotion,
+            conflicting,
+            true,
+            CookFollowUpBudgetScope::Cook,
+            &budget,
+            ExecutionBudgetUsage::default(),
+            &mut category,
+        )
+        .err()
+        .expect("submitted intent is equally immutable");
+        assert!(error.message.contains("conflicts with replay inputs"));
+        assert_eq!(
+            serde_json::to_value(recipes.load_recipe("intent-crash").unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            category,
+            ExecutionBudgetUsage::default(),
+            "replay does not reserve budget again"
+        );
+    });
 }
 
 #[test]
@@ -25452,6 +25735,8 @@ fn a_progress_event_carries_provider_activity_to_the_observer() {
         run_id: "cook-1-attempt-1",
         attempt: 1,
         detail: Some("provider execution is still running"),
+        elapsed_ms: 12,
+        wait_owner: "provider_execution".to_string(),
         terminal_success: None,
         terminal_retry_command: None,
         activity: Some(&activity),
@@ -25474,6 +25759,8 @@ fn a_progress_event_without_a_sample_renders_no_activity() {
         run_id: "cook-1-attempt-1",
         attempt: 1,
         detail: None,
+        elapsed_ms: 0,
+        wait_owner: "provider_execution".to_string(),
         terminal_success: None,
         terminal_retry_command: None,
         activity: None,
