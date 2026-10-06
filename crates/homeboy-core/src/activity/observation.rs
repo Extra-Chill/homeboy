@@ -109,19 +109,17 @@ fn item_from_run(store: &ObservationStore, run: RunRecord) -> Result<ActivityIte
     })
 }
 
+/// Activity reads the same mapping as the control-plane run resource
+/// ([`RunStatus::control_plane_state`]). Activity has no `Skipped` state, so a
+/// skipped run settles as succeeded here, as it always has.
 pub(super) fn state_from_run_status(status: &str) -> ActivityState {
-    match RunStatus::from_label(status) {
-        Some(RunStatus::Running) => ActivityState::Running,
-        // A handed-off record is settled locally: the dispatch it observes
-        // succeeded. Its remote continuation surfaces in activity as the runner
-        // job it created, so reporting this row as still running would
-        // double-count one piece of work as two active items.
-        Some(RunStatus::Pass | RunStatus::Skipped | RunStatus::HandedOff) => {
-            ActivityState::Succeeded
-        }
-        Some(RunStatus::Fail | RunStatus::Error) => ActivityState::Failed,
-        Some(RunStatus::Stale) => ActivityState::Stale,
-        None => ActivityState::Unknown,
+    use homeboy_control_plane_contract::ControlPlaneRunState as State;
+    match RunStatus::from_label(status).map(RunStatus::control_plane_state) {
+        Some(State::Running) => ActivityState::Running,
+        Some(State::Succeeded | State::Skipped) => ActivityState::Succeeded,
+        Some(State::Failed) => ActivityState::Failed,
+        Some(State::Stale) => ActivityState::Stale,
+        _ => ActivityState::Unknown,
     }
 }
 
