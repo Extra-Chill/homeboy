@@ -11,7 +11,7 @@ const {
 	boundedTimeout,
 	resolveExecutable,
 } = require('../../lib/cli-runtime-readiness');
-const { resolveOpenCodeAuthPlan, selectedOpenCodeRoute } = require('./opencode-auth-plan');
+const { resolveOpenCodeAuthPlan, selectedOpenCodeRoute, openCodeAuthPlanError } = require('./opencode-auth-plan');
 const { openCodeProviderCapacity } = require('./opencode-provider-capacity');
 
 const OPENCODE_READINESS_TIMEOUT_MS = 15_000;
@@ -50,8 +50,9 @@ function openCodeRuntimeReadiness(request = {}, options = {}) {
 	if (selected.error) {
 		return verdict('configuration_failure', identity, selected.error, false, 'invalid_provider_model');
 	}
-	if (!authPlan.supported) {
-		return verdict('configuration_failure', identity, authPlan.reason, false, 'unsupported_provider_route');
+	const authError = openCodeAuthPlanError(authPlan, env);
+	if (authError) {
+		return verdict('auth_failure', identity, authError, false, 'selected_auth_unavailable');
 	}
 
 	const command = config.runtime_bin || config.runtimeBin || config.command || 'opencode';

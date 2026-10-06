@@ -12,9 +12,19 @@ embedding CLI details in their own manifests.
 - `command` and `invocation` point at the runtime-local executor wrapper.
 - `runner_readiness` advertises the OpenCode executable check and install hint.
 - `workspace_tools` declares the default repository workspace tool ids.
-- `provider_defaults.openai` declares the optional scoped OpenAI API-key route;
-  `provider_defaults.codex` declares Codex OAuth secret env names and source
-  metadata.
+- Native provider/model routes use OpenCode's selected account. The shared
+  `resolveOpenCodeAuthPlan` and `openCodeAuthPlanError` functions drive readiness
+  and execution; `openai/gpt-6.1-sol` can use native OAuth or a native API-key
+  account without requiring `OPENAI_API_KEY`.
+- An explicitly selected environment API-key account uses
+  `executor.config: { "provider": "openai", "auth_kind": "api_key" }` and
+  Homeboy's existing `executor.secret_env: ["OPENAI_API_KEY"]` reference for
+  scoped delivery. The declared secret is mandatory at Homeboy admission;
+  readiness and execution also reject an unavailable selected key. A native
+  stored API-key account needs no environment-key reference, including when
+  `auth_kind` selects it explicitly. A conflicting native account is rejected
+  rather than silently serving the request through another authentication kind.
+- `provider_defaults.codex` declares Codex OAuth secret env names and sources.
 - `provider_defaults.openai-oauth` declares the OpenCode auth-store handoff
   route as an additive opt-in: selecting `provider: "openai-oauth"` requires
   the `AI_PROVIDER_OPENCODE_OPENAI_ACCESS`, `AI_PROVIDER_OPENCODE_OPENAI_REFRESH`,
@@ -23,11 +33,10 @@ embedding CLI details in their own manifests.
   uploads that whole declared file to the same `~`-relative path on the runner
   before every agent-task run, and OpenCode reads it through its native store
   path. The env values are secondary; the file sync is the handoff. Exactly
-  the selected route's credential names are required, so existing `openai`
-  API-key configurations are unaffected and an OAuth-only setup never needs an
-  API key.
-- `provider_preflight` declares the auth checks callers should run before
-  launching OpenCode.
+  the selected handoff's credential names are required. Native routes use the
+  execution host's native store; they do not implicitly select this file copy.
+- `readiness_invocation` verifies native authentication with a bounded model
+  request. `provider_preflight` retains the separate Codex credential checks.
 
 ### Delegated task liveness
 
@@ -57,25 +66,31 @@ the CLI remains root-scoped, and cleans up its temporary workspace.
 
 ### Auth-store handoff behavior
 
-The controller's OpenCode auth store is the source of truth. The runner-side
-copy is overwritten from the controller before every run and is never copied
-back, so an OpenCode refresh on the runner cannot corrupt or diverge from the
-controller's credentials: a rotated refresh token on the runner is discarded
-with the next provisioning pass.
+The explicit `openai-oauth` handoff overwrites the runner's OpenCode auth store
+from the controller before a run. It does not coordinate token refresh. Both
+machines refreshing a copied single-use grant can invalidate each other's
+credentials; discarding the runner's refreshed copy does not prevent this.
 
 Sync targets the `~`-relative declared path (`~/.local/share/opencode/auth.json`).
 In job environments where `XDG_DATA_HOME` is set, OpenCode resolves its store
-under `$XDG_DATA_HOME` instead; the executor's process env allowlist forwards
-only `HOME`, so agent-task execution resolves the synced store at the
-provisioned `~` path. Readiness keeps `XDG_DATA_HOME` in its allowlist for
-installations that genuinely relocate their store.
+under `$XDG_DATA_HOME` instead. Readiness and execution both forward
+`XDG_DATA_HOME` so native account selection uses the same location. A legacy
+handoff must provision the store at the location the runner actually reads.
 
-Core admission requires every required secret env name of the selected route
-to resolve, and its `when` conditions can only inspect the serialized request —
-not machine state such as whether the store currently holds an OAuth entry. A
-single `openai` route therefore cannot conditionally switch between the API
-key and the store; the `openai-oauth` account is the supported selector for
-the store handoff until core grows a conditional source mechanism.
+Account rotation and single-owner refresh belong to subrouter, not Homeboy's
+provider/backend rotation. The runtime migration is tracked in
+[homeboy-extensions#2918](https://github.com/Extra-Chill/homeboy-extensions/issues/2918).
+Removing the native OpenAI API-key mandate fixes
+[homeboy#15079](https://github.com/Extra-Chill/homeboy/issues/15079); it does not
+establish unified Mac/Lab stores, shared cooldowns, or cross-host refresh
+ownership. Those require separate runtime and live-host proof.
+
+The installed-binary regression uses an isolated HOME and synthetic native
+accounts, with no network or operator credentials:
+
+```sh
+HOMEBOY_BIN=/path/to/homeboy npm run test:opencode-auth-homeboy
+```
 
 ### Plan capacity in readiness
 

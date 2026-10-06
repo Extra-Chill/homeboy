@@ -11,11 +11,8 @@ const OPENCODE_STORE_SECRET_ENV_FIELDS = [
 	['EXPIRES', 'expires'],
 ];
 const OPENCODE_STORE_SECRET_ENV_NAME_PATTERN = /^AI_PROVIDER_OPENCODE_[A-Z0-9]+_(?:ACCESS|REFRESH|EXPIRES)$/;
-// The OpenCode auth-store OAuth route is its own additive provider_defaults
-// account: selecting it opts a run into the store handoff. The existing
-// `openai` account keeps requiring exactly OPENAI_API_KEY, so current API-key
-// configurations are unaffected, and exactly the selected route's names are
-// required at dispatch.
+// Explicit legacy file-handoff selector. Native provider names do not select an
+// auth kind: the runtime resolves that from the selected account and environment.
 const OPENAI_OAUTH_ACCOUNT = 'openai-oauth';
 
 const CODEX_SECRET_ENV = [
@@ -46,25 +43,43 @@ function resolveOpenCodeAuthPlan(config = {}, options = {}) {
 		? { kind: 'scoped_secret_env', location: 'OPENAI_API_KEY', handoff_supported: true }
 		: authKind === 'oauth' && route.provider === 'codex' && codexEnvPresent
 			? { kind: 'scoped_secret_env', location: 'AI_PROVIDER_OPENAI_CODEX_*', handoff_supported: true }
+		: explicitKind && explicitKind !== metadata.auth_kind
+			? nativeSource('selected authentication is not present in the native store')
 		: metadata.source;
 	const storeHandoff = authKind === 'oauth' && route.provider !== 'codex' && source.kind === 'opencode_auth_store';
 	const secretEnv = route.provider === 'codex' && authKind === 'oauth'
 		? [...CODEX_SECRET_ENV]
-		: authKind === 'api_key' && route.provider === 'openai'
+		: authKind === 'api_key' && route.provider === 'openai' && source.kind !== 'opencode_auth_store'
 			? ['OPENAI_API_KEY']
 		: storeHandoff ? openCodeStoreSecretEnv(route.provider) : [];
+	const incompatibleSelection = route.provider === 'openai' && explicitKind && (
+		metadata.auth_kind === 'unknown' ? explicitKind !== 'api_key' : explicitKind !== metadata.auth_kind
+	);
 	return {
-		supported: true,
+		supported: !incompatibleSelection,
+		...(incompatibleSelection ? { reason: 'The selected OpenAI authentication does not match the native account. Select a matching native account before running OpenCode.' } : {}),
 		provider: route.provider,
 		model: route.model,
 		account_kind: accountKind(route.provider, authKind),
 		auth_kind: authKind,
 		secret_env: secretEnv,
-		secret_env_sources: storeHandoff ? openCodeStoreSecretEnvSources(route.provider) : secretSources(route.provider, authKind),
+		secret_env_sources: storeHandoff ? openCodeStoreSecretEnvSources(route.provider)
+			: source.kind === 'opencode_auth_store' && authKind === 'api_key' ? {} : secretSources(route.provider, authKind),
 		source,
 		metadata_only: true,
 		...(source.handoff_supported === false ? { handoff_blocker: source.reason } : {}),
 	};
+}
+
+// Only a selected scoped environment source needs environment credentials.
+// Native accounts are authenticated by OpenCode's bounded readiness request and
+// native request path; OAuth file-handoff env names are not API-key requirements.
+function openCodeAuthPlanError(plan, env) {
+	if (!plan.supported) return plan.reason;
+	if (plan.auth_kind === 'api_key' && plan.secret_env.includes('OPENAI_API_KEY') && !hasValue(env.OPENAI_API_KEY)) {
+		return 'Selected OpenAI API-key authentication requires OPENAI_API_KEY.';
+	}
+	return null;
 }
 
 function selectedOpenCodeRoute(config = {}) {
@@ -199,6 +214,7 @@ module.exports = {
 	openCodeStoreSecretEnv,
 	openCodeStoreSecretEnvSources,
 	resolveOpenCodeAuthPlan,
+	openCodeAuthPlanError,
 	selectedOpenCodeRoute,
 	effectiveOpenCodeModel,
 };

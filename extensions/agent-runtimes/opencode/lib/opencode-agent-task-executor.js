@@ -38,6 +38,7 @@ const {
 	openCodeStoreSecretEnv,
 	openCodeStoreSecretEnvSources,
 	resolveOpenCodeAuthPlan,
+	openCodeAuthPlanError,
 } = require('./opencode-auth-plan');
 
 const { spawn, spawnSync } = require('node:child_process');
@@ -141,6 +142,7 @@ const OPENCODE_PROCESS_ENV_ALLOWLIST = [
 	'CI',
 	'CARGO_TARGET_DIR',
 	'HOME',
+	'XDG_DATA_HOME',
 	'HOMEBOY_CARGO_TARGET_RESOLUTION',
 	'LANG',
 	'LC_ALL',
@@ -220,15 +222,6 @@ const OPENCODE_ROLE_ALIASES = {
 };
 
 const OPENCODE_PROVIDER_DEFAULTS = {
-	openai: {
-		secret_env: ['OPENAI_API_KEY'],
-		secret_env_sources: {
-			OPENAI_API_KEY: {
-				source: 'environment',
-				env: 'OPENAI_API_KEY',
-			},
-		},
-	},
 	// Selecting this account opts a run into the OpenCode auth-store handoff:
 	// core uploads the whole declared file to the same ~-relative runner path
 	// before every run, and OpenCode reads it natively from there.
@@ -248,15 +241,6 @@ const OPENCODE_SESSION_METADATA_ABSENT = {
 };
 
 const OPENCODE_PROVIDER_PREFLIGHT = {
-	openai: {
-		label: 'OpenAI',
-		diagnostic_class: 'opencode.preflight.openai_api_key',
-		required_secret_env: [],
-		optional_secret_env: ['OPENAI_API_KEY', ...OPENCODE_OPENAI_STORE_SECRET_ENV],
-		refresh_hook: 'openai-api-key-refresh',
-		validation_hooks: [],
-		guidance: 'Provide the OpenAI API key through the declared OPENAI_API_KEY secret environment mapping, or select the openai-oauth provider account to hand off the OpenCode auth store, which the controller syncs to the runner before each run.',
-	},
 	codex: {
 		label: 'Codex',
 		diagnostic_class: 'opencode.preflight.codex_auth',
@@ -297,7 +281,6 @@ function providerContract(options = {}) {
 		readiness_invocation: options.readinessInvocation || OPENCODE_READINESS_INVOCATION,
 		...contractFields,
 		secret_env_requirements: [
-			providerSecretEnvRequirement('openai', ['OPENAI_API_KEY']),
 			providerSecretEnvRequirement(OPENAI_OAUTH_ACCOUNT, OPENCODE_OPENAI_STORE_SECRET_ENV),
 			providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV),
 		],
@@ -329,7 +312,7 @@ function opencodeSpawnEnv(request = {}, options = {}) {
 	}
 	const env = cliAgentTaskSpawnEnv(request, options, {
 		allowlist: OPENCODE_PROCESS_ENV_ALLOWLIST,
-		secretEnv: resolveOpenCodeAuthPlan(config, { env: options.env || process.env }).secret_env,
+		secretEnv: resolveOpenCodeAuthPlan({ ...config, model: effectiveOpenCodeModel(config, request.executor?.model || request.model) }, { env: options.env || process.env }).secret_env,
 	});
 	const configContent = opencodeConfigContentForRequest(request, env.OPENCODE_CONFIG_CONTENT, env);
 	return configContent ? { ...env, OPENCODE_CONFIG_CONTENT: configContent } : env;
@@ -1471,6 +1454,17 @@ async function executeOpenCodeAgentTask(request = {}, options = {}) {
 	const cwd = resolveOpenCodeCwd(request, config);
 	const args = opencodeRunArgs(request, config, commandSpec, cwd);
 	const spawnExtra = { env: { ...opencodeSpawnEnv(request, options), PWD: cwd } };
+	const authPlan = resolveOpenCodeAuthPlan({ ...config, model: effectiveOpenCodeModel(config, request.executor?.model || request.model) }, { env: spawnExtra.env });
+	const authError = openCodeAuthPlanError(authPlan, spawnExtra.env);
+	if (authError) {
+		return outcome(request, {
+			status: 'provider_error',
+			failure_classification: 'provider',
+			failure_code: 'agent_task.opencode_auth_plan_failed',
+			summary: authError,
+			diagnostics: [{ class: 'opencode.auth_plan', classification: 'provider_setup', message: authError }],
+		});
+	}
 	const runtimeLogPaths = openCodeRuntimeLogPaths(request, config);
 	if (runtimeLogPaths.stdout) {
 		runtimeLogPaths.activity = runtimeLogPaths.stdout.replace(/stdout\.log$/, 'session-activity.jsonl');

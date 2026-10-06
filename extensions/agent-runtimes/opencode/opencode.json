@@ -130,29 +130,6 @@
           "schema": "homeboy/secret-env-requirement/v1",
           "source": "provider_default",
           "env": [
-            "OPENAI_API_KEY"
-          ],
-          "when": {
-            "any": [
-              {
-                "path": "executor.config.provider",
-                "equals": "openai"
-              },
-              {
-                "path": "executor.provider",
-                "equals": "openai"
-              },
-              {
-                "path": "provider",
-                "equals": "openai"
-              }
-            ]
-          }
-        },
-        {
-          "schema": "homeboy/secret-env-requirement/v1",
-          "source": "provider_default",
-          "env": [
             "AI_PROVIDER_OPENCODE_OPENAI_ACCESS",
             "AI_PROVIDER_OPENCODE_OPENAI_REFRESH",
             "AI_PROVIDER_OPENCODE_OPENAI_EXPIRES"
@@ -259,17 +236,6 @@
         ]
       },
       "provider_defaults": {
-        "openai": {
-          "secret_env": [
-            "OPENAI_API_KEY"
-          ],
-          "secret_env_sources": {
-            "OPENAI_API_KEY": {
-              "source": "environment",
-              "env": "OPENAI_API_KEY"
-            }
-          }
-        },
         "openai-oauth": {
           "secret_env": [
             "AI_PROVIDER_OPENCODE_OPENAI_ACCESS",
@@ -337,20 +303,6 @@
         }
       },
       "provider_preflight": {
-        "openai": {
-          "label": "OpenAI",
-          "diagnostic_class": "opencode.preflight.openai_api_key",
-          "required_secret_env": [],
-          "optional_secret_env": [
-            "OPENAI_API_KEY",
-            "AI_PROVIDER_OPENCODE_OPENAI_ACCESS",
-            "AI_PROVIDER_OPENCODE_OPENAI_REFRESH",
-            "AI_PROVIDER_OPENCODE_OPENAI_EXPIRES"
-          ],
-          "refresh_hook": "openai-api-key-refresh",
-          "validation_hooks": [],
-          "guidance": "Provide the OpenAI API key through the declared OPENAI_API_KEY secret environment mapping, or select the openai-oauth provider account to hand off the OpenCode auth store, which the controller syncs to the runner before each run."
-        },
         "codex": {
           "label": "Codex",
           "diagnostic_class": "opencode.preflight.codex_auth",

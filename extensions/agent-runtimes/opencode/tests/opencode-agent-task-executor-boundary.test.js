@@ -125,12 +125,9 @@ assert.equal(provider.readiness_invocation.env_allowlist.includes('AI_PROVIDER_O
 assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, OPENCODE_SECRET_ENV);
-assert.deepEqual(secretEnvRequirementForProvider(provider, 'openai').env, ['OPENAI_API_KEY']);
+assert.equal(secretEnvRequirementForProvider(provider, 'openai'), undefined);
 assert.deepEqual(secretEnvRequirementForProvider(provider, OPENAI_OAUTH_ACCOUNT).env, OPENCODE_OPENAI_STORE_SECRET_ENV);
-assert.deepEqual(provider.provider_defaults.openai.secret_env, ['OPENAI_API_KEY']);
-assert.deepEqual(provider.provider_defaults.openai.secret_env_sources, {
-	OPENAI_API_KEY: { source: 'environment', env: 'OPENAI_API_KEY' },
-});
+assert.equal(provider.provider_defaults.openai, undefined);
 assert.deepEqual(provider.provider_defaults[OPENAI_OAUTH_ACCOUNT].secret_env, OPENCODE_OPENAI_STORE_SECRET_ENV);
 assert.deepEqual(provider.provider_defaults[OPENAI_OAUTH_ACCOUNT].secret_env_sources, {
 	AI_PROVIDER_OPENCODE_OPENAI_ACCESS: { source: 'json-file', path: '~/.local/share/opencode/auth.json', field: 'openai.access' },
@@ -201,6 +198,12 @@ try {
 	});
 	assert.equal(JSON.stringify(storeOnlyPlan).includes('store-access-must-not-leak'), false);
 	assert.equal(JSON.stringify(storeOnlyPlan).includes('store-refresh-must-not-leak'), false);
+	const rejectedSelection = await executeOpenCodeAgentTask({
+		schema: 'homeboy/agent-task-request/v1', task_id: 'selected-api-over-oauth',
+		executor: { backend: 'opencode', model: 'openai/gpt-6.1-sol', config: { provider: 'openai', auth_kind: 'api_key', runtime_bin: '/must-not-execute' } },
+		instructions: 'Reply with READY.',
+	}, { env: storeAmbientEnv });
+	assert.equal(rejectedSelection.failure_code, 'agent_task.opencode_auth_plan_failed');
 
 	// The store account is a credential selector for the OpenAI route.
 	const storeAccountPlan = resolveOpenCodeAuthPlan({
@@ -233,6 +236,13 @@ try {
 	}, { env: { ...apiKeyOnlyEnv, AI_PROVIDER_OPENCODE_OPENAI_ACCESS: 'store-access-must-not-leak' } });
 	assert.equal(apiKeyOnlyExecutionEnv.OPENAI_API_KEY, apiKeyOnlyEnv.OPENAI_API_KEY);
 	assert.equal(apiKeyOnlyExecutionEnv.AI_PROVIDER_OPENCODE_OPENAI_ACCESS, undefined);
+	const missingSelectedKey = await executeOpenCodeAgentTask({
+		schema: 'homeboy/agent-task-request/v1', task_id: 'selected-api-without-key',
+		executor: { backend: 'opencode', model: 'openai/gpt-6.1-sol', config: { provider: 'openai', auth_kind: 'api_key', runtime_bin: '/must-not-execute' } },
+		instructions: 'Reply with READY.',
+	}, { env: storeAmbientEnv });
+	assert.equal(missingSelectedKey.failure_code, 'agent_task.opencode_auth_plan_failed');
+	assert.match(missingSelectedKey.summary, /OPENAI_API_KEY/);
 
 	// The codex route keeps its own declared names and sources.
 	const codexPlan = resolveOpenCodeAuthPlan({ model: 'codex/gpt-5.6-luna' }, {

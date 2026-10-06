@@ -1,5 +1,7 @@
 'use strict';
 
+require('../../../runtime-agent-ci/tests/helpers/runtime-contract-constants-fixture.cjs');
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -111,6 +113,11 @@ try {
 	});
 	assert.equal(JSON.stringify(openAiOAuth).includes('opencode-access-must-not-leak'), false);
 	assert.equal(JSON.stringify(openAiOAuth).includes('opencode-refresh-must-not-leak'), false);
+	const explicitApiOverOAuth = openCodeRuntimeReadiness(request({ provider: 'openai', auth_kind: 'api_key' }), {
+		env: env(), spawnSync: () => { throw new Error('conflicting authentication must fail before the CLI'); },
+	});
+	assert.equal(explicitApiOverOAuth.ready, false);
+	assert.equal(explicitApiOverOAuth.reason, 'selected_auth_unavailable');
 	const oauthAccountRoute = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra', provider: 'openai-oauth' }, { env: env() });
 	assert.equal(oauthAccountRoute.provider, 'openai');
 	assert.equal(oauthAccountRoute.auth_kind, 'oauth');
@@ -121,8 +128,25 @@ try {
 	assert.equal(openAiApi.auth_kind, 'api_key');
 	assert.deepEqual(openAiApi.secret_env, ['OPENAI_API_KEY']);
 	assert.equal(JSON.stringify(openAiApi).includes('api-key-must-not-leak'), false);
+	const nativeApi = resolveOpenCodeAuthPlan({ model: 'openai/gpt-6.1-sol' }, { env: env({ OPENAI_API_KEY: undefined }) });
+	assert.equal(nativeApi.auth_kind, 'api_key');
+	assert.equal(nativeApi.source.kind, 'opencode_auth_store');
+	assert.deepEqual(nativeApi.secret_env, []);
+	assert.deepEqual(nativeApi.secret_env_sources, {});
+	const explicitOAuthOverApi = openCodeRuntimeReadiness(request({ provider: 'openai', auth_kind: 'oauth' }), {
+		env: env(), spawnSync: () => { throw new Error('explicit OAuth must not fall back to API-key access'); },
+	});
+	assert.equal(explicitOAuthOverApi.ready, false);
+	assert.equal(explicitOAuthOverApi.reason, 'selected_auth_unavailable');
 	const secondAuthStore = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses()) });
 	assert.notEqual(firstAuthStore.cache_key, secondAuthStore.cache_key);
+	fs.writeFileSync(path.join(authStore, 'auth.json'), '{}');
+	const missingSelectedKey = openCodeRuntimeReadiness(request({ provider: 'openai', auth_kind: 'api_key' }), {
+		env: env({ OPENAI_API_KEY: undefined }), spawnSync: () => { throw new Error('missing selected key must fail before the CLI'); },
+	});
+	assert.equal(missingSelectedKey.ready, false);
+	assert.equal(missingSelectedKey.reason, 'selected_auth_unavailable');
+	assert.match(missingSelectedKey.remediation, /OPENAI_API_KEY/);
 
 	const missingAuth = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe([
 		readyResponses()[0],

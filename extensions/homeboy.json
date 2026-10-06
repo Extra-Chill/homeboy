@@ -8,6 +8,7 @@
       "node tests/agent-task-provider-contract-smoke.mjs",
       "node agent-runtimes/codex/tests/declared-artifact-harvester.test.js",
       "node agent-runtimes/opencode/tests/opencode-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/opencode/tests/opencode-runtime-readiness.test.js",
       "node agent-runtimes/opencode/tests/opencode-external-storage-retention.test.js",
       "node agent-runtimes/opencode/tests/opencode-external-storage-bounds.test.js",
       "node agent-runtimes/opencode/tests/opencode-external-storage-native-session.test.js",
