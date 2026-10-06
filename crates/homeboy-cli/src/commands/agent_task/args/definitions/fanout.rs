@@ -74,6 +74,9 @@ pub enum AgentTaskFanoutCommand {
 #[derive(Args, Debug, Clone)]
 #[command(disable_help_flag = true)]
 pub struct AgentTaskFanoutCookBatchArgs {
+    /// Controller-resolved per-child policy for Lab transport.
+    #[arg(long = "resolved-provider-policies", hide = true)]
+    pub resolved_provider_policies: Option<String>,
     /// Show compact task-first cook-batch help. Use `--help-full` for the
     /// complete cook-batch option reference.
     #[arg(short = 'h', long, action = clap::ArgAction::HelpShort)]
@@ -230,6 +233,9 @@ pub struct AgentTaskFanoutCookBatchArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct AgentTaskFanoutInputArgs {
+    /// Controller-resolved per-child policy for Lab transport.
+    #[arg(long = "resolved-provider-policies", hide = true)]
+    pub resolved_provider_policies: Option<String>,
     /// Plan input: inline JSON, `@FILE`, or `-` for stdin. `plan` and `submit`
     /// expect a batch-cook fanout plan (`homeboy/agent-task-batch-cook-plan/v1`);
     /// `submit-batch` expects an `AgentTaskPlan` JSON spec; `run-plan` expects a
@@ -347,6 +353,7 @@ impl AgentTaskFanoutPlanArgs {
     /// flags are pinned off because `fanout plan` never executes.
     pub(crate) fn into_cook_batch_preview(self) -> AgentTaskFanoutCookBatchArgs {
         AgentTaskFanoutCookBatchArgs {
+            resolved_provider_policies: None,
             help: None,
             help_full: None,
             issues: self.issues,

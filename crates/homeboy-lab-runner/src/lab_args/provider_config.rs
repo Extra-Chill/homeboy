@@ -192,6 +192,22 @@ pub(crate) fn inject_agent_task_default_provider_config_in_args(
 pub(crate) fn inject_agent_task_resolved_provider_policy_in_args(
     args: &[String],
 ) -> Result<Vec<String>> {
+    if args.windows(2).any(|pair| pair == ["agent-task", "fanout"]) {
+        if args.iter().any(|arg| {
+            arg == "--resolved-provider-policies"
+                || arg.starts_with("--resolved-provider-policies=")
+        }) {
+            return Ok(args.to_vec());
+        }
+        if let Some(policies) = crate::cli_resolver::resolve_fanout_provider_policies(args)? {
+            return Ok(with_provider_policy_arg(
+                args,
+                "--resolved-provider-policies",
+                policies,
+            ));
+        }
+        return Ok(args.to_vec());
+    }
     if !is_agent_task_dispatch_or_cook(args)
         || args.iter().any(|arg| arg == "--resolved-provider-policy")
         || args
@@ -216,21 +232,21 @@ pub(crate) fn inject_agent_task_resolved_provider_policy_in_args(
             Some("serialize resolved Lab agent-task provider policy".to_string()),
         )
     })?;
-    let mut out = Vec::with_capacity(args.len() + 2);
-    let mut inserted = false;
-    for arg in args {
-        if !inserted && arg == "--" {
-            out.push("--resolved-provider-policy".to_string());
-            out.push(encoded.clone());
-            inserted = true;
-        }
-        out.push(arg.clone());
-    }
-    if !inserted {
-        out.push("--resolved-provider-policy".to_string());
-        out.push(encoded);
-    }
-    Ok(out)
+    Ok(with_provider_policy_arg(
+        args,
+        "--resolved-provider-policy",
+        encoded,
+    ))
+}
+
+fn with_provider_policy_arg(args: &[String], flag: &str, policy: String) -> Vec<String> {
+    let boundary = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut out = args.to_vec();
+    out.splice(boundary..boundary, [flag.to_string(), policy]);
+    out
 }
 
 fn is_agent_task_dispatch_or_cook(args: &[String]) -> bool {

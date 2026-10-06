@@ -557,6 +557,14 @@ policy, and finalization intent. The wave still owns one concurrency limit and
 one durable parent status, while every child retains its normal Cook recipe,
 evidence, PR finalization, and replay identity.
 
+Each planned child retains its controller-resolved provider policy: primary
+route, ordered fallback chain, retry/liveness intent, and runtime identity.
+Executing or resuming the saved batch on another machine uses that submitted
+policy, including an intentional absence of rotation. Receiver-local defaults
+cannot replace it. Explicit execution caps and pinned routes retain their
+declared semantics. Lab handoff materializes each child's runtime independently;
+credentials and machine capabilities remain local to the execution node.
+
 ```json
 {
   "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",

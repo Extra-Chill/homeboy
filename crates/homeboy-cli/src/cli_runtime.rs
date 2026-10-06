@@ -1273,6 +1273,28 @@ fn register_startup_providers_after_reconcile(
             _ => None,
         })
     });
+    crate::runner::set_fanout_provider_policy_resolver(|argv| {
+        let cli =
+            <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(|error| {
+                crate::core::Error::validation_invalid_argument(
+                    "fanout",
+                    "failed to parse fanout arguments while compiling Lab provider policy",
+                    Some(error.to_string()),
+                    None,
+                )
+            })?;
+        match cli.command {
+            crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
+                crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) => {
+                    crate::commands::agent_task::fanout::resolve_lab_provider_policies(
+                        fanout.command,
+                    )
+                }
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    });
     // Register the Lab-runner hint provider so core::runner can compose
     // `--runner`/`--placement` unsupported errors from the command-spec table
     // without depending on `command_contract`.

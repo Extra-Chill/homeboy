@@ -199,7 +199,7 @@ where
     check_cancelled()?;
     let runtime_generation = resolved_runtime
         .as_ref()
-        .map(|resolved| resolved.generation.clone());
+        .and_then(|resolved| resolved.generation.clone());
     let runtime_env = resolved_runtime
         .as_ref()
         .map(|resolved| resolved.env.clone())
@@ -219,7 +219,11 @@ where
                 "lab.materialize_agent_runtime",
                 "lab.materialize_agent_runtime",
             )
-            .inputs(PlanValues::new().json("generation", &runtime_generation))
+            .inputs(
+                PlanValues::new()
+                    .json("generation", &runtime_generation)
+                    .json("cells", &resolved.cells),
+            )
             .build(),
         );
     }
