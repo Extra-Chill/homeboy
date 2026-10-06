@@ -40,8 +40,7 @@ touching component checkouts.
 | `services` | object | No | Map of service ID to `ServiceSpec`. |
 | `symlinks` | array | No | List of `SymlinkSpec` entries. |
 | `shared_paths` | array | No | List of dependency paths the rig may borrow from another checkout. |
-| `shared_templates` | array | No | Template roots, relative to this `rig.json`, this rig may inherit from outside its selected package root. |
-| `package_dependencies` | array | No | Install-time package-relative paths that must materialize with the package, for nested package imports that cross the selected package root. |
+| `requirements` | object | No | Typed preconditions evaluated by `rig check`: `executables`, `filesystem_assertions`, `dependency_materialization`, `broker_targets`, and extension-owned `extensions` entries. See [`requirements`](#requirements). |
 | `resources` | object | No | Resource declarations used by active-run leases. |
 | `pipeline` | object | No | Map of pipeline name to `PipelineStep[]`. |
 | `bench` | object | No | Rig-pinned benchmark component/default-baseline settings. |
@@ -50,7 +49,6 @@ touching component checkouts.
 | `fuzz_workloads` | object | No | Rig-owned out-of-tree fuzz workloads keyed by extension ID. |
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
-| `toolchain` | object | No | Declarative `PATH` assembly for `command` steps. Omit to keep the built-in default. |
 
 ## Workload Lifecycle Contracts
 
@@ -99,7 +97,7 @@ Merge rules are intentionally generic:
 - A child field whose inherited value is an array can opt into array merge semantics by using an object directive instead of a plain array:
   - `{ "$append": [...] }` appends entries after the inherited array.
   - `{ "$merge_by": "<key>", "entries": [...] }` merges array objects by a key field such as `id` or `label`; matching entries deep-merge with the same object rules, and new keyed entries append.
-- `extends` paths must be non-empty relative paths that stay inside the rig package source root, or inside a root explicitly declared in `shared_templates`.
+- `extends` paths must be non-empty relative paths that stay inside the rig package source root.
 
 Example:
 
@@ -129,20 +127,6 @@ Example:
 ```
 
 The installed rig keeps the base `pipeline.check` and `components.app.branch`, while replacing `components.app.path`.
-
-### Shared Templates
-
-Packages nested inside a repository can reuse a repository-level template by declaring its directory in `shared_templates`. The declaration and every resolved template are canonicalized, must remain inside the containing repository (or materialized runner snapshot), and authorize only that declared root. This keeps package-local templates working as before while rejecting undeclared traversal and symlink escapes.
-
-```jsonc
-// Automattic/jetpack/rigs/browser-coverage/rig.json
-{
-  "shared_templates": ["../../../../shared/wordpress-plugin"],
-  "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json"
-}
-```
-
-For runner installation, declare the same repository-level directory in `package_dependencies` when it must travel with a selected package snapshot.
 
 Array merge example:
 
@@ -184,25 +168,6 @@ Array merge example:
 ```
 
 The materialized `pipeline.check` keeps `npm available`, deep-merges the `build` step so `metadata.retries` and `metadata.timeout` both survive, and appends `app checkout exists`. Plain array fields still replace inherited arrays unless one of these directives is used.
-
-## Package Dependencies
-
-Nested package rigs can declare sibling files/directories that must travel with
-the selected package when Lab materializes the package source. Entries are
-resolved relative to the selected package root, must be relative paths, must
-exist, and must stay inside the package source repository root.
-
-```jsonc
-{
-  "id": "static-site-importer-fixture-matrix",
-  "package_dependencies": ["../../shared/sample-runtime"]
-}
-```
-
-When this rig is installed from `WordPress/static-site-importer`, Homeboy records
-the repository root as the source root and keeps the package path at
-`WordPress/static-site-importer`, so imports such as
-`../../../shared/sample-runtime/recipe.mjs` keep resolving on Lab.
 
 ## `ComponentSpec`
 
@@ -646,7 +611,7 @@ one declaration governs every op the rig runs against it.
 - `extension_hook` — an extension ability named `<extension-id>.<action-id>`,
   dispatched through the normal extension action path.
 - `command` — a shell command, captured, honouring `timeout_seconds` and
-  inheriting the rig's [`toolchain`](#toolchain) PATH.
+  inheriting the built-in command-step PATH.
 
 `required` defaults to `true`. A `required: false` phase that fails is recorded
 as `skipped` and the step continues.
@@ -889,54 +854,35 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
 
 Linux launchers use the same block with `"platform": "linux"` and write a `.desktop` file that invokes the target executable after preflight and `rig up` succeed.
 
-## `toolchain`
+## `requirements`
 
-`toolchain` declares which bin directories a rig's `command` steps see. Omitting
-it keeps Homeboy's built-in default, so rigs authored before this field are
-unchanged. Declaring it **replaces** the default outright — the rig states its
-whole toolchain rather than extending an orchestrator-owned guess.
-
-| Field | Type | Description |
-|---|---|---|
-| `prepend_paths` | array | Directories placed ahead of everything else, in declared order. |
-| `discover` | array | Version-manager style scans applied after `prepend_paths`. |
-| `append_paths` | array | Directories placed after `discover`, still ahead of the inherited `PATH`. |
-
-Resolution order is `prepend_paths` → `discover` → `append_paths` → inherited
-`PATH`. Entries are variable-expanded, dropped when the directory does not
-exist, and de-duplicated keeping the highest-priority occurrence.
-
-Each `discover` entry:
-
-| Field | Type | Description |
-|---|---|---|
-| `root` | string | Directory whose immediate children are scanned. |
-| `glob` | string | Optional `*`-wildcard filter on each child's file name. All children when omitted. |
-| `bin_subdir` | string | Optional subdirectory appended to each match. The match itself when omitted. |
-| `sort` | enum | `descending` (default), `ascending`, or `unsorted`. |
+Typed rig preconditions. `rig check` evaluates `executables` and
+`filesystem_assertions` before the `check` pipeline and reports each as a
+`rig-requirement` step.
 
 ```jsonc
 {
-  "toolchain": {
-    "prepend_paths": ["~/.local/bin", "${components.studio.path}/node_modules/.bin"],
-    "discover": [
+  "requirements": {
+    "executables": [
       {
-        "root": "~/.nvm/versions/node",
-        "glob": "v*",
-        "bin_subdir": "bin",
-        "sort": "descending"
+        "executable": "node",
+        "env": "HOMEBOY_NODE_BIN",
+        "env_aliases": ["NODE_BIN"],
+        "label": "Node.js available",
+        "remediation": "Install Node.js or set HOMEBOY_NODE_BIN"
       }
     ],
-    "append_paths": ["/opt/homebrew/bin", "/usr/local/bin"]
+    "filesystem_assertions": [
+      { "path": "${components.app.path}/node_modules", "kind": "dir" }
+    ]
   }
 }
 ```
 
-The built-in default is equivalent to `prepend_paths` of `~/.local/bin`,
-`~/.cargo/bin`, `~/.kimaki/bin`, the nvm `discover` entry above, and
-`append_paths` of `/opt/homebrew/bin`, `/usr/local/bin`. Those language- and
-product-specific entries are legacy: they belong in host or rig configuration,
-and this field is the migration path.
+Executable requirements try each `env` / `env_aliases` variable in order, then
+resolve `executable` from `PATH` (or as a path when it contains a separator).
+Filesystem assertions take `kind` `path` (default, anything that exists), `file`,
+or `dir`, and resolve relative paths against `cwd` when set.
 
 ## Variable Expansion
 

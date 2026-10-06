@@ -37,9 +37,8 @@ pub(super) fn run_rig_source_management_on_runner(
     // pre-install + `--skip-install` (#6964). Materialize the source's containing
     // checkout on the runner and translate the forwarded path through the same
     // sync+translate seam the working directory already uses. Syncing the
-    // containing checkout (not just the package directory) keeps rigs that
-    // declare `package_dependencies` — which resolve against the repo root — and
-    // package-level `extends` templates working on the runner.
+    // containing checkout (not just the package directory) keeps package-level
+    // `extends` templates working on the runner.
     if let Some(source_root) = rig_install_source_root.as_deref() {
         let (synced, sync_exit_code) = runners::sync_workspace(
             runner_id,

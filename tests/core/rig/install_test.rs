@@ -1,6 +1,5 @@
 //! Rig install lifecycle tests. Covers `src/core/rig/install.rs`.
 
-use crate::install::local_package_source_root_for_dependencies;
 use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install,
     install_with_local_source_copy, list, list_ids, load, load_local_source,
@@ -266,37 +265,6 @@ mod materialization {
     }
 
     #[test]
-    fn materialize_allows_declared_shared_template_root() {
-        let repo = tempfile::tempdir().expect("repo");
-        let package = repo.path().join("packages/app");
-        let rig = package.join("rigs/example/rig.json");
-        let shared = repo.path().join("shared/templates");
-        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
-        fs::create_dir_all(&shared).expect("shared directory");
-        fs::write(
-            shared.join("base.json"),
-            r#"{ "settings": { "shared": true } }"#,
-        )
-        .expect("shared template");
-        fs::write(
-            &rig,
-            r#"{
-                "id": "example",
-                "shared_templates": ["../../../../shared/templates"],
-                "extends": "../../../../shared/templates/base.json"
-            }"#,
-        )
-        .expect("rig");
-        init_main(repo.path());
-        commit_all(repo.path(), "shared template");
-
-        assert_eq!(
-            materialize_rig_spec(&rig, &package).expect("materialize"),
-            serde_json::json!({ "id": "example", "settings": { "shared": true } })
-        );
-    }
-
-    #[test]
     fn materialize_rejects_undeclared_template_outside_package_root() {
         let repo = tempfile::tempdir().expect("repo");
         let package = repo.path().join("packages/app");
@@ -315,32 +283,7 @@ mod materialization {
 
         let error = materialize_rig_spec(&rig, &package).expect_err("undeclared template rejected");
         assert_eq!(error.details["field"], "extends");
-        assert!(error.message.contains("declared shared template root"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn materialize_rejects_shared_template_symlink_escape() {
-        use std::os::unix::fs::symlink;
-
-        let package = tempfile::tempdir().expect("package");
-        let outside = tempfile::tempdir().expect("outside");
-        let rig = package.path().join("rigs/example/rig.json");
-        fs::create_dir_all(rig.parent().expect("rig directory")).expect("rig directory");
-        fs::write(outside.path().join("base.json"), r#"{}"#).expect("outside template");
-        symlink(outside.path(), package.path().join("shared")).expect("shared symlink");
-        fs::write(
-            &rig,
-            r#"{
-                "shared_templates": ["../../shared"],
-                "extends": "../../shared/base.json"
-            }"#,
-        )
-        .expect("rig");
-
-        let error = materialize_rig_spec(&rig, package.path()).expect_err("symlink rejected");
-        assert_eq!(error.details["field"], "shared_templates");
-        assert!(error.message.contains("must stay inside"));
+        assert!(error.message.contains("rig package source root"));
     }
 
     #[test]
@@ -555,185 +498,6 @@ mod install_flows {
             #[cfg(unix)]
             assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
         }
-    }
-
-    #[test]
-    fn local_nested_package_dependency_records_repo_source_root() {
-        let _home = HomeGuard::new();
-        let repo = tempfile::tempdir().expect("repo");
-        let nested = repo.path().join("WordPress/static-site-importer");
-        fs::create_dir_all(repo.path().join("shared/sample-runtime")).expect("shared dir");
-        fs::write(
-            repo.path().join("shared/sample-runtime/recipe.mjs"),
-            "export default {};\n",
-        )
-        .expect("shared recipe");
-        write_single_rig(
-            &nested,
-            "static-site-importer-fixture-matrix",
-            r#"{
-                "id": "static-site-importer-fixture-matrix",
-                "package_dependencies": ["../../shared/sample-runtime"],
-                "bench_workloads": {
-                    "static-site-importer": [
-                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
-                    ]
-                }
-            }"#,
-        );
-        init_main(repo.path());
-        commit_all(repo.path(), "nested package with shared dependency");
-
-        let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
-            .expect("install nested package");
-        let metadata = read_source_metadata_in_root(
-            &test_config_root(),
-            "static-site-importer-fixture-matrix",
-        )
-        .expect("metadata");
-        let repo_root = repo.path().canonicalize().expect("canonical repo root");
-        let package_root = nested.canonicalize().expect("canonical package root");
-        let rigs = discover_rigs(&nested).expect("discover local rigs");
-        let local_source_root = local_package_source_root_for_dependencies(&nested, &rigs)
-            .expect("resolve local source root");
-
-        assert_eq!(result.source_root, repo_root);
-        assert_eq!(local_source_root, result.source_root);
-        assert_eq!(result.package_path, package_root);
-        assert_eq!(
-            metadata.source_root.as_deref(),
-            Some(repo_root.to_str().unwrap())
-        );
-        assert_eq!(metadata.package_path, package_root.to_string_lossy());
-    }
-
-    #[test]
-    fn materialized_lab_nested_package_dependency_uses_snapshot_source_root() {
-        let _home = HomeGuard::new();
-        let workspace = tempfile::tempdir().expect("workspace");
-        let snapshot = workspace
-            .path()
-            .join("_lab_workspaces/homeboy-rigs-fixture-123");
-        let nested = snapshot.join("WordPress/static-site-importer");
-        fs::create_dir_all(snapshot.join("shared/sample-runtime")).expect("shared dir");
-        fs::write(
-            snapshot.join("shared/sample-runtime/recipe.mjs"),
-            "export default {};\n",
-        )
-        .expect("shared recipe");
-        write_single_rig(
-            &nested,
-            "static-site-importer-fixture-matrix",
-            r#"{
-                "id": "static-site-importer-fixture-matrix",
-                "package_dependencies": ["../../shared/sample-runtime"],
-                "bench_workloads": {
-                    "static-site-importer": [
-                        { "path": "${package.root}/bench/static-site-fixture-matrix.bench.mjs" }
-                    ]
-                }
-            }"#,
-        );
-
-        let result = install(&test_config_root(), nested.to_str().unwrap(), None, false)
-            .expect("install materialized package");
-        let metadata = read_source_metadata_in_root(
-            &test_config_root(),
-            "static-site-importer-fixture-matrix",
-        )
-        .expect("metadata");
-        let source_root = snapshot.canonicalize().expect("canonical source root");
-        let package_root = nested.canonicalize().expect("canonical package root");
-        let rigs = discover_rigs(&nested).expect("discover materialized rigs");
-        let local_source_root = local_package_source_root_for_dependencies(&nested, &rigs)
-            .expect("resolve materialized source root");
-
-        assert_eq!(result.source_root, source_root);
-        assert_eq!(local_source_root, result.source_root);
-        assert_eq!(result.package_path, package_root);
-        assert_eq!(
-            metadata.source_root.as_deref(),
-            Some(source_root.to_str().unwrap())
-        );
-        assert_eq!(metadata.package_path, package_root.to_string_lossy());
-    }
-
-    #[test]
-    fn materialized_lab_package_dependency_outside_snapshot_is_rejected() {
-        let _home = HomeGuard::new();
-        let workspace = tempfile::tempdir().expect("workspace");
-        let snapshot = workspace
-            .path()
-            .join("_lab_workspaces/homeboy-rigs-fixture-123");
-        let nested = snapshot.join("WordPress/static-site-importer");
-        fs::create_dir_all(workspace.path().join("_lab_workspaces/outside")).expect("outside dir");
-        write_single_rig(
-            &nested,
-            "bad-rig",
-            r#"{
-                "id": "bad-rig",
-                "package_dependencies": ["../../../outside"]
-            }"#,
-        );
-
-        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
-            .expect_err("dependency outside snapshot should fail");
-
-        assert!(err
-            .message
-            .contains("package dependency paths must stay inside"));
-        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    }
-
-    #[test]
-    fn package_dependency_outside_source_root_is_rejected() {
-        let _home = HomeGuard::new();
-        let parent = tempfile::tempdir().expect("parent");
-        let repo = parent.path().join("repo");
-        let outside = parent.path().join("outside-shared");
-        let nested = repo.join("packages/app");
-        fs::create_dir_all(&outside).expect("outside dir");
-        write_single_rig(
-            &nested,
-            "bad-rig",
-            r#"{
-                "id": "bad-rig",
-                "package_dependencies": ["../../../outside-shared"]
-            }"#,
-        );
-        init_main(&repo);
-        commit_all(&repo, "bad dependency");
-
-        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
-            .expect_err("dependency outside repo should fail");
-
-        assert!(err
-            .message
-            .contains("package dependency paths must stay inside"));
-        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
-    }
-
-    #[test]
-    fn absolute_package_dependency_is_rejected() {
-        let _home = HomeGuard::new();
-        let repo = tempfile::tempdir().expect("repo");
-        let nested = repo.path().join("packages/app");
-        write_single_rig(
-            &nested,
-            "bad-rig",
-            r#"{
-                "id": "bad-rig",
-                "package_dependencies": ["/tmp/shared"]
-            }"#,
-        );
-        init_main(repo.path());
-        commit_all(repo.path(), "bad dependency");
-
-        let err = install(&test_config_root(), nested.to_str().unwrap(), None, false)
-            .expect_err("absolute dependency should fail");
-
-        assert!(err.message.contains("non-empty relative paths"));
-        assert_eq!(err.code, ErrorCode::ValidationInvalidArgument);
     }
 
     #[test]
