@@ -102,6 +102,29 @@ pub fn resolve_agent_task_dispatch(
     }
 }
 
+type FanoutProviderPolicyResolver = fn(&[String]) -> homeboy_core::Result<Option<String>>;
+
+fn fanout_provider_policy_resolver() -> &'static RwLock<Option<FanoutProviderPolicyResolver>> {
+    static RESOLVER: OnceLock<RwLock<Option<FanoutProviderPolicyResolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| RwLock::new(None))
+}
+
+/// The CLI owns parsing batch inputs and resolving each child's submitted policy.
+pub fn set_fanout_provider_policy_resolver(resolver: FanoutProviderPolicyResolver) {
+    *fanout_provider_policy_resolver()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
+}
+
+pub(crate) fn resolve_fanout_provider_policies(
+    argv: &[String],
+) -> homeboy_core::Result<Option<String>> {
+    let resolver = *fanout_provider_policy_resolver()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    resolver.map(|resolve| resolve(argv)).unwrap_or(Ok(None))
+}
+
 /// Human-readable strings describing which commands support Lab-runner offload.
 ///
 /// Built by the CLI layer from the command-spec table and registered via

@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use homeboy::agents::agent_task_dispatch_service::{
+    initial_provider_route_from_policy, ResolvedAgentTaskProviderPolicy,
+};
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
 use homeboy::agents::agent_task_scheduler::{
     resolve_batch_concurrency, BatchConcurrencyDecision, BatchConcurrencyInputs,
@@ -164,6 +167,65 @@ pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
     fanout_with_placement(args, Placement::Auto)
 }
 
+type FanoutProviderPolicies = BTreeMap<String, ResolvedAgentTaskProviderPolicy>;
+
+fn parse_provider_policies(spec: Option<&str>) -> Result<FanoutProviderPolicies> {
+    spec.map(|spec| {
+        serde_json::from_str(spec).map_err(|error| {
+            Error::validation_invalid_json(
+                error,
+                Some("fanout provider policies".to_string()),
+                None,
+            )
+        })
+    })
+    .transpose()
+    .map(|policies| policies.unwrap_or_default())
+}
+
+/// Resolve policies before a batch command crosses the Lab boundary. Generated
+/// batches use their stable issue selectors; loaded manifests use exact cell IDs.
+pub(crate) fn resolve_lab_provider_policies(
+    command: AgentTaskFanoutCommand,
+) -> Result<Option<String>> {
+    let policies = match command {
+        AgentTaskFanoutCommand::CookBatch(args) => {
+            let mut args = *args;
+            apply_provider_profile(&mut args);
+            resolve_effective_backend_without_admission(&mut args)?;
+            parse_provider_policies(args.resolved_provider_policies.as_deref())?
+        }
+        AgentTaskFanoutCommand::RunPlan(args) => {
+            let plan = load_batch_cook_fanout_plan(&args.input, true)?;
+            plan.cooks
+                .into_iter()
+                .map(|cook| {
+                    let policy = cook
+                        .resolved_provider_policy
+                        .expect("loaded batch resolves every provider policy");
+                    (cook.cook_id, policy)
+                })
+                .collect()
+        }
+        AgentTaskFanoutCommand::Submit(args) => {
+            let plan = load_batch_cook_fanout_plan(&args.input, true)?;
+            plan.cooks
+                .into_iter()
+                .map(|cook| {
+                    let policy = cook
+                        .resolved_provider_policy
+                        .expect("loaded batch resolves every provider policy");
+                    (cook.cook_id, policy)
+                })
+                .collect()
+        }
+        _ => return Ok(None),
+    };
+    serde_json::to_string(&policies)
+        .map(Some)
+        .map_err(|error| Error::internal_json(error.to_string(), None))
+}
+
 pub(crate) fn fanout_with_placement(
     args: AgentTaskFanoutArgs,
     placement: Placement,
@@ -191,6 +253,7 @@ pub(crate) fn fanout_with_placement(
                 ..
             } = plan_args;
             let load_args = AgentTaskFanoutInputArgs {
+                resolved_provider_policies: None,
                 input: input.unwrap_or_default(),
                 fanout_id,
                 backend,
@@ -3552,9 +3615,19 @@ impl BatchCookFanoutPlan {
                 "batch cook fanout requires at least one cook",
             ));
         }
+        let mut policies = parse_provider_policies(args.resolved_provider_policies.as_deref())?;
         for cook in &mut plan.cooks {
+            if let Some(policy) = policies.remove(&cook.cook_id) {
+                cook.resolved_provider_policy = Some(policy);
+            }
             cook.apply_defaults(args)?;
             validate_batch_cook_repository_component(cook)?;
+            cook.resolve_provider_policy()?;
+        }
+        if !policies.is_empty() {
+            return Err(invalid_fanout(
+                "submitted provider policies name unknown batch children",
+            ));
         }
         plan.resolve_dependencies()?;
         Ok(plan)
@@ -3784,6 +3857,8 @@ fn validate_batch_cook_repository_component(cook: &mut BatchCookSpec) -> Result<
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct BatchCookSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_provider_policy: Option<ResolvedAgentTaskProviderPolicy>,
     cook_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     depends_on: Vec<String>,
@@ -3909,6 +3984,57 @@ struct BatchCookInvocation {
 }
 
 impl BatchCookSpec {
+    fn resolve_provider_policy(&mut self) -> Result<()> {
+        if self.resolved_provider_policy.is_none() {
+            let command = fanout_provider_dispatch_command(
+                self.repo.clone(),
+                self.component_id.clone(),
+                self.backend.clone(),
+                self.selector.clone(),
+                self.model.clone(),
+                self.secret_env.clone(),
+                self.provider_config.clone(),
+            );
+            let request = dispatch_service::resolve_dispatch_request(command)?;
+            self.resolved_provider_policy = Some(
+                dispatch_service::controller_resolved_execution_policy(&request),
+            );
+        }
+        self.validate_provider_policy()?;
+        Ok(())
+    }
+
+    fn validate_provider_policy(&self) -> Result<()> {
+        let Some(policy) = &self.resolved_provider_policy else {
+            return Ok(());
+        };
+        for (field, declared, resolved) in [
+            (
+                "backend",
+                self.backend.as_deref(),
+                Some(policy.backend.as_str()),
+            ),
+            (
+                "selector",
+                self.selector.as_deref(),
+                policy.selector.as_deref(),
+            ),
+            ("model", self.model.as_deref(), policy.model.as_deref()),
+        ] {
+            if let Some(declared) = declared {
+                if Some(declared) != resolved {
+                    return Err(Error::validation_invalid_argument(
+                        field,
+                        "declared route conflicts with the submitted provider policy; re-plan on the controller after changing a route",
+                        Some(declared.to_string()),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_defaults(&mut self, args: &AgentTaskFanoutInputArgs) -> Result<()> {
         if self.cook_id.trim().is_empty() {
             return Err(invalid_fanout("each cook requires a non-empty cook_id"));
@@ -3940,6 +4066,7 @@ impl BatchCookSpec {
     }
 
     fn to_cook_invocation(&self, plan: &BatchCookFanoutPlan) -> Result<BatchCookInvocation> {
+        self.validate_provider_policy()?;
         if self.verify.is_empty()
             && self.private_verify.is_empty()
             && self.test_execution_plan.is_none()
@@ -4019,7 +4146,12 @@ impl BatchCookSpec {
                 provider_rotations: Some(retry_budget.provider_rotations),
                 queue_only: false,
                 timeout_ms: None,
-                resolved_provider_policy: None,
+                resolved_provider_policy: self.resolved_provider_policy.clone().map(
+                    |mut policy| {
+                        policy.retry.max_attempts = retry_budget.provider_executions;
+                        policy
+                    },
+                ),
                 deny_command: Vec::new(),
                 allow_command: Vec::new(),
                 command_policy_reason: None,
@@ -4128,15 +4260,10 @@ fn batch_cook_configured_rotations(cook: &BatchCookSpec) -> u32 {
     if cook.backend.is_some() && cook.model.is_some() && cook.provider_rotations.is_none() {
         return 0;
     }
-    homeboy::core::defaults::load_config()
-        .agent_task
-        .rotation
-        .and_then(|rotation| {
-            serde_json::from_value::<
-                homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy,
-            >(rotation)
-            .ok()
-        })
+    cook.resolved_provider_policy
+        .clone()
+        .map(initial_provider_route_from_policy)
+        .and_then(|route| route.rotation)
         .map(|rotation| {
             let entries = u32::try_from(rotation.entries.len()).unwrap_or(u32::MAX);
             rotation
@@ -4268,6 +4395,7 @@ fn build_cook_batch_plan_with_profiles(
     }
     let mut seen = HashSet::new();
     let mut cooks = Vec::with_capacity(args.issues.len());
+    let mut policies = parse_provider_policies(args.resolved_provider_policies.as_deref())?;
     for issue_url in &args.issues {
         let issue = IssueRef::parse(issue_url)?;
         if !seen.insert(issue.key.clone()) {
@@ -4302,6 +4430,7 @@ fn build_cook_batch_plan_with_profiles(
         let input_sources =
             sources_for_executed_gates(&args.gates.input_sources, &verify, &private_verify);
         cooks.push(BatchCookSpec {
+            resolved_provider_policy: policies.remove(&task_selector),
             cook_id: format!("issue-{}", issue.number),
             depends_on: Vec::new(),
             prompt: Some(prompt),
@@ -4361,6 +4490,14 @@ fn build_cook_batch_plan_with_profiles(
             ai_tool: args.ai_tool.clone().unwrap_or_else(default_ai_tool),
             ai_used_for: default_ai_used_for(),
         });
+    }
+    if !policies.is_empty() {
+        return Err(invalid_fanout(
+            "submitted provider policies name unknown batch children",
+        ));
+    }
+    for cook in &mut cooks {
+        cook.resolve_provider_policy()?;
     }
     if bindings.len() != args.issues.len() && !bindings.is_empty() {
         return Err(invalid_fanout(
@@ -4780,7 +4917,7 @@ fn resolve_effective_backend_without_admission(
     args: &mut AgentTaskFanoutCookBatchArgs,
 ) -> Result<()> {
     let catalog = AgentTaskProviderCatalog::discover();
-    let command = fanout_provider_dispatch_command(
+    let mut command = fanout_provider_dispatch_command(
         Some(args.repo.clone()),
         args.component.clone(),
         args.backend.clone(),
@@ -4789,6 +4926,10 @@ fn resolve_effective_backend_without_admission(
         args.secret_env.clone(),
         args.provider_config.clone(),
     );
+    command.core.resolved_provider_policy =
+        parse_provider_policies(args.resolved_provider_policies.as_deref())?
+            .into_values()
+            .next();
     let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
         command,
         provider::default_backend_for_component,
@@ -4796,6 +4937,7 @@ fn resolve_effective_backend_without_admission(
     )
     .map_err(with_provider_admission_remediation)?;
 
+    retain_cook_batch_provider_policy(args, &request)?;
     args.backend = Some(request.backend);
     args.selector = request.selector;
     args.model = request.model;
@@ -4818,7 +4960,7 @@ fn resolve_and_validate_effective_backend_with_catalog_and_default(
     catalog: &AgentTaskProviderCatalog,
     default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
 ) -> Result<()> {
-    let command = fanout_provider_dispatch_command(
+    let mut command = fanout_provider_dispatch_command(
         Some(args.repo.clone()),
         args.component.clone(),
         args.backend.clone(),
@@ -4827,6 +4969,10 @@ fn resolve_and_validate_effective_backend_with_catalog_and_default(
         args.secret_env.clone(),
         args.provider_config.clone(),
     );
+    command.core.resolved_provider_policy =
+        parse_provider_policies(args.resolved_provider_policies.as_deref())?
+            .into_values()
+            .next();
     let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
         command,
         default_backend,
@@ -4835,6 +4981,7 @@ fn resolve_and_validate_effective_backend_with_catalog_and_default(
     .map_err(with_provider_admission_remediation)?;
     validate_provider_route(&request, catalog).map_err(with_provider_admission_remediation)?;
 
+    retain_cook_batch_provider_policy(args, &request)?;
     args.backend = Some(request.backend);
     args.selector = request.selector;
     args.model = request.model;
@@ -4849,6 +4996,32 @@ fn with_provider_admission_remediation(error: Error) -> Error {
         ["agent-task", "providers", "--validate-readiness"],
         ActionSafety::ReadOnly,
     ))
+}
+
+fn retain_cook_batch_provider_policy(
+    args: &mut AgentTaskFanoutCookBatchArgs,
+    request: &dispatch_service::AgentTaskDispatchRequest,
+) -> Result<()> {
+    if args.resolved_provider_policies.is_none() {
+        let policy = request
+            .core
+            .resolved_provider_policy
+            .clone()
+            .unwrap_or_else(|| dispatch_service::controller_resolved_execution_policy(request));
+        let policies = args
+            .issues
+            .iter()
+            .map(|url| {
+                IssueRef::parse(url)
+                    .map(|issue| (format!("issue-{}", issue.number), policy.clone()))
+            })
+            .collect::<Result<FanoutProviderPolicies>>()?;
+        args.resolved_provider_policies = Some(
+            serde_json::to_string(&policies)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        );
+    }
+    Ok(())
 }
 
 fn fanout_provider_dispatch_command(
@@ -4894,7 +5067,9 @@ fn admit_batch_provider_routes_with_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
     for cook in &mut plan.cooks {
-        let command = fanout_provider_dispatch_command(
+        cook.validate_provider_policy()
+            .map_err(with_provider_admission_remediation)?;
+        let mut command = fanout_provider_dispatch_command(
             cook.repo.clone(),
             cook.component_id.clone(),
             cook.backend.clone(),
@@ -4903,6 +5078,7 @@ fn admit_batch_provider_routes_with_catalog(
             cook.secret_env.clone(),
             cook.provider_config.clone(),
         );
+        command.core.resolved_provider_policy = cook.resolved_provider_policy.clone();
         let request = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
             command,
             provider::default_backend_for_component,
@@ -5754,6 +5930,7 @@ mod tests {
             assert!(path.exists());
             let loaded = load_batch_cook_fanout_plan(
                 &AgentTaskFanoutInputArgs {
+                    resolved_provider_policies: None,
                     input: format!("@{}", path.display()),
                     fanout_id: None,
                     backend: None,
@@ -5855,6 +6032,7 @@ mod tests {
                 0o600
             );
             let args = AgentTaskFanoutInputArgs {
+                resolved_provider_policies: None,
                 input: format!("@{}", path.display()),
                 fanout_id: None,
                 backend: None,
@@ -5931,6 +6109,7 @@ mod tests {
             plan.cooks[0].private_verify = vec![sentinel.to_string()];
             let path = persist_private_batch_plan(&plan).expect("persist private plan");
             let args = AgentTaskFanoutInputArgs {
+                resolved_provider_policies: None,
                 input: format!("@{}", path.display()),
                 fanout_id: None,
                 backend: None,
@@ -5956,6 +6135,7 @@ mod tests {
             let escaped = path.with_file_name("escaped.json");
             fs::copy(&path, &escaped).expect("copy envelope outside owned name");
             let args = AgentTaskFanoutInputArgs {
+                resolved_provider_policies: None,
                 input: format!("@{}", escaped.display()),
                 fanout_id: None,
                 backend: None,
@@ -6062,6 +6242,204 @@ mod tests {
                         .max_provider_rotations,
                     2
                 );
+            }
+        });
+    }
+
+    #[test]
+    fn batch_provider_policy_survives_receiver_config_and_resume() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.rotation = Some(json!({
+                "entries": [
+                    {"backend": "test", "model": "controller-fallback-one"},
+                    {"backend": "test", "model": "controller-fallback-two"}
+                ],
+                "liveness_timeout_ms": 45000
+            }));
+            homeboy::core::defaults::save_config(&config).unwrap();
+            let submitted = test_batch_plan();
+            let rotation: homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy =
+                serde_json::from_value(config.agent_task.rotation.clone().unwrap()).unwrap();
+            let encoded = serde_json::to_value(&submitted).unwrap();
+
+            for receiver_rotation in [
+                None,
+                Some(json!({
+                    "entries": [{"backend": "test", "model": "runner-only-fallback"}]
+                })),
+            ] {
+                config.agent_task.rotation = receiver_rotation;
+                config.agent_task.default_backend = Some("runner-only-backend".to_string());
+                homeboy::core::defaults::save_config(&config).unwrap();
+                let replay = BatchCookFanoutPlan::from_value(encoded.clone(), &args()).unwrap();
+                for cook in &replay.cooks {
+                    let invocation = cook.to_cook_invocation(&replay).unwrap();
+                    assert_eq!(invocation.dispatch.core.provider_rotations, Some(2));
+                    assert_eq!(invocation.dispatch.core.attempts, Some(5));
+                    let mut request =
+                        dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
+                    let compiled =
+                        dispatch_service::build_controller_dispatch_plan(&mut request).unwrap();
+                    assert_eq!(compiled.options.rotation.as_ref(), Some(&rotation));
+                    assert_eq!(compiled.options.execution_budget.max_provider_rotations, 2);
+                    assert_eq!(compiled.options.retry.max_attempts, 5);
+                    assert_eq!(compiled.tasks[0].executor.backend, "test");
+                    assert_eq!(compiled.tasks[0].limits.liveness_timeout_ms, Some(45000));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn batch_submitted_absent_rotation_and_explicit_caps_stay_authoritative() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let mut submitted = test_batch_plan();
+            assert!(submitted.cooks[0]
+                .resolved_provider_policy
+                .as_ref()
+                .unwrap()
+                .rotation
+                .is_none());
+            submitted.cooks[0].attempts = Some(1);
+            submitted.cooks[0].max_attempts = 1;
+            submitted.cooks[0].same_provider_retries = Some(0);
+            submitted.cooks[0].provider_rotations = Some(0);
+            let encoded = serde_json::to_value(&submitted).unwrap();
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.rotation = Some(json!({
+                "entries": [{"backend": "test", "model": "runner-fallback"}]
+            }));
+            homeboy::core::defaults::save_config(&config).unwrap();
+            let replay = BatchCookFanoutPlan::from_value(encoded, &args()).unwrap();
+            let invocation = replay.cooks[0].to_cook_invocation(&replay).unwrap();
+            assert_eq!(invocation.dispatch.core.provider_rotations, Some(0));
+            assert_eq!(invocation.dispatch.core.attempts, Some(1));
+            let mut request =
+                dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
+            let compiled = dispatch_service::build_controller_dispatch_plan(&mut request).unwrap();
+            assert!(compiled.options.rotation.is_none());
+            assert_eq!(compiled.options.execution_budget.max_provider_executions, 1);
+            assert_eq!(compiled.options.retry.max_attempts, 1);
+        });
+    }
+
+    #[test]
+    fn lab_fanout_policy_transport_preserves_each_cell_before_planning_on_receiver() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.rotation = Some(json!({
+                "entries": [{"backend": "test", "model": "controller-fallback"}]
+            }));
+            homeboy::core::defaults::save_config(&config).unwrap();
+            let mut submitted = test_batch_plan();
+            submitted.cooks[1].model = Some("pinned-model".to_string());
+            submitted.cooks[1].provider_rotations = Some(0);
+            submitted.cooks[1].resolved_provider_policy = None;
+            submitted.cooks[1].resolve_provider_policy().unwrap();
+            let mut input = args();
+            input.input = serde_json::to_string(&submitted).unwrap();
+            let policies = resolve_lab_provider_policies(AgentTaskFanoutCommand::RunPlan(
+                AgentTaskFanoutRunPlanArgs {
+                    input: input.clone(),
+                    record_run_id: None,
+                    ai_tool: None,
+                    max_concurrency: None,
+                    max_duration: None,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+            let mut raw = serde_json::to_value(&submitted).unwrap();
+            for cook in raw["cooks"].as_array_mut().unwrap() {
+                cook.as_object_mut()
+                    .unwrap()
+                    .remove("resolved_provider_policy");
+            }
+            config.agent_task.rotation = None;
+            homeboy::core::defaults::save_config(&config).unwrap();
+            input.resolved_provider_policies = Some(policies);
+            let received = BatchCookFanoutPlan::from_value(raw, &input).unwrap();
+            assert_eq!(
+                received.cooks[0].resolved_provider_policy,
+                submitted.cooks[0].resolved_provider_policy
+            );
+            assert_eq!(
+                received.cooks[1].resolved_provider_policy,
+                submitted.cooks[1].resolved_provider_policy
+            );
+            assert_eq!(
+                received.cooks[0]
+                    .to_cook_invocation(&received)
+                    .unwrap()
+                    .dispatch
+                    .core
+                    .provider_rotations,
+                Some(1)
+            );
+            assert_eq!(
+                received.cooks[1]
+                    .to_cook_invocation(&received)
+                    .unwrap()
+                    .dispatch
+                    .core
+                    .provider_rotations,
+                Some(0)
+            );
+        });
+    }
+
+    #[test]
+    fn lab_cook_batch_transport_retains_default_chain_and_initial_route() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let primary = home.path().join("primary");
+            init_git_primary(&primary);
+            write_component_registration(home.path(), "homeboy", &primary);
+            let mut config = homeboy::core::defaults::load_config();
+            config.agent_task.default_backend = Some("test".to_string());
+            config.agent_task.rotation = Some(json!({"entries": [
+                {"backend": "test", "model": "controller-primary"},
+                {"backend": "test", "model": "controller-fallback"}
+            ]}));
+            homeboy::core::defaults::save_config(&config).unwrap();
+            let mut inputs = cook_batch_args();
+            inputs.backend = None;
+            inputs.selector = None;
+            inputs.model = None;
+            inputs.provider_config = None;
+            let policies = resolve_lab_provider_policies(AgentTaskFanoutCommand::CookBatch(
+                Box::new(inputs.clone()),
+            ))
+            .unwrap()
+            .unwrap();
+
+            config.agent_task.default_backend = Some("runner-only".to_string());
+            config.agent_task.rotation = None;
+            homeboy::core::defaults::save_config(&config).unwrap();
+            inputs.resolved_provider_policies = Some(policies);
+            resolve_effective_backend_without_admission(&mut inputs).unwrap();
+            let received = build_cook_batch_plan(&inputs).unwrap();
+            for cook in &received.cooks {
+                let mut invocation = cook.to_cook_invocation(&received).unwrap();
+                assert_eq!(invocation.dispatch.core.provider_rotations, Some(1));
+                invocation.dispatch.workspace = None;
+                invocation.dispatch.cwd = Some(primary.display().to_string());
+                let mut request =
+                    dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
+                let compiled =
+                    dispatch_service::build_controller_dispatch_plan(&mut request).unwrap();
+                assert_eq!(compiled.tasks[0].executor.backend, "test");
+                assert_eq!(
+                    compiled.tasks[0].executor.model.as_deref(),
+                    Some("controller-primary")
+                );
+                let fallback = &compiled.options.rotation.as_ref().unwrap().entries;
+                assert_eq!(fallback.len(), 1);
+                assert_eq!(fallback[0].model.as_deref(), Some("controller-fallback"));
             }
         });
     }
@@ -6828,6 +7206,7 @@ fi
 
     fn args() -> AgentTaskFanoutInputArgs {
         AgentTaskFanoutInputArgs {
+            resolved_provider_policies: None,
             input: "inline".to_string(),
             fanout_id: Some("fanout/refactor".to_string()),
             backend: Some("test".to_string()),
@@ -6995,6 +7374,7 @@ fi
 
     fn cook_batch_args() -> AgentTaskFanoutCookBatchArgs {
         AgentTaskFanoutCookBatchArgs {
+            resolved_provider_policies: None,
             help: None,
             help_full: None,
             issues: vec![
@@ -8328,6 +8708,7 @@ fi
             let path = private_batch_plan_path(fanout_id).expect("private artifact path");
             let loaded = load_batch_cook_fanout_plan(
                 &AgentTaskFanoutInputArgs {
+                    resolved_provider_policies: None,
                     input: format!("@{}", path.display()),
                     fanout_id: None,
                     backend: None,
