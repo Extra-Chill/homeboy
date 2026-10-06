@@ -4,8 +4,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::{Barrier, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -57,18 +55,6 @@ const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
 // surface a wedged peer rather than inherit an operator-configured unbounded
 // config-lock wait.
 const WORKSPACE_BASE_CAPTURE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-static INITIAL_RECIPE_CREATION_BARRIER: LazyLock<Mutex<(Option<Arc<Barrier>>, usize)>> =
-    LazyLock::new(|| Mutex::new((None, 0)));
-
-#[cfg(test)]
-pub(crate) fn set_initial_recipe_creation_barrier_for_test(barrier: Option<Arc<Barrier>>) {
-    let mut hook = INITIAL_RECIPE_CREATION_BARRIER
-        .lock()
-        .expect("initial recipe creation barrier");
-    *hook = (barrier, 0);
-}
-
 /// Durable Cook storage bound to explicit filesystem roots.
 #[derive(Clone, Debug)]
 pub struct CookRecipeStore {
@@ -675,22 +661,6 @@ pub fn persist_initial_recipe_in_store(
     recover_pending_supersession(store, &options.identity.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
-    #[cfg(test)]
-    let barrier = {
-        let mut hook = INITIAL_RECIPE_CREATION_BARRIER
-            .lock()
-            .expect("initial recipe creation barrier");
-        if hook.1 < 2 {
-            hook.1 += 1;
-            hook.0.clone()
-        } else {
-            None
-        }
-    };
-    #[cfg(test)]
-    if let Some(barrier) = barrier {
-        barrier.wait();
-    }
     let recipe_existed_before_admission = store.recipe_exists(&recipe.cook_id);
     if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
         return Ok(InitialRecipeMaterialization {
@@ -5991,5 +5961,78 @@ mod cook_driver_tests {
             .foreign_cook_driver("never-started")
             .unwrap()
             .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_driver_probe() {
+        let Some(root) = std::env::var_os("HOMEBOY_TEST_DRIVER_ROOT") else {
+            return;
+        };
+        let store = CookRecipeStore::from_data_root(root.into());
+        let _driver = store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .unwrap();
+        std::fs::write(store.data_root().join("driver-ready"), b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_death_releases_ownership_without_expiry_or_record_repair() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let mut child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent_task_service::cook_recipe::cook_driver_tests::process_driver_probe",
+                    "--nocapture",
+                ])
+                .env("HOMEBOY_TEST_DRIVER_ROOT", temp.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !temp.path().join("driver-ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "driver child exited before readiness"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "driver child readiness deadline"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .is_none());
+        assert!(store.foreign_cook_driver("process-cook").unwrap().is_some());
+        let pid_record = std::fs::read(store.driver_lock_path("process-cook")).unwrap();
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert_eq!(
+            std::fs::read(store.driver_lock_path("process-cook")).unwrap(),
+            pid_record
+        );
+        assert!(store.foreign_cook_driver("process-cook").unwrap().is_none());
+        assert!(store
+            .try_acquire_cook_driver("process-cook")
+            .unwrap()
+            .is_some());
     }
 }
