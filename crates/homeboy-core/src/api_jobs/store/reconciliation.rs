@@ -212,6 +212,23 @@ impl JobStore {
         expected_job_ids: &[Uuid],
         daemon_pid: u32,
     ) -> Result<DaemonLeaseJobDiagnostics> {
+        self.reconcile_exact_daemon_loss_jobs_with_child_liveness(
+            expected_lease_id,
+            expected_job_ids,
+            daemon_pid,
+            local_child_liveness,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(private_bounds)]
+    pub(crate) fn reconcile_exact_daemon_loss_jobs_with_child_liveness(
+        &self,
+        expected_lease_id: &str,
+        expected_job_ids: &[Uuid],
+        daemon_pid: u32,
+        inspect_local_child: impl Fn(&LocalChildExecution) -> LocalChildLiveness,
+    ) -> Result<DaemonLeaseJobDiagnostics> {
         let expected = expected_job_ids
             .iter()
             .copied()
@@ -252,34 +269,16 @@ impl JobStore {
                     None,
                 ));
             }
-            if stored.controller_job.is_some() || stored_job_execution_liveness(stored, &local_child_liveness).pid.is_some()
-            {
+            if matches!(
+                stored_job_execution_liveness(stored, &inspect_local_child).state,
+                Some(LocalChildLiveness::Live | LocalChildLiveness::Unsupported(_))
+            ) {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    format!("job `{job_id}` has controller-driver or persisted child-process evidence; refusing operator no-PID recovery"),
+                    format!("job `{job_id}` has live or unverifiable workload-process evidence; refusing operator no-PID recovery"),
                     Some(job_id.to_string()),
                     None,
                 ));
-            }
-            if let Some(run_id) = stored_job_durable_run_id(stored) {
-                if matches!(
-                    super::super::agent_task_terminal_recovery::linked_durable_run_state(
-                        &run_id
-                    ),
-                    Some(
-                        super::super::types::DaemonLinkedDurableRunState::Active
-                            | super::super::types::DaemonLinkedDurableRunState::Unresolved
-                    )
-                ) {
-                    return Err(Error::validation_invalid_argument(
-                        "job_id",
-                        format!(
-                            "job `{job_id}` links to durable run `{run_id}` without authoritative terminal evidence; refusing operator no-PID recovery"
-                        ),
-                        Some(job_id.to_string()),
-                        None,
-                    ));
-                }
             }
         }
         let now = timestamp_ms();
