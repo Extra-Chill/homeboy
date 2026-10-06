@@ -133,6 +133,9 @@ pub(crate) use stop_transport_recovery::{
     disconnect_with_session, disconnect_with_session_in_roots, recorded_session,
 };
 
+#[path = "connection_dead_lease_attestation.rs"]
+mod dead_lease_attestation;
+
 use super::daemon_http_get::daemon_get;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2489,6 +2492,51 @@ pub struct RunnerReconcileStatusOutcome {
     pub retired_generation_ids: Vec<String>,
     pub retirement_blockers: std::collections::BTreeMap<String, String>,
     pub retained_evidence_generation_count: usize,
+}
+
+/// The result of a reconcile that was allowed to apply the operator-attested
+/// remote dead-lease recovery: the post-attestation reconcile outcome plus the
+/// exact remote recovery that ran, if one did.
+#[derive(Debug)]
+pub struct RunnerReconcileWithAttestationOutcome {
+    pub outcome: RunnerReconcileStatusOutcome,
+    pub attested: Option<dead_lease_attestation::RemoteAttestedReconcileApplied>,
+}
+
+/// Reconcile a runner, and when that reconcile is blocked by a remote
+/// generation whose daemon PID is dead and whose active jobs lack automatic
+/// proof, apply the operator-attested remote dead-lease recovery
+/// (`daemon reconcile-dead-lease-orphans` on the runner, bound to that exact
+/// generation), then re-run the reconcile (#15556).
+///
+/// Without the blocker this is exactly [`reconcile_status_with_outcome`]. A
+/// refusal from the runner side — a live daemon PID, a live child, or a changed
+/// job set — is surfaced verbatim and nothing is retried.
+pub fn reconcile_status_with_outcome_with_remote_attestation(
+    runner_id: &str,
+) -> Result<RunnerReconcileWithAttestationOutcome> {
+    let first = reconcile_status_with_outcome(runner_id)?;
+    // Two blocked states can come from a dead generation whose jobs have no
+    // automatic proof: the admission daemon itself lacks ownership evidence,
+    // or a draining generation cannot retire (the Lab inventory incident,
+    // chaos case 8). Anything else has nothing to attest.
+    let blocked = dead_lease_attestation::blocked_by_daemon_ownership_evidence(&first.status)
+        || !first.retirement_blockers.is_empty();
+    if !blocked {
+        return Ok(RunnerReconcileWithAttestationOutcome {
+            outcome: first,
+            attested: None,
+        });
+    }
+    let attested = dead_lease_attestation::run_attested_dead_lease_reconcile(runner_id)?;
+    // The fresh observation is the authoritative postcondition: the attested
+    // recovery terminalized the exact job set, so the same reconcile that was
+    // blocked now reports the recovered state.
+    let outcome = reconcile_status_with_outcome(runner_id)?;
+    Ok(RunnerReconcileWithAttestationOutcome {
+        outcome,
+        attested: Some(attested),
+    })
 }
 
 /// Return the controller-side session projection with bounded liveness

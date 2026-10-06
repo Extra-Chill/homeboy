@@ -1688,7 +1688,122 @@ mod tests {
         assert!(
             second.contains(&crate::connection::controller_scope_segment(
                 "a_b-controller"
-            ))
+            )),
+        );
+    }
+
+    #[test]
+    fn the_attested_reconcile_command_targets_the_exact_generation() {
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        let command = remote_daemon_attested_reconcile_command(
+            "/opt/homeboy",
+            "/home/lab/.config/homeboy/daemon-generations/lab/controllers/ctrl/primary/generations/gen-1",
+            "lease-lab",
+            &[first, second],
+        );
+        assert_eq!(
+            command,
+            format!(
+                "HOMEBOY_DAEMON_ROUTER_BYPASS=1 HOMEBOY_DAEMON_STATE_DIR=/home/lab/.config/homeboy/daemon-generations/lab/controllers/ctrl/primary/generations/gen-1 /opt/homeboy daemon reconcile-dead-lease-orphans --lease-id lease-lab --job-id {first} --job-id {second} --confirm-workload-processes-absent --no-replacement"
+            )
+        );
+    }
+
+    /// The state directory comes verbatim from the remote registry, so shell
+    /// metacharacters in it must never break out of the environment assignment.
+    #[test]
+    fn the_attested_reconcile_command_quotes_hostile_state_directories() {
+        let command = remote_daemon_attested_reconcile_command(
+            "/opt/homeboy",
+            "/opt/evil dir'; daemon stop --lease-id other; '",
+            "lease-lab",
+            &[uuid::Uuid::nil()],
+        );
+        assert!(
+            command.starts_with(
+                "HOMEBOY_DAEMON_ROUTER_BYPASS=1 HOMEBOY_DAEMON_STATE_DIR='/opt/evil dir'\\''; daemon stop --lease-id other; '\\''"
+            ),
+            "state directory must stay one quoted argv/environment token: {command}"
+        );
+        assert!(command.ends_with("--confirm-workload-processes-absent --no-replacement"));
+    }
+
+    #[test]
+    fn the_registry_parser_keeps_only_exact_schema_and_endpoint_pairs() {
+        // The exact on-disk shape (copied from a Lab registry): the lease map
+        // is nested under `generations.generations`, beside `admission_owner`
+        // and `job_owners`, which must not be read as generations.
+        let registry = serde_json::json!({
+            "schema": "homeboy.daemon.generations.v1",
+            "generations": {
+              "admission_owner": "lease-a",
+              "job_owners": { "job-1": "lease-a" },
+              "run_owners": {},
+              "artifact_owners": {},
+              "retired_evidence": {},
+              "generations": {
+                "lease-a": {
+                    "endpoint": {
+                        "lease_id": "lease-a",
+                        "address": "127.0.0.1:9001",
+                        "state_dir": "/home/lab/daemon/primary/generations/gen-a",
+                        "build_identity": "homeboy 1.0.0"
+                    },
+                    "active_jobs": 1,
+                    "drain_state": "admitting"
+                },
+                "lease-b": {
+                    "endpoint": {
+                        "lease_id": "lease-b",
+                        "address": "127.0.0.1:9002",
+                        "state_dir": "/home/lab/daemon/primary"
+                    },
+                    "active_jobs": 0,
+                    "drain_state": "draining"
+                }
+              }
+            },
+            "completed_jobs": []
+        });
+        // The parser sorts by (state_dir, lease_id) for deterministic probing;
+        // ".../primary" sorts before ".../primary/generations/gen-a".
+        assert_eq!(
+            remote_daemon_generation_endpoints_from_registry(&registry).expect("parse registry"),
+            vec![
+                RemoteDaemonGenerationEndpoint {
+                    lease_id: "lease-b".to_string(),
+                    state_dir: "/home/lab/daemon/primary".to_string(),
+                },
+                RemoteDaemonGenerationEndpoint {
+                    lease_id: "lease-a".to_string(),
+                    state_dir: "/home/lab/daemon/primary/generations/gen-a".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_registry_parser_refuses_foreign_schemas_and_missing_pairs() {
+        let foreign = serde_json::json!({
+            "schema": "something.else.v1",
+            "generations": { "generations": {
+                "lease-a": { "endpoint": { "lease_id": "lease-a", "state_dir": "/x" } }
+            } }
+        });
+        assert!(remote_daemon_generation_endpoints_from_registry(&foreign)
+            .expect_err("foreign schema")
+            .contains("unexpected schema"),);
+        let missing_state_dir = serde_json::json!({
+            "schema": "homeboy.daemon.generations.v1",
+            "generations": { "admission_owner": "lease-a", "generations": {
+                "lease-a": { "endpoint": { "lease_id": "lease-a" } }
+            } }
+        });
+        assert!(
+            remote_daemon_generation_endpoints_from_registry(&missing_state_dir)
+                .expect_err("missing state dir")
+                .contains("no endpoint state directory"),
         );
     }
 }
@@ -2305,6 +2420,240 @@ fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
     let controller_segment = crate::connection::controller_scope_segment(controller_id);
     format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/primary")
+}
+
+/// Hard wall clock for one attested dead-lease recovery. The remote command
+/// re-proves PID death under the owner lock, terminalizes the exact job set,
+/// and starts a replacement daemon, so it legitimately outlives a status probe.
+pub(crate) const REMOTE_ATTESTED_RECONCILE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// One daemon generation endpoint read from the remote daemon's own router
+/// registry (`homeboy.daemon.generations.v1`). `state_dir` is the exact remote
+/// state directory recorded for that lease; callers must never derive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteDaemonGenerationEndpoint {
+    pub(crate) lease_id: String,
+    pub(crate) state_dir: String,
+}
+
+/// The remote router registry path: the same controller-scoped frame the
+/// remote `ensure-running`/`status` commands run in.
+pub(crate) fn remote_daemon_registry_path(runner_id: &str) -> String {
+    format!(
+        "{}/generations.json",
+        remote_daemon_state_dir(runner_id, &crate::connection::controller_id())
+    )
+}
+
+/// Parse the remote router registry into its exact generation endpoints.
+///
+/// The schema is pinned so a foreign or malformed registry is refused rather
+/// than mined for paths: every recovery bound below reads `endpoint.state_dir`
+/// from this file and never from a derived layout.
+pub(crate) fn remote_daemon_generation_endpoints_from_registry(
+    value: &Value,
+) -> std::result::Result<Vec<RemoteDaemonGenerationEndpoint>, String> {
+    if value.get("schema").and_then(Value::as_str) != Some("homeboy.daemon.generations.v1") {
+        return Err(format!(
+            "remote daemon generation registry has unexpected schema {:?}; refusing to derive a generation state directory",
+            value.get("schema").and_then(Value::as_str).unwrap_or("missing")
+        ));
+    }
+    // On disk the registry nests the rolling-generation record:
+    // `{"schema", "generations": {"admission_owner", "generations": {<lease>: {...}}, "job_owners", ...}}`.
+    let generations = value
+        .pointer("/generations/generations")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "remote daemon generation registry has no generations map".to_string())?;
+    let mut endpoints = Vec::new();
+    for (generation, entry) in generations {
+        let missing =
+            |what: &str| format!("remote daemon generation `{generation}` has no endpoint {what}");
+        let lease_id = entry
+            .pointer("/endpoint/lease_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|lease| !lease.is_empty())
+            .ok_or_else(|| missing("lease id"))?;
+        let state_dir = entry
+            .pointer("/endpoint/state_dir")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .ok_or_else(|| missing("state directory"))?;
+        endpoints.push(RemoteDaemonGenerationEndpoint {
+            lease_id: lease_id.to_string(),
+            state_dir: state_dir.to_string(),
+        });
+    }
+    // Deterministic probe order regardless of JSON map feature flags.
+    endpoints.sort_by(|a, b| (&a.state_dir, &a.lease_id).cmp(&(&b.state_dir, &b.lease_id)));
+    Ok(endpoints)
+}
+
+/// Read the remote router registry over SSH.
+///
+/// A missing registry means the remote daemon never handed off a generation;
+/// that is an empty inventory, not an error — the attested recovery then
+/// refuses because no lease/state-dir pair can be resolved exactly.
+pub(crate) fn read_remote_daemon_generation_registry(
+    client: &SshClient,
+    runner_id: &str,
+) -> std::result::Result<Vec<RemoteDaemonGenerationEndpoint>, String> {
+    let path = remote_daemon_registry_path(runner_id);
+    let command = format!("cat \"{}\"", path);
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        let registry_absent = output.exit_code != 0
+            && output.stdout.trim().is_empty()
+            && output.stderr.contains("No such file or directory");
+        if registry_absent {
+            return Ok(Vec::new());
+        }
+        return Err(command_failure_message(
+            "read remote daemon generation registry",
+            &output,
+        ));
+    }
+    let value: Value = parse_json_from_mixed_stdout(&output.stdout).map_err(|error| {
+        format!("remote daemon generation registry returned invalid JSON: {error}")
+    })?;
+    remote_daemon_generation_endpoints_from_registry(&value)
+}
+
+/// Read one generation's own daemon status, bound to its exact state directory.
+/// Read-only: this is the same status the remote store itself reports.
+pub(crate) fn remote_generation_status(
+    client: &SshClient,
+    homeboy: &str,
+    state_dir: &str,
+) -> std::result::Result<Value, String> {
+    let command = remote_generation_daemon_command(homeboy, state_dir, "daemon status");
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        return Err(command_failure_message(
+            "remote generation-bound daemon status failed",
+            &output,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout).map_err(|error| {
+        format!("remote generation-bound daemon status returned invalid JSON: {error}")
+    })?;
+    if !envelope.success {
+        return Err(format!(
+            "remote generation-bound daemon status returned an error: {}",
+            envelope.error.unwrap_or(Value::Null)
+        ));
+    }
+    envelope
+        .data
+        .ok_or_else(|| "remote generation-bound daemon status returned no data".to_string())
+}
+
+/// One generation-bound daemon command: the state directory comes from the
+/// remote router registry (`endpoint.state_dir`), never from a derived path.
+///
+/// `HOMEBOY_DAEMON_ROUTER_BYPASS` pins every read to that exact directory.
+/// Without it, a command run in the router's own directory follows the
+/// registry's current admission owner and reports a different generation.
+pub(crate) fn remote_generation_daemon_command(
+    homeboy: &str,
+    state_dir: &str,
+    args: &str,
+) -> String {
+    format!(
+        "HOMEBOY_DAEMON_ROUTER_BYPASS=1 HOMEBOY_DAEMON_STATE_DIR={} {} {args}",
+        shell::quote_arg(state_dir),
+        shell::quote_arg(homeboy),
+    )
+}
+
+/// The generation-bound attested dead-lease reconcile, as one shell command.
+///
+/// This is the existing local attested recovery
+/// (`daemon reconcile-dead-lease-orphans`) executed on the runner in the exact
+/// generation's frame: `HOMEBOY_DAEMON_STATE_DIR` is the `endpoint.state_dir`
+/// resolved from the remote router registry for `lease_id`. The remote store
+/// owns every refusal — live daemon PID, live or unverifiable child, and the
+/// exact active-job-set compare-and-swap — so nothing here relaxes #15560's
+/// gates; this frame only binds them to one exact generation.
+pub(crate) fn remote_daemon_attested_reconcile_command(
+    homeboy: &str,
+    state_dir: &str,
+    lease_id: &str,
+    job_ids: &[uuid::Uuid],
+) -> String {
+    let mut args = vec![
+        "daemon".to_string(),
+        "reconcile-dead-lease-orphans".to_string(),
+        "--lease-id".to_string(),
+        lease_id.to_string(),
+    ];
+    for job_id in job_ids {
+        args.push("--job-id".to_string());
+        args.push(job_id.to_string());
+    }
+    args.push("--confirm-workload-processes-absent".to_string());
+    // The target is a dead generation being retired: terminalize its jobs
+    // without starting a daemon in its directory.
+    args.push("--no-replacement".to_string());
+    let rendered_args = args
+        .iter()
+        .map(|arg| shell::quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    remote_generation_daemon_command(homeboy, state_dir, &rendered_args)
+}
+
+/// Execute one already-constructed attested reconcile command over SSH.
+pub(crate) fn execute_attested_reconcile_command(
+    client: &SshClient,
+    command: &str,
+) -> std::result::Result<Value, String> {
+    let output = client.execute_with_timeout(command, REMOTE_ATTESTED_RECONCILE_TIMEOUT);
+    if !output.success {
+        if let Ok(envelope) = parse_envelope(&output.stdout) {
+            if !envelope.success {
+                return Err(attested_reconcile_refusal(
+                    command,
+                    envelope.error.as_ref(),
+                    &output,
+                ));
+            }
+        }
+        return Err(command_failure_message(
+            "remote attested dead-lease reconcile failed",
+            &output,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout).map_err(|error| {
+        format!("remote attested dead-lease reconcile returned invalid JSON: {error}")
+    })?;
+    if !envelope.success {
+        return Err(attested_reconcile_refusal(
+            command,
+            envelope.error.as_ref(),
+            &output,
+        ));
+    }
+    envelope
+        .data
+        .ok_or_else(|| "remote attested dead-lease reconcile returned no data".to_string())
+}
+
+/// Prefix a remote store refusal with just enough context to locate the
+/// command, keeping the refusal text itself verbatim.
+fn attested_reconcile_refusal(
+    command: &str,
+    error: Option<&Value>,
+    output: &homeboy_core::server::CommandOutput,
+) -> String {
+    let detail = match error {
+        Some(Value::String(text)) => text.clone(),
+        Some(value) => value.to_string(),
+        None => command_failure_message("remote attested dead-lease reconcile failed", output),
+    };
+    format!("remote attested dead-lease reconcile refused: {detail}; command: {command}")
 }
 
 pub(super) fn remote_daemon_force_stop(

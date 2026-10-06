@@ -350,14 +350,25 @@ pub(super) fn execution_capabilities_with_local_placement(
     }
 }
 
-pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
-    let outcome = runner::reconcile_status_with_outcome(id)?;
-    let (mut output, mut exit_code) =
-        reconcile_output(id, outcome.status, outcome.retired_generation_ids)?;
+pub(super) fn reconcile(
+    id: &str,
+    confirm_workload_processes_absent: bool,
+) -> CmdResult<RunnerOutput> {
+    let (reconcile_outcome, attested_recovery) = if confirm_workload_processes_absent {
+        let with_attestation = runner::reconcile_status_with_outcome_with_remote_attestation(id)?;
+        (with_attestation.outcome, with_attestation.attested)
+    } else {
+        (runner::reconcile_status_with_outcome(id)?, None)
+    };
+    let (mut output, mut exit_code) = reconcile_output(
+        id,
+        reconcile_outcome.status,
+        reconcile_outcome.retired_generation_ids,
+    )?;
     if let Some(reconciliation) = output.extra.reconciliation.as_mut() {
-        reconciliation.retirement_blockers = outcome.retirement_blockers;
+        reconciliation.retirement_blockers = reconcile_outcome.retirement_blockers;
         reconciliation.retained_evidence_generation_count =
-            outcome.retained_evidence_generation_count;
+            reconcile_outcome.retained_evidence_generation_count;
         reconciliation.postcondition = "healthy admission, verified retained evidence, and no blocked draining process retirement";
         if !reconciliation.retirement_blockers.is_empty() {
             reconciliation.status = if reconciliation.retired_generation_count > 0 {
@@ -375,6 +386,15 @@ pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
             }
             exit_code = 1;
         }
+    }
+    if let Some(applied) = attested_recovery {
+        output.extra.operator_hints.push(format!(
+            "applied remote attested dead-lease recovery for lease `{}` in `{}` ({} job(s) terminalized): {}",
+            applied.lease_id,
+            applied.state_dir,
+            applied.job_ids.len(),
+            applied.command
+        ));
     }
     Ok((output, exit_code))
 }
@@ -449,12 +469,19 @@ pub(crate) fn reconciliation_outcome(
     }
 
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
+    let attested_reconcile_command = format!(
+        "homeboy runner reconcile {} --confirm-workload-processes-absent",
+        shell_arg(runner_id)
+    );
     let (remaining_blocker, next_action, retry_predicate) = if terminal_daemon_ownership_blocker(
         report,
     ) {
+        // The attested reconcile is the one action that can still recover this
+        // state, so the blocked plan names it exactly and never dead-ends
+        // (#15556). Applying it remains the operator's explicit choice.
         (
             "daemon_ownership_evidence_unavailable".to_string(),
-            None,
+            Some(attested_reconcile_command),
             format!(
                 "ownership evidence required before daemon recovery: {}",
                 report

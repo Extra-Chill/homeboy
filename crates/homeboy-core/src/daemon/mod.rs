@@ -1092,7 +1092,11 @@ pub struct DaemonExactOrphanRecoveryResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub termination_evidence: Option<DaemonTerminationEvidence>,
     pub ownership_proof: Vec<String>,
-    pub replacement: DaemonStartResult,
+    /// The daemon started after recovery. `None` when the caller asked for no
+    /// replacement (`--no-replacement`), as the remote attested reconcile does
+    /// for a generation that is being retired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<DaemonStartResult>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

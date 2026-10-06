@@ -1965,6 +1965,7 @@ pub fn reconcile_dead_lease_orphans(
     job_ids: &[uuid::Uuid],
     confirm_workload_processes_absent: bool,
     addr: &str,
+    start_replacement: bool,
 ) -> Result<DaemonExactOrphanRecoveryResult> {
     if !confirm_workload_processes_absent {
         return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
@@ -1984,7 +1985,16 @@ pub fn reconcile_dead_lease_orphans(
                 )?;
                 store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
             },
-            start: || start_or_return_live_unlocked(addr),
+            // A remote attested reconcile targets one dead generation that is
+            // being retired; starting a daemon in its directory would revive
+            // it. The controller's own reconcile owns what serves next (#15556).
+            start: || {
+                if start_replacement {
+                    start_or_return_live_unlocked(addr).map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
         },
     )
 }
@@ -2030,7 +2040,7 @@ where
     AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
     ProveNoOwner: FnOnce() -> Result<Vec<String>>,
     Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
+    Start: FnOnce() -> Result<Option<super::DaemonStartResult>>,
 {
     let DeadLeaseOrphanRecoveryOperations {
         status,

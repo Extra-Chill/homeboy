@@ -1062,7 +1062,7 @@ fn exact_no_pid_recovery_uses_current_lease_authority_when_launcher_evidence_is_
                     ..Default::default()
                 })
             },
-            start: || Ok(fake_daemon(4343, "replacement")),
+            start: || Ok(Some(fake_daemon(4343, "replacement"))),
         },
     )
     .expect("operator authority does not depend on the lost launcher's record");
@@ -1091,7 +1091,7 @@ fn exact_no_pid_recovery_uses_current_lease_authority_when_launcher_evidence_is_
                     ..Default::default()
                 })
             },
-            start: || Ok(fake_daemon(4344, "replacement-2")),
+            start: || Ok(Some(fake_daemon(4344, "replacement-2"))),
         },
     )
     .expect("stale launcher evidence does not block current proof");
@@ -1138,7 +1138,7 @@ fn exact_no_pid_recovery_starts_only_after_reconciliation() {
                     ..Default::default()
                 })
             },
-            start: || Ok(fake_daemon(4343, "replacement")),
+            start: || Ok(Some(fake_daemon(4343, "replacement"))),
         },
     )
     .expect("exact reconciliation succeeds before replacement");
@@ -1150,7 +1150,43 @@ fn exact_no_pid_recovery_starts_only_after_reconciliation() {
             .classification,
         DaemonTerminationClassification::UnexpectedExit
     );
-    assert_eq!(result.replacement.lease_id, "replacement");
+    assert_eq!(
+        result
+            .replacement
+            .as_ref()
+            .map(|daemon| daemon.lease_id.as_str()),
+        Some("replacement")
+    );
+}
+
+/// #15556: the remote attested reconcile retires a dead generation, so it
+/// terminalizes the exact job set and starts nothing in that directory.
+#[test]
+fn exact_no_pid_recovery_without_replacement_reconciles_and_starts_nothing() {
+    let daemon = fake_daemon(4242, "lease-dead");
+    let job = uuid::Uuid::new_v4();
+    let result = super::reconcile_dead_lease_orphans_with_operations(
+        "lease-dead",
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || Ok(dead_status_with_unexpected_termination(daemon)),
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || Ok(vec!["owner lock acquired".to_string()]),
+            reconcile: |_| {
+                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
+                    expected_lease_id: "lease-dead".to_string(),
+                    matching_job_ids: vec![job],
+                    ..Default::default()
+                })
+            },
+            start: || Ok(None),
+        },
+    )
+    .expect("exact reconciliation succeeds without a replacement");
+    assert_eq!(result.reconciled_job_ids, vec![job]);
+    assert_eq!(result.replacement, None);
+    let serialized = serde_json::to_value(&result).expect("serializes");
+    assert!(serialized.get("replacement").is_none());
 }
 
 #[test]

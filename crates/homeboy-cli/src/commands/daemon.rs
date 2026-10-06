@@ -94,6 +94,11 @@ enum DaemonCommand {
         confirm_workload_processes_absent: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+        /// Terminalize the job set without starting a replacement daemon in
+        /// this state directory. Used for a dead generation that is being
+        /// retired, such as by `runner reconcile --confirm-workload-processes-absent`.
+        #[arg(long)]
+        no_replacement: bool,
     },
     /// Recover one legacy job with exact PID and Linux start-tick evidence.
     #[command(hide = true)]
@@ -457,12 +462,14 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             job_ids,
             confirm_workload_processes_absent,
             addr,
+            no_replacement,
         } => Ok((
             DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
                 &lease_id,
                 &job_ids,
                 confirm_workload_processes_absent,
                 &addr,
+                !no_replacement,
             )?),
             0,
         )),
@@ -1233,6 +1240,7 @@ fn execute_recovery_plan(
                     job_ids,
                     confirm_workload_processes_absent,
                     addr,
+                    true,
                 )?;
             }
             code => {
