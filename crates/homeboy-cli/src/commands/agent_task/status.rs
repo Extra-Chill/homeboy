@@ -5558,9 +5558,9 @@ fn collected_diagnostic_value_with_details(
         "owner": owner,
     });
     if include_details && !item.data.is_null() {
-        if let Some(details) = bounded_diagnostic_value(&item.data) {
-            value["details"] = details;
-        }
+        // `--full` is the explicit evidence surface: preserve the complete
+        // redacted source facts already retained by the durable record.
+        value["details"] = item.data.clone();
     } else if let Some(details) = policy_denial_details(&item.data) {
         value["details"] = details;
     } else if let Some(details) = structured_error_details(&item.data) {
