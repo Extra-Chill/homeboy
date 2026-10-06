@@ -2376,16 +2376,14 @@ fn retryable_cook_attempt(
             )]),
         ));
     };
-    let retryable_pre_execution_failure =
-        source.metadata["pre_execution_failure"]["retryable"] == serde_json::Value::Bool(true);
-    if retryable_pre_execution_failure
-        && recipe.runtime_generation != homeboy_core::build_identity::current().display
-        && super::has_unambiguous_zero_execution(source)
+    let retryable_pre_execution_failure = super::retryable_pre_execution_failure(source);
+    if recipe.runtime_generation != homeboy_core::build_identity::current().display
+        && !super::pre_execution_runtime_recovery_is_eligible(&recipe, source)
     {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.runtime_generation",
             format!(
-                "Cook retry must run with its pinned Homeboy runtime `{}`; this process is `{}`. No retry identity was reserved.",
+                "Cook retry must run with its pinned Homeboy runtime `{}` unless canonical zero-execution recovery is eligible; this process is `{}`. No retry identity was reserved.",
                 recipe.runtime_generation,
                 homeboy_core::build_identity::current().display
             ),

@@ -1260,10 +1260,11 @@ impl AgentTaskLifecycleStore {
         self.with_config_lock(|| {
             let mut record = self.read_record(run_id)?;
             let key = homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY;
+            let recovery = pre_execution_runtime_recovery(&record);
             if record.metadata[key] == runtime {
                 return Ok(record);
             }
-            if pre_execution_runtime_recovery(&record).is_none() {
+            if recovery.is_none() {
                 return Err(Error::validation_invalid_argument(
                     "controller_runtime_recovery",
                     "Cook runtime rebinding requires unambiguous zero-execution admission",
@@ -1272,8 +1273,7 @@ impl AgentTaskLifecycleStore {
                 ));
             }
             if record.state != AgentTaskRunState::Queued
-                || pre_execution_runtime_recovery(&record)
-                    != Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission)
+                || recovery != Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission)
             {
                 return Err(Error::validation_invalid_argument(
                     "controller_runtime_recovery",

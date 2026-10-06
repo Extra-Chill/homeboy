@@ -137,7 +137,7 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
 }
 
 #[test]
-fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() {
+fn historical_runtime_retry_rebinds_zero_execution_and_executes_once() {
     let (Ok(old_binary), Ok(new_binary)) = (
         std::env::var("HOMEBOY_15504_OLD_BINARY"),
         std::env::var("HOMEBOY_15504_NEW_BINARY"),
@@ -232,6 +232,18 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         old_display.starts_with(expected_identity_prefix),
         "{old_display}"
     );
+    let candidate_binary = env!("CARGO_BIN_EXE_homeboy");
+    let candidate_version = Command::new(candidate_binary)
+        .arg("--version")
+        .output()
+        .expect("run candidate runtime identity");
+    assert!(candidate_version.status.success());
+    let candidate_display = String::from_utf8_lossy(&candidate_version.stdout)
+        .lines()
+        .next()
+        .expect("candidate runtime display")
+        .trim()
+        .to_string();
     recipe["runtime_generation"] = old_display.clone().into();
     std::fs::write(
         &recipe_path,
@@ -282,22 +294,38 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         "old-runtime source submit failed: {}",
         String::from_utf8_lossy(&source_submitted.stdout)
     );
+    let original_runtime = store
+        .read_record(&run_id)
+        .expect("read source runtime pin")
+        .metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+        .clone();
     store
         .mutate_record(&run_id, |record| {
-            record.state = AgentTaskRunState::Failed;
             record.metadata["cook_id"] = serde_json::json!(cook_id);
             record.metadata["cook_attempt"] = serde_json::json!(1);
-            record.metadata["pre_execution_failure"] = serde_json::json!({
-                "retryable": true,
-                "phase": "runtime_readiness"
-            });
             record.metadata["provider_executions_consumed"] = serde_json::json!(0);
             true
         })
-        .expect("record zero-execution failure");
+        .expect("bind source lifecycle record to Cook");
     store
         .record_cook_attempt(cook_id, 1, &run_id)
         .expect("bind failed source attempt");
+    homeboy::agents::agent_task_lifecycle::record_pre_execution_failure_in_store(
+        &store,
+        &run_id,
+        &plan,
+        "runtime_readiness",
+        &homeboy::core::Error::internal_unexpected("old-runtime provider readiness failed")
+            .with_retryable(true),
+    )
+    .expect("record retryable zero-execution failure");
+    assert_eq!(
+        store
+            .read_record(&run_id)
+            .expect("verify immutable source runtime")
+            .metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
+        original_runtime
+    );
 
     let run_retry = |binary: &str| {
         let mut command = Command::new(binary);
@@ -310,7 +338,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
                 &run_id,
                 "--new-run-id",
                 &retry_id,
-                "--run",
                 "--idempotency-key",
                 "runtime-compatible-replay-1",
             ])
@@ -347,43 +374,34 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
                 )
                 .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", compatible_binary)
                 .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY", &old_display);
+        } else if binary == candidate_binary {
+            command
+                .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
+                .env(
+                    "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
+                    candidate_binary,
+                )
+                .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", candidate_binary)
+                .env(
+                    "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY",
+                    &candidate_display,
+                );
         }
         bounded_output(&mut command, Duration::from_secs(60))
     };
 
-    let candidate_binary = env!("CARGO_BIN_EXE_homeboy");
-    let rejected = run_retry(&candidate_binary);
+    let admitted = run_retry(candidate_binary);
     assert!(
-        !rejected.status.success(),
-        "candidate unexpectedly accepted old pin"
+        admitted.status.success(),
+        "canonical zero-execution runtime recovery failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&admitted.stdout),
+        String::from_utf8_lossy(&admitted.stderr)
     );
-    let recipe_after_rejection = recipe_store
-        .load_recipe(cook_id)
-        .expect("recipe after refusal");
-    assert_eq!(recipe_after_rejection.attempts.len(), 1);
+    let queued_record = store.read_record(&retry_id).expect("read queued retry");
     assert_eq!(
-        store
-            .read_cook_index(cook_id)
-            .expect("Cook index")
-            .latest_run_id,
-        run_id
+        queued_record.metadata["controller_runtime_recovery"]["previous"], original_runtime,
+        "retry reservation must preserve source runtime provenance"
     );
-    assert!(
-        !homeboy::agents::agent_task_lifecycle::run_record_exists_in_store(&store, &retry_id)
-            .expect("check reserved successor"),
-        "incompatible retry must not persist its declared successor"
-    );
-
-    let compatible = run_retry(compatible_binary);
-    assert!(
-        compatible.status.success(),
-        "old-runtime compatible replay failed ({}): stdout={} stderr={}",
-        compatible.status,
-        String::from_utf8_lossy(&compatible.stdout),
-        String::from_utf8_lossy(&compatible.stderr),
-    );
-    let successor = store.read_record(&retry_id).expect("compatible successor");
-    assert_eq!(successor.metadata["retry_of"], run_id);
     assert_eq!(
         store
             .read_cook_index(cook_id)
@@ -391,48 +409,103 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
             .latest_run_id,
         retry_id
     );
-    let mut run_successor = Command::new(compatible_binary);
-    run_successor
-        .args(["--placement", "local", "agent-task", "run", &retry_id])
-        .env("HOME", context.home())
-        .env("XDG_CONFIG_HOME", context.root().join(".config"))
-        .env("XDG_DATA_HOME", context.root().join("data"))
-        .env(
-            homeboy::core::paths::HOMEBOY_DATA_DIR_ENV,
-            context.data_dir(),
-        )
-        .env(
-            homeboy::core::paths::DAEMON_STATE_DIR_ENV,
-            context.daemon_dir(),
-        )
-        .env("HOMEBOY_TEST_DAEMON_NAMESPACE", context.daemon_dir())
-        .env("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP", "1")
-        .env("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir())
-        .env("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir())
-        .env("TMPDIR", context.temp_dir())
-        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
-        .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
-        .env(
-            "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
-            compatible_binary,
-        )
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", compatible_binary)
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY", &old_display);
-    let run_output = bounded_output(&mut run_successor, Duration::from_secs(60));
-    assert!(
-        run_output.status.success(),
-        "old-runtime provider execution failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&run_output.stdout),
-        String::from_utf8_lossy(&run_output.stderr)
+    let queued_successor = store.read_record(&retry_id).expect("queued successor");
+    assert_eq!(
+        queued_successor.metadata["controller_runtime_recovery"]["previous"], original_runtime,
+        "successor runtime rebinding retains the source pin"
     );
-    let provider_deadline = Instant::now() + Duration::from_secs(30);
-    while !provider_started.exists() && Instant::now() < provider_deadline {
-        std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        queued_successor.metadata["controller_runtime_recovery"]["current"]["originating"]
+            ["build_identity"],
+        candidate_display
+    );
+    assert_eq!(
+        homeboy::agents::agent_task_service::pre_execution_runtime_recovery(
+            &store
+                .read_record(&retry_id)
+                .expect("queued retry successor")
+        ),
+        Some(
+            homeboy::agents::agent_task_service::PreExecutionRuntimeRecovery::ReboundZeroExecution
+        )
+    );
+    let wait_for_provider = || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !provider_started.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_for_provider();
+    if !provider_started.exists() {
+        let mut run_successor = Command::new(candidate_binary);
+        run_successor
+            .args(["--placement", "local", "agent-task", "run", &retry_id])
+            .env("HOME", context.home())
+            .env("XDG_CONFIG_HOME", context.root().join(".config"))
+            .env("XDG_DATA_HOME", context.root().join("data"))
+            .env(
+                homeboy::core::paths::HOMEBOY_DATA_DIR_ENV,
+                context.data_dir(),
+            )
+            .env(
+                homeboy::core::paths::DAEMON_STATE_DIR_ENV,
+                context.daemon_dir(),
+            )
+            .env("HOMEBOY_TEST_DAEMON_NAMESPACE", context.daemon_dir())
+            .env("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP", "1")
+            .env("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir())
+            .env("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir())
+            .env("TMPDIR", context.temp_dir())
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
+            .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
+            .env(
+                "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
+                candidate_binary,
+            )
+            .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", candidate_binary)
+            .env(
+                "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY",
+                &candidate_display,
+            );
+        let run_output = bounded_output(&mut run_successor, Duration::from_secs(60));
+        assert!(
+            run_output.status.success(),
+            "candidate-runtime provider execution failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&run_output.stdout),
+            String::from_utf8_lossy(&run_output.stderr)
+        );
+        wait_for_provider();
     }
+    let compatible = run_retry(compatible_binary);
+    assert!(
+        compatible.status.success(),
+        "historical-runtime idempotency replay failed ({}): stdout={} stderr={}",
+        compatible.status,
+        String::from_utf8_lossy(&compatible.stdout),
+        String::from_utf8_lossy(&compatible.stderr),
+    );
+    let successor = store.read_record(&retry_id).expect("recovered successor");
+    assert_eq!(successor.metadata["retry_of"], run_id);
+    assert_eq!(
+        successor.metadata["controller_runtime_recovery"]["previous"], original_runtime,
+        "{successor:#?}"
+    );
+    assert_eq!(
+        successor.metadata["controller_runtime_recovery"]["current"]["originating"]
+            ["build_identity"],
+        candidate_display
+    );
+    assert_eq!(
+        recipe_store
+            .load_recipe(cook_id)
+            .expect("load immutable historical recipe")
+            .runtime_generation,
+        old_display
+    );
     assert!(
         provider_started.exists(),
-        "compatible retry did not admit fixture provider; successor={}",
+        "zero-execution recovery did not admit fixture provider; successor={}",
         store
             .read_record(&retry_id)
             .expect("inspect successor")
@@ -444,7 +517,7 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
             .lines()
             .count(),
         1,
-        "compatible replay admits the fixture provider exactly once"
+        "canonical recovery admits the fixture provider exactly once"
     );
     let completed = store
         .read_record(&retry_id)
