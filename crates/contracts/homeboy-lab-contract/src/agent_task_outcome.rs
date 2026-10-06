@@ -85,24 +85,33 @@ impl AgentTaskOutcomeStatus {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn agent_task_outcome_status_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                AgentTaskOutcomeStatus::Succeeded,
-                AgentTaskOutcomeStatus::NoOp,
+    fn agent_task_outcome_status_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (AgentTaskOutcomeStatus::Succeeded, "succeeded"),
+            (AgentTaskOutcomeStatus::NoOp, "no_op"),
+            (
                 AgentTaskOutcomeStatus::UnableToRemediate,
-                AgentTaskOutcomeStatus::ProviderError,
-                AgentTaskOutcomeStatus::Timeout,
+                "unable_to_remediate",
+            ),
+            (AgentTaskOutcomeStatus::ProviderError, "provider_error"),
+            (AgentTaskOutcomeStatus::Timeout, "timeout"),
+            (
                 AgentTaskOutcomeStatus::CandidateRecoverable,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskOutcomeStatus::FollowUpIssue,
-                AgentTaskOutcomeStatus::Cancelled,
-            ]
-        );
+                "candidate_recoverable",
+            ),
+            (AgentTaskOutcomeStatus::Failed, "failed"),
+            (AgentTaskOutcomeStatus::FollowUpIssue, "follow_up_issue"),
+            (AgentTaskOutcomeStatus::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

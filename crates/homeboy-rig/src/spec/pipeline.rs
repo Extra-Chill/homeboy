@@ -586,18 +586,21 @@ pub enum HostMutationOp {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn lifecycle_workload_kind_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                LifecycleWorkloadKind::Bench,
-                LifecycleWorkloadKind::Fuzz,
-                LifecycleWorkloadKind::Trace,
-            ]
-        );
+    fn lifecycle_workload_kind_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (LifecycleWorkloadKind::Bench, "bench"),
+            (LifecycleWorkloadKind::Fuzz, "fuzz"),
+            (LifecycleWorkloadKind::Trace, "trace"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

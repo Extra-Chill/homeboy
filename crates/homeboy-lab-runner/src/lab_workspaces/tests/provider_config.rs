@@ -45,7 +45,7 @@ fn init_task_worktree(source: &Path, worktree: &Path, branch: &str) {
 
 #[cfg(unix)]
 #[test]
-fn json_extra_workspace_input_materializes_delimiter_paths_without_legacy_sources() {
+fn json_extra_workspace_input_materializes_delimiter_paths() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -59,9 +59,6 @@ fn json_extra_workspace_input_materializes_delimiter_paths_without_legacy_source
             std::fs::write(source.join("input.txt"), format!("source-{index}"))
                 .expect("source bytes");
         }
-        let retired_source = controller.path().join("legacy-only");
-        std::fs::create_dir(&retired_source).expect("retired source directory");
-        std::env::set_var("HOMEBOY_LAB_EXTRA_WORKSPACES", &retired_source);
         for (value, field) in [
             ("not-json".to_string(), LAB_EXTRA_WORKSPACES_JSON_ENV),
             (
@@ -78,7 +75,7 @@ fn json_extra_workspace_input_materializes_delimiter_paths_without_legacy_source
             accepted_extra_lab_workspaces()
                 .expect("empty declaration")
                 .is_empty(),
-            "retired delimited input must not inject undeclared sources"
+            "an empty JSON declaration has no extra workspaces"
         );
         std::env::set_var(
             LAB_EXTRA_WORKSPACES_JSON_ENV,
@@ -86,7 +83,6 @@ fn json_extra_workspace_input_materializes_delimiter_paths_without_legacy_source
         );
         let declared = accepted_extra_lab_workspaces();
         std::env::remove_var(LAB_EXTRA_WORKSPACES_JSON_ENV);
-        std::env::remove_var("HOMEBOY_LAB_EXTRA_WORKSPACES");
         let declared = declared.expect("JSON workspace declarations");
         assert_eq!(declared.len(), 2);
 

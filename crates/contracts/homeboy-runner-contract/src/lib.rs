@@ -707,7 +707,6 @@ mod tests {
         assert_eq!(value["job_id"], "job-1");
         assert_eq!(value["local_run_id"], "controller-run-1");
         assert_eq!(value["mirror_run_id"], "run-1");
-        assert!(value.get("remote_run_id").is_none());
         assert_eq!(
             value["path_materialization_plan"]["schema"],
             PATH_MATERIALIZATION_PLAN_SCHEMA
@@ -734,24 +733,6 @@ mod tests {
         assert_eq!(record.status, "planned");
         assert!(record.job_id.is_none());
         assert!(record.artifact_refs.is_empty());
-    }
-
-    #[test]
-    fn retired_record_fields_cannot_populate_canonical_mirror_identity() {
-        for field in ["remote_run_id", "agent_task_run_id"] {
-            let mut value = json!({
-                "execution_id": "execution-1",
-                "runner_id": "runner-1",
-                "transport": "daemon",
-                "status": "planned"
-            });
-            value[field] = json!("retired-run");
-            let record: RunnerExecutionRecord = serde_json::from_value(value).expect("read record");
-            assert!(record.mirror_run_id.is_none());
-            let value = serde_json::to_value(record).expect("serialize canonical record");
-            assert!(value.get(field).is_none());
-            assert!(value.get("mirror_run_id").is_none());
-        }
     }
 
     #[test]

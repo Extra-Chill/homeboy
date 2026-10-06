@@ -441,19 +441,22 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn currency_evidence_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                CurrencyEvidence::ContentDigest,
-                CurrencyEvidence::SourceRevision,
-                CurrencyEvidence::BuildIdentity,
-                CurrencyEvidence::BuildTimestamp,
-            ]
-        );
+    fn currency_evidence_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (CurrencyEvidence::ContentDigest, "content_digest"),
+            (CurrencyEvidence::SourceRevision, "source_revision"),
+            (CurrencyEvidence::BuildIdentity, "build_identity"),
+            (CurrencyEvidence::BuildTimestamp, "build_timestamp"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

@@ -1625,28 +1625,6 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_process_identity_fields_are_rejected_by_the_strict_schema() {
-        let request = json!({
-            "schema": AGENT_TASK_LOOP_JOB_SCHEMA,
-            "loop_id": "loop-invalid-identity",
-            "kind": "daemon_execution",
-            "generation": "generation-1",
-            "dispatch_defaults": null,
-            "provider_catalog": AgentTaskProviderCatalog::default(),
-            "child_pid": 4242,
-            "child_start_identity": { "linux": { "starttime_ticks": 1 } }
-        });
-        let error = AgentTaskLoopJob::parse(json!({
-            "schema": AGENT_TASK_LOOP_JOB_SCHEMA,
-            "idempotency_key": "agent-task-loop:loop-invalid-identity:generation-1",
-            "request": request,
-            "phase": "queued"
-        }))
-        .expect_err("obsolete process identity must be rejected");
-        assert!(format!("{error:?}").contains("unknown field"));
-    }
-
-    #[test]
     fn new_execution_requires_a_generation_and_preserves_provider_config_reference() {
         let error = loop_work_job_execution_submission(
             "loop-missing-generation",

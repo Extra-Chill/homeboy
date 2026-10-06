@@ -660,17 +660,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn agent_command_policy_mode_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                AgentCommandPolicyMode::DenyList,
-                AgentCommandPolicyMode::AllowList,
-            ]
-        );
+    fn agent_command_policy_mode_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (AgentCommandPolicyMode::DenyList, "deny_list"),
+            (AgentCommandPolicyMode::AllowList, "allow_list"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

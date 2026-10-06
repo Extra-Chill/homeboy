@@ -971,20 +971,23 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn worktree_terminal_disposition_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                WorktreeTerminalDisposition::Succeeded,
-                WorktreeTerminalDisposition::Failed,
-                WorktreeTerminalDisposition::Cancelled,
-                WorktreeTerminalDisposition::TimedOut,
-                WorktreeTerminalDisposition::Interrupted,
-            ]
-        );
+    fn worktree_terminal_disposition_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (WorktreeTerminalDisposition::Succeeded, "succeeded"),
+            (WorktreeTerminalDisposition::Failed, "failed"),
+            (WorktreeTerminalDisposition::Cancelled, "cancelled"),
+            (WorktreeTerminalDisposition::TimedOut, "timed_out"),
+            (WorktreeTerminalDisposition::Interrupted, "interrupted"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

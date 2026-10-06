@@ -637,19 +637,22 @@ mod batch_concurrency_tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn batch_concurrency_source_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [
-                BatchConcurrencySource::Flag,
-                BatchConcurrencySource::Config,
-                BatchConcurrencySource::ResourceBudget,
-                BatchConcurrencySource::ChildCount,
-            ]
-        );
+    fn batch_concurrency_source_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (BatchConcurrencySource::Flag, "flag"),
+            (BatchConcurrencySource::Config, "config"),
+            (BatchConcurrencySource::ResourceBudget, "resource_budget"),
+            (BatchConcurrencySource::ChildCount, "child_count"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }

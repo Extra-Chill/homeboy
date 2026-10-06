@@ -228,14 +228,20 @@ mod tests {
 }
 
 #[cfg(test)]
-mod serde_label_pins {
+mod wire_label_tests {
     use super::*;
 
     #[test]
-    fn deploy_target_label_matches_serde() {
-        homeboy_serde_pin::assert_label_matches_serde!(
-            as_str,
-            [DeployTarget::Server, DeployTarget::Provider]
-        );
+    fn deploy_target_uses_fixed_wire_labels() {
+        for (value, label) in [
+            (DeployTarget::Server, "server"),
+            (DeployTarget::Provider, "provider"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&value).unwrap(),
+                serde_json::json!(label)
+            );
+            assert_eq!(value.as_str(), label);
+        }
     }
 }
