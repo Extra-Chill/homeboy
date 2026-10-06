@@ -214,12 +214,13 @@ fn start_replaces_missing_admission_without_using_root_owner_lock() {
 }
 
 #[test]
-fn native_recovery_reuses_live_root_after_exact_dead_generation_retirement() {
+fn native_recovery_restores_admission_without_touching_live_root_work() {
     let fixture = GenerationFixture::new();
     let result = fixture.cli(&["daemon", "recover", "--yes"]);
     assert_eq!(result["fresh"], true);
     let status = fixture.cli(&["daemon", "status"]);
-    assert_eq!(status["daemon"]["lease_id"], fixture.root_state["lease_id"]);
+    assert_eq!(status["daemon"]["lease_id"], result["lease_id"]);
+    assert_ne!(status["daemon"]["lease_id"], fixture.selected_state["lease_id"]);
     fixture.assert_root_preserved();
 }
 
