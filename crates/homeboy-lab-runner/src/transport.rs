@@ -1006,14 +1006,14 @@ fn file_transfer_operation_error(
     stderr: String,
     transport: &str,
 ) -> Error {
-    let stderr = bounded_redacted_text(stderr.trim(), 2 * 1024);
-    let remote_path = bounded_redacted_text(remote_path, 3 * 1024);
+    let stderr = homeboy_core::redaction::redact_string(stderr.trim());
+    let remote_path = homeboy_core::redaction::redact_string(remote_path);
+    let summary = format!(
+        "{stderr} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`)"
+    );
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
-        format!(
-            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
-            stderr.trim()
-        ),
+        bounded_redacted_text(&summary, 512),
         json!({
             "runner_id": runner_id,
             "operation": operation,
@@ -1336,6 +1336,54 @@ mod tests {
             "private_file_chunk_upload"
         );
         assert_eq!(refusal.details["required_protocol_version"], 1);
+    }
+
+    #[test]
+    fn direct_transfer_keeps_complete_redacted_source_facts() {
+        let stderr = format!(
+            "Authorization: Bearer ssh-fixture-secret; {}",
+            "remote upload rejection detail ".repeat(80)
+        );
+        let remote_path = format!("/{}", "long-path-segment/".repeat(40));
+        assert!(stderr.len() > 512);
+        assert!(remote_path.len() > 512);
+        assert!(stderr.contains("ssh-fixture-secret"));
+
+        let error = file_transfer_operation_error(
+            "test-runner",
+            "private evidence upload",
+            &remote_path,
+            stderr,
+            "direct_ssh",
+        );
+        let redacted_stderr = homeboy_core::redaction::redact_string(
+            &error.details["stderr"]
+                .as_str()
+                .expect("complete stderr detail"),
+        );
+        let redacted_path = homeboy_core::redaction::redact_string(&remote_path);
+        assert!(error.message.chars().count() <= 512);
+        assert_eq!(error.details["stderr"], redacted_stderr);
+        assert_eq!(error.details["remote_path"], redacted_path);
+
+        let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
+            "attempt-direct-private-upload",
+            "test-runner",
+            homeboy_lab_contract::lab::transport_failure::LabTransportOperation::DispatchCookAttempt,
+            homeboy_lab_contract::lab::transport_failure::LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        );
+        assert_eq!(
+            persisted_candidate.details["source_error"]["details"]["stderr"],
+            redacted_stderr
+        );
+        assert_eq!(
+            persisted_candidate.details["source_error"]["details"]["remote_path"],
+            redacted_path
+        );
+        assert!(!serde_json::to_string(&persisted_candidate.details)
+            .expect("serialize full SSH evidence")
+            .contains("ssh-fixture-secret"));
     }
 
     #[test]
