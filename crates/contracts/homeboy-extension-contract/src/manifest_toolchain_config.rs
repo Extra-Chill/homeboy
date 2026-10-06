@@ -14,7 +14,6 @@ pub struct ToolchainReadinessProbe {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     /// Executed as an argv vector, never through a shell.
-    #[serde(default)]
     pub program: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -22,32 +21,32 @@ pub struct ToolchainReadinessProbe {
     pub repair_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostic_env: Vec<String>,
-    /// A recognized mixed-version manifest form. It is retained only to return
-    /// a typed upgrade diagnostic; Homeboy never executes this shell text.
-    #[serde(default, rename = "command", skip_serializing_if = "Option::is_none")]
-    pub legacy_command: Option<String>,
-}
-
-impl ToolchainReadinessProbe {
-    pub fn is_legacy_non_executable(&self) -> bool {
-        self.legacy_command.is_some()
-    }
 }
 
 #[cfg(test)]
-mod legacy_probe_tests {
+mod probe_contract_tests {
     use super::ToolchainReadinessProbe;
 
     #[test]
-    fn legacy_shell_command_probe_is_recognized_but_non_executable() {
-        let legacy = serde_json::json!({
-            "id": "legacy",
-            "command": "tool; touch /tmp/owned"
-        });
-        let probe = serde_json::from_value::<ToolchainReadinessProbe>(legacy)
-            .expect("recognize legacy manifest for an upgrade diagnostic");
-        assert!(probe.is_legacy_non_executable());
-        assert!(probe.program.is_empty());
+    fn readiness_probes_require_program_and_reject_shell_command_fields() {
+        for (value, expected) in [
+            (
+                serde_json::json!({"id": "missing"}),
+                "missing field `program`",
+            ),
+            (
+                serde_json::json!({"id": "retired", "command": "tool; touch /tmp/owned"}),
+                "unknown field `command`",
+            ),
+            (
+                serde_json::json!({"id": "mixed", "program": "tool", "command": "tool --version"}),
+                "unknown field `command`",
+            ),
+        ] {
+            let error = serde_json::from_value::<ToolchainReadinessProbe>(value)
+                .expect_err("probe declaration must use the canonical argv contract");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 }
 
