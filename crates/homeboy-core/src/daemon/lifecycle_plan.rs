@@ -37,8 +37,18 @@ pub enum Plan {
     Converged,
     Transition { step: Step },
     NeedsAttestation(Attestation),
-    Wait { reason: String },
+    Wait { cause: WaitCause, reason: String },
     Blocked { cause: BlockCause, reason: String },
+}
+
+/// What the planner is waiting for.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitCause {
+    /// A dead generation's job still has a live workload process.
+    LiveWorkload,
+    /// A stale daemon still owns jobs; it is replaced when they finish.
+    BusyStaleDaemon,
 }
 
 /// Why the planner refuses to act.
@@ -181,6 +191,7 @@ fn plan_dead_generation_jobs(generation: &GenerationView) -> Option<Plan> {
         .find(|job| job.custody == JobCustody::Running)
     {
         return Some(Plan::Wait {
+            cause: WaitCause::LiveWorkload,
             reason: format!(
                 "job {} of dead generation {lease_id} still has a live workload process",
                 job.job_id
@@ -285,6 +296,7 @@ fn plan_stale_live_generation(generation: &GenerationView) -> Option<Plan> {
     let lease_id = generation.lease_id.clone()?;
     if !generation.jobs.is_empty() {
         return Some(Plan::Wait {
+            cause: WaitCause::BusyStaleDaemon,
             reason: format!(
                 "generation {lease_id} runs a stale binary but still owns {} job(s); it is replaced when they finish",
                 generation.jobs.len()

@@ -18,12 +18,53 @@ use std::path::Path;
 use serde_json::json;
 
 use super::lifecycle::observe_local;
-use super::lifecycle_plan::{plan, Plan, Step};
+use super::lifecycle_plan::{plan, BlockCause, Plan, Step, WaitCause};
 use crate::error::{Error, Result};
 
 /// Plan for this process's own daemon router.
 pub fn plan_local() -> Plan {
     plan(&observe_local())
+}
+
+/// The shared safety gate for every mutating daemon entry point (#15557 C4).
+///
+/// Returns why `planned` forbids a lease or job-store mutation right now:
+/// a dead generation still has a live workload process, or a live daemon
+/// process holds no lease and could own the store being changed. Everything
+/// else is left to the entry point's own, narrower preconditions.
+pub fn mutation_refusal(planned: &Plan) -> Option<String> {
+    match planned {
+        Plan::Wait {
+            cause: WaitCause::LiveWorkload,
+            reason,
+        } => Some(format!("live workload: {reason}")),
+        Plan::Blocked {
+            cause: BlockCause::UnleasedProcess,
+            reason,
+        } => Some(format!("unleased daemon process: {reason}")),
+        _ => None,
+    }
+}
+
+/// Refuse `entry_point` when the current lifecycle plan forbids mutation.
+pub fn ensure_mutation_allowed(entry_point: &str) -> Result<()> {
+    ensure_mutation_allowed_with(entry_point, plan_local)
+}
+
+fn ensure_mutation_allowed_with(entry_point: &str, replan: impl FnOnce() -> Plan) -> Result<()> {
+    let Some(reason) = mutation_refusal(&replan()) else {
+        return Ok(());
+    };
+    let mut error = Error::validation_invalid_argument(
+        "daemon_lifecycle",
+        format!("{entry_point} refused by the daemon lifecycle plan: {reason}"),
+        None,
+        Some(vec![
+            "Run `homeboy daemon recover --dry-run` for the one next action.".to_string(),
+        ]),
+    );
+    error.details["classification"] = json!("lifecycle_refused");
+    Err(error)
 }
 
 /// Whether this module can apply `planned` (as opposed to the legacy
@@ -275,10 +316,58 @@ mod tests {
     }
 
     #[test]
+    fn the_mutation_gate_refuses_only_live_workload_and_unleased_processes() {
+        let refused = [
+            Plan::Wait {
+                cause: WaitCause::LiveWorkload,
+                reason: "child 9 is live".to_string(),
+            },
+            Plan::Blocked {
+                cause: BlockCause::UnleasedProcess,
+                reason: "pid 7 holds no lease".to_string(),
+            },
+        ];
+        for planned in refused {
+            let error = ensure_mutation_allowed_with("daemon adopt-orphan", || planned.clone())
+                .expect_err("refused");
+            assert_eq!(error.details["classification"], "lifecycle_refused");
+            assert!(error
+                .message
+                .contains("daemon adopt-orphan refused by the daemon lifecycle plan"));
+        }
+        let allowed = [
+            Plan::Converged,
+            Plan::Wait {
+                cause: WaitCause::BusyStaleDaemon,
+                reason: "busy".to_string(),
+            },
+            Plan::Blocked {
+                cause: BlockCause::Unreadable,
+                reason: "legacy lease".to_string(),
+            },
+            Plan::Blocked {
+                cause: BlockCause::UnknownSupervision,
+                reason: "unknown".to_string(),
+            },
+            attestation(),
+            Plan::Transition {
+                step: Step::StartDaemon,
+            },
+        ];
+        for planned in allowed {
+            assert!(
+                ensure_mutation_allowed_with("entry", || planned.clone()).is_ok(),
+                "{planned:?}"
+            );
+        }
+    }
+
+    #[test]
     fn plans_the_legacy_executor_owns_are_not_applied_here() {
         for planned in [
             Plan::Converged,
             Plan::Wait {
+                cause: crate::daemon::lifecycle_plan::WaitCause::LiveWorkload,
                 reason: "live child".to_string(),
             },
             Plan::Blocked {
