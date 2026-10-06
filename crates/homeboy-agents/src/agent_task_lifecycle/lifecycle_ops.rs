@@ -643,6 +643,51 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     Err(error)
 }
 
+/// Transfer pre-supervisor custody to the pinned controller that inherited the
+/// launcher's opaque token. This makes the durable owner PID identify the
+/// process that can finish/repair the handoff after its original caller exits.
+pub fn transfer_detached_cook_handoff_launcher_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let launcher_pid = std::process::id();
+    let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
+        .ok()
+        .flatten();
+    let updated = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if record.state.is_terminal()
+            || handoff["cook_id"] != cook_id
+            || handoff["launcher_id"] != launcher_id
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["cancellation_fence"]["state"] != "open"
+        {
+            return false;
+        }
+        let handoff = &mut record.ensure_metadata_object()["detached_cook_handoff"];
+        handoff["launcher_pid"] = json!(launcher_pid);
+        handoff["launcher_start_identity"] =
+            serde_json::to_value(&launcher_start_identity).unwrap_or(Value::Null);
+        handoff["admission_deadline_at"] = json!((chrono::Utc::now()
+            + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
+        .to_rfc3339());
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    updated.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "pinned controller could not take custody of the pre-supervisor Cook handoff",
+            Some(cook_id),
+            None,
+        )
+    })
+}
+
 fn detached_cook_launcher_is_live(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -4226,6 +4271,36 @@ pub fn record_provider_launch_context_in_store(
             None,
         )
     })
+}
+
+/// Seal the current controller with a caller-owned bound on FIFO admission.
+/// The request ID is also the durable Cook identity, so the queue timeout points
+/// back to the record that the caller can inspect and retry.
+pub fn pin_current_controller_runtime_with_timeout(
+    data_root: &std::path::Path,
+    request_id: &str,
+    wait_timeout: std::time::Duration,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<std::path::PathBuf> {
+    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
+    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root_with_timeout(
+        &runtime_root,
+        request_id,
+        wait_timeout,
+        cancellation_requested,
+    )?;
+    runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "new controller runtime pin has no immutable executable",
+                None,
+                None,
+            )
+        })
 }
 
 /// Bind a reserved provider execution to the subprocess that actually runs it.
