@@ -174,3 +174,22 @@ pub struct ChangelogSnapshotData {
     pub label: String,
     pub items: Vec<String>,
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn release_state_status_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                ReleaseStateStatus::Uncommitted,
+                ReleaseStateStatus::NeedsRelease,
+                ReleaseStateStatus::DocsOnly,
+                ReleaseStateStatus::Clean,
+                ReleaseStateStatus::Unknown,
+            ]
+        );
+    }
+}

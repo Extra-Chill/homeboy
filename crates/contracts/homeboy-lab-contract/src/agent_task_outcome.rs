@@ -83,3 +83,26 @@ impl AgentTaskOutcomeStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn agent_task_outcome_status_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                AgentTaskOutcomeStatus::Succeeded,
+                AgentTaskOutcomeStatus::NoOp,
+                AgentTaskOutcomeStatus::UnableToRemediate,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskOutcomeStatus::Timeout,
+                AgentTaskOutcomeStatus::CandidateRecoverable,
+                AgentTaskOutcomeStatus::Failed,
+                AgentTaskOutcomeStatus::FollowUpIssue,
+                AgentTaskOutcomeStatus::Cancelled,
+            ]
+        );
+    }
+}

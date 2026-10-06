@@ -38,7 +38,7 @@ fn registry_list_output_redacts_runner_env_values() {
     let (output, _) = map_registry(Ok((
         RunnerOutput {
             command: "runner.list".to_string(),
-            entities: vec![runner_with_env("lab")],
+            entities: Some(vec![runner_with_env("lab")]),
             ..Default::default()
         },
         0,

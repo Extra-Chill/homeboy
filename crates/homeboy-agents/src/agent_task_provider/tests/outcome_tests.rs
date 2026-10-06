@@ -629,6 +629,20 @@ fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_
         .unwrap_or_default()
         .contains("intentional no-change"));
 
+    let mut retired = outcome.clone();
+    retired.outputs["provider_run_result"]["intentional_no_change"]["verdict"] = json!("no_change");
+    normalize_homeboy_local_artifact_sizes(
+        &mut retired,
+        artifacts.path(),
+        &provenance,
+        Some(workspace.path()),
+    );
+    assert_eq!(retired.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert!(retired
+        .metadata
+        .get("intentional_no_change_verified")
+        .is_none());
+
     fs::write(workspace.path().join("uncaptured.rs"), "must recover\n").expect("untracked source");
     normalize_homeboy_local_artifact_sizes(
         &mut outcome,

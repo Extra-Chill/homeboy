@@ -267,3 +267,28 @@ pub struct TraceScenario {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn trace_status_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [TraceStatus::Pass, TraceStatus::Fail, TraceStatus::Error]
+        );
+    }
+
+    #[test]
+    fn trace_assertion_status_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                TraceAssertionStatus::Pass,
+                TraceAssertionStatus::Fail,
+                TraceAssertionStatus::Error,
+            ]
+        );
+    }
+}

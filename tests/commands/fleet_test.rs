@@ -1,5 +1,13 @@
-use super::{health_indicator, validate_exec_apply_boundary};
+use super::{health_indicator, list_output, validate_exec_apply_boundary};
 use homeboy::core::server::health::{ServerHealth, ServerHealthState};
+
+#[test]
+fn empty_fleet_list_emits_entities_array() {
+    let value = serde_json::to_value(list_output(Vec::new())).expect("serialize fleet list");
+
+    assert_eq!(value["command"], "fleet.list");
+    assert_eq!(value["entities"], serde_json::json!([]));
+}
 
 #[test]
 fn fleet_exec_requires_apply_for_real_execution() {
