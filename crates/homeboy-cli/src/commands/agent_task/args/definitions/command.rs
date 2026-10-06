@@ -48,6 +48,7 @@ pub struct AgentTaskArgs {
 
 #[derive(Args, Debug)]
 pub struct ActiveScopeArgs {
+    /// Opaque caller reference whose active checkout ownership should be read.
     #[arg(long)]
     pub context: String,
 }
