@@ -1864,7 +1864,7 @@ mod tests {
             "transport": "daemon",
             "status": "succeeded",
             "job_id": "job-1",
-            "remote_run_id": "run-1",
+            "mirror_run_id": "run-1",
             "path_materialization_plan": {
                 "schema": PATH_MATERIALIZATION_PLAN_SCHEMA,
                 "entries": [

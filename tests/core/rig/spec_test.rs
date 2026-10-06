@@ -463,7 +463,6 @@ fn workload_with_trace_metadata() -> WorkloadSpec {
         path: "/tmp/scoped.trace.mjs".to_string(),
         env_provider_extensions: Vec::new(),
         artifact_postprocess: Vec::new(),
-        trace_phase_template: None,
         public_preview: None,
         check_groups: Some(vec!["desktop-app".to_string()]),
         port_range_size: None,

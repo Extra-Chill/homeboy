@@ -7,10 +7,11 @@ use std::io::ErrorKind;
 use homeboy_error::{Error, ErrorCode};
 use serde::{Deserialize, Serialize};
 
-pub const LAB_TRANSPORT_ATTEMPT_RECEIPT_SCHEMA: &str = "homeboy/lab-transport-attempt-receipt/v1";
+pub const LAB_TRANSPORT_ATTEMPT_RECEIPT_SCHEMA: &str = "homeboy/lab-transport-attempt-receipt/v2";
 pub const LAB_TRANSPORT_CAUSE_LIMIT: usize = 4;
 pub const LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT: usize = 256;
 pub const LAB_TRANSPORT_ERROR_MESSAGE_LIMIT: usize = 512;
+pub const LAB_TRANSPORT_CONTEXT_LIMIT: usize = 4 * 1024;
 pub const LAB_TRANSPORT_RETRY_LIMIT: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +92,10 @@ pub struct LabTransportFailure {
     pub code: String,
     pub kind: LabTransportErrorKind,
     pub message: String,
+    /// Operation/path context is bounded independently from the primary cause
+    /// so a long remote path cannot crowd the failure reason out of `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     pub causes: Vec<LabTransportCause>,
     pub causes_truncated: bool,
 }
@@ -124,12 +129,15 @@ impl LabTransportAttemptReceipt {
         let kind = typed_error_kind(error);
         let retryable = error.retryable == Some(true)
             && acceptance == LabJobAcceptanceDisposition::NoJobAccepted;
-        let message = error
+        let context = transport_operation_context(error);
+        let original_error = error
             .details
-            .get("context")
-            .and_then(serde_json::Value::as_str)
-            .map(|context| format!("Lab transport operation failed: {context}"))
-            .unwrap_or_else(|| error.message.clone());
+            .get("diagnostic_cause")
+            .or_else(|| error.details.get("error"))
+            .or_else(|| error.details.get("stderr"))
+            .or_else(|| error.details.pointer("/source/cause"))
+            .and_then(serde_json::Value::as_str);
+        let message = original_error.unwrap_or(&error.message);
         let run_id = bounded_redacted(run_id, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT);
         Self {
             schema: LAB_TRANSPORT_ATTEMPT_RECEIPT_SCHEMA.to_string(),
@@ -145,13 +153,47 @@ impl LabTransportAttemptReceipt {
             error: LabTransportFailure {
                 code: ErrorCode::RunnerLabTransportFailure.as_str().to_string(),
                 kind,
-                message: bounded_redacted(&message, LAB_TRANSPORT_ERROR_MESSAGE_LIMIT),
+                message: bounded_redacted(message, LAB_TRANSPORT_ERROR_MESSAGE_LIMIT),
+                context: context
+                    .as_deref()
+                    .map(|context| bounded_redacted(context, LAB_TRANSPORT_CONTEXT_LIMIT)),
                 causes,
                 causes_truncated,
             },
             provider_executions_consumed: 0,
         }
     }
+}
+
+fn transport_operation_context(error: &Error) -> Option<String> {
+    if let Some(context) = error
+        .details
+        .get("context")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(context.to_string());
+    }
+    let operation = error
+        .details
+        .get("operation")
+        .and_then(serde_json::Value::as_str)?;
+    let runner = error
+        .details
+        .get("runner_id")
+        .and_then(serde_json::Value::as_str);
+    let path = error
+        .details
+        .get("remote_path")
+        .and_then(serde_json::Value::as_str);
+    let transport = error
+        .details
+        .get("transport")
+        .and_then(serde_json::Value::as_str);
+    let mut context = vec![operation.to_string()];
+    context.extend(runner.map(|value| format!("runner={value}")));
+    context.extend(transport.map(|value| format!("transport={value}")));
+    context.extend(path.map(|value| format!("path={value}")));
+    Some(context.join("; "))
 }
 
 pub fn preacceptance_transport_error(
@@ -169,13 +211,79 @@ pub fn preacceptance_transport_error(
         &error,
     );
     let retryable = receipt.retryable;
+    let source_error = full_source_error_evidence(&error);
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         receipt.error.message.clone(),
-        serde_json::json!({ "lab_transport_attempt_receipt": receipt }),
+        serde_json::json!({
+            "lab_transport_attempt_receipt": receipt,
+            "source_error": source_error,
+        }),
     )
     .with_retryable(retryable)
     .with_source(error)
+}
+
+/// Build the canonical, redacted error for a local provider-evidence I/O
+/// failure. Structured facts stay complete; the human summary is bounded.
+pub fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error {
+    const MESSAGE_LIMIT: usize = 512;
+    let operation = homeboy_redaction::redact_string(&operation);
+    let cause = homeboy_redaction::redact_string(&error.to_string());
+    let mut diagnostic = Error::from_io_error(&error, Some(operation.clone()));
+    diagnostic.message = format!("{cause} (operation: {operation})")
+        .chars()
+        .take(MESSAGE_LIMIT)
+        .collect();
+    if let Some(details) = diagnostic.details.as_object_mut() {
+        details.insert("context".to_string(), serde_json::json!(operation));
+        details.insert("error".to_string(), serde_json::json!(cause));
+    }
+    diagnostic.with_source(error)
+}
+
+fn full_source_error_evidence(error: &Error) -> serde_json::Value {
+    let mut causes = Vec::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(homeboy_error) = cause.downcast_ref::<Error>() {
+            causes.push(serde_json::json!({
+                "code": homeboy_error.code.as_str(),
+                "message": homeboy_redaction::redact_string(&homeboy_error.message),
+                "details": homeboy_redaction::redact_json(&homeboy_error.details),
+                "hints": homeboy_error
+                    .hints
+                    .iter()
+                    .map(|hint| homeboy_redaction::redact_string(&hint.message))
+                    .collect::<Vec<_>>(),
+                "retryable": homeboy_error.retryable,
+            }));
+        } else if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+            causes.push(serde_json::json!({
+                "kind": LabTransportErrorKind::from_io_kind(io_error.kind()),
+                "message": homeboy_redaction::redact_string(&io_error.to_string()),
+                "raw_os_error": io_error.raw_os_error(),
+            }));
+        } else {
+            causes.push(serde_json::json!({
+                "message": homeboy_redaction::redact_string(&cause.to_string()),
+            }));
+        }
+        source = cause.source();
+    }
+
+    serde_json::json!({
+        "code": error.code.as_str(),
+        "message": homeboy_redaction::redact_string(&error.message),
+        "details": homeboy_redaction::redact_json(&error.details),
+        "hints": error
+            .hints
+            .iter()
+            .map(|hint| homeboy_redaction::redact_string(&hint.message))
+            .collect::<Vec<_>>(),
+        "retryable": error.retryable,
+        "causes": causes,
+    })
 }
 
 fn typed_error_kind(error: &Error) -> LabTransportErrorKind {
@@ -205,6 +313,24 @@ fn bounded_cause_chain(error: &Error) -> (Vec<LabTransportCause>, bool) {
         kind: None,
         message: bounded_redacted(&error.message, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT),
     }];
+    // HTTP/file-transfer adapters retain remote rejection details under
+    // `details.source`; they are structured response facts, not necessarily
+    // `std::error::Error::source()` nodes. Lift a bounded textual cause into the
+    // durable chain before wrapping discards that detail object.
+    if let Some(message) = error
+        .details
+        .pointer("/source/cause")
+        .and_then(serde_json::Value::as_str)
+    {
+        if causes.len() == LAB_TRANSPORT_CAUSE_LIMIT {
+            return (causes, true);
+        }
+        causes.push(LabTransportCause {
+            code: None,
+            kind: None,
+            message: bounded_redacted(message, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT),
+        });
+    }
     let mut source = error.source();
     while let Some(cause) = source {
         if causes.len() == LAB_TRANSPORT_CAUSE_LIMIT {
@@ -265,9 +391,36 @@ mod tests {
         );
         assert_eq!(receipt.selected_runner, "homeboy-lab");
         assert!(receipt.causes_are_bounded());
+        assert_eq!(wrapped.details["source_error"]["retryable"], true);
         assert!(!serde_json::to_string(&wrapped.details)
             .expect("serialize details")
             .contains("fixture-secret"));
+    }
+
+    #[test]
+    fn v1_receipt_decodes_without_the_v2_independent_context_field() {
+        let wrapped = preacceptance_transport_error(
+            "cook-attempt-legacy-receipt",
+            "homeboy-lab",
+            LabTransportOperation::DispatchCookAttempt,
+            LabJobAcceptanceDisposition::NoJobAccepted,
+            Error::internal_io(
+                "No such file or directory (os error 2)",
+                Some("open provider evidence /tmp/missing.json".to_string()),
+            ),
+        );
+        let mut legacy = wrapped.details["lab_transport_attempt_receipt"].clone();
+        legacy["schema"] = serde_json::json!("homeboy/lab-transport-attempt-receipt/v1");
+        legacy["error"]
+            .as_object_mut()
+            .expect("failure object")
+            .remove("context");
+
+        let receipt: LabTransportAttemptReceipt =
+            serde_json::from_value(legacy).expect("deserialize legacy receipt");
+        assert_eq!(receipt.schema, "homeboy/lab-transport-attempt-receipt/v1");
+        assert_eq!(receipt.error.context, None);
+        assert!(receipt.error.message.contains("No such file"));
     }
 
     impl LabTransportAttemptReceipt {

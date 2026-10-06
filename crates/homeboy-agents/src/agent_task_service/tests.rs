@@ -2183,7 +2183,7 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
 }
 
 #[test]
-fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_projection() {
+fn control_plane_reconciliation_completes_its_effect_across_runner_terminal_projection() {
     with_isolated_home(|_| {
         let run_id = "cook-runner-reconcile-claim-attempt-1-transport-retry";
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
@@ -2240,13 +2240,21 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
                 .state,
             AgentTaskRunState::Cancelled
         );
-        let operation_key = format!("control-plane-action:reconcile:{}", request.effect_id.0);
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let effect = store
+            .open_observation_initialized()
+            .expect("observation store")
+            .control_plane_effect_status(&request.effect_id)
+            .expect("effect status")
+            .expect("durable effect");
         assert_eq!(
-            agent_task_lifecycle::operation_claim(run_id, &operation_key)
-                .expect("operation claim")
-                .expect("completed operation claim")
-                .state,
-            agent_task_lifecycle::ClaimState::Completed
+            effect.state,
+            homeboy_control_plane_contract::ControlPlaneEffectState::Terminal
+        );
+        assert_eq!(
+            effect.terminal.expect("completed effect").acknowledgement,
+            first
         );
         assert_eq!(
             crate::orchestration::execute_action_from_current_environment(run_id, &request)
@@ -2347,6 +2355,123 @@ fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
             AgentTaskRunState::Cancelled
         );
         assert!(agent_task_lifecycle::exact_record(run_id).is_err());
+    });
+}
+
+/// Every file under one run's durable directory, by relative path.
+fn run_dir_snapshot(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(dir).expect("read run dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                out.insert(
+                    path.strip_prefix(root).expect("relative").to_path_buf(),
+                    std::fs::read(&path).expect("read file"),
+                );
+            }
+        }
+    }
+    let root = lifecycle_store.run_dir(run_id);
+    let mut out = std::collections::BTreeMap::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+/// A stale queued record whose stored `plan_path` disagrees with its
+/// controller plan. Any reconciling read rewrites `plan_path`, so a preview
+/// that reconciles is caught by the run directory changing.
+fn stale_record_that_a_reconciling_read_would_rewrite(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) {
+    agent_task_lifecycle::submit_plan_in_store(lifecycle_store, &discovery_plan(), Some(run_id))
+        .expect("submitted");
+    lifecycle_store
+        .mutate_record(run_id, |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.plan_path = "/stale/plan/path".to_string();
+            true
+        })
+        .expect("stale record");
+}
+
+#[test]
+fn scoped_reconcile_preview_writes_nothing() {
+    with_isolated_home(|home| {
+        let run_id = "preview-must-not-write";
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
+            home.path().join("explicit-lifecycle"),
+        );
+        stale_record_that_a_reconciling_read_would_rewrite(&lifecycle_store, run_id);
+        let before = run_dir_snapshot(&lifecycle_store, run_id);
+
+        let preview = reconcile_run_in_store(&lifecycle_store, run_id, true).expect("preview");
+
+        assert_eq!(preview.reconciled, 0, "{preview:?}");
+        assert_eq!(preview.runs[0].action, "would-reconcile", "{preview:?}");
+        assert_eq!(
+            run_dir_snapshot(&lifecycle_store, run_id),
+            before,
+            "a reconcile preview must leave the durable run untouched"
+        );
+
+        // Apply still reconciles the same run from an authoritative read.
+        let applied = reconcile_run_in_store(&lifecycle_store, run_id, false).expect("apply");
+        assert_eq!(applied.reconciled, 1, "{applied:?}");
+    });
+}
+
+#[test]
+fn active_reconcile_preview_writes_nothing() {
+    // Only runner-backed candidates were refreshed through the writing status
+    // path, so the fixture must be an accepted Lab run whose controller owner
+    // has exited.
+    with_isolated_home(|_| {
+        let run_id = "sweep-preview-must-not-write";
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("ambient store");
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        lifecycle_store
+            .record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: "00000000-0000-0000-0000-000000015560",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+            })
+            .expect("accepted Lab run");
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
+                record.plan_path = "/stale/plan/path".to_string();
+                record.annotate_stale_running();
+                true
+            })
+            .expect("dead controller owner");
+        let before = run_dir_snapshot(&lifecycle_store, run_id);
+
+        let preview = reconcile_stale_active_runs(true).expect("preview");
+
+        assert!(
+            preview.runs.iter().any(|run| run.run_id == run_id),
+            "the dead-owner Lab run is a preview candidate: {preview:?}"
+        );
+        assert_eq!(
+            run_dir_snapshot(&lifecycle_store, run_id),
+            before,
+            "a reconcile preview must leave the durable run untouched"
+        );
     });
 }
 

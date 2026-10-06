@@ -2486,7 +2486,13 @@ fn retryable_cook_attempt(
                 }
             }
         }
-        if !owned_replacement && record.metadata["retry_of"] != source.run_id {
+        // Read through the single lineage reader: a gate-fix successor carries
+        // its source in plan provenance, not `retry_of`, and used to be
+        // rejected here as not continuing the attempt it continues (#15567).
+        let continues_source =
+            super::cook_lineage::attempt_lineage(&record.metadata, Some(&recipe_attempt.plan))
+                .is_some_and(|lineage| lineage.source_run_id == source.run_id);
+        if !owned_replacement && !continues_source {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry run is not the durable retry of its source attempt",

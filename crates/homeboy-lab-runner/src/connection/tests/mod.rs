@@ -868,3 +868,38 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
         }),
     }
 }
+
+/// #15552: `homeboy upgrade` converges runners from the pre-upgrade process.
+/// A runner that converged to the installed controller must be judged
+/// compatible against that controller, not against this process's build.
+#[test]
+fn runner_converged_to_installed_controller_is_compatible_during_upgrade() {
+    let installed = "homeboy 99.0.0+dd97ab6dd5395907573bd4525f60f67e1e38af56";
+    let judged = |controller: &homeboy_product_identity::BuildIdentity| {
+        controller_compatibility("99.0.0", Some(installed), controller)
+    };
+
+    // Outside the upgrade scope this process's build is the controller, so the
+    // newer runner reads as skewed.
+    let outside = judged(&crate::controller_identity::compatibility_controller_identity());
+    assert!(!outside.version_matches);
+    assert!(!outside.current);
+
+    let inside = crate::controller_identity::with_converging_controller(Some(installed), || {
+        judged(&crate::controller_identity::compatibility_controller_identity())
+    });
+    assert!(inside.version_matches);
+    assert!(inside.current);
+    assert_eq!(inside.reference, ControllerReference::Comparable);
+
+    // A runner that did not converge is still caught inside the scope.
+    let stale = crate::controller_identity::with_converging_controller(Some(installed), || {
+        controller_compatibility(
+            "99.0.0",
+            Some("homeboy 99.0.0+caf3361019fbc45ee0263dbcd9f5d6659b87ed48"),
+            &crate::controller_identity::compatibility_controller_identity(),
+        )
+    });
+    assert!(stale.version_matches);
+    assert!(!stale.current);
+}
