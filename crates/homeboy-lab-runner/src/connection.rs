@@ -390,6 +390,29 @@ pub fn connect_in_roots(
     )
 }
 
+/// Start command for a rotation candidate generation.
+///
+/// The candidate becomes the admission generation once promoted, so it must be
+/// resident like the one `runner connect` starts. Otherwise it idles out under
+/// the automatic 300s window and strands the connected session (#15585,
+/// #15610). Superseded generations still drain under the bounded default.
+fn candidate_daemon_start_command(state_dir: &str, candidate_homeboy: &str) -> String {
+    format!(
+        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} daemon ensure-running --addr 127.0.0.1:0",
+        homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
+        shell::quote_arg(candidate_homeboy),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn candidate_daemon_start_command_launches_a_resident_generation() {
+    assert_eq!(
+        candidate_daemon_start_command("$HOME/state/gen1", "/opt/homeboy"),
+        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/state/gen1\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --addr 127.0.0.1:0"
+    );
+}
+
 /// Start and validate a second daemon without touching the recorded admission
 /// daemon. Its state directory is generation-scoped while HOME and the normal
 /// runtime configuration remain shared, preserving runner credentials.
@@ -438,10 +461,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
     let state_dir = format!(
         "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
     );
-    let command = format!(
-        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(candidate_homeboy),
-    );
+    let command = candidate_daemon_start_command(&state_dir, candidate_homeboy);
     let output = client.execute_with_timeout(&command, REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !output.success {
         return Err(Error::validation_invalid_argument(
