@@ -1439,6 +1439,10 @@ jobs:
           # resolves from latest.
           commands: review lint
           expected-commands: review lint
+          # This job only proves which release a consumer resolves. Its token is
+          # read-only, and filing findings belongs to the release lint job, so
+          # auto-issue (on by default for push events) must stay off here.
+          auto-issue: 'false'
 
       - name: Verify Homeboy Action installed the published version
         env:
