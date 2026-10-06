@@ -13,6 +13,7 @@ use sha2::Digest;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::server::{self, SshClient};
+use homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error;
 
 use super::session::{RunnerSession, RunnerStatusReport, RunnerTunnelMode};
 use super::{broker_http, Runner, RunnerKind};
@@ -481,13 +482,16 @@ impl RunnerFileTransfer {
         const CHUNK_BYTES: usize = 64 * 1024;
         let upload_id = uuid::Uuid::new_v4().to_string();
         let mut input = fs::File::open(path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            provider_evidence_io_error(error, format!("open evidence snapshot {}", path.display()))
         })?;
         let mut offset = 0u64;
         let mut buffer = [0u8; CHUNK_BYTES];
         loop {
             let read = input.read(&mut buffer).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                provider_evidence_io_error(
+                    error,
+                    format!("read evidence snapshot {}", path.display()),
+                )
             })?;
             let final_chunk = read == 0 || offset + read as u64 == size;
             if read == 0 && offset != size {
@@ -678,16 +682,11 @@ fn private_evidence_snapshot(
         options.custom_flags(libc::O_NOFOLLOW);
     }
     let mut input = options.open(local_path).map_err(|error| {
-        Error::validation_invalid_argument(
-            "provider_evidence",
-            "declared evidence could not be safely opened",
-            Some(format!("{local_path}: {error}")),
-            None,
-        )
+        provider_evidence_io_error(error, format!("open provider evidence {local_path}"))
     })?;
-    let metadata = input
-        .metadata()
-        .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+    let metadata = input.metadata().map_err(|error| {
+        provider_evidence_io_error(error, format!("inspect provider evidence {local_path}"))
+    })?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err(Error::validation_invalid_argument(
             "provider_evidence",
@@ -697,18 +696,15 @@ fn private_evidence_snapshot(
         ));
     }
     let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create evidence snapshot".to_string()),
-        )
+        provider_evidence_io_error(error, "create evidence snapshot".to_string())
     })?;
     let mut digest = sha2::Sha256::new();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+        let read = input.read(&mut buffer).map_err(|error| {
+            provider_evidence_io_error(error, format!("read provider evidence {local_path}"))
+        })?;
         if read == 0 {
             break;
         }
@@ -722,10 +718,7 @@ fn private_evidence_snapshot(
             ));
         }
         snapshot.write_all(&buffer[..read]).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write evidence snapshot".to_string()),
-            )
+            provider_evidence_io_error(error, "write evidence snapshot".to_string())
         })?;
         sha2::Digest::update(&mut digest, &buffer[..read]);
     }
@@ -738,12 +731,10 @@ fn private_evidence_snapshot(
             None,
         ));
     }
-    snapshot.as_file().sync_all().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("sync evidence snapshot".to_string()),
-        )
-    })?;
+    snapshot
+        .as_file()
+        .sync_all()
+        .map_err(|error| provider_evidence_io_error(error, "sync evidence snapshot".to_string()))?;
     Ok(snapshot)
 }
 
@@ -1015,12 +1006,14 @@ fn file_transfer_operation_error(
     stderr: String,
     transport: &str,
 ) -> Error {
+    let stderr = homeboy_core::redaction::redact_string(stderr.trim());
+    let remote_path = homeboy_core::redaction::redact_string(remote_path);
+    let summary = format!(
+        "{stderr} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`)"
+    );
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
-        format!(
-            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
-            stderr.trim()
-        ),
+        bounded_redacted_text(&summary, 512),
         json!({
             "runner_id": runner_id,
             "operation": operation,
@@ -1039,21 +1032,41 @@ fn http_file_transfer_error(
     source: Error,
     transport: &str,
 ) -> Error {
+    let remote_path = homeboy_core::redaction::redact_string(remote_path);
+    let source_cause = ["cause", "reason", "error"]
+        .iter()
+        .find_map(|key| source.details.get(*key).and_then(Value::as_str))
+        .filter(|cause| !cause.is_empty() && !source.message.contains(cause))
+        .map(homeboy_core::redaction::redact_string);
+    let source_message = homeboy_core::redaction::redact_string(&source.message);
+    let diagnostic_cause = source_cause
+        .clone()
+        .unwrap_or_else(|| source_message.clone());
+    let source_details = homeboy_core::redaction::redact_json(&source.details);
+    let summary = format!(
+        "{diagnostic_cause} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {source_message})"
+    );
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
-        format!(
-            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
-            source.message
-        ),
+        bounded_redacted_text(&summary, 512),
         json!({
             "runner_id": runner_id,
             "operation": operation,
             "remote_path": remote_path,
             "transport": transport,
-            "source": source.details,
+            "diagnostic_cause": diagnostic_cause,
+            "source": source_details,
         }),
     )
     .with_retryable(true)
+    .with_source(source)
+}
+
+fn bounded_redacted_text(value: &str, limit: usize) -> String {
+    homeboy_core::redaction::redact_string(value)
+        .chars()
+        .take(limit)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1323,5 +1336,222 @@ mod tests {
             "private_file_chunk_upload"
         );
         assert_eq!(refusal.details["required_protocol_version"], 1);
+    }
+
+    #[test]
+    fn direct_transfer_keeps_complete_redacted_source_facts() {
+        let stderr = format!(
+            "Authorization: Bearer ssh-fixture-secret; {}",
+            "remote upload rejection detail ".repeat(80)
+        );
+        let remote_path = format!("/{}", "long-path-segment/".repeat(40));
+        assert!(stderr.len() > 512);
+        assert!(remote_path.len() > 512);
+        assert!(stderr.contains("ssh-fixture-secret"));
+
+        let error = file_transfer_operation_error(
+            "test-runner",
+            "private evidence upload",
+            &remote_path,
+            stderr,
+            "direct_ssh",
+        );
+        let redacted_stderr = homeboy_core::redaction::redact_string(
+            &error.details["stderr"]
+                .as_str()
+                .expect("complete stderr detail"),
+        );
+        let redacted_path = homeboy_core::redaction::redact_string(&remote_path);
+        assert!(error.message.chars().count() <= 512);
+        assert_eq!(error.details["stderr"], redacted_stderr);
+        assert_eq!(error.details["remote_path"], redacted_path);
+
+        let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
+            "attempt-direct-private-upload",
+            "test-runner",
+            homeboy_lab_contract::lab::transport_failure::LabTransportOperation::DispatchCookAttempt,
+            homeboy_lab_contract::lab::transport_failure::LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        );
+        assert_eq!(
+            persisted_candidate.details["source_error"]["details"]["stderr"],
+            redacted_stderr
+        );
+        assert_eq!(
+            persisted_candidate.details["source_error"]["details"]["remote_path"],
+            redacted_path
+        );
+        assert!(!serde_json::to_string(&persisted_candidate.details)
+            .expect("serialize full SSH evidence")
+            .contains("ssh-fixture-secret"));
+    }
+
+    #[test]
+    fn denied_private_upload_keeps_the_daemon_response_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let cause = format!(
+            "Authorization: Bearer http-fixture-secret; {}",
+            "remote policy detail ".repeat(80)
+        );
+        assert!(cause.contains("http-fixture-secret"));
+        let large_detail = "complete daemon rejection detail ".repeat(180);
+        let body = serde_json::to_string(&json!({
+            "success": false,
+            "error": {
+                "error": "runner.lab_transport_failure",
+                "message": format!("private upload parent rejected: {cause}"),
+                "details": {
+                    "operation": "private evidence upload",
+                    "cause": cause,
+                    "diagnostic_payload": large_detail,
+                }
+            }
+        }))
+        .expect("serialize large daemon rejection");
+        assert!(body.len() > 4 * 1024);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read request");
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write refusal");
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let long_remote_path = format!(
+            "/{}",
+            (0..8)
+                .map(|index| format!("segment-{index}-{}", "r".repeat(76)))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        assert!(long_remote_path.len() > 512);
+        let source = daemon_file_post_json(
+            &client,
+            &format!("http://{address}"),
+            "/files/upload-chunk",
+            json!({ "path": &long_remote_path }),
+            None,
+        )
+        .expect_err("daemon refuses group-writable evidence parent");
+        server.join().expect("server");
+
+        let error = http_file_transfer_error(
+            "test-runner",
+            "private evidence upload",
+            &long_remote_path,
+            source,
+            "daemon_http",
+        );
+
+        let redacted_cause = homeboy_core::redaction::redact_string(&cause);
+        assert!(error.message.contains("remote policy detail"));
+        assert_eq!(error.details["operation"], "private evidence upload");
+        assert_eq!(error.details["source"]["cause"], redacted_cause);
+        assert_eq!(error.details["source"]["diagnostic_payload"], large_detail);
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<Error>())
+            .expect("daemon response error remains in the source chain");
+        assert_eq!(
+            source.message,
+            format!("private upload parent rejected: {cause}")
+        );
+        assert_eq!(source.details["cause"], cause);
+        assert_eq!(source.details["diagnostic_payload"], large_detail);
+        let redacted_source_message = homeboy_core::redaction::redact_string(&error.message);
+        let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
+            "attempt-denied-private-upload",
+            "test-runner",
+            homeboy_lab_contract::lab::transport_failure::LabTransportOperation::DispatchCookAttempt,
+            homeboy_lab_contract::lab::transport_failure::LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        );
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("remote policy detail"))
+        );
+        let source_error = &persisted_candidate.details["source_error"];
+        assert_eq!(source_error["code"], "runner.lab_transport_failure");
+        assert_eq!(source_error["message"], redacted_source_message);
+        assert_eq!(source_error["details"]["source"]["cause"], redacted_cause);
+        assert_eq!(
+            source_error["details"]["source"]["diagnostic_payload"],
+            large_detail
+        );
+        let full_evidence = serde_json::to_string(&persisted_candidate.details)
+            .expect("serialize complete daemon failure");
+        assert!(full_evidence.contains("complete daemon rejection detail"));
+        assert!(!full_evidence.contains("http-fixture-secret"));
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["context"]
+                .as_str()
+                .is_some_and(
+                    |context| context.len() <= 4 * 1024 && context.contains(&long_remote_path)
+                )
+        );
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["causes"]
+                .as_array()
+                .is_some_and(|causes| causes.iter().any(|cause| {
+                    cause["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("remote policy detail"))
+                }))
+        );
+    }
+
+    #[test]
+    fn missing_provider_evidence_retains_the_original_filesystem_cause() {
+        let home = tempfile::tempdir().expect("temporary directory");
+        let missing = home.path().join("missing-evidence.json");
+
+        let error =
+            private_evidence_snapshot(missing.to_str().unwrap(), "0".repeat(64).as_str(), 0)
+                .expect_err("missing evidence is an actual filesystem error");
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(
+            error.details["context"],
+            format!("open provider evidence {}", missing.display())
+        );
+        assert!(error.message.contains("open provider evidence"));
+        assert!(error.message.contains("No such file") || error.message.contains("not found"));
+        let source = std::error::Error::source(&error).expect("original I/O source");
+        let source = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source remains an io::Error");
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            source.to_string().contains("No such file") || source.to_string().contains("not found")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_evidence_disk_full_keeps_canonical_storage_classification() {
+        let error = provider_evidence_io_error(
+            std::io::Error::from_raw_os_error(28),
+            "write evidence snapshot".to_string(),
+        );
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert_eq!(error.retryable, Some(false));
+        assert_eq!(error.details["context"], "write evidence snapshot");
+        assert!(error.message.contains("write evidence snapshot"));
+        assert!(error.message.contains("No space left") || error.message.contains("storage full"));
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("original disk-full I/O source");
+        assert_eq!(source.raw_os_error(), Some(28));
     }
 }

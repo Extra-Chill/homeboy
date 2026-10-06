@@ -3429,44 +3429,16 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     }
                 }
                 ControlPlaneAction::Reconcile => {
-                    let operation_intent = serde_json::to_value(request)
-                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-                    match crate::agent_task_lifecycle::claim_operation_with_intent_in_store(
-                        &self.lookup.store,
-                        &resolved,
-                        &operation_key,
-                        ACTION_LEASE,
-                        &operation_intent,
-                    ) {
-                        Ok(crate::agent_task_lifecycle::ClaimOutcome::Acquired) => {}
-                        Ok(crate::agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)) => {
-                            return Err(ControlPlaneError::unavailable(
-                                "reconciliation completed without its control-plane acknowledgement; recover the effect before redispatch",
-                            ));
-                        }
-                        Ok(crate::agent_task_lifecycle::ClaimOutcome::LeaseHeld) => {
-                            return Err(ControlPlaneError::unavailable(
-                                "reconciliation action is already leased; recover the effect before redispatch",
-                            ));
-                        }
-                        Err(error) => return Err(map_lifecycle_error(error)),
-                    }
+                    // The transactional control-plane effect above already owns
+                    // admission, leasing and replay. A second claim inside the
+                    // lifecycle projection can be discarded by its terminal guard
+                    // when a stale observation still embeds a running record.
                     match crate::agent_task_service::reconcile_run_in_store(
                         &self.lookup.store,
                         &resolved,
                         false,
                     ) {
                         Ok(report) => {
-                            let claim_result = serde_json::to_value(&report).map_err(|error| {
-                                ControlPlaneError::invalid_argument(error.to_string())
-                            })?;
-                            crate::agent_task_lifecycle::complete_cook_operation_in_store(
-                                &self.lookup.store,
-                                &resolved,
-                                &operation_key,
-                                claim_result,
-                            )
-                            .map_err(map_lifecycle_error)?;
                             let current = self
                                 .lookup
                                 .store
@@ -10540,6 +10512,73 @@ mod tests {
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
+                first
+            );
+        });
+    }
+
+    #[test]
+    fn reconcile_stale_observation_uses_one_durable_effect_owner_and_replays() {
+        with_isolated_home(|home| {
+            let store = AgentTaskLifecycleStore::from_data_root(home.path().join("stale-action"));
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("stale-observation", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("seed lifecycle record");
+            store
+                .mutate_record(AGENT_TASK_RUN, |record| {
+                    record.submitted_at = "2000-01-01T00:00:00Z".to_string();
+                    record.updated_at = None;
+                    true
+                })
+                .expect("stale lifecycle owner");
+            let observation = store
+                .open_observation_initialized()
+                .expect("observation store");
+            observation
+                .finish_run(
+                    AGENT_TASK_RUN,
+                    homeboy_core::observation::RunStatus::Stale,
+                    None,
+                )
+                .expect("seed stale scalar projection");
+            drop(observation);
+
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run id");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:stale-observation-reconcile".to_string()),
+                action: ControlPlaneAction::Reconcile,
+                idempotency_key: "stale-observation-reconcile".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let first = service
+                .execute_action(&run, &request)
+                .expect("complete canonical effect");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(
+                store
+                    .read_record(AGENT_TASK_RUN)
+                    .expect("reconciled lifecycle")
+                    .state,
+                AgentTaskRunState::Cancelled
+            );
+            assert!(store
+                .read_record(AGENT_TASK_RUN)
+                .expect("record")
+                .metadata
+                .get("cook_operation_claims")
+                .is_none());
+            assert_eq!(
+                service
+                    .execute_action(&run, &request)
+                    .expect("idempotent replay"),
                 first
             );
         });

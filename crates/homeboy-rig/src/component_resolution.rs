@@ -181,7 +181,6 @@ mod tests {
             r#ref: None,
             default_ref: None,
             extensions: None,
-            dependency_cache: None,
         }
     }
 

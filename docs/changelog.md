@@ -4,6 +4,74 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.407.1] - 2026-10-06
+
+### Fixed
+- read attempt lineage through one function
+- restore a green main after contract retirements and the fallback reconciliation pass
+- admit configured model choices
+- reuse the bound gate-fix remediation instead of dispatching a twin
+
+## [0.407.0] - 2026-10-06
+
+### Added
+- extend the provider timeout while the agent is still making progress
+
+### Changed
+- chaos suite replaying lifecycle incidents; fix in-place restart admission
+
+### Fixed
+- judge converging runners against the installed controller
+
+## [0.406.4] - 2026-10-06
+
+### Changed
+- Allow operator-attested recovery of exact dead-lease jobs
+
+## [0.406.3] - 2026-10-06
+
+### Fixed
+- reconcile previews, loop status, and source probes no longer write lifecycle state
+
+## [0.406.2] - 2026-10-06
+
+### Changed
+- call the command-step PATH directly; delete the rig toolchain provider
+
+### Fixed
+- preserve configured runtime in bash shells
+- authorize exact run-owned runtime evidence
+- invoke scoped generation stop with valid CLI args
+- render default runner job lists
+- resume pre-admission batches through native cook
+- make default status compact and actionable
+
+## [0.406.1] - 2026-10-06
+
+### Fixed
+- recover terminal custody from durable runner run resources
+
+## [0.406.0] - 2026-10-06
+
+### Added
+- reject component path/path_setting that restate the automatic override
+
+### Changed
+- delete rig spec features with zero consumers
+
+### Fixed
+- bound retry caller contention
+- own control-plane transactions
+- bound control-plane writer admission
+
+## [0.405.0] - 2026-10-06
+
+### Changed
+- retire legacy no-change review verdict alias
+
+### Fixed
+- use one durable owner for reconciliation
+
 ## [0.404.1] - 2026-10-05
 
 ### Changed

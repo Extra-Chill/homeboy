@@ -36,7 +36,6 @@ fn observation_spec(id: &str) -> RigSpec {
         trace_workloads: HashMap::new(),
         fuzz_workloads: Default::default(),
         trace_workload_defaults: HashMap::new(),
-        trace_phase_templates: HashMap::new(),
         trace_variants: HashMap::new(),
         trace_profiles: HashMap::new(),
         trace_experiments: HashMap::new(),
@@ -44,7 +43,6 @@ fn observation_spec(id: &str) -> RigSpec {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
-        toolchain: None,
     }
 }
 
@@ -312,7 +310,6 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
-                dependency_cache: None,
             },
         );
         rig.pipeline.insert(

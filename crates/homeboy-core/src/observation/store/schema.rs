@@ -848,7 +848,7 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
         path.display()
     )))?;
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(super::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
         .map_err(sqlite_error("configure observation store busy timeout"))?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)
@@ -923,13 +923,12 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
 /// avoids migrations, pragma maintenance, and artifact reconciliation: a
 /// scheduler may only claim or terminalize its own durable work.
 pub(crate) fn open_bounded_writer_connection(path: &Path) -> Result<Connection> {
-    const WRITE_TIMEOUT: Duration = Duration::from_millis(750);
     let connection = Connection::open(path).map_err(sqlite_error(format!(
         "open bounded observation scheduler store {}",
         path.display()
     )))?;
     connection
-        .busy_timeout(WRITE_TIMEOUT)
+        .busy_timeout(super::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
         .map_err(sqlite_error(
             "configure bounded observation scheduler store",
         ))?;

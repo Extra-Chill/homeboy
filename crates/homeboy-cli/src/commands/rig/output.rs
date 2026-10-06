@@ -236,7 +236,6 @@ mod tests {
                 trace_workloads: Default::default(),
                 fuzz_workloads: Default::default(),
                 trace_workload_defaults: Default::default(),
-                trace_phase_templates: Default::default(),
                 trace_variants: Default::default(),
                 trace_profiles: Default::default(),
                 trace_experiments: Default::default(),
@@ -244,7 +243,6 @@ mod tests {
                 bench_profiles: Default::default(),
                 fuzz_profiles: Default::default(),
                 app_launcher: None,
-                toolchain: None,
             },
             resources: RigResourcesSpec {
                 exclusive: vec!["studio-runtime".to_string()],

@@ -260,6 +260,12 @@ impl ControllerFallbackProjectionStore {
             + 'static,
         Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
     {
+        // No ledger means no deferred receipts. Return before the batch
+        // reservation creates the ledger lock and cursor, so the detached
+        // startup pass leaves an untouched data root untouched.
+        if !self.path.exists() {
+            return Ok(Vec::new());
+        }
         let receipts = self.reserve_reconciliation_batch(limit)?;
         let snapshot = Arc::new(snapshot);
         let mut projections = Vec::new();
@@ -748,6 +754,32 @@ mod tests {
                 },
             )
             .is_err());
+    }
+
+    #[test]
+    fn startup_reconciliation_without_a_ledger_writes_nothing() {
+        // Every mutating command schedules this pass; with no deferred
+        // receipts it must not create the ledger lock or cursor.
+        let root = tempdir().expect("data root");
+        let store = ControllerFallbackProjectionStore::open_in_roots(root.path())
+            .expect("open projection store");
+
+        let projected = store
+            .reconcile_after_controller_restart_with(
+                8,
+                |_, _| panic!("no receipts means no runner query"),
+                |_, _| panic!("no receipts means no finalization"),
+            )
+            .expect("reconcile empty ledger");
+
+        assert!(projected.is_empty());
+        assert_eq!(
+            std::fs::read_dir(root.path())
+                .expect("read data root")
+                .count(),
+            0,
+            "an empty data root stays empty"
+        );
     }
 
     #[test]

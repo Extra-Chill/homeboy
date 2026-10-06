@@ -28,7 +28,7 @@ fn daemon_crash_quiesces_command_without_attestation_or_redispatch() {
             serde_json::from_slice::<Value>(&output.stdout).expect("CLI JSON")["data"].clone()
         };
         let spec = json!({
-            "schema":"homeboy/controller-spec/v1", "controller_id":"command-crash-proof",
+            "schema":"homeboy/controller-spec/v1", "loop_id": "command-crash-proof",
             "phase":"prove", "config_version":"v1",
             "workflows":[{"workflow_id":"command", "tasks":["Run guarded command crash fixture"],
                 "runtime_execution":{"kind":"command", "command":"/bin/sh",
