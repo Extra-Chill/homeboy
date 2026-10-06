@@ -4358,11 +4358,8 @@ pub(crate) fn dispatch_cook_follow_up(
     }
     let recipe = recipe_store.load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
-        recipe_attempt.plan.tasks.len() == 1
-            && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
-                ["source_run_id"]
-                .as_str()
-                == Some(source_run_id)
+        super::cook_lineage::plan_lineage(&recipe_attempt.plan)
+            .is_some_and(|lineage| lineage.source_run_id == source_run_id)
     });
     let replay = related_attempts
         .clone()
@@ -4385,12 +4382,14 @@ pub(crate) fn dispatch_cook_follow_up(
     // reporting a Cook that had in fact gone green as a durable failure.
     if replay.is_none() {
         if let Some(existing_run_id) = existing_candidate_remediation(
-            related_attempts.clone().map(|recipe_attempt| {
-                (
-                    recipe_attempt.attempt,
-                    recipe_attempt.run_id.as_str(),
-                    &recipe_attempt.plan.tasks[0].inputs["cook_loop"],
-                )
+            related_attempts.clone().filter_map(|recipe_attempt| {
+                super::cook_lineage::plan_lineage(&recipe_attempt.plan).map(|lineage| {
+                    (
+                        recipe_attempt.attempt,
+                        recipe_attempt.run_id.as_str(),
+                        lineage,
+                    )
+                })
             }),
             attempt,
             promotion.patch_artifact.sha256.as_deref(),
@@ -4739,7 +4738,7 @@ pub(crate) fn dispatch_cook_follow_up(
 /// crash between recipe append and plan submission) is not something a caller
 /// could drive.
 fn existing_candidate_remediation<'a>(
-    related: impl IntoIterator<Item = (u32, &'a str, &'a Value)>,
+    related: impl IntoIterator<Item = (u32, &'a str, super::cook_lineage::CookAttemptLineage)>,
     source_attempt: u32,
     source_patch_sha256: Option<&str>,
     failed_terminal: impl Fn(&str) -> Option<bool>,
@@ -4747,11 +4746,11 @@ fn existing_candidate_remediation<'a>(
     let source_patch_sha256 = source_patch_sha256?;
     related
         .into_iter()
-        .filter(|(attempt, _, cook_loop)| {
+        .filter(|(attempt, _, lineage)| {
             *attempt > source_attempt
-                && cook_loop["review_form_required"] != true
-                && cook_loop["artifact_provenance"]["source_patch_artifact_sha256"].as_str()
-                    == Some(source_patch_sha256)
+                && lineage.kind
+                    == (super::cook_lineage::CookLineageKind::Remediation { review_form: false })
+                && lineage.source_patch_sha256.as_deref() == Some(source_patch_sha256)
         })
         .max_by_key(|(attempt, _, _)| *attempt)
         .filter(|(_, run_id, _)| failed_terminal(run_id) == Some(false))
@@ -11562,13 +11561,18 @@ mod io_error_attribution_tests {
 #[cfg(test)]
 mod candidate_remediation_idempotence_tests {
     use super::existing_candidate_remediation;
-    use serde_json::{json, Value};
+    use crate::agent_task_service::cook_lineage::{CookAttemptLineage, CookLineageKind};
 
-    fn gate_fix(sha: &str) -> Value {
-        json!({
-            "review_form_required": false,
-            "artifact_provenance": { "source_patch_artifact_sha256": sha },
-        })
+    fn lineage(review_form: bool, sha: &str) -> CookAttemptLineage {
+        CookAttemptLineage {
+            source_run_id: "run-1".to_string(),
+            kind: CookLineageKind::Remediation { review_form },
+            source_patch_sha256: Some(sha.to_string()),
+        }
+    }
+
+    fn gate_fix(sha: &str) -> CookAttemptLineage {
+        lineage(false, sha)
     }
 
     /// The observed double-booking: attempt 2 is the live gate fix for the
@@ -11576,10 +11580,12 @@ mod candidate_remediation_idempotence_tests {
     #[test]
     fn a_live_gate_fix_for_the_same_candidate_is_reused() {
         let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
-                Some(false)
-            });
+        let found = existing_candidate_remediation(
+            [(2, "run-2", loop_inputs.clone())],
+            1,
+            Some("abc"),
+            |_| Some(false),
+        );
         assert_eq!(found.as_deref(), Some("run-2"));
     }
 
@@ -11587,7 +11593,10 @@ mod candidate_remediation_idempotence_tests {
     fn the_newest_matching_remediation_wins() {
         let loop_inputs = gate_fix("abc");
         let found = existing_candidate_remediation(
-            [(2, "run-2", &loop_inputs), (3, "run-3", &loop_inputs)],
+            [
+                (2, "run-2", loop_inputs.clone()),
+                (3, "run-3", loop_inputs.clone()),
+            ],
             1,
             Some("abc"),
             |_| Some(false),
@@ -11598,28 +11607,36 @@ mod candidate_remediation_idempotence_tests {
     #[test]
     fn a_failed_remediation_keeps_its_redispatch_semantics() {
         let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
-                Some(true)
-            });
+        let found = existing_candidate_remediation(
+            [(2, "run-2", loop_inputs.clone())],
+            1,
+            Some("abc"),
+            |_| Some(true),
+        );
         assert_eq!(found, None);
     }
 
     #[test]
     fn an_unrecorded_remediation_is_not_reused() {
         let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| None);
+        let found = existing_candidate_remediation(
+            [(2, "run-2", loop_inputs.clone())],
+            1,
+            Some("abc"),
+            |_| None,
+        );
         assert_eq!(found, None);
     }
 
     #[test]
     fn a_different_candidate_patch_is_a_different_remediation() {
         let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("def"), |_| {
-                Some(false)
-            });
+        let found = existing_candidate_remediation(
+            [(2, "run-2", loop_inputs.clone())],
+            1,
+            Some("def"),
+            |_| Some(false),
+        );
         assert_eq!(found, None);
     }
 
@@ -11627,30 +11644,33 @@ mod candidate_remediation_idempotence_tests {
     fn a_candidate_without_a_digest_is_never_deduplicated() {
         let loop_inputs = gate_fix("abc");
         let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, None, |_| Some(false));
+            existing_candidate_remediation([(2, "run-2", loop_inputs.clone())], 1, None, |_| {
+                Some(false)
+            });
         assert_eq!(found, None);
     }
 
     #[test]
     fn review_form_follow_ups_are_left_to_their_own_replay_rule() {
-        let loop_inputs = json!({
-            "review_form_required": true,
-            "artifact_provenance": { "source_patch_artifact_sha256": "abc" },
-        });
-        let found =
-            existing_candidate_remediation([(2, "run-2", &loop_inputs)], 1, Some("abc"), |_| {
-                Some(false)
-            });
+        let loop_inputs = lineage(true, "abc");
+        let found = existing_candidate_remediation(
+            [(2, "run-2", loop_inputs.clone())],
+            1,
+            Some("abc"),
+            |_| Some(false),
+        );
         assert_eq!(found, None);
     }
 
     #[test]
     fn attempts_not_newer_than_the_source_are_ignored() {
         let loop_inputs = gate_fix("abc");
-        let found =
-            existing_candidate_remediation([(1, "run-1", &loop_inputs)], 1, Some("abc"), |_| {
-                Some(false)
-            });
+        let found = existing_candidate_remediation(
+            [(1, "run-1", loop_inputs.clone())],
+            1,
+            Some("abc"),
+            |_| Some(false),
+        );
         assert_eq!(found, None);
     }
 }
