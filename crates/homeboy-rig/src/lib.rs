@@ -39,7 +39,6 @@ mod source;
 pub mod spec;
 mod stack;
 mod state;
-mod toolchain;
 pub mod trace_experiment;
 mod workloads;
 

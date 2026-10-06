@@ -12,6 +12,8 @@ mod cook_preview_lifecycle;
 mod cook_prompt_stdin;
 #[path = "cli_binary/cook_retry_projection_recursion.rs"]
 mod cook_retry_projection_recursion;
+#[path = "cli_binary/daemon_chaos.rs"]
+mod daemon_chaos;
 #[path = "cli_binary/daemon_serve_lifecycle.rs"]
 mod daemon_serve_lifecycle;
 #[path = "cli_binary/extension_action_payload.rs"]
@@ -38,5 +40,7 @@ mod review_dirty_preflight;
 mod review_option_order;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;
+#[path = "cli_binary/runner_job_list.rs"]
+mod runner_job_list;
 #[path = "cli_binary/runner_refresh_progress.rs"]
 mod runner_refresh_progress;

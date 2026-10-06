@@ -95,6 +95,26 @@ fn rooted_exact_status(
     .record)
 }
 
+/// The record a reconcile decision is taken from.
+///
+/// Apply refreshes through [`rooted_exact_status`], which persists the runner,
+/// candidate, and admission projections it observes. A preview must not write
+/// (#13697: reads never mutate; reconciliation is the explicit action), so it
+/// reads the durable record as stored. Apply still re-reads authoritatively
+/// immediately before acting, so a preview can only over-report candidates,
+/// never cancel one.
+fn decision_status(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    dry_run: bool,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    if dry_run {
+        agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)
+    } else {
+        rooted_exact_status(lifecycle_store, run_id)
+    }
+}
+
 /// Read back the durable record and its active discovery projection after an
 /// apply. A successful reconcile must mean the selected record is no longer a
 /// blocking projection, not merely that its cancellation write returned.
@@ -189,7 +209,9 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         // the daemon before treating a dead controller owner as authority: the
         // daemon may still be active or may have already published the terminal
         // aggregate and artifacts while the controller caller was gone.
-        if run.runner_id.is_some() && run.runner_job_id.is_some() {
+        // Preview leaves the runner-backed projection unrefreshed: refreshing
+        // persists what it observes, and a preview must not write.
+        if !dry_run && run.runner_id.is_some() && run.runner_job_id.is_some() {
             match rooted_status(&lifecycle_store, &run.run_id) {
                 Ok(refreshed) if refreshed.state.is_terminal() => continue,
                 Ok(refreshed) if !refreshed.is_stale_running() => continue,
@@ -336,7 +358,7 @@ pub(crate) fn reconcile_run_in_store(
     let mut reconciled = 0;
     let mut failed = 0;
     for resolved_run_id in &resolved_run_ids {
-        let authoritative = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
+        let authoritative = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
         let source = authoritative
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
@@ -350,7 +372,7 @@ pub(crate) fn reconcile_run_in_store(
                 let liveness = run.liveness.expect("checked reconcilable liveness");
                 // Re-read immediately before apply. A newly-live runner or a changed
                 // owner is authoritative and turns this scoped request into a no-op.
-                let refreshed = rooted_exact_status(&lifecycle_store, resolved_run_id)?;
+                let refreshed = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
                 let locally_reconcilable_after_runner_idle =
                     refreshed.is_locally_reconcilable_after_runner_idle();
                 let still_reconcilable =

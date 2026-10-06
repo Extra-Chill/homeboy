@@ -84,6 +84,9 @@ pub struct PlacementUpdateArgs {
 pub struct StatusArgs {
     /// Durable run or Cook ID whose status to inspect.
     pub run_id: String,
+    /// Include the complete lifecycle and eligibility report.
+    #[arg(long)]
+    pub full: bool,
     /// Inspect this exact lifecycle record instead of resolving a Cook ID to its current attempt.
     #[arg(long)]
     pub exact: bool,
@@ -454,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn status_rejects_removed_projection_flags() {
-        for flag in ["--full", "--bounded", "--no-runner-probe", "--since-cursor"] {
+    fn status_rejects_unsupported_projection_flags() {
+        for flag in ["--bounded", "--no-runner-probe", "--since-cursor"] {
             let mut argv = vec!["homeboy", "agent-task", "status", "run-a", flag];
             if flag == "--since-cursor" {
                 argv.push("1");

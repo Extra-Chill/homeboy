@@ -123,6 +123,182 @@ fn accepted_detached_handoff(run_id: &str) -> AgentTaskRunRecord {
     .expect("accept handoff")
 }
 
+fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observation::RunRecord {
+    let mut remote = record.clone();
+    remote.state = AgentTaskRunState::Failed;
+    remote.lab_handoff = None;
+    remote
+        .ensure_metadata_object()
+        .insert("runner_id".to_string(), json!(record.runner_id().unwrap()));
+    remote.ensure_metadata_object().insert(
+        "runner_job_id".to_string(),
+        json!(record.runner_job_id().unwrap()),
+    );
+    let context =
+        homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+            Some(&record.run_id),
+            record.runner_id().unwrap(),
+            record.runner_job_id().unwrap(),
+            "homeboy",
+            "retained-reservation",
+        )
+        .unwrap()
+        .evidence_record()
+        .unwrap();
+    remote
+        .ensure_metadata_object()
+        .insert("runner_execution_context".to_string(), context);
+    let aggregate = AgentTaskAggregate {
+        schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+        plan_id: record.plan_id.clone(),
+        status: AgentTaskAggregateStatus::Failed,
+        totals: AgentTaskAggregateTotals {
+            failed: 1,
+            ..Default::default()
+        },
+        outcomes: vec![AgentTaskOutcome {
+            task_id: "task-a".to_string(),
+            status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
+            summary: Some("Retained real provider failure".to_string()),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "logs".to_string(),
+                uri: "homeboy://agent-task/run/retained-proof/logs".to_string(),
+                label: None,
+            }],
+            ..Default::default()
+        }],
+        events: Vec::new(),
+        artifact_lineage: Vec::new(),
+        child_runs: Vec::new(),
+        artifact_bindings: Vec::new(),
+        queue: AgentTaskQueueStatus {
+            completed: 1,
+            ..Default::default()
+        },
+    };
+    homeboy_core::observation::RunRecord {
+        id: record.run_id.clone(),
+        kind: "agent-task".to_string(),
+        status: "fail".to_string(),
+        finished_at: Some("2026-10-05T17:47:14Z".to_string()),
+        metadata_json: json!({"agent_task_run": remote, "agent_task_aggregate": aggregate}),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn durable_terminal_run_restores_failed_outcome_without_transport_job_or_plan_rebinding() {
+    with_isolated_home(|_| {
+        let mut record = accepted_detached_handoff("retained-proof");
+        let store = test_lifecycle_store();
+        let plan_before =
+            serde_json::to_value(store.read_controller_plan(&record.run_id).unwrap()).unwrap();
+        let source = retained_terminal_run(&record);
+        assert!(
+            super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                &store,
+                &mut record,
+                &source
+            )
+            .unwrap()
+        );
+        let reloaded = store.read_record(&record.run_id).unwrap();
+        assert_eq!(reloaded.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            reloaded.runner_job_id(),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+        let aggregate = store.read_aggregate(&record.run_id).unwrap();
+        assert_eq!(
+            aggregate.outcomes[0].summary.as_deref(),
+            Some("Retained real provider failure")
+        );
+        assert!(!aggregate.outcomes[0].evidence_refs.is_empty());
+        assert_eq!(
+            serde_json::to_value(store.read_controller_plan(&record.run_id).unwrap()).unwrap(),
+            plan_before
+        );
+        assert!(
+            !super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                &store,
+                &mut record,
+                &source
+            )
+            .unwrap()
+        );
+    });
+}
+
+#[test]
+fn durable_terminal_run_rejects_unbound_or_tampered_evidence_without_mutating_store() {
+    with_isolated_home(|_| {
+        let record = accepted_detached_handoff("retained-mismatch");
+        let store = test_lifecycle_store();
+        for field in ["run", "job", "digest", "aggregate"] {
+            let mut source = retained_terminal_run(&record);
+            match field {
+                "run" => source.metadata_json["agent_task_run"]["run_id"] = json!("unrelated-run"),
+                "job" => {
+                    source.metadata_json["agent_task_run"]["metadata"]["runner_job_id"] =
+                        json!("unrelated-job")
+                }
+                "digest" => {
+                    source.metadata_json["agent_task_run"]["metadata"]["runner_execution_context"]
+                        ["content_sha256"] = json!("sha256:tampered")
+                }
+                "aggregate" => {
+                    source.metadata_json["agent_task_aggregate"]["plan_id"] =
+                        json!("unrelated-plan")
+                }
+                _ => unreachable!(),
+            }
+            let mut candidate = record.clone();
+            assert!(
+                super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                    &store,
+                    &mut candidate,
+                    &source
+                )
+                .is_err(),
+                "{field}"
+            );
+            assert_eq!(
+                store.read_record(&record.run_id).unwrap().state,
+                AgentTaskRunState::Running
+            );
+        }
+    });
+}
+
+#[test]
+fn durable_terminal_run_preserves_parent_mission_and_explicit_handoff_identity() {
+    with_isolated_home(|_| {
+        let mut record = accepted_detached_handoff("retained-child-attempt");
+        let store = test_lifecycle_store();
+        let mut source = retained_terminal_run(&record);
+        let evidence = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon_with_dispatch_metadata(
+            Some("parent-mission"), Some(&record.run_id), Some("explicit-handoff"),
+            record.runner_id().unwrap(), record.runner_job_id().unwrap(), "homeboy", "retained-reservation",
+        ).unwrap().evidence_record().unwrap();
+        source.metadata_json["agent_task_run"]["metadata"]["runner_execution_context"] = evidence;
+        assert!(
+            super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                &store,
+                &mut record,
+                &source
+            )
+            .unwrap()
+        );
+        let persisted = store.read_record(&record.run_id).unwrap();
+        assert_eq!(persisted.state, AgentTaskRunState::Failed);
+        assert_eq!(
+            persisted.metadata["terminal_transport_recovery"]["execution_context"]["context"]
+                ["accepted_handoff_id"],
+            "explicit-handoff"
+        );
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). Acceptance is a durable transfer of one run to one runner daemon:
 /// the pending handoff, the typed acceptance, the reload that models caller
