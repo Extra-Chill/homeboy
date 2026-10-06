@@ -418,13 +418,32 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
         still_failed.state,
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed
     );
-    let completed = store
-        .read_record(&replay_run_id)
-        .expect("replayed Cook parent");
+    let replay_deadline = Instant::now() + Duration::from_secs(20);
+    let completed = loop {
+        let record = store
+            .read_record(&replay_run_id)
+            .expect("replayed Cook parent");
+        if record.state.is_terminal() {
+            break record;
+        }
+        assert!(
+            Instant::now() < replay_deadline,
+            "replayed Cook did not become terminal: {record:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
     assert_eq!(
         completed.state,
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded,
-        "replay must finish the new durable Cook"
+        "replay must finish the new durable Cook; record={completed:?}; log={}",
+        std::fs::read_to_string(
+            context
+                .data_dir()
+                .join("agent-task-detached")
+                .join(&replay_run_id)
+                .join("cook.log")
+        )
+        .unwrap_or_else(|error| format!("<unavailable: {error}>"))
     );
     assert_ne!(
         completed.metadata["detached_cook_handoff"]["launcher_id"], original_launcher,
