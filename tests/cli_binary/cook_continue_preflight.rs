@@ -706,41 +706,58 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         .unwrap(),
     )
     .expect("write fixture runtime manifest");
+    let host_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| context.root().to_path_buf());
+    let gate_path = std::env::var("PATH").expect("test process PATH");
+    let gate_cargo_home = std::env::var_os("CARGO_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".cargo"));
+    let gate_rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".rustup"));
+    let gate_cargo_target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| context.root().join("gate-target"));
+    let gate_environment = [
+        ("PATH", gate_path),
+        ("CARGO_HOME", gate_cargo_home.display().to_string()),
+        ("RUSTUP_HOME", gate_rustup_home.display().to_string()),
+        ("CARGO_TARGET_DIR", gate_cargo_target.display().to_string()),
+    ]
+    .into_iter()
+    .flat_map(|(name, value)| ["--gate-env".to_string(), format!("{name}={value}")])
+    .collect::<Vec<_>>();
     let mut target_command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     target_command
         .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
         .args([
-        "--wait",
-        "--placement",
-        "local",
-        "agent-task",
-        "cook",
-        "--run-id",
-        target_cook,
-        "--repo",
-        component_id,
-        "--backend",
-        "recoverable-fixture",
-        "--model",
-        "fixture-model",
-        "--prompt",
-        "write the deterministic fixture patch",
-        "--cwd",
-        worktree.to_str().unwrap(),
-        "--to-worktree",
-        worktree.to_str().unwrap(),
-        "--verify",
-        "cargo test --locked -q",
-        "--gate-environment-mode",
-        "replace",
-        "--gate-env",
-        "PATH=/home/chubes/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin",
-        "--gate-env",
-        "HOME=/home/chubes/.nr/h15503",
-        "--gate-env",
-        "CARGO_HOME=/home/chubes/.cargo",
-        "--gate-env",
-        "CARGO_TARGET_DIR=/home/chubes/.nr/h15503/candidate-target",
+            "--wait",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--run-id",
+            target_cook,
+            "--repo",
+            component_id,
+            "--backend",
+            "recoverable-fixture",
+            "--model",
+            "fixture-model",
+            "--prompt",
+            "write the deterministic fixture patch",
+            "--cwd",
+            worktree.to_str().unwrap(),
+            "--to-worktree",
+            worktree.to_str().unwrap(),
+            "--verify",
+            "cargo test --locked -q",
+            "--gate-environment-mode",
+            "replace",
+        ]);
+    target_command.args(gate_environment);
+    target_command.args([
         "--timeout-ms",
         "120000",
         "--max-attempts",
