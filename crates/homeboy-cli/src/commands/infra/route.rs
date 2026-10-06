@@ -2386,24 +2386,47 @@ fn supervise_replay_worker(
     mut child: std::process::Child,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let exit = child.wait().ok();
         let diagnostic = local_detach::detached_child_diagnostic(&worker_log);
-        if let Some(reason) = deterministic_replay_worker_failure(diagnostic) {
+        if let Some(failure) = deterministic_replay_worker_failure(diagnostic.clone()) {
             if agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
-                &cook_id, fence, &token, &reason,
+                &cook_id, fence, &token, &failure,
             )
             .unwrap_or(false)
             {
                 return;
             }
         }
-        let _ = agent_task_lifecycle::release_unmaterialized_cook_replay_claim_after_worker_exit(
-            &cook_id, fence, &token,
-        );
+        if agent_task_lifecycle::release_unmaterialized_cook_replay_claim_after_worker_exit(
+            &cook_id,
+            fence,
+            &token,
+            diagnostic.ok().as_ref(),
+        )
+        .unwrap_or(false)
+        {
+            if let Ok(record) = agent_task_lifecycle::exact_record(&cook_id) {
+                if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&worker_log) {
+                    let observation = serde_json::json!({
+                        "schema": "homeboy/cook-replay-observation/v1",
+                        "cook_id": cook_id,
+                        "worker_exit_code": exit.as_ref().and_then(std::process::ExitStatus::code),
+                        "worker_exit_success": exit.as_ref().map(std::process::ExitStatus::success),
+                        "state": record.metadata["unmaterialized_cook_admission"]["state"],
+                        "reason": record.metadata["unmaterialized_cook_admission"]["reason"],
+                        "next_attempt_at": record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"],
+                    });
+                    let _ = std::io::Write::write_all(
+                        &mut log,
+                        format!("\n{observation}\n").as_bytes(),
+                    );
+                }
+            }
+        }
     })
 }
 
-/// Classify a replay worker's exit diagnostic (#15009): `Some(message)` only
+/// Classify a replay worker's exit diagnostic (#15009): `Some(diagnostic)` only
 /// for a typed failure that is *not* itself marked retryable, so the caller
 /// terminalizes the admission with the worker's real message instead of
 /// requeuing it. A missing/unparsable diagnostic (worker crash, oom-kill, a
@@ -2413,12 +2436,13 @@ fn supervise_replay_worker(
 /// is not a known deterministic failure.
 fn deterministic_replay_worker_failure(
     diagnostic: Result<serde_json::Value, &'static str>,
-) -> Option<String> {
+) -> Option<serde_json::Value> {
     let diagnostic = diagnostic.ok()?;
     if diagnostic["retryable"].as_bool() == Some(true) {
         return None;
     }
-    diagnostic["message"].as_str().map(str::to_string)
+    diagnostic["message"].as_str()?;
+    Some(diagnostic)
 }
 
 fn validate_replay_intent(
