@@ -1260,7 +1260,7 @@ mod tests {
             error.details["schema"],
             "homeboy/agent-task-model-override-confirmation-required/v1"
         );
-        assert_eq!(error.details["configured_models"], json!([]));
+        assert_eq!(error.details["configured_models"], serde_json::json!([]));
     }
 
     #[test]
