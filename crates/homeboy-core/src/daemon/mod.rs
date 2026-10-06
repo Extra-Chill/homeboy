@@ -57,6 +57,9 @@ mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod stop;
+/// Idle window, in seconds, for automatically launched daemons; `0` selects a
+/// resident launch. See `lifetime::launch_idle_timeout`.
+pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
 pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
