@@ -1692,47 +1692,34 @@ fn discovery_active_reads_runner_backed_record_without_reconciliation() {
     });
 }
 
-/// #W3-4: `is_reconcilable` is now public and emitted as `liveness_reconcilable`,
-/// and the CLI's hand-rolled four-way bucketing was replaced by it. This pins
-/// the predicate against the bucketing it replaced for **all four** variants:
-/// the CLI grouped `Some(Active) | None` into `active` and everything else into
-/// a named non-active bucket, so "not in the active bucket" must be exactly
-/// "reconcilable". Any divergence here is a behaviour change.
 #[test]
-fn is_reconcilable_matches_the_replaced_cli_bucketing_for_every_variant() {
-    for (liveness, expected) in [
-        (AgentTaskLiveness::Active, false),
-        (AgentTaskLiveness::Stale, true),
-        (AgentTaskLiveness::Suspect, true),
-        (AgentTaskLiveness::Unreconciled, true),
+fn liveness_uses_fixed_wire_labels_and_reconcilability() {
+    for (liveness, label, expected) in [
+        (AgentTaskLiveness::Active, "active", false),
+        (AgentTaskLiveness::Stale, "stale", true),
+        (AgentTaskLiveness::Suspect, "suspect", true),
+        (AgentTaskLiveness::Unreconciled, "unreconciled", true),
     ] {
         assert_eq!(
             liveness.is_reconcilable(),
             expected,
             "{liveness:?} reconcilability"
         );
-        // The CLI's `active` bucket was `Some(Active) | None`; a classified run
-        // lands in the `active` bucket exactly when it is not reconcilable.
-        assert_eq!(
-            liveness.as_str() == "active",
-            !liveness.is_reconcilable(),
-            "{liveness:?} bucket membership"
-        );
-        // The wire label the CLI keys buckets by is the same string the enum
-        // serializes to, so bucketing by `as_str()` cannot drift from `liveness`.
+        assert_eq!(liveness.as_str(), label);
         assert_eq!(
             serde_json::to_value(liveness).expect("serialize liveness"),
-            serde_json::Value::String(liveness.as_str().to_string())
+            serde_json::json!(label)
         );
     }
-
-    // An unclassified run (the `all`/`latest` filters do not classify) defaults
-    // to Active, which is what the replaced `None` arm did.
-    assert!(!Option::<AgentTaskLiveness>::None
-        .unwrap_or(AgentTaskLiveness::Active)
-        .is_reconcilable());
-
-    assert_eq!(AgentTaskLiveness::ALL.len(), 4);
+    assert_eq!(
+        AgentTaskLiveness::ALL,
+        [
+            AgentTaskLiveness::Active,
+            AgentTaskLiveness::Stale,
+            AgentTaskLiveness::Suspect,
+            AgentTaskLiveness::Unreconciled
+        ]
+    );
 }
 
 #[test]

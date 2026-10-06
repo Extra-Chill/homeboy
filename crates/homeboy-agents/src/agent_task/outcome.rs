@@ -292,21 +292,6 @@ mod default_construction_tests {
     use super::*;
 
     #[test]
-    fn default_matches_the_fully_spelled_out_empty_outcome() {
-        let via_default = AgentTaskOutcome {
-            task_id: "cook".to_string(),
-            status: AgentTaskOutcomeStatus::Succeeded,
-            ..Default::default()
-        };
-        let verbose = AgentTaskOutcome {
-            task_id: "cook".to_string(),
-            status: AgentTaskOutcomeStatus::Succeeded,
-            ..Default::default()
-        };
-        assert_eq!(via_default, verbose);
-    }
-
-    #[test]
     fn default_status_is_failed_never_succeeded() {
         assert_eq!(
             AgentTaskOutcome::default().status,

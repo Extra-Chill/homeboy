@@ -232,36 +232,26 @@ pub struct AgentTaskFollowUp {
 }
 
 #[cfg(test)]
-mod default_construction_tests {
+mod default_wire_tests {
     use super::*;
 
     #[test]
-    fn default_matches_the_fully_spelled_out_empty_artifact() {
-        let via_default = AgentTaskArtifact {
+    fn artifact_defaults_and_omitted_fields_use_the_current_wire_shape() {
+        let constructed = AgentTaskArtifact {
             id: "artifact-1".to_string(),
             kind: "report".to_string(),
             ..Default::default()
         };
-        let verbose = AgentTaskArtifact {
-            schema: artifact_schema(),
-            id: "artifact-1".to_string(),
-            kind: "report".to_string(),
-            name: None,
-            label: None,
-            role: None,
-            semantic_key: None,
-            path: None,
-            url: None,
-            mime: None,
-            size_bytes: None,
-            sha256: None,
-            metadata: Value::Null,
-        };
-        assert_eq!(via_default, verbose);
-    }
-
-    #[test]
-    fn default_carries_the_current_artifact_schema() {
-        assert_eq!(AgentTaskArtifact::default().schema, artifact_schema());
+        let decoded: AgentTaskArtifact = serde_json::from_value(serde_json::json!({
+            "id": "artifact-1", "kind": "report"
+        }))
+        .expect("artifact with omitted schema and optional fields");
+        let expected = serde_json::json!({
+            "schema": "homeboy/agent-task-artifact/v1",
+            "id": "artifact-1",
+            "kind": "report"
+        });
+        assert_eq!(serde_json::to_value(constructed).unwrap(), expected);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
     }
 }

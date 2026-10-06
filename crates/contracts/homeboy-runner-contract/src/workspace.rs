@@ -159,17 +159,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_sync_mode_matches_its_serialized_form() {
-        for mode in [
-            RunnerWorkspaceSyncMode::Snapshot,
-            RunnerWorkspaceSyncMode::SnapshotGit,
-            RunnerWorkspaceSyncMode::Git,
+    fn workspace_sync_modes_use_fixed_wire_labels() {
+        for (mode, label) in [
+            (RunnerWorkspaceSyncMode::Snapshot, "snapshot"),
+            (RunnerWorkspaceSyncMode::SnapshotGit, "snapshot-git"),
+            (RunnerWorkspaceSyncMode::Git, "git"),
         ] {
             assert_eq!(
                 serde_json::to_value(mode).expect("serialize"),
-                serde_json::json!(mode.as_str()),
+                serde_json::json!(label),
                 "{mode:?}"
             );
+            assert_eq!(mode.as_str(), label);
         }
     }
 }

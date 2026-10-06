@@ -46,9 +46,8 @@ impl JobStatus {
         }
     }
 
-    /// This status as its own canonical wire string — the value `serde`
-    /// already produces, pinned to it by
-    /// `job_status_matches_its_serialized_form`.
+    /// This status as its own canonical wire string. Tests independently pin
+    /// serde and this helper to fixed wire labels.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -382,33 +381,22 @@ impl DaemonLeaseJobDiagnostics {
 mod job_status_label_tests {
     use super::JobStatus;
 
-    /// `as_str` must stay the value `serde` produces. It replaced
-    /// `daemon_status_label`, which restated the same strings by hand with
-    /// nothing tying them to `#[serde(rename_all)]`. This is that tie.
     #[test]
-    fn job_status_matches_its_serialized_form() {
-        for status in [
-            JobStatus::Queued,
-            JobStatus::Running,
-            JobStatus::Succeeded,
-            JobStatus::Failed,
-            JobStatus::Cancelled,
+    fn job_status_uses_fixed_wire_and_run_listing_labels() {
+        for (status, wire_label, run_label) in [
+            (JobStatus::Queued, "queued", "queued"),
+            (JobStatus::Running, "running", "running"),
+            (JobStatus::Succeeded, "succeeded", "pass"),
+            (JobStatus::Failed, "failed", "fail"),
+            (JobStatus::Cancelled, "cancelled", "cancelled"),
         ] {
             assert_eq!(
                 serde_json::to_value(status).expect("serialize"),
-                serde_json::json!(status.as_str()),
+                serde_json::json!(wire_label),
                 "{status:?}"
             );
+            assert_eq!(status.as_str(), wire_label);
+            assert_eq!(status.run_status_label(), run_label);
         }
-    }
-
-    /// `run_status_label` is a different vocabulary, not a different format,
-    /// and `homeboy runs list --status pass` depends on it staying that way.
-    /// Merging it into `as_str` is a string-comparison break with no compile
-    /// error, so it fails here instead.
-    #[test]
-    fn the_run_listing_vocabulary_keeps_pass_and_fail() {
-        assert_eq!(JobStatus::Succeeded.run_status_label(), "pass");
-        assert_eq!(JobStatus::Failed.run_status_label(), "fail");
     }
 }
