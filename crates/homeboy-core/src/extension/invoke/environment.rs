@@ -384,7 +384,7 @@ pub(crate) fn build_exec_env(
         env.extend(helper_pairs);
     }
 
-    if let Some(path) = homeboy_core::rig_toolchain_provider::command_step_path() {
+    if let Some(path) = homeboy_engine_primitives::command_path::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().to_string()));
     }
 

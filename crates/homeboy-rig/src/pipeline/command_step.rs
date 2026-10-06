@@ -6,7 +6,6 @@ use std::process::Command;
 
 use super::super::expand::{expand_vars_with_settings, settings_env};
 use super::super::spec::{PipelineStep, RigSpec};
-use super::super::toolchain;
 use homeboy_core::error::{Error, Result};
 
 pub(crate) fn run_command_step(
@@ -26,7 +25,7 @@ pub(crate) fn run_command_step(
     }
 
     if !env.contains_key("PATH") {
-        if let Some(path) = toolchain::command_step_path() {
+        if let Some(path) = homeboy_engine_primitives::command_path::command_step_path() {
             command.env("PATH", path);
         }
     }

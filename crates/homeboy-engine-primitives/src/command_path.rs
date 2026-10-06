@@ -1,8 +1,13 @@
-//! Toolchain environment helpers for rig command steps.
+//! The `PATH` Homeboy hands to commands it runs.
 //!
 //! Rig `command` steps, lifecycle phases, and extension executions see a
 //! `PATH` with Homeboy's built-in bin directories prepended to the inherited
 //! one, so commonly installed tools resolve without per-rig shims.
+//!
+//! This is a pure function of the host, so every caller reaches it directly.
+//! It used to sit behind a rig-registered provider in core, which left the
+//! extension runner without it in any process that never registered the rig
+//! layer.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -29,7 +34,7 @@ const APPEND_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 ///
 /// Existing built-in directories are prepended before the inherited PATH;
 /// missing ones are skipped so the result stays portable across hosts.
-pub(crate) fn command_step_path() -> Option<OsString> {
+pub fn command_step_path() -> Option<OsString> {
     let home = homeboy_paths::home_root().ok();
     let existing_path = std::env::var_os("PATH");
     build_command_step_path(home.as_deref(), APPEND_DIRS, existing_path.as_deref())

@@ -2537,7 +2537,7 @@ impl RunnerStaleDaemonWarning {
             recovery_action(
                 runner_id,
                 current_homeboy_build_identity.as_deref(),
-                &homeboy_product_identity::build_identity(),
+                &crate::controller_identity::compatibility_controller_identity(),
             )
         } else {
             Vec::new()
@@ -2651,7 +2651,7 @@ impl RunnerStaleDaemonWarning {
         probe_error: Option<String>,
         message: String,
     ) -> Self {
-        let controller = homeboy_product_identity::build_identity();
+        let controller = crate::controller_identity::compatibility_controller_identity();
         let mut warning = Self {
             severity: RUNNER_DAEMON_SEVERITY_UNKNOWN,
             verification,
@@ -2846,7 +2846,7 @@ impl RunnerStaleDaemonWarning {
             self.set_recovery(recovery_action(
                 runner_id,
                 self.current_homeboy_build_identity.as_deref(),
-                &homeboy_product_identity::build_identity(),
+                &crate::controller_identity::compatibility_controller_identity(),
             ));
         }
         self
@@ -2894,7 +2894,7 @@ impl RunnerStaleDaemonWarning {
                 self.set_recovery(recovery_action(
                     runner_id,
                     self.current_homeboy_build_identity.as_deref(),
-                    &homeboy_product_identity::build_identity(),
+                    &crate::controller_identity::compatibility_controller_identity(),
                 ));
             }
         }

@@ -69,9 +69,12 @@ pub struct DispatchCoreArgs {
     pub queue_only: bool,
 
     /// Provider wall-clock timeout in milliseconds for each provider execution
-    /// (default 1200000 = 20 min). Cook reports the resolved value in its
-    /// preamble; a plan's `options.timeout_ms` carries the same budget into
-    /// `agent-task run-plan`.
+    /// (default 1200000 = 20 min). This is the base deadline: a provider still
+    /// producing output when it arrives is extended in 10-minute steps up to
+    /// 3x the base (60 min by default; set a task's `limits.max_timeout_ms` to
+    /// change or disable that), while one that has gone quiet stops there. Cook
+    /// reports the resolved value in its preamble; a plan's
+    /// `options.timeout_ms` carries the same budget into `agent-task run-plan`.
     #[arg(long = "timeout-ms", value_name = "MS")]
     pub timeout_ms: Option<u64>,
 

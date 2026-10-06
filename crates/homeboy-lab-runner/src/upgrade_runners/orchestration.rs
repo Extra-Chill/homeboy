@@ -609,21 +609,26 @@ pub(crate) fn upgrade_configured_runners(
         runners.len()
     );
     // The installed controller identity, not this (possibly pre-upgrade)
-    // process's own build, is what configured runners converge to.
+    // process's own build, is what configured runners converge to — and what
+    // their compatibility is judged against, or a runner that converged to the
+    // installed controller reads as skewed from the old one (#15552).
     let upgrade = || {
-        Ok(
-            upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-                &runners,
-                force,
-                method_override,
-                source_path,
-                extension_updates,
-                runner::exec,
-                runner::status,
-                materialize_runner_source_path,
-                expected_controller_identity,
-            ),
-        )
+        Ok(crate::controller_identity::with_converging_controller(
+            expected_controller_identity,
+            || {
+                upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+                    &runners,
+                    force,
+                    method_override,
+                    source_path,
+                    extension_updates,
+                    runner::exec,
+                    runner::status,
+                    materialize_runner_source_path,
+                    expected_controller_identity,
+                )
+            },
+        ))
     };
     match promotion_lease {
         Some(lease) => lease.with_local_targets(

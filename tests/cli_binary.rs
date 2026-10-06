@@ -4,12 +4,16 @@ mod agent_task_provider_flag_diagnostic;
 mod agent_tool_dispatch;
 #[path = "cli_binary/cook_continue_preflight.rs"]
 mod cook_continue_preflight;
+#[path = "cli_binary/cook_model_routes.rs"]
+mod cook_model_routes;
 #[path = "cli_binary/cook_preview_lifecycle.rs"]
 mod cook_preview_lifecycle;
 #[path = "cli_binary/cook_prompt_stdin.rs"]
 mod cook_prompt_stdin;
 #[path = "cli_binary/cook_retry_projection_recursion.rs"]
 mod cook_retry_projection_recursion;
+#[path = "cli_binary/daemon_chaos.rs"]
+mod daemon_chaos;
 #[path = "cli_binary/daemon_serve_lifecycle.rs"]
 mod daemon_serve_lifecycle;
 #[path = "cli_binary/extension_action_payload.rs"]
@@ -36,5 +40,7 @@ mod review_dirty_preflight;
 mod review_option_order;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;
+#[path = "cli_binary/runner_job_list.rs"]
+mod runner_job_list;
 #[path = "cli_binary/runner_refresh_progress.rs"]
 mod runner_refresh_progress;

@@ -44,7 +44,7 @@ fn stopped_loop_resumes_and_recovers_failed_consumer_exactly_once() {
         let ready = root.join("ready");
         let producer = format!("printf x >> '{}'; printf '%s' '{{\"artifacts\":{{\"capture\":{{\"id\":\"frozen-source\"}}}}}}' > \"$HOMEBOY_LOOP_ACTION_OUTPUT\"", producer_effect.display());
         let consumer = format!("test -f '{}' || exit 7; printf x >> '{}'; printf '%s' '{{\"artifacts\":{{\"evaluation\":{{\"ok\":true}}}}}}' > \"$HOMEBOY_LOOP_ACTION_OUTPUT\"", ready.display(), consumer_effect.display());
-        let spec = json!({"schema":"homeboy/controller-spec/v1","controller_id":"stopped-resume-proof","phase":"evaluate","config_version":"v1",
+        let spec = json!({"schema":"homeboy/controller-spec/v1","loop_id": "stopped-resume-proof","phase":"evaluate","config_version":"v1",
             "artifacts":[{"artifact_id":"capture","kind":"fixture-capture","required":true},{"artifact_id":"evaluation","kind":"fixture-evaluation","required":true}],
             "workflows":[
                 {"workflow_id":"capture","tasks":["Retain capture"],"runtime_execution":{"kind":"command","command":"/bin/sh","args":["-c",producer],"cwd":root,"timeout_seconds":10},"artifacts":["capture"],"emits":["capture"],"inputs":{}},

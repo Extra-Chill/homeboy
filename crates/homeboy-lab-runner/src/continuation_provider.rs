@@ -201,6 +201,36 @@ impl RunnerContinuationProvider for RunnerContinuation {
         }
     }
 
+    fn runner_run_record(
+        &self,
+        runner_id: &str,
+        run_id: &str,
+    ) -> Result<Option<homeboy_core::observation::RunRecord>> {
+        let path = format!("/runs/{run_id}");
+        let data = match super::execution::daemon_api_get(runner_id, &path) {
+            Ok(data) => data,
+            Err(error) if error.details["http_status"] == 404 => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let body = super::execution::canonical_daemon_body(&data, "runner run resource")?;
+        let mut run = body["run"].clone();
+        // The public run resource names this field `metadata`; the internal
+        // observation record stores it as `metadata_json`.
+        let fields = run
+            .as_object_mut()
+            .ok_or_else(|| Error::internal_unexpected("runner run resource is not an object"))?;
+        let metadata = fields
+            .remove("metadata")
+            .ok_or_else(|| Error::internal_unexpected("runner run resource has no metadata"))?;
+        fields.insert("metadata_json".to_string(), metadata);
+        serde_json::from_value(run).map(Some).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse runner run resource".to_string()),
+            )
+        })
+    }
+
     fn runner_job_id_for_durable_run(
         &self,
         runner_id: &str,

@@ -1438,8 +1438,8 @@ mod command_env {
 
     use crate::pipeline::run_pipeline;
     use crate::spec::{PipelineStep, RigSpec};
-    use crate::toolchain;
     use homeboy_core::test_support::home_env_guard;
+    use homeboy_engine_primitives::command_path as toolchain;
 
     fn rig_with_command(cmd: String, env: HashMap<String, String>) -> RigSpec {
         let mut pipeline = HashMap::new();

@@ -1757,13 +1757,15 @@ fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entrie
         };
 
         let baseline = key();
-        let baseline_path = crate::toolchain::command_step_path().expect("toolchain path");
+        let baseline_path =
+            homeboy_engine_primitives::command_path::command_step_path().expect("toolchain path");
 
         // An unrelated version-managed toolchain appears on the host. It is
         // discovered into the command-step PATH but resolves nothing this step
         // uses.
         std::fs::create_dir_all(home.join(".nvm/versions/node/v24.13.1/bin")).expect("node bin");
-        let noisy_path = crate::toolchain::command_step_path().expect("toolchain path");
+        let noisy_path =
+            homeboy_engine_primitives::command_path::command_step_path().expect("toolchain path");
 
         assert_ne!(
             baseline_path, noisy_path,

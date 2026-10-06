@@ -110,6 +110,354 @@ fn runner_child_environment_keeps_daemon_state_with_redirected_home() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn bare_homeboy_argv_uses_configured_runner_executable_in_real_subprocess() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let tools = tempfile::tempdir().expect("tools");
+    let configured = tools.path().join("homeboy-managed");
+    let decoy = tools.path().join("homeboy");
+    for (path, output) in [(&configured, "configured"), (&decoy, "decoy")] {
+        std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{output}'\n"))
+            .expect("write executable fixture");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+    }
+
+    let mut runner = local_runner(workspace.path().display().to_string());
+    runner.settings.homeboy_path = Some(configured.display().to_string());
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        runner_id: "local".to_string(),
+        runner: Some(runner),
+        cwd: Some(workspace.path().display().to_string()),
+        project_id: None,
+        command: vec!["homeboy".to_string(), "status".to_string()],
+        env: HashMap::from([("PATH".to_string(), tools.path().display().to_string())]),
+        secret_env_names: Vec::new(),
+        secret_env_plan: None,
+        capture_patch: false,
+        raw_exec: false,
+        source_snapshot: None,
+        require_paths: Vec::new(),
+        validate_require_paths_on_host: false,
+    })
+    .expect("prepare runner child");
+
+    let output = execute_runner_process(&plan).expect("spawn configured executable");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "configured");
+    assert_eq!(plan.command[0], configured.display().to_string());
+
+    assert_eq!(
+        super::super::resolve_configured_homeboy_argv(
+            vec!["/caller/homeboy".to_string(), "status".to_string()],
+            &plan.env,
+        )[0],
+        "/caller/homeboy",
+        "explicit caller executable paths remain authoritative"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_owner_repo() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn git(args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_string()
+    }
+
+    fn init_repo(path: &PathBuf) {
+        std::fs::create_dir_all(path).expect("create repository");
+        git(&["-C", path.to_str().unwrap(), "init", "-q"]);
+        git(&[
+            "-C",
+            path.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Runner Test",
+        ]);
+        git(&[
+            "-C",
+            path.to_str().unwrap(),
+            "config",
+            "user.email",
+            "runner@example.test",
+        ]);
+        std::fs::write(path.join("README.md"), "runner worktree authority\n")
+            .expect("write repository file");
+        git(&["-C", path.to_str().unwrap(), "add", "README.md"]);
+        git(&["-C", path.to_str().unwrap(), "commit", "-qm", "initial"]);
+    }
+
+    fn run(runner: Runner, cwd: &PathBuf, command: Vec<String>, path: &PathBuf) -> ProcessOutput {
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "local".to_string(),
+            runner: Some(runner),
+            cwd: Some(cwd.display().to_string()),
+            project_id: None,
+            command,
+            env: HashMap::from([
+                (
+                    "PATH".to_string(),
+                    format!(
+                        "{}:{}",
+                        path.display(),
+                        std::env::var("PATH").expect("test PATH")
+                    ),
+                ),
+                (
+                    "HOME".to_string(),
+                    path.parent().expect("fixture home").display().to_string(),
+                ),
+            ]),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("prepare runner process");
+        execute_runner_process(&plan).expect("execute runner process")
+    }
+
+    let root = tempfile::tempdir().expect("fixture root");
+    let owner_repo = root.path().join("owner");
+    let decoy_repo = root.path().join("decoy");
+    let tools = root.path().join("tools");
+    std::fs::create_dir_all(&tools).expect("tools directory");
+    init_repo(&owner_repo);
+    init_repo(&decoy_repo);
+
+    let configured = tools.join("homeboy-managed");
+    let decoy = tools.join("homeboy");
+    for (binary, repo) in [(&configured, &owner_repo), (&decoy, &decoy_repo)] {
+        let script = format!(
+            "#!/bin/sh\nexec git -C '{}' worktree add -b \"$2\" \"$1\" HEAD\n",
+            repo.display()
+        );
+        std::fs::write(binary, script).expect("write executable fixture");
+        std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755))
+            .expect("make executable fixture");
+    }
+    let script_file = root.path().join("create-worktree.sh");
+    std::fs::write(
+        root.path().join(".bash_profile"),
+        format!("export PATH='{}:/usr/bin:/bin'\n", tools.display()),
+    )
+    .expect("write login shell PATH override");
+
+    let baseline_worktree = root.path().join("login-baseline-wt");
+    let baseline = Command::new("/bin/bash")
+        .args([
+            "-lc",
+            "exec homeboy \"$1\" \"$2\"",
+            "homeboy",
+            baseline_worktree.to_str().unwrap(),
+            "login-baseline-proof",
+        ])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+        .output()
+        .expect("run unpinned baseline login shell");
+    assert_eq!(
+        baseline.status.code(),
+        Some(0),
+        "baseline shell should run the PATH decoy: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline_common = git(&[
+        "-C",
+        baseline_worktree.to_str().unwrap(),
+        "rev-parse",
+        "--git-common-dir",
+    ]);
+    assert_eq!(
+        std::fs::canonicalize(baseline_worktree.join(baseline_common)).expect("baseline store"),
+        decoy_repo.join(".git"),
+        "without the runner runtime environment, login PATH selects the decoy"
+    );
+
+    std::fs::write(
+        &script_file,
+        "#!/bin/bash\nexec \"$HOMEBOY_COMMAND\" \"$1\" \"$2\"\n",
+    )
+    .expect("write script-file fixture");
+
+    let mut runner = local_runner(owner_repo.display().to_string());
+    runner.settings.homeboy_path = Some(configured.display().to_string());
+    let cwd = owner_repo.clone();
+    let forms = [
+        (
+            "direct",
+            vec![
+                "homeboy".to_string(),
+                root.path().join("direct-wt").display().to_string(),
+                "direct-proof".to_string(),
+            ],
+        ),
+        (
+            "script",
+            vec![
+                "bash".to_string(),
+                script_file.display().to_string(),
+                root.path().join("script-wt").display().to_string(),
+                "script-proof".to_string(),
+            ],
+        ),
+        (
+            "login-shell",
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "exec \"$HOMEBOY_COMMAND\" \"$1\" \"$2\"".to_string(),
+                "homeboy".to_string(),
+                root.path().join("login-wt").display().to_string(),
+                "login-proof".to_string(),
+            ],
+        ),
+    ];
+
+    for (form, command) in forms {
+        let output = run(runner.clone(), &cwd, command, &tools);
+        assert_eq!(output.exit_code, 0, "{form} failed: {}", output.stderr);
+    }
+
+    let explicit_worktree = root.path().join("explicit-wt");
+    let explicit = run(
+        runner.clone(),
+        &cwd,
+        vec![
+            decoy.display().to_string(),
+            explicit_worktree.display().to_string(),
+            "explicit-proof".to_string(),
+        ],
+        &tools,
+    );
+    assert_eq!(
+        explicit.exit_code, 0,
+        "explicit executable remains selected"
+    );
+
+    for name in ["direct-wt", "script-wt", "login-wt"] {
+        let worktree = root.path().join(name);
+        assert!(worktree.is_dir(), "{name} should be created");
+        let common = git(&[
+            "-C",
+            worktree.to_str().unwrap(),
+            "rev-parse",
+            "--git-common-dir",
+        ]);
+        let common = std::fs::canonicalize(worktree.join(common)).expect("canonical git store");
+        assert_eq!(common, owner_repo.join(".git"));
+    }
+    let decoy_common = git(&[
+        "-C",
+        explicit_worktree.to_str().unwrap(),
+        "rev-parse",
+        "--git-common-dir",
+    ]);
+    assert_eq!(
+        std::fs::canonicalize(explicit_worktree.join(decoy_common)).expect("decoy store"),
+        decoy_repo.join(".git"),
+        "explicit executable path continues to select the caller's binary"
+    );
+
+    let authority_bin = root.path().join("authority-bin");
+    std::fs::create_dir_all(&authority_bin).expect("authority bin");
+    let default_name_runtime = authority_bin.join("homeboy");
+    std::fs::write(
+        &default_name_runtime,
+        format!(
+            "#!/bin/sh\nexec git -C '{}' worktree add -b \"$2\" \"$1\" HEAD\n",
+            owner_repo.display()
+        ),
+    )
+    .expect("write default-name configured runtime");
+    std::fs::set_permissions(
+        &default_name_runtime,
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("make default-name runtime executable");
+    runner.settings.homeboy_path = Some(default_name_runtime.display().to_string());
+    std::fs::write(&script_file, "#!/bin/bash\nexec homeboy \"$1\" \"$2\"\n")
+        .expect("write bare-command script fixture");
+    for (form, command, name, branch) in [
+        (
+            "script bare command",
+            vec![
+                "bash".to_string(),
+                script_file.display().to_string(),
+                root.path().join("script-bare-wt").display().to_string(),
+                "script-bare-proof".to_string(),
+            ],
+            "script-bare-wt",
+            "script-bare-proof",
+        ),
+        (
+            "login-shell bare command",
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "exec homeboy \"$1\" \"$2\"".to_string(),
+                "homeboy".to_string(),
+                root.path().join("login-bare-wt").display().to_string(),
+                "login-bare-proof".to_string(),
+            ],
+            "login-bare-wt",
+            "login-bare-proof",
+        ),
+    ] {
+        let output = run(runner.clone(), &cwd, command, &tools);
+        assert_eq!(output.exit_code, 0, "{form}: {}", output.stderr);
+        let worktree = root.path().join(name);
+        assert!(worktree.is_dir(), "{form} creates worktree");
+        assert!(git(&["-C", worktree.to_str().unwrap(), "branch", "--show-current"]) == branch);
+        let common = git(&[
+            "-C",
+            worktree.to_str().unwrap(),
+            "rev-parse",
+            "--git-common-dir",
+        ]);
+        assert_eq!(
+            std::fs::canonicalize(worktree.join(common)).expect("configured Git store"),
+            owner_repo.join(".git"),
+            "{form} retains configured repository authority"
+        );
+    }
+    assert_eq!(
+        git(&[
+            "-C",
+            decoy_repo.to_str().unwrap(),
+            "worktree",
+            "list",
+            "--porcelain"
+        ])
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .count(),
+        3,
+        "decoy repository contains the baseline failure and explicitly selected worktree only"
+    );
+}
+
 #[test]
 fn explicit_job_data_directory_remains_authoritative() {
     let job_env = HashMap::from([
