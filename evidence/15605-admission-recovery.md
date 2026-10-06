@@ -31,8 +31,12 @@ disconnected Lab evidence cannot silently authorize controller execution.
   re-observation, plus the read-only placement regression, passed.
 - Lab run `hb-15605-broader-gates-20261006`: all 52 generation-store tests passed,
   including process-isolated custody, concurrency and retained-evidence restart
-  proof. The dirty source snapshot lacked immutable build identity, so two
-  unrelated refresh identity tests require a clean provenance-bound rerun.
+  proof. Initial snapshot runs exposed build-provenance scoping in nested fixture
+  builds; those runs were superseded by the clean provenance-bound gate below.
+- Lab run `hb-15605-provenance-scoped-gates-20261006`: all 187 selected tests
+  passed (52 generation-store, 129 refresh, one terminal-recovery, one placement
+  matrix and four preview projection tests), plus formatting. The nine ignored
+  helper processes are driven by their enclosing process-isolated tests.
 - Live candidate `target/debug/homeboy runner reconcile <runner>` delivered the
   already-recorded cancellation to its exact retained endpoint. A direct remote
   job read confirmed `cancelled`; that generation changed from one active job to
@@ -57,6 +61,9 @@ cargo fmt --all -- --check
 For a sealed source snapshot without Git metadata, pass its actual committed
 source identity through the supported `HOMEBOY_PRODUCT_GIT_COMMIT` and
 `HOMEBOY_PRODUCT_GIT_DIRTY` build inputs. Do not stamp a dirty snapshot as clean.
+Scope these inputs to compilation, then run Cargo's reported test executables
+without those environment overrides: nested fixture builds must derive their own
+Git identity, not inherit the parent candidate's commit.
 
 ## Execution provenance
 
