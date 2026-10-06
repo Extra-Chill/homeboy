@@ -1062,7 +1062,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn runner_temp_owner_exports_a_socket_safe_alias_for_long_run_identity() {
+    fn runner_temp_owner_exports_a_socket_safe_path_for_long_run_identity() {
         use std::os::unix::net::UnixListener;
 
         let _guard = homeboy_core::test_support::home_env_guard();
@@ -1081,16 +1081,20 @@ mod tests {
             .into_iter()
             .collect::<HashMap<_, _>>();
         let exported = PathBuf::from(env.get("TMPDIR").expect("exported TMPDIR"));
+        let exported_is_owner = exported == owner.path();
         let socket_dir = exported.join("tsx-1000");
         fs::create_dir(&socket_dir).expect("socket parent");
         let socket = socket_dir.join("123456.pipe");
 
         let listener = UnixListener::bind(&socket).expect("bind socket below exported TMPDIR");
-        assert_ne!(exported, owner.path());
         assert!(socket.as_os_str().len() < 108);
         drop(listener);
         drop(owner);
-        assert!(!exported.exists());
+        assert_eq!(
+            exported.exists(),
+            exported_is_owner,
+            "a separate short alias is removed, while a directly exported owner remains for managed cleanup"
+        );
 
         std::env::remove_var(homeboy_core::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV);
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");

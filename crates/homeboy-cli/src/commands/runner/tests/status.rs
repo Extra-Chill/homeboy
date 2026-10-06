@@ -11,8 +11,8 @@ use homeboy::core::daemon::{
     DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
 };
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerSession, RunnerStatusReport,
-    RunnerTunnelMode,
+    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerDaemonLeaseVerdict, RunnerSession,
+    RunnerStatusReport, RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 use homeboy_runner_contract::RunnerKind;
@@ -77,6 +77,16 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
         daemon_fresh: true,
+        daemon_lease_verdict: RunnerDaemonLeaseVerdict {
+            generation_id: Some("lease-current".to_string()),
+            generation_identity_source: Some("daemon_freshness_report"),
+            observed_at: Some("2026-10-06T00:00:00Z".to_string()),
+            observation_age_ms: Some(0),
+            freshness_observed: true,
+            lease_published: true,
+            fresh: true,
+            next_action: None,
+        },
         daemon_compatible: true,
         accepting_jobs: false,
         active_job_count: Some(0),
@@ -99,6 +109,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
 fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownership() {
     let mut admission = admission_fixture();
     admission.daemon_fresh = false;
+    admission.daemon_lease_verdict.fresh = false;
     admission.blocking_generation = Some("lease-retained".to_string());
     admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
     admission.next_action =
@@ -297,6 +308,7 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
 
     let mut stale = admission_fixture();
     stale.daemon_fresh = false;
+    stale.daemon_lease_verdict.fresh = false;
     stale.next_action = Some(reconcile.to_string());
     let mut stale_report = connected_report();
     stale_report.daemon_freshness = Some(DaemonFreshnessReport {
@@ -357,6 +369,7 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
     });
     let mut admission = admission_fixture();
     admission.daemon_fresh = false;
+    admission.daemon_lease_verdict.fresh = false;
 
     let outcome = reconciliation_outcome("homeboy-lab", Vec::new(), &report, &admission);
 
@@ -520,7 +533,7 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     );
     assert_eq!(
         serialized["data"]["reconciliation"]["remaining_blocker"],
-        "admission_unavailable"
+        "daemon_freshness_unavailable"
     );
     assert!(serialized["data"]["operator_commands"]
         .as_array()
@@ -529,15 +542,15 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
             .all(|command| command["command"] != "homeboy runner reconcile homeboy-lab")));
     assert_eq!(
         serialized["data"]["reconciliation"]["next_action"],
-        "homeboy runner status homeboy-lab --full"
+        "homeboy runner status 'homeboy lab' --full"
     );
     assert_eq!(
         serialized["data"]["reconciliation"]["retry_predicate"],
-        "an authoritative active-job view is available"
+        "daemon_fresh=true after the selected daemon repair completes"
     );
     assert_eq!(
         serialized["diagnostics"]["code"],
-        "runner.reconcile.admission_unavailable"
+        "runner.reconcile.daemon_freshness_unavailable"
     );
     assert_eq!(
         serialized["diagnostics"]["details"]["remaining_blocker"],
@@ -545,7 +558,7 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     );
     assert_eq!(
         serialized["next_actions"][0]["command"],
-        "homeboy runner status homeboy-lab --full"
+        "homeboy runner status 'homeboy lab' --full"
     );
 }
 
@@ -1079,8 +1092,8 @@ fn reverse_runner_and_workspace_sync_guidance_remain_available_without_terminal_
         fresh: true,
         stale_reason_code: None,
         restartable: false,
-        lease_id: None,
-        pid: None,
+        lease_id: Some("lease-workspace".to_string()),
+        pid: Some(42),
         recovery_evidence: None,
         ownership_evidence: None,
         adoption_command: None,

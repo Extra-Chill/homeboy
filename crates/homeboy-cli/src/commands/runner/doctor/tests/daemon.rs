@@ -500,6 +500,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         runner_id: "lab".to_string(),
         connected: false,
         daemon_fresh: false,
+        daemon_lease_verdict: Default::default(),
         daemon_compatible: false,
         accepting_jobs: false,
         active_job_count: Some(0),
@@ -721,7 +722,28 @@ mod repair_readiness {
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
     };
 
+    fn fresh_lease() -> homeboy::core::daemon::DaemonFreshnessReport {
+        homeboy::core::daemon::DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: false,
+            lease_id: Some("lease-doctor".to_string()),
+            pid: Some(4242),
+            recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        }
+    }
+
     fn status(stale_daemon: Option<RunnerStaleDaemonWarning>) -> RunnerStatusReport {
+        let daemon_freshness = stale_daemon.is_none().then(fresh_lease);
         RunnerStatusReport {
             runner_id: "homeboy-lab".to_string(),
             connected: true,
@@ -729,7 +751,7 @@ mod repair_readiness {
             session: None,
             stale_daemon,
             configured_job_binary_build_identity: None,
-            daemon_freshness: None,
+            daemon_freshness,
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),

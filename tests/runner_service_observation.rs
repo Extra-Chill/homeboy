@@ -730,6 +730,14 @@ esac
             .as_str()
             .expect("service lease");
         let _final_status = cli(&["runner", "status", runner_id]);
+        let verdict = &_final_status["admission_summary"]["daemon_lease_verdict"];
+        assert_eq!(verdict["generation_id"], lease, "{_final_status:#}");
+        assert_eq!(verdict["lease_published"], true, "{_final_status:#}");
+        assert_eq!(verdict["fresh"], true, "{_final_status:#}");
+        assert!(
+            verdict["observation_age_ms"].as_u64().is_some(),
+            "the captured service session contributes an observation age: {_final_status:#}"
+        );
         assert_eq!(
             cli(&["runner", "service", "status", runner_id])["daemon_lease_id"],
             lease,
