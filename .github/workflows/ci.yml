@@ -72,6 +72,7 @@ jobs:
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
+      # #524 strips ANSI-colored Nextest summaries before retry outcome parsing.
       action-ref: 8e5d4f96b732fe2028076cc2541ab39f17ad9fb0
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .

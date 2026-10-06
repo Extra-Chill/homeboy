@@ -1341,7 +1341,6 @@ fn rig_dependency_workspace_mapping_uses_dependency_sync_mode_and_subpath() {
         used_pinned_ref: false,
         dirty_overlay: false,
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
-        dependency_cache: None,
         counts: ByteFileCounts {
             files: 7,
             bytes: 42,

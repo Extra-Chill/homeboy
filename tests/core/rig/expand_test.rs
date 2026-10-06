@@ -37,7 +37,6 @@ fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
         trace_workloads: Default::default(),
         fuzz_workloads: Default::default(),
         trace_workload_defaults: Default::default(),
-        trace_phase_templates: Default::default(),
         trace_variants: Default::default(),
         trace_profiles: Default::default(),
         trace_experiments: Default::default(),
@@ -45,7 +44,6 @@ fn rig_with(id: &str, components: HashMap<String, ComponentSpec>) -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
-        toolchain: None,
     }
 }
 
@@ -74,7 +72,6 @@ fn test_expand_vars_component_path() {
             r#ref: None,
             default_ref: None,
             extensions: None,
-            dependency_cache: None,
         },
     );
     let rig = rig_with("t", components);
@@ -120,7 +117,6 @@ fn test_expand_vars_package_root_from_installed_source_metadata() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
-                dependency_cache: None,
             },
         );
         let rig = rig_with("studio-web-product-matrix", components);
@@ -201,7 +197,6 @@ fn test_expand_resources_expands_string_entries() {
                 r#ref: None,
                 default_ref: None,
                 extensions: None,
-                dependency_cache: None,
             },
         );
         let mut rig = rig_with("t", components);

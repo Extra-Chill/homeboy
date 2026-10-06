@@ -1564,8 +1564,8 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("controller-driver or persisted child-process evidence"),
-                "operator no-PID recovery must refuse typed controller ownership: {error}"
+                    .contains("live or unverifiable workload-process evidence"),
+                "operator no-PID recovery must refuse a job whose workload process is live: {error}"
             );
             let other_submission = cook_job_submission_for_launcher(
                 "ownership-other",

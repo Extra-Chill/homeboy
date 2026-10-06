@@ -143,6 +143,7 @@ fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -691,6 +692,7 @@ fn status_returns_control_plane_run_for_a_cancelled_retry() {
 
         let status_args = || StatusArgs {
             run_id: retry_run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -807,6 +809,7 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
 
         let (value, exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: true,
             exact: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
@@ -3332,6 +3335,7 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
@@ -5469,15 +5473,29 @@ fn reconcile_apply_accounts_for_each_record_in_a_cook_scope() {
         assert_eq!(exit_code, 0);
         assert_eq!(value["requested_run_id"], cook_id);
         assert_eq!(value["acknowledgements"].as_array().map(Vec::len), Some(2));
+        // Reconciliation is owned by one durable control-plane effect per
+        // record (#15533), not by a lifecycle-projection claim, so each record
+        // is accounted for by its own acknowledgement and idempotency key.
+        let acknowledgements = value["acknowledgements"]
+            .as_array()
+            .expect("acknowledgements");
+        let mut keys = std::collections::BTreeSet::new();
         for run_id in [cook_id, attempt_id.as_str()] {
-            let record = agent_task_lifecycle::exact_record(run_id).expect("action record");
+            let prefix = format!("{run_id}:action:reconcile:");
+            let matching = acknowledgements
+                .iter()
+                .filter(|ack| {
+                    ack["acknowledgement"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(&prefix))
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                record.metadata["cook_operation_claims"]
-                    .as_array()
-                    .map(Vec::len),
-                Some(1),
-                "{run_id} receives its own action claim"
+                matching.len(),
+                1,
+                "{run_id} receives its own acknowledgement"
             );
+            assert!(keys.insert(matching[0]["idempotency_key"].to_string()));
         }
     });
 }
