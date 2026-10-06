@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: Extra-Chill/homeboy-action
-          ref: v2
+          ref: 8194050639aeb51728460051884f183aa74eade5
           path: .homeboy-action
       - name: Generate GitHub App token
         id: app-token
@@ -68,14 +68,14 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8e5d4f96b732fe2028076cc2541ab39f17ad9fb0
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8194050639aeb51728460051884f183aa74eade5
     with:
       commands: review test
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
-      # #524 strips ANSI-colored Nextest summaries before retry outcome parsing.
-      action-ref: 8e5d4f96b732fe2028076cc2541ab39f17ad9fb0
+      # #526 isolates compatible source artifacts; includes #522/#524 retry proof.
+      action-ref: 8194050639aeb51728460051884f183aa74eade5
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
