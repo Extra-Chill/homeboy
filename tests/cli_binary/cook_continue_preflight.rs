@@ -5,13 +5,210 @@ use serde_json::Value;
 struct KillOnDrop(std::process::Child);
 
 #[cfg(unix)]
+impl KillOnDrop {
+    fn terminate_tree(&mut self) -> homeboy::core::process::ProcessTreeTermination {
+        homeboy::core::process::terminate_process_tree(self.0.id())
+            .expect("owned process tree terminates within its bounded grace period")
+    }
+}
+
+#[cfg(unix)]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+            let _ = self.terminate_tree();
         }
     }
+}
+
+#[cfg(unix)]
+struct HermeticSiblingDaemonGuard<'a> {
+    context: &'a HermeticTestContext,
+    state_dir: std::path::PathBuf,
+    active: bool,
+}
+
+#[cfg(unix)]
+impl HermeticSiblingDaemonGuard<'_> {
+    fn stop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut command = self.context.command(TestBinary::HomeboyFixture);
+        command
+            .env(homeboy::core::paths::DAEMON_STATE_DIR_ENV, &self.state_dir)
+            .env("HOMEBOY_TEST_DAEMON_NAMESPACE", &self.state_dir)
+            .args(["daemon", "stop"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let _ = homeboy::core::test_support::bounded_output(command);
+        self.active = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HermeticSiblingDaemonGuard<'_> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_snapshot(pid: u32) -> serde_json::Value {
+    let root = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let stat = std::fs::read_to_string(root.join("stat")).ok();
+    let (state, parent_pid, process_group_id, session_id, starttime_ticks) = stat
+        .as_deref()
+        .and_then(|stat| stat.rsplit_once(')'))
+        .map(|(_, remainder)| {
+            let fields = remainder.split_whitespace().collect::<Vec<_>>();
+            (
+                fields.first().copied(),
+                fields.get(1).and_then(|value| value.parse::<u32>().ok()),
+                fields.get(2).and_then(|value| value.parse::<u32>().ok()),
+                fields.get(3).and_then(|value| value.parse::<u32>().ok()),
+                fields.get(19).and_then(|value| value.parse::<u64>().ok()),
+            )
+        })
+        .unwrap_or((None, None, None, None, None));
+    let command_line = std::fs::read(root.join("cmdline")).ok().map(|bytes| {
+        String::from_utf8_lossy(&bytes)
+            .split('\0')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    serde_json::json!({
+        "pid": pid,
+        "state": state,
+        "parent_pid": parent_pid,
+        "process_group_id": process_group_id,
+        "session_id": session_id,
+        "starttime_ticks": starttime_ticks,
+        "command_line": command_line,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendant_snapshot(root_pid: u32) -> serde_json::Value {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,pgid=,stat=,comm="])
+        .output()
+    else {
+        return serde_json::json!({ "error": "ps could not be started" });
+    };
+    let rows = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.to_string(),
+                fields.next()?.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut selected = vec![root_pid];
+    let mut selected_groups = Vec::new();
+    loop {
+        let mut changed = false;
+        for (pid, parent, group, _, _) in &rows {
+            if (selected.contains(parent) || selected_groups.contains(group))
+                && !selected.contains(pid)
+            {
+                selected.push(*pid);
+                selected_groups.push(*group);
+                changed = true;
+            }
+            if selected.contains(pid) && !selected_groups.contains(group) {
+                selected_groups.push(*group);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    serde_json::Value::Array(
+        rows.iter()
+            .filter(|(pid, _, group, _, _)| {
+                selected.contains(pid) || selected_groups.contains(group)
+            })
+            .map(|(pid, parent, group, state, command)| {
+                serde_json::json!({
+                    "pid": pid,
+                    "parent_pid": parent,
+                    "process_group_id": group,
+                    "state": state,
+                    "command": command,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_lock_file_holders(lock_path: &std::path::Path) -> serde_json::Value {
+    let lock_path = std::fs::canonicalize(lock_path).unwrap_or_else(|_| lock_path.to_path_buf());
+    let mut holders = Vec::new();
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return serde_json::json!({ "error": "cannot read /proc" });
+    };
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(descriptors) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        let matching_descriptors = descriptors
+            .flatten()
+            .filter_map(|descriptor| std::fs::read_link(descriptor.path()).ok())
+            .filter(|path| path == &lock_path)
+            .collect::<Vec<_>>();
+        if !matching_descriptors.is_empty() {
+            holders.push(serde_json::json!({
+                "pid": pid,
+                "process": linux_process_snapshot(pid),
+                "descriptor_count": matching_descriptors.len(),
+            }));
+        }
+    }
+    serde_json::Value::Array(holders)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_process_snapshot(pid: u32) -> serde_json::Value {
+    serde_json::json!({ "pid": pid, "available": false })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_descendant_snapshot(root_pid: u32) -> serde_json::Value {
+    serde_json::json!({ "root_pid": root_pid, "available": false })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_lock_file_holders(_lock_path: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({ "available": false })
+}
+
+fn write_same_child_evidence(name: &str, value: &serde_json::Value) {
+    let Some(directory) = std::env::var_os("HOMEBOY_SAME_CHILD_EVIDENCE_DIR") else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).expect("create same-child evidence directory");
+    std::fs::write(
+        directory.join(name),
+        serde_json::to_vec_pretty(value).expect("serialize same-child evidence"),
+    )
+    .expect("persist same-child evidence");
 }
 
 fn finalized_receipt_fixture(
@@ -401,11 +598,14 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         resolve_cook_continuation_run_id_in_store, CookRecipeStore,
     };
     use homeboy::core::test_support::bounded_output;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant};
 
     let context = HermeticTestContext::new();
+    let _daemon_guard =
+        homeboy::core::test_support::HermeticDaemonGuard::new(&context, TestBinary::HomeboyFixture);
     let (_checkout_guard, checkout) =
         homeboy::core::test_support::shared_committed_git_repo_fixture("continue-wave-15503");
     std::fs::create_dir_all(checkout.join("docs")).unwrap();
@@ -418,7 +618,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     std::fs::write(checkout.join("Cargo.toml"), "[package]\nname = \"continuation-wave-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     std::fs::write(checkout.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let gate_test = format!(
-        "use std::{{fs, path::Path, thread, time::Duration}};\nconst OPEN: &str = {:?};\nconst STARTED: &str = {:?};\nconst COUNT: &str = {:?};\n#[test]\nfn retained_patch_passes_after_recovery_marker() {{\n let contents = include_str!(\"../docs/agent-task-smoke.md\").trim();\n if contents == \"after\" {{\n  assert!(Path::new(OPEN).exists(), \"recovery marker missing\");\n  let count_path = Path::new(COUNT);\n  let count = fs::read_to_string(count_path).ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) + 1;\n  fs::write(count_path, count.to_string()).unwrap();\n  fs::write(STARTED, \"active\").unwrap();\n  thread::sleep(Duration::from_secs(3));\n }} else {{ assert_eq!(contents, \"before\"); }}\n}}\n",
+        "use std::{{fs, path::Path, thread, time::{{Duration, Instant}}}};\nconst OPEN: &str = {:?};\nconst STARTED: &str = {:?};\nconst COUNT: &str = {:?};\n#[test]\nfn retained_patch_passes_after_recovery_marker() {{\n let contents = include_str!(\"../docs/agent-task-smoke.md\").trim();\n if contents == \"after\" {{\n  fs::write(STARTED, \"active\").unwrap();\n  let deadline = Instant::now() + Duration::from_secs(60);\n  while !Path::new(OPEN).exists() && Instant::now() < deadline {{ thread::sleep(Duration::from_millis(10)); }}\n  assert!(Path::new(OPEN).exists(), \"recovery marker missing\");\n  let count_path = Path::new(COUNT);\n  let count = fs::read_to_string(count_path).ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0) + 1;\n  fs::write(count_path, count.to_string()).unwrap();\n  thread::sleep(Duration::from_secs(3));\n }} else {{ assert_eq!(contents, \"before\"); }}\n}}\n",
         gate_open.display().to_string(),
         gate_started.display().to_string(),
         gate_count.display().to_string(),
@@ -487,11 +687,11 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     };
     let worktree = create_worktree("child");
     let sibling_worktree = create_worktree("sibling");
-    let gate_sibling_worktree = create_worktree("gate-owner");
 
     let target_cook = "continue-wave-15503-terminal-child";
     let target_provider_started = context.root().join("target-provider-started");
-    std::fs::write(&gate_open, "target gates admitted\n").unwrap();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
     let provider_script = context.root().join("timeout-provider.js");
     std::fs::write(
         &provider_script,
@@ -520,8 +720,10 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         .unwrap(),
     )
     .expect("write fixture runtime manifest");
-    let mut target = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    target.env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0").args([
+    let mut target_command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    target_command
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
+        .args([
         "--wait",
         "--placement",
         "local",
@@ -559,28 +761,96 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         "1",
         "--no-finalize",
     ]);
-    let target_output = bounded_output(target);
-    assert!(
-        matches!(target_output.status.code(), Some(0 | 1)),
-        "Cook completes its provider-timeout gate path: {}",
-        String::from_utf8_lossy(&target_output.stdout)
+    let target_stdout = context.root().join("target.stdout");
+    let target_stderr = context.root().join("target.stderr");
+    target_command.stdout(Stdio::from(std::fs::File::create(&target_stdout).unwrap()));
+    target_command.stderr(Stdio::from(std::fs::File::create(&target_stderr).unwrap()));
+    target_command.process_group(0);
+    let mut target = KillOnDrop(target_command.spawn().expect("start terminalizing Cook"));
+    let target_deadline = Instant::now() + Duration::from_secs(90);
+    let mut target_run = None;
+    let mut interrupted_gate_owner_pid = None;
+    while Instant::now() < target_deadline {
+        if let Ok(run_id) =
+            resolve_cook_continuation_run_id_in_store(&recipe_store, &lifecycle_store, target_cook)
+        {
+            if let Ok(record) = lifecycle_store.read_record(&run_id) {
+                if record.metadata["promotion_progress"]["phase"] == "gate"
+                    && record.metadata["promotion_progress"]["active"] == true
+                    && gate_started.exists()
+                {
+                    interrupted_gate_owner_pid = record.metadata["promotion_progress"]["owner_pid"]
+                        .as_u64()
+                        .map(|pid| pid as u32);
+                    target_run = Some(run_id);
+                    break;
+                }
+            }
+        }
+        assert!(
+            target.0.try_wait().unwrap().is_none(),
+            "target Cook exited before reaching its real gate; stdout={} stderr={}",
+            std::fs::read_to_string(&target_stdout).unwrap_or_default(),
+            std::fs::read_to_string(&target_stderr).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let target_run = target_run.expect("terminal child reached its live Cargo gate");
+    let interrupted_gate_owner_pid =
+        interrupted_gate_owner_pid.expect("gate progress names its owner PID");
+    let target_pid = target.0.id();
+    assert!(homeboy::core::process::pid_is_running(
+        interrupted_gate_owner_pid
+    ));
+    let gate_owner_before = linux_process_snapshot(interrupted_gate_owner_pid);
+    let target_descendants_before = linux_descendant_snapshot(target_pid);
+    let target_record_before_kill = lifecycle_store.read_record(&target_run).unwrap();
+    assert!(target_record_before_kill.state.is_terminal());
+    assert_eq!(
+        target_record_before_kill.metadata["promotion_progress"]["owner_pid"],
+        interrupted_gate_owner_pid
     );
-    assert!(
-        target_provider_started.exists(),
-        "fixture provider executed"
+    let driver_lock = recipe_store
+        .data_root()
+        .join("agent-task-cooks")
+        .join(target_cook)
+        .join("driver.lock");
+    let driver_lock_content_before = std::fs::read_to_string(&driver_lock).ok();
+    let driver_lock_holders_before = linux_lock_file_holders(&driver_lock);
+    write_same_child_evidence(
+        "same-child-gate-before-kill.json",
+        &serde_json::json!({
+            "target_pid": target_pid,
+            "target_process_group": linux_process_snapshot(target_pid),
+            "target_descendants_and_group": target_descendants_before,
+            "gate_owner_pid": interrupted_gate_owner_pid,
+            "gate_owner": gate_owner_before,
+            "durable_record": target_record_before_kill,
+            "driver_lock_path": driver_lock,
+            "driver_lock_content": driver_lock_content_before,
+            "driver_lock_holders": driver_lock_holders_before,
+        }),
     );
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let recipe_store = CookRecipeStore::new(context.path_roots());
-    let target_run =
-        resolve_cook_continuation_run_id_in_store(&recipe_store, &lifecycle_store, target_cook)
-            .expect("terminal attempt id");
-
+    // Use a separate daemon namespace for the sibling so the target's
+    // automatic continuation recovery cannot consume its provider slot.
     let sibling_cook = "continue-wave-15503-live-sibling";
     let sibling_started = context.root().join("sibling-provider-started");
     let sibling_stdout = context.root().join("sibling.stdout");
     let sibling_stderr = context.root().join("sibling.stderr");
-    let mut sibling = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    sibling
+    let sibling_daemon_root = context.root().join("sibling-daemon");
+    std::fs::create_dir_all(&sibling_daemon_root).unwrap();
+    let mut sibling_daemon_guard = HermeticSiblingDaemonGuard {
+        context: &context,
+        state_dir: sibling_daemon_root.clone(),
+        active: true,
+    };
+    let mut sibling_command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    sibling_command
+        .env(
+            homeboy::core::paths::DAEMON_STATE_DIR_ENV,
+            &sibling_daemon_root,
+        )
+        .env("HOMEBOY_TEST_DAEMON_NAMESPACE", &sibling_daemon_root)
         .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &sibling_started)
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "120000")
         .args([
@@ -609,11 +879,11 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
             "1",
             "--no-finalize",
         ]);
-    sibling.stdout(Stdio::from(std::fs::File::create(&sibling_stdout).unwrap()));
-    sibling.stderr(Stdio::from(std::fs::File::create(&sibling_stderr).unwrap()));
-    let mut sibling = KillOnDrop(sibling.spawn().expect("start live sibling Cook"));
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !sibling_started.exists() && Instant::now() < deadline {
+    sibling_command.stdout(Stdio::from(std::fs::File::create(&sibling_stdout).unwrap()));
+    sibling_command.stderr(Stdio::from(std::fs::File::create(&sibling_stderr).unwrap()));
+    let mut sibling = KillOnDrop(sibling_command.spawn().expect("start live sibling Cook"));
+    let sibling_deadline = Instant::now() + Duration::from_secs(90);
+    while !sibling_started.exists() && Instant::now() < sibling_deadline {
         assert!(
             sibling.0.try_wait().unwrap().is_none(),
             "sibling exited: {}",
@@ -621,7 +891,13 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         );
         thread::sleep(Duration::from_millis(25));
     }
-    assert!(sibling_started.exists(), "sibling provider started");
+    assert!(
+        sibling_started.exists(),
+        "sibling provider starts while the target still owns its real gate; sibling state={:?}; stderr={} stdout={}",
+        sibling.0.try_wait().unwrap(),
+        std::fs::read_to_string(&sibling_stderr).unwrap_or_default(),
+        std::fs::read_to_string(&sibling_stdout).unwrap_or_default()
+    );
     let sibling_run =
         resolve_cook_continuation_run_id_in_store(&recipe_store, &lifecycle_store, sibling_cook)
             .expect("live sibling attempt id");
@@ -629,117 +905,48 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     let sibling_provider_owner = sibling_record.metadata["provider_executions"][0]["owner_pid"]
         .as_u64()
         .expect("durable provider owner") as u32;
-    assert!(
-        homeboy::core::process::pid_is_running(sibling_provider_owner),
-        "same-child provider process remains alive"
-    );
-
-    let gate_sibling_cook = "continue-wave-15503-live-gate-sibling";
-    let gate_sibling_stdout = context.root().join("gate-sibling.stdout");
-    let gate_sibling_stderr = context.root().join("gate-sibling.stderr");
-    let _ = std::fs::remove_file(&gate_started);
-    let mut gate_sibling_command = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    gate_sibling_command.args([
-        "--wait",
-        "--placement",
-        "local",
-        "agent-task",
-        "cook",
-        "--run-id",
-        gate_sibling_cook,
-        "--repo",
-        component_id,
-        "--backend",
-        "fixture",
-        "--model",
-        "fixture-model",
-        "--prompt",
-        "exercise a live native cargo gate",
-        "--cwd",
-        gate_sibling_worktree.to_str().unwrap(),
-        "--to-worktree",
-        gate_sibling_worktree.to_str().unwrap(),
-        "--verify",
-        "cargo test --locked -q",
-        "--gate-environment-mode",
-        "replace",
-        "--gate-env",
-        "PATH=/home/chubes/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin",
-        "--gate-env",
-        "HOME=/home/chubes/.nr/h15503",
-        "--gate-env",
-        "RUSTUP_HOME=/home/chubes/.rustup",
-        "--gate-env",
-        "CARGO_TARGET_DIR=/home/chubes/.nr/h15503/candidate-target",
-        "--max-attempts",
-        "1",
-        "--no-finalize",
-    ]);
-    gate_sibling_command.stdout(Stdio::from(
-        std::fs::File::create(&gate_sibling_stdout).unwrap(),
+    assert!(homeboy::core::process::pid_is_running(
+        sibling_provider_owner
     ));
-    gate_sibling_command.stderr(Stdio::from(
-        std::fs::File::create(&gate_sibling_stderr).unwrap(),
-    ));
-    let mut gate_sibling = KillOnDrop(gate_sibling_command.spawn().expect("start gate-owner Cook"));
-    let gate_start_deadline = Instant::now() + Duration::from_secs(30);
-    while !gate_started.exists() && Instant::now() < gate_start_deadline {
-        assert!(
-            gate_sibling.0.try_wait().unwrap().is_none(),
-            "gate-owner Cook exited early; gate receipt={:?}; stdout={} stderr={}",
-            resolve_cook_continuation_run_id_in_store(
-                &recipe_store,
-                &lifecycle_store,
-                gate_sibling_cook,
-            )
-            .ok()
-            .and_then(|run| lifecycle_store.read_record(&run).ok())
-            .map(|record| record.metadata["latest_promotion"]["gate_results"].clone()),
-            std::fs::read_to_string(&gate_sibling_stdout).unwrap_or_default(),
-            std::fs::read_to_string(&gate_sibling_stderr).unwrap_or_default()
-        );
-        thread::sleep(Duration::from_millis(25));
+    // Remove the first gate's marker before killing its owner. Removing it
+    // after termination races the daemon's automatic recovery gate, whose
+    // fresh marker is the handoff signal this test waits for below.
+    std::fs::remove_file(&gate_started).unwrap();
+    let termination = target.terminate_tree();
+    let reap_deadline = Instant::now() + Duration::from_secs(5);
+    while homeboy::core::process::pid_is_running(interrupted_gate_owner_pid)
+        && Instant::now() < reap_deadline
+    {
+        thread::sleep(Duration::from_millis(20));
     }
-    assert!(gate_started.exists(), "real child-owned cargo gate started");
-    let gate_sibling_run = resolve_cook_continuation_run_id_in_store(
-        &recipe_store,
-        &lifecycle_store,
-        gate_sibling_cook,
-    )
-    .expect("live gate-owner attempt id");
-    let gate_sibling_record = lifecycle_store.read_record(&gate_sibling_run).unwrap();
-    let gate_owner_pid = gate_sibling_record.metadata["promotion_progress"]["owner_pid"]
-        .as_u64()
-        .expect("durable gate promotion owner") as u32;
-    assert_eq!(
-        gate_sibling_record.metadata["promotion_progress"]["active"],
-        true
+    let gate_owner_after = linux_process_snapshot(interrupted_gate_owner_pid);
+    let target_descendants_after = linux_descendant_snapshot(target_pid);
+    let driver_lock_content_after = std::fs::read_to_string(&driver_lock).ok();
+    let driver_lock_holders_after = linux_lock_file_holders(&driver_lock);
+    let termination_evidence = serde_json::json!({
+        "termination": format!("{termination:?}"),
+        "gate_owner_pid": interrupted_gate_owner_pid,
+        "gate_owner_running_after": homeboy::core::process::pid_is_running(interrupted_gate_owner_pid),
+        "gate_owner_after": gate_owner_after,
+        "target_descendants_and_group_after": target_descendants_after,
+        "driver_lock_content_after": driver_lock_content_after,
+        "driver_lock_holders_after": driver_lock_holders_after,
+    });
+    write_same_child_evidence("same-child-gate-after-kill.json", &termination_evidence);
+    assert!(
+        !homeboy::core::process::pid_is_running(interrupted_gate_owner_pid),
+        "interrupted target gate owner {interrupted_gate_owner_pid} is reaped; evidence={termination_evidence}"
     );
     assert!(
-        homeboy::core::process::pid_is_running(gate_owner_pid),
-        "same-child gate/promotion owner process remains alive"
+        target_provider_started.exists(),
+        "fixture provider executed"
     );
 
     let target_record = lifecycle_store.read_record(&target_run).unwrap();
     let aggregate = lifecycle_store
         .read_aggregate(&target_run)
         .expect("durable terminal aggregate");
-    assert!(
-        matches!(
-            target_record.state,
-            AgentTaskRunState::Succeeded
-                | AgentTaskRunState::CandidateRecoverable
-                | AgentTaskRunState::PartialRecoverable
-        ),
-        "record state {:?}; Cook output: {}",
-        target_record.state,
-        String::from_utf8_lossy(&target_output.stdout),
-    );
-    assert!(
-        String::from_utf8_lossy(&target_output.stdout)
-            .contains("\"run_state\": \"PartialRecoverable\""),
-        "Cook result retained its recoverable terminal classification"
-    );
+    assert!(target_record.state.is_terminal());
     assert!(target_record.metadata["provider_executions"]
         .as_array()
         .unwrap()
@@ -755,6 +962,15 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     assert!(
         std::fs::metadata(retained_patch).unwrap().len() > 0,
         "substantive patch is retained"
+    );
+    assert!(
+        aggregate.outcomes.iter().any(|outcome| {
+            outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
+        }),
+        "the actual child result retains its provider-timeout classification"
     );
     assert_eq!(
         std::fs::read_to_string(worktree.join("docs/agent-task-smoke.md")).unwrap(),
@@ -776,10 +992,6 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
                 task_id: sibling_cook.to_string(),
                 run_id: sibling_run.clone(),
             },
-            FanoutRunBatchChild {
-                task_id: gate_sibling_cook.to_string(),
-                run_id: gate_sibling_run.clone(),
-            },
         ],
         serde_json::json!({}),
     )
@@ -791,6 +1003,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     batch_store
         .mutate_batch("continue-wave-15503-batch", |batch| {
             batch.metadata["coordinator"]["stage"] = serde_json::json!("running");
+            batch.metadata["coordinator"]["owner_pid"] = serde_json::json!(std::process::id());
             batch.state = homeboy::agents::agent_task_batch::AgentTaskBatchState::Running;
             for child in &mut batch.child_runs {
                 // Cook status tracks the recoverable candidate while the
@@ -808,29 +1021,12 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     assert_eq!(claim.len(), 36, "durable coordinator claim is retained");
     lifecycle_store
         .mutate_record(&target_run, |record| {
-            // The test process claimed the durable batch coordinator above;
-            // keep it live as the original parent owner. Reopen only this
-            // just-terminalized Cook continuation so the public CLI exercises
-            // the same pre-claim boundary as an interrupted batch child.
+            // Keep the batch coordinator live as the generic parent PID while
+            // preserving the real queued continuation and gate checkpoint.
             record.metadata["runner_pid"] = serde_json::json!(std::process::id());
-            record
-                .metadata
-                .as_object_mut()
-                .expect("run metadata object")
-                .remove("cook_continuation");
             true
         })
         .unwrap();
-    assert_eq!(
-        homeboy::agents::agent_task_service::continuation_state_in_store(
-            &recipe_store,
-            target_cook,
-            &target_run,
-        )
-        .unwrap(),
-        homeboy::agents::agent_task_service::CookContinuationState::Absent,
-        "target child is staged at the pre-continuation boundary"
-    );
 
     let preflight = |run_id: &str| {
         context
@@ -858,46 +1054,230 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         "denial is tied to this child's live provider PID"
     );
     assert!(sibling.0.try_wait().unwrap().is_none());
-    let gate_owner_preflight = preflight(&gate_sibling_run);
-    assert_eq!(
-        gate_owner_preflight.status.code(),
-        Some(1),
-        "live child-owned gate process remains fenced"
-    );
-    let gate_owner_report: Value = serde_json::from_slice(&gate_owner_preflight.stdout).unwrap();
-    assert_eq!(
-        gate_owner_report["data"]["failure_context"]["diagnostic"]["details"]
-            ["continuation_admission"]["phase"],
-        "gate",
-        "live gate-owner denial must name its phase: {gate_owner_report}"
-    );
-    assert!(gate_sibling.0.try_wait().unwrap().is_none());
+
+    let recovery_deadline = Instant::now() + Duration::from_secs(90);
+    let resumed_gate_owner_pid = loop {
+        let record = lifecycle_store.read_record(&target_run).unwrap();
+        let lock_owner_pid = std::fs::read_to_string(&driver_lock)
+            .ok()
+            .and_then(|owner| owner.trim().parse::<u32>().ok());
+        let lock_holders = linux_lock_file_holders(&driver_lock);
+        if gate_started.exists()
+            && record.metadata["promotion_progress"]["phase"] == "gate"
+            && record.metadata["promotion_progress"]["active"] == true
+            && lock_owner_pid.is_some_and(|pid| pid != interrupted_gate_owner_pid)
+            && lock_holders.as_array().is_some_and(|holders| {
+                holders
+                    .iter()
+                    .any(|holder| holder["pid"] == lock_owner_pid.unwrap())
+            })
+        {
+            let owner_pid = lock_owner_pid.unwrap();
+            if homeboy::core::process::pid_is_running(owner_pid) {
+                break owner_pid;
+            }
+        }
+        assert!(
+            sibling.0.try_wait().unwrap().is_none(),
+            "live provider sibling exits while daemon recovers the target"
+        );
+        if Instant::now() >= recovery_deadline {
+            let queued_owner_pid = record.metadata["cook_continuation"]["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok());
+            let timeout_evidence = serde_json::json!({
+                "interrupted_gate_owner_pid": interrupted_gate_owner_pid,
+                "interrupted_gate_owner": linux_process_snapshot(interrupted_gate_owner_pid),
+                "record_promotion_owner_pid": record.metadata["promotion_progress"]["owner_pid"],
+                "record_promotion_owner": record.metadata["promotion_progress"]["owner_pid"]
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .map(linux_process_snapshot),
+                "queued_continuation_owner_pid": queued_owner_pid,
+                "queued_continuation_owner": queued_owner_pid.map(linux_process_snapshot),
+                "target_processes": linux_descendant_snapshot(target_pid),
+                "record": record,
+                "driver_lock_content": std::fs::read_to_string(&driver_lock).ok(),
+                "driver_lock_holders": linux_lock_file_holders(&driver_lock),
+                "sibling_provider_pid": sibling_provider_owner,
+                "sibling_provider": linux_process_snapshot(sibling_provider_owner),
+                "sibling_still_running": sibling.0.try_wait().unwrap().is_none(),
+                "target_stderr": std::fs::read_to_string(&target_stderr).unwrap_or_default(),
+            });
+            write_same_child_evidence("same-child-recovery-timeout.json", &timeout_evidence);
+            panic!("queued same-child continuation did not reacquire its real gate: {timeout_evidence}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let resumed_record = lifecycle_store.read_record(&target_run).unwrap();
+    let recovery_evidence = serde_json::json!({
+        "interrupted_gate_owner_pid": interrupted_gate_owner_pid,
+        "interrupted_gate_owner_running": homeboy::core::process::pid_is_running(interrupted_gate_owner_pid),
+        "resumed_gate_owner_pid": resumed_gate_owner_pid,
+        "resumed_gate_owner": linux_process_snapshot(resumed_gate_owner_pid),
+        "resumed_promotion_progress": resumed_record.metadata["promotion_progress"],
+        "cook_continuation": resumed_record.metadata["cook_continuation"],
+        "cook_continuation_scheduler": resumed_record.metadata["cook_continuation_scheduler"],
+        "cook_operation_claims": resumed_record.metadata["cook_operation_claims"],
+        "target_driver_lock_content": std::fs::read_to_string(&driver_lock).ok(),
+        "target_driver_lock_holders": linux_lock_file_holders(&driver_lock),
+        "sibling_provider_pid": sibling_provider_owner,
+        "sibling_provider": linux_process_snapshot(sibling_provider_owner),
+        "batch_coordinator_pid": std::process::id(),
+    });
+    write_same_child_evidence("same-child-scheduler-handoff.json", &recovery_evidence);
+
     let target_preflight = preflight(&target_run);
     let target_report: Value = serde_json::from_slice(&target_preflight.stdout).unwrap();
+    write_same_child_evidence(
+        "same-child-active-gate-preflight.json",
+        &serde_json::json!({
+            "exit_code": target_preflight.status.code(),
+            "report": target_report,
+            "expected_gate_owner_pid": resumed_gate_owner_pid,
+            "recovery_evidence": recovery_evidence,
+            "target_cook_id": target_cook,
+            "target_run_id": target_run,
+            "sibling_cook_id": sibling_cook,
+            "sibling_run_id": sibling_run,
+            "sibling_runner_pid": sibling_record.metadata["runner_pid"],
+            "sibling_provider_owner_pid": sibling_provider_owner,
+            "target_driver_lock_content": std::fs::read_to_string(&driver_lock).ok(),
+            "target_driver_lock_holders": linux_lock_file_holders(&driver_lock),
+        }),
+    );
     assert_eq!(
         target_preflight.status.code(),
-        Some(0),
-        "terminal child must pass with coordinator and sibling live: {target_report}"
+        Some(1),
+        "a new live owner of this exact child's gate must remain fenced: {target_report}"
     );
-    assert_eq!(target_report["data"]["admitted"], true);
-    assert!(sibling.0.try_wait().unwrap().is_none());
+    assert_eq!(
+        target_report["data"]["failure_context"]["diagnostic"]["details"]["continuation_admission"]
+            ["owner_pid"],
+        resumed_gate_owner_pid,
+        "denial is tied to the resumed exact-child gate owner"
+    );
+    assert_eq!(
+        target_report["data"]["failure_context"]["diagnostic"]["details"]["continuation_admission"]
+            ["phase"],
+        "gate"
+    );
 
-    let continued = context
-        .command(TestBinary::HomeboyFixture)
-        .args(["agent-task", "cook-continue", &target_run])
-        .output()
-        .expect("continue terminal child while both siblings remain live");
+    std::fs::write(&gate_open, "continue").unwrap();
+    let continuation_deadline = Instant::now() + Duration::from_secs(30);
+    let mut completed_record = None;
+    while Instant::now() < continuation_deadline {
+        let record = lifecycle_store.read_record(&target_run).unwrap();
+        if std::fs::read_to_string(&gate_count).is_ok_and(|count| count == "1")
+            && homeboy::agents::agent_task_service::continuation_state_in_store(
+                &recipe_store,
+                target_cook,
+                &target_run,
+            )
+            .is_ok_and(|state| {
+                state == homeboy::agents::agent_task_service::CookContinuationState::Completed
+            })
+        {
+            completed_record = Some(record);
+            break;
+        }
+        assert!(
+            sibling.0.try_wait().unwrap().is_none(),
+            "live sibling provider exits during same-child continuation recovery"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let Some(completed_record) = completed_record else {
+        let record = lifecycle_store.read_record(&target_run).unwrap();
+        let continuation_state = homeboy::agents::agent_task_service::continuation_state_in_store(
+            &recipe_store,
+            target_cook,
+            &target_run,
+        )
+        .unwrap();
+        let completion_timeout_evidence = serde_json::json!({
+            "record_state": record.state,
+            "promotion_progress": record.metadata["promotion_progress"],
+            "cook_continuation": record.metadata["cook_continuation"],
+            "cook_continuation_state": format!("{continuation_state:?}"),
+            "cook_continuation_scheduler": record.metadata["cook_continuation_scheduler"],
+            "cook_operation_claims": record.metadata["cook_operation_claims"],
+            "cook_progress": record.metadata["cook_progress"],
+            "provider_executions": record.metadata["provider_executions"],
+            "gate_count": std::fs::read_to_string(&gate_count).ok(),
+            "gate_started": gate_started.exists(),
+            "driver_lock_content": std::fs::read_to_string(&driver_lock).ok(),
+            "driver_lock_holders": linux_lock_file_holders(&driver_lock),
+            "batch_coordinator_pid": std::process::id(),
+            "sibling_provider_pid": sibling_provider_owner,
+            "sibling_provider_running": homeboy::core::process::pid_is_running(sibling_provider_owner),
+        });
+        write_same_child_evidence(
+            "same-child-recovery-completion-timeout.json",
+            &completion_timeout_evidence,
+        );
+        panic!("same-child recovery did not reach completed continuation state: {completion_timeout_evidence}");
+    };
     assert!(
-        continued.status.success(),
-        "public continuation: {}",
-        String::from_utf8_lossy(&continued.stdout)
+        linux_lock_file_holders(&driver_lock)
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "Cook driver lock is released after resumed gate completion"
     );
-    let provider_count = lifecycle_store.read_record(&target_run).unwrap().metadata
-        ["provider_executions"]
+    write_same_child_evidence(
+        "same-child-recovery-completed.json",
+        &serde_json::json!({
+            "record_state": completed_record.state,
+            "promotion_progress": completed_record.metadata["promotion_progress"],
+            "cook_continuation": completed_record.metadata["cook_continuation"],
+            "cook_continuation_scheduler": completed_record.metadata["cook_continuation_scheduler"],
+            "provider_executions": completed_record.metadata["provider_executions"],
+            "gate_count": std::fs::read_to_string(&gate_count).ok(),
+            "driver_lock_content": std::fs::read_to_string(&driver_lock).ok(),
+            "driver_lock_holders": linux_lock_file_holders(&driver_lock),
+            "batch_coordinator_pid": std::process::id(),
+            "sibling_provider_pid": sibling_provider_owner,
+            "sibling_provider_running": homeboy::core::process::pid_is_running(sibling_provider_owner),
+        }),
+    );
+    let provider_count = completed_record.metadata["provider_executions"]
         .as_array()
         .unwrap()
         .len();
     let gate_count_after_continue = std::fs::read_to_string(&gate_count).unwrap();
+    assert_eq!(
+        gate_count_after_continue, "1",
+        "real target gate completed once after the old owner was reaped"
+    );
+    lifecycle_store
+        .mutate_record(&target_run, |record| {
+            // The batch coordinator remains live after the child's own driver
+            // lock and gate owner have gone away.
+            record.metadata["runner_pid"] = serde_json::json!(std::process::id());
+            true
+        })
+        .unwrap();
+    let terminal_parent_preflight = preflight(&target_run);
+    let terminal_parent_report: Value =
+        serde_json::from_slice(&terminal_parent_preflight.stdout).unwrap();
+    let terminal_parent_denial = terminal_parent_report["data"]["failure_context"]["diagnostic"]
+        ["details"]["continuation_admission"]["first_authoritative_denial"]
+        .as_str();
+    assert_ne!(
+        terminal_parent_denial,
+        Some("live_owner_in_progress"),
+        "a live batch coordinator PID is not the terminal child's Cook owner: {terminal_parent_report}"
+    );
+    write_same_child_evidence(
+        "same-child-terminal-parent-preflight.json",
+        &serde_json::json!({
+            "exit_code": terminal_parent_preflight.status.code(),
+            "live_batch_coordinator_pid": std::process::id(),
+            "child_driver_lock_holders": linux_lock_file_holders(&driver_lock),
+            "child_promotion_progress": completed_record.metadata["promotion_progress"],
+            "report": terminal_parent_report,
+        }),
+    );
     let replay = context
         .command(TestBinary::HomeboyFixture)
         .args(["agent-task", "cook-continue", &target_run])
@@ -924,6 +1304,6 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         sibling.0.try_wait().unwrap().is_none(),
         "unrelated sibling remains live after continuation"
     );
-    sibling.0.kill().unwrap();
-    let _ = sibling.0.wait();
+    sibling.terminate_tree();
+    sibling_daemon_guard.stop();
 }
