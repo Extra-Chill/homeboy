@@ -274,7 +274,9 @@ fn unreadable_state_blocks_instead_of_guessing() {
             },
         )],
     );
-    assert!(matches!(plan(&v), Plan::Blocked { reason } if reason.contains("lease is corrupt")));
+    assert!(
+        matches!(plan(&v), Plan::Blocked { cause: BlockCause::Unreadable, reason } if reason.contains("lease is corrupt"))
+    );
     let mut unreadable_registry = view(None, Vec::new());
     unreadable_registry.registry = RegistryObservation::Unreadable {
         reason: "truncated".to_string(),
@@ -290,7 +292,9 @@ fn an_unleased_live_daemon_blocks_any_start() {
         ownership: DaemonProcessOwnership::Ambiguous,
         bind_endpoint: None,
     }];
-    assert!(matches!(plan(&v), Plan::Blocked { reason } if reason.contains("4242")));
+    assert!(
+        matches!(plan(&v), Plan::Blocked { cause: BlockCause::UnleasedProcess, reason } if reason.contains("4242"))
+    );
 }
 
 // ---------------------------------------------------------------------------

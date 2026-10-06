@@ -298,6 +298,24 @@ pub fn observe(router_dir: &Path) -> DaemonView {
     }
 }
 
+/// Observe this process's own daemon router directory.
+///
+/// An unresolvable router location is reported in the view, not raised.
+pub fn observe_local() -> DaemonView {
+    match generation_store::router_dir() {
+        Ok(router_dir) => observe(&router_dir),
+        Err(error) => DaemonView {
+            router_dir: PathBuf::new(),
+            registry: RegistryObservation::Unreadable {
+                reason: format!("daemon router directory is unresolvable: {error}"),
+            },
+            admission_owner: None,
+            generations: Vec::new(),
+            unleased_candidates: Vec::new(),
+        },
+    }
+}
+
 struct Registered {
     lease_id: String,
     state_dir: PathBuf,

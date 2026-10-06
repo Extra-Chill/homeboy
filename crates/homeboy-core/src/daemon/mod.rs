@@ -47,6 +47,7 @@ mod controller_terminal_regression;
 mod daemon_lease;
 mod generation_store;
 pub mod lifecycle;
+pub mod lifecycle_apply;
 pub mod lifecycle_plan;
 mod lifetime;
 pub mod orchestration;

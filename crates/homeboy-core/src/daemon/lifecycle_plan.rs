@@ -38,7 +38,20 @@ pub enum Plan {
     Transition { step: Step },
     NeedsAttestation(Attestation),
     Wait { reason: String },
-    Blocked { reason: String },
+    Blocked { cause: BlockCause, reason: String },
+}
+
+/// Why the planner refuses to act.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockCause {
+    /// The registry or a lease could not be read. Another repair (legacy
+    /// lease migration, corrupt-lease handling) may still apply.
+    Unreadable,
+    /// A live daemon process holds no lease; anything could race it.
+    UnleasedProcess,
+    /// A stale daemon has no lease credential to prove a stop is safe.
+    UnknownSupervision,
 }
 
 /// One recovery step. Each names the exact generation it applies to, so the
@@ -93,6 +106,7 @@ pub const CONFIRM_WORKLOAD_PROCESSES_ABSENT: &str = "confirm-workload-processes-
 pub fn plan(view: &DaemonView) -> Plan {
     if let RegistryObservation::Unreadable { reason } = &view.registry {
         return Plan::Blocked {
+            cause: BlockCause::Unreadable,
             reason: format!("the generation registry is unreadable: {reason}"),
         };
     }
@@ -105,6 +119,7 @@ pub fn plan(view: &DaemonView) -> Plan {
             })
     {
         return Plan::Blocked {
+            cause: BlockCause::Unreadable,
             reason: format!(
                 "generation {} in {} is unreadable: {reason}",
                 label(generation),
@@ -132,6 +147,7 @@ pub fn plan(view: &DaemonView) -> Plan {
             .collect::<Vec<_>>()
             .join(", ");
         return Plan::Blocked {
+            cause: BlockCause::UnleasedProcess,
             reason: format!(
                 "live daemon process(es) {pids} hold no lease; no process is signaled and no daemon is started while ownership is unresolved"
             ),
@@ -282,6 +298,7 @@ fn plan_stale_live_generation(generation: &GenerationView) -> Option<Plan> {
             // No lease credential to prove a lease-bound stop is safe.
             Supervision::Unknown => {
                 return Some(Plan::Blocked {
+                    cause: BlockCause::UnknownSupervision,
                     reason: format!(
                         "generation {lease_id} runs a stale binary but its supervision is unknown"
                     ),

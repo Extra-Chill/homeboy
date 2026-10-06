@@ -401,6 +401,10 @@ pub struct DaemonRecoverOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_on: Option<String>,
     pub next_command: String,
+    /// The lifecycle planner's single next action (#15557). It gates the
+    /// legacy plan: a `blocked` or `wait` lifecycle plan never executes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_plan: Option<daemon::lifecycle_plan::Plan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -959,12 +963,158 @@ fn bounded_text(value: &str) -> String {
 /// The planning `read_status()` supplies every argument. A successful execution
 /// requires a second authoritative read that proves freshness. Dispatch is on
 /// the typed step code, never on the rendered command string (#11105).
+/// How `daemon recover` acts on the lifecycle plan (#15557, slice C3).
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryRoute {
+    /// The legacy executor applies its own plan.
+    Legacy,
+    /// The lifecycle plan forbids any mutation right now.
+    Refuse(String),
+    /// The lifecycle executor applies the lifecycle plan.
+    Lifecycle,
+}
+
+/// The lifecycle plan is the authority on whether recovery may mutate, and it
+/// fills the gaps the legacy plan dead-ends on. The legacy executor still
+/// carries out the transitions it already knows.
+fn recovery_route(
+    lifecycle: &daemon::lifecycle_plan::Plan,
+    legacy: &daemon::recovery_actions::DaemonRecoveryPlan,
+) -> RecoveryRoute {
+    use daemon::lifecycle_plan::{BlockCause, Plan};
+    match lifecycle {
+        // Unreadable state is not a lifecycle verdict: the legacy executor
+        // owns legacy-lease migration and corrupt-lease handling.
+        Plan::Blocked {
+            cause: BlockCause::Unreadable,
+            ..
+        } => RecoveryRoute::Legacy,
+        Plan::Blocked { reason, .. } => {
+            RecoveryRoute::Refuse(format!("lifecycle_blocked: {reason}"))
+        }
+        Plan::Wait { reason } => RecoveryRoute::Refuse(format!("lifecycle_wait: {reason}")),
+        // One attestation over the complete job set, applied by the lifecycle
+        // executor so its scope matches what the store will accept.
+        Plan::NeedsAttestation(_) => RecoveryRoute::Lifecycle,
+        planned if daemon::lifecycle_apply::applies(planned) && !legacy.executable => {
+            RecoveryRoute::Lifecycle
+        }
+        _ => RecoveryRoute::Legacy,
+    }
+}
+
 fn recover(
     dry_run: bool,
     confirm_workload_processes_absent: bool,
     addr: &str,
 ) -> CmdResult<DaemonOutput> {
+    let lifecycle = daemon::lifecycle_apply::plan_local();
     let status = daemon::read_status()?;
+    let route = recovery_route(
+        &lifecycle,
+        &daemon::recovery_actions::plan_recovery(&status),
+    );
+    let (output, exit_code) = match route {
+        RecoveryRoute::Legacy => {
+            recover_legacy(status, dry_run, confirm_workload_processes_absent, addr)?
+        }
+        RecoveryRoute::Refuse(reason) => {
+            // Report the legacy plan for context, but never run it.
+            let (output, _) = recover_legacy(status, true, false, addr)?;
+            let DaemonOutput::Recover(mut output) = output else {
+                unreachable!("recover_from_status returns a recover output");
+            };
+            output.blocked_on = Some(reason);
+            if output.plan.executable {
+                output.next_command = "homeboy daemon status".to_string();
+            }
+            (DaemonOutput::Recover(output), 1)
+        }
+        RecoveryRoute::Lifecycle => recover_lifecycle(
+            &lifecycle,
+            status,
+            dry_run,
+            confirm_workload_processes_absent,
+            addr,
+        )?,
+    };
+    let DaemonOutput::Recover(mut output) = output else {
+        return Ok((output, exit_code));
+    };
+    output.lifecycle_plan = Some(lifecycle);
+    Ok((DaemonOutput::Recover(output), exit_code))
+}
+
+/// Apply a lifecycle-executor plan: preview it, require its attestation, or
+/// apply it and prove the daemon fresh afterwards.
+fn recover_lifecycle(
+    lifecycle: &daemon::lifecycle_plan::Plan,
+    status: DaemonStatus,
+    dry_run: bool,
+    confirm_workload_processes_absent: bool,
+    addr: &str,
+) -> CmdResult<DaemonOutput> {
+    use daemon::lifecycle_plan::Plan;
+    let attestation = matches!(lifecycle, Plan::NeedsAttestation(_));
+    let (output, _) = recover_legacy(status, true, false, addr)?;
+    let DaemonOutput::Recover(mut output) = output else {
+        unreachable!("recover_from_status returns a recover output");
+    };
+    let apply_command = if attestation {
+        "homeboy daemon recover --yes --confirm-workload-processes-absent"
+    } else {
+        "homeboy daemon recover --yes"
+    };
+    output.blocked_on = None;
+    if dry_run {
+        output.next_command = apply_command.to_string();
+        return Ok((DaemonOutput::Recover(output), 0));
+    }
+    if attestation && !confirm_workload_processes_absent {
+        output.blocked_on = Some(
+            "this recovery requires operator attestation that no report can supply: --confirm-workload-processes-absent".to_string(),
+        );
+        output.next_command = apply_command.to_string();
+        return Ok((DaemonOutput::Recover(output), 1));
+    }
+    output.applied_steps =
+        match daemon::lifecycle_apply::apply(lifecycle, confirm_workload_processes_absent, addr) {
+            Ok(applied) => applied,
+            Err(error) if error.details["classification"] == "stale_daemon_recovery_plan" => {
+                output.blocked_on = Some(error.message);
+                output.next_command = "homeboy daemon recover --dry-run".to_string();
+                return Ok((DaemonOutput::Recover(output), 1));
+            }
+            Err(error) => return Err(error),
+        };
+    output.executed = true;
+    output.next_command = "homeboy daemon status".to_string();
+    let postcondition = daemon::read_status()?;
+    output.fresh = postcondition.fresh;
+    output.stale_reason_code = postcondition.freshness.stale_reason_code;
+    output.lease_id = postcondition.freshness.lease_id.clone();
+    output.store_path = postcondition.state_path.clone();
+    output.active_jobs = postcondition.freshness.active_jobs;
+    if !daemon_is_fresh(&postcondition) {
+        output.blocked_on = Some(format!(
+            "recovery executed but the authoritative status remains stale{}",
+            postcondition
+                .stale_reason
+                .as_deref()
+                .map(|reason| format!(": {reason}"))
+                .unwrap_or_default()
+        ));
+        return Ok((DaemonOutput::Recover(output), 1));
+    }
+    Ok((DaemonOutput::Recover(output), 0))
+}
+
+fn recover_legacy(
+    status: DaemonStatus,
+    dry_run: bool,
+    confirm_workload_processes_absent: bool,
+    addr: &str,
+) -> CmdResult<DaemonOutput> {
     let planned_status = status.clone();
     recover_from_status(
         status,
@@ -1055,6 +1205,7 @@ where
         blocked_on: None,
         next_command: String::new(),
         plan,
+        lifecycle_plan: None,
     };
 
     if output.plan.steps.is_empty() {
@@ -1394,6 +1545,107 @@ mod tests {
     use homeboy::test_support::with_isolated_home;
 
     use super::*;
+
+    mod lifecycle_route {
+        use super::super::{recovery_route, RecoveryRoute};
+        use homeboy::core::daemon::lifecycle_plan::{Attestation, BlockCause, Plan, Step};
+        use homeboy::core::daemon::recovery_actions::DaemonRecoveryPlan;
+
+        fn legacy(executable: bool) -> DaemonRecoveryPlan {
+            DaemonRecoveryPlan {
+                steps: Vec::new(),
+                reason: "legacy".to_string(),
+                required_confirmations: Vec::new(),
+                executable,
+            }
+        }
+
+        #[test]
+        fn wait_and_safety_blocks_never_execute_even_when_legacy_would() {
+            for lifecycle in [
+                Plan::Wait {
+                    reason: "child 42 is live".to_string(),
+                },
+                Plan::Blocked {
+                    cause: BlockCause::UnleasedProcess,
+                    reason: "pid 7 holds no lease".to_string(),
+                },
+                Plan::Blocked {
+                    cause: BlockCause::UnknownSupervision,
+                    reason: "unknown".to_string(),
+                },
+            ] {
+                assert!(matches!(
+                    recovery_route(&lifecycle, &legacy(true)),
+                    RecoveryRoute::Refuse(_)
+                ));
+            }
+        }
+
+        #[test]
+        fn unreadable_state_defers_to_the_legacy_repairs() {
+            let lifecycle = Plan::Blocked {
+                cause: BlockCause::Unreadable,
+                reason: "legacy lease format".to_string(),
+            };
+            assert_eq!(
+                recovery_route(&lifecycle, &legacy(true)),
+                RecoveryRoute::Legacy
+            );
+        }
+
+        #[test]
+        fn an_attestation_is_applied_by_the_lifecycle_executor() {
+            let lifecycle = Plan::NeedsAttestation(Attestation {
+                lease_id: "DEAD".to_string(),
+                state_dir: std::path::PathBuf::from("/daemon"),
+                job_ids: vec![uuid::Uuid::nil()],
+                confirmation: "confirm-workload-processes-absent",
+            });
+            for executable in [false, true] {
+                assert_eq!(
+                    recovery_route(&lifecycle, &legacy(executable)),
+                    RecoveryRoute::Lifecycle
+                );
+            }
+        }
+
+        /// The dead-end class: the legacy plan authorizes nothing but the view
+        /// proves a safe transition.
+        #[test]
+        fn lifecycle_fills_legacy_dead_ends_and_otherwise_defers() {
+            for step in [
+                Step::StartDaemon,
+                Step::ClaimAdmission {
+                    from_lease_id: "DEAD".to_string(),
+                    to_lease_id: "LIVE".to_string(),
+                },
+            ] {
+                let lifecycle = Plan::Transition { step };
+                assert_eq!(
+                    recovery_route(&lifecycle, &legacy(false)),
+                    RecoveryRoute::Lifecycle
+                );
+                assert_eq!(
+                    recovery_route(&lifecycle, &legacy(true)),
+                    RecoveryRoute::Legacy
+                );
+            }
+            for lifecycle in [
+                Plan::Converged,
+                Plan::Transition {
+                    step: Step::StopByLease {
+                        lease_id: "OLD".to_string(),
+                    },
+                },
+            ] {
+                assert_eq!(
+                    recovery_route(&lifecycle, &legacy(false)),
+                    RecoveryRoute::Legacy
+                );
+            }
+        }
+    }
     use crate::cli_surface::{Cli, Commands};
 
     #[test]
