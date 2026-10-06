@@ -751,7 +751,7 @@ fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error
     // retryability/hints. Only refine the operator-facing message and redact
     // the two diagnostic strings placed in the structured details.
     let mut diagnostic = Error::from_io_error(&error, Some(operation.clone()));
-    diagnostic.message = format!("{operation}: {cause}");
+    diagnostic.message = format!("{cause} (operation: {operation})");
     if let Some(details) = diagnostic.details.as_object_mut() {
         details.insert("context".to_string(), json!(operation));
         details.insert("error".to_string(), json!(cause));
@@ -1028,7 +1028,7 @@ fn file_transfer_operation_error(
     transport: &str,
 ) -> Error {
     let stderr = bounded_redacted_text(stderr.trim(), 2 * 1024);
-    let remote_path = bounded_redacted_text(remote_path, 512);
+    let remote_path = bounded_redacted_text(remote_path, 3 * 1024);
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
@@ -1053,29 +1053,28 @@ fn http_file_transfer_error(
     source: Error,
     transport: &str,
 ) -> Error {
-    let remote_path = bounded_redacted_text(remote_path, 512);
+    let remote_path = bounded_redacted_text(remote_path, 3 * 1024);
     let source_cause = ["cause", "reason", "error"]
         .iter()
         .find_map(|key| source.details.get(*key).and_then(Value::as_str))
         .filter(|cause| !cause.is_empty() && !source.message.contains(cause))
         .map(|cause| bounded_redacted_text(cause, 512));
-    let cause_suffix = source_cause
-        .as_ref()
-        .map(|cause| format!("; cause: {cause}"))
-        .unwrap_or_default();
     let source_message = bounded_redacted_text(&source.message, 512);
+    let diagnostic_cause = source_cause
+        .clone()
+        .unwrap_or_else(|| source_message.clone());
     let source_details = bounded_transport_error_details(&source.details, source_cause.as_deref());
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
-            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}{cause_suffix}",
-            source_message,
+            "{diagnostic_cause} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {source_message})",
         ),
         json!({
             "runner_id": runner_id,
             "operation": operation,
             "remote_path": remote_path,
             "transport": transport,
+            "diagnostic_cause": diagnostic_cause,
             "source": source_details,
         }),
     )
@@ -1397,11 +1396,19 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("client");
+        let long_remote_path = format!(
+            "/{}",
+            (0..8)
+                .map(|index| format!("segment-{index}-{}", "r".repeat(76)))
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        assert!(long_remote_path.len() > 512);
         let source = daemon_file_post_json(
             &client,
             &format!("http://{address}"),
             "/files/upload-chunk",
-            json!({ "path": "/private/evidence.json" }),
+            json!({ "path": &long_remote_path }),
             None,
         )
         .expect_err("daemon refuses group-writable evidence parent");
@@ -1410,7 +1417,7 @@ mod tests {
         let error = http_file_transfer_error(
             "test-runner",
             "private evidence upload",
-            "/private/evidence.json",
+            &long_remote_path,
             source,
             "daemon_http",
         );
@@ -1442,7 +1449,14 @@ mod tests {
         assert!(
             persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("group/world writable"))
+                .is_some_and(|message| message.contains("upload parent must be daemon-owned"))
+        );
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["context"]
+                .as_str()
+                .is_some_and(
+                    |context| context.len() <= 4 * 1024 && context.contains(&long_remote_path)
+                )
         );
         assert!(
             persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["causes"]

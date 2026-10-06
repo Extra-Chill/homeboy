@@ -446,10 +446,14 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
         })
         .expect("persist selected runner");
-        let missing_evidence = std::env::temp_dir().join(format!(
-            "homeboy-missing-provider-evidence-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let long_path_root = tempfile::tempdir().expect("long evidence path root");
+        let mut evidence_parent = long_path_root.path().to_path_buf();
+        for index in 0..7 {
+            evidence_parent.push(format!("segment-{index}-{}", "p".repeat(76)));
+            std::fs::create_dir(&evidence_parent).expect("create long path component");
+        }
+        let missing_evidence = evidence_parent.join("missing-evidence.json");
+        assert!(missing_evidence.to_string_lossy().len() > 512);
         let io_error = std::fs::File::open(&missing_evidence)
             .expect_err("fixture exercises a real filesystem open failure");
         assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
@@ -500,9 +504,14 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             &record.metadata["pre_execution_failure"]["details"]["lab_transport_attempt_receipt"];
         assert!(persisted_receipt["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("private evidence upload")
-                && (message.contains("No such file") || message.contains("not found"))
-                && message.contains("[REDACTED]")));
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
+        assert!(persisted_receipt["error"]["context"]
+            .as_str()
+            .is_some_and(|context| context.len() <= 4 * 1024
+                && context.contains(missing_evidence.to_string_lossy().as_ref())
+                && context.contains("[REDACTED]")));
 
         let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
@@ -514,6 +523,14 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             full: true,
         })
         .expect("full diagnosis");
+        let (full_evidence, _) = evidence(EvidenceArgs {
+            run_id: run_id.to_string(),
+            kind: None,
+            task: None,
+            failure_only: false,
+            full: true,
+        })
+        .expect("full evidence projection");
         let (status_output, _) = status(StatusArgs {
             run_id: run_id.to_string(),
             interval: "5s".to_string(),
@@ -524,8 +541,9 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
 
         assert!(compact_diagnosis["root_cause"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("private evidence upload")
-                && (message.contains("No such file") || message.contains("not found"))));
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
         assert!(
             compact_diagnosis["root_cause"]["details"]["lab_transport_attempt_receipt"]["error"]
                 ["causes"]
@@ -539,8 +557,9 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         );
         assert!(status_output["blocker"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("private evidence upload")
-                && (message.contains("No such file") || message.contains("not found"))));
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
         for receipt in [
             &compact_diagnosis["lab_transport_failure"]["receipt"],
             &full_diagnosis["lab_transport_failure"]["receipt"],
@@ -551,12 +570,22 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             assert_eq!(receipt["error"]["kind"], "not_found");
             assert!(receipt["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("private evidence upload")
-                    && (message.contains("No such file") || message.contains("not found"))));
+                .is_some_and(
+                    |message| message.contains("No such file") || message.contains("not found")
+                ));
+            assert!(receipt["error"]["context"]
+                .as_str()
+                .is_some_and(|context| context.contains("private evidence upload")
+                    && context.contains(missing_evidence.to_string_lossy().as_ref())
+                    && context.contains("[REDACTED]")));
             assert_eq!(receipt["retryable"], true);
             assert!(receipt["error"]["causes"]
                 .as_array()
                 .is_some_and(|causes| causes.len() <= 4));
+            assert!(receipt["error"]["context"]
+                .as_str()
+                .is_some_and(|context| context.len() <= 4 * 1024
+                    && context.contains(missing_evidence.to_string_lossy().as_ref())));
         }
         assert_eq!(
             compact_diagnosis["root_cause"]["class"],
@@ -564,8 +593,9 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         );
         assert!(compact_diagnosis["root_cause"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("private evidence upload")
-                && (message.contains("No such file") || message.contains("not found"))));
+            .is_some_and(
+                |message| message.contains("No such file") || message.contains("not found")
+            ));
         // Both compact and full diagnosis route through the same
         // `attach_diagnose_actionable` and carry their one remediation
         // exclusively under `_homeboy_actionable.next_actions`; there is no
@@ -585,6 +615,25 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
                 .expect("serialize command output")
                 .contains("status-fixture-secret"));
         }
+        let full_evidence_text = serde_json::to_string(&full_evidence).expect("serialize evidence");
+        assert!(
+            full_evidence_text.contains("No such file") || full_evidence_text.contains("not found")
+        );
+        assert!(full_evidence_text.contains(missing_evidence.to_string_lossy().as_ref()));
+        assert!(!full_evidence_text.contains("status-fixture-secret"));
+        let status_bytes = serde_json::to_vec(&status_output)
+            .expect("serialize default status")
+            .len();
+        let full_diagnosis_bytes = serde_json::to_vec(&full_diagnosis)
+            .expect("serialize full diagnosis")
+            .len();
+        let full_evidence_bytes = serde_json::to_vec(&full_evidence)
+            .expect("serialize full evidence")
+            .len();
+        assert!(status_bytes <= 16 * 1024, "status_bytes={status_bytes}");
+        eprintln!(
+            "long-context diagnostic output bytes: status={status_bytes}, full_diagnosis={full_diagnosis_bytes}, full_evidence={full_evidence_bytes}"
+        );
         assert!(!serde_json::to_string(&(record, aggregate))
             .expect("serialize durable evidence")
             .contains("status-fixture-secret"));
