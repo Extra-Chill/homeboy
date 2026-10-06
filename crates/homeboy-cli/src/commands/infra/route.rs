@@ -1082,10 +1082,11 @@ pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
             || matches!(preflight.input.runner, homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(_))))
         || (matches!(placement, homeboy::cli_surface::Placement::Auto)
             && preflight.selected_runner_id.is_none()
-            && matches!(
-                preflight.resource_admission,
-                homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
-            )
+            && (auto_cook_unavailable_lab_state(preflight).is_some()
+                || matches!(
+                    preflight.resource_admission,
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+                ))
             && !matches!(
                 preflight.fallback,
                 homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity

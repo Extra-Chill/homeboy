@@ -21,6 +21,12 @@ pub trait AgentTaskTerminalRecoveryProvider: Send + Sync {
     /// when the run has no terminal result.
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob>;
 
+    /// An exact durable cancellation can outlive its unstarted remote handoff.
+    /// Unknown records and other terminal outcomes do not authorize cancellation.
+    fn durable_run_is_cancelled(&self, _run_id: &str) -> bool {
+        false
+    }
+
     /// Classify a linked durable run for replacement evidence. `None` means
     /// the run cannot be resolved at all, which stays fail-closed.
     fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
@@ -62,6 +68,11 @@ pub(crate) fn recovered_terminal_agent_task_job(run_id: &str) -> Option<Recovere
 /// no provider can resolve the run.
 pub(crate) fn linked_durable_run_state(run_id: &str) -> Option<DaemonLinkedDurableRunState> {
     with_provider(|p| p.linked_durable_run_state(run_id))
+}
+
+/// Read canonical controller cancellation without requiring an aggregate result.
+pub fn durable_run_is_cancelled(run_id: &str) -> bool {
+    with_provider(|provider| provider.durable_run_is_cancelled(run_id))
 }
 
 /// Build a [`RecoveredTerminalJob`] from its parts. Used by the agent-task

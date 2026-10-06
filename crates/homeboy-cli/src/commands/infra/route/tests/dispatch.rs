@@ -3633,6 +3633,15 @@ fn cook_admission_placement_is_independent_of_wait_policy() {
         },
     );
     assert!(cook_requires_unmaterialized_admission(&automatic, &stale));
+    for admission in [
+        ResourceAdmissionDecision::NotRequired,
+        ResourceAdmissionDecision::Admitted,
+    ] {
+        let mut preview = stale.clone();
+        preview.resource_admission = admission;
+        assert!(cook_requires_unmaterialized_admission(&automatic, &preview),
+            "read-only preview resource policy must not authorize local fallback from a stale runner");
+    }
     let error = auto_cook_unavailable_lab_replay_error(
         &automatic,
         &stale,
