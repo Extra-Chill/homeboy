@@ -6713,6 +6713,30 @@ fn cook_workspace_path(value: &str) -> homeboy::core::Result<Option<PathBuf>> {
     )
 }
 
+/// Publish an already materialized destination before runtime sealing. Reuse
+/// Cook's repository and linked-worktree validators; unresolved destinations
+/// remain pending until the normal provisioning owner materializes them.
+pub(crate) fn existing_cook_caller_workspace(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<Option<Value>> {
+    let Some(destination) = args.dispatch.cwd.as_deref().or(args.to_worktree.as_deref()) else {
+        return Ok(None);
+    };
+    let Some(path) = cook_workspace_path(destination)? else {
+        return Ok(None);
+    };
+    let mut resolved = args.clone();
+    normalize_cook_repository_identity(&mut resolved)?;
+    validate_cook_destination_identity(&resolved, &path)?;
+    if let (Some(_), Some(handle)) = (&args.dispatch.cwd, &args.to_worktree) {
+        validate_cook_cwd_destination_identity(&path, handle)?;
+    }
+    Ok(Some(serde_json::json!({
+        "repository": resolved.dispatch.repo,
+        "working_directory": path,
+    })))
+}
+
 pub(crate) fn canonical_remote_identity(remote_url: &str) -> Option<String> {
     let remote_url = remote_url.trim();
     let (host, path) = if let Some((_, rest)) = remote_url.split_once("://") {
