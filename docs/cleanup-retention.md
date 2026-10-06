@@ -142,6 +142,10 @@ including failures. The terminal report identifies the policy, outcome,
 lifecycle owner, retained location, and `homeboy runner workspace prune
 <runner> --apply --min-age-hours 0` reclaim command.
 
+Staging recipes use only `delete_workspace_on_failure`, defaulting to `false`
+when omitted. The retired `preserve_workspace_on_failure` field is rejected;
+staging stores do not invert, migrate, or rewrite that old format.
+
 Detached, in-flight, and otherwise uncertain daemon ownership always
 relinquishes the local cleanup handle. Those paths remain fail-closed and are
 never treated as terminal deletion or debug-retention outcomes.
