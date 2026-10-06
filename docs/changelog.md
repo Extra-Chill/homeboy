@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.411.0] - 2026-10-06
+
+### Added
+- operator-attested recovery for dead remote generations
+
+### Changed
+- prune retired status flag absence assertions
+- prune retired composition key compatibility fixture
+- replace gate parity with evaluated wire oracles
+- synchronize foreground proof through lifecycle state
+- retire staging retention adapter and store migration
+- isolate runner-owned fixture identity
+- use canonical CLI fixtures in cancellation gates
+- bound native cancellation proof
+- reflect deferred cancellation failure
+- verify fanout readiness cache sharing
+
+### Fixed
+- keep the connected runner daemon resident
+- serialize cancellation with pending admission
+- share fanout readiness across processes
+- fence pending runner cancellation
+- root pending cancellation transport
+
 ## [0.410.0] - 2026-10-06
 
 ### Changed
