@@ -512,6 +512,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             ));
         let source_error = &record.metadata["pre_execution_failure"]["details"]["source_error"];
         assert_eq!(source_error["code"], "internal.io_error");
+        assert_eq!(source_error["retryable"], true);
         assert!(source_error["details"]["context"]
             .as_str()
             .is_some_and(|context| context.chars().count() > 512));
@@ -524,6 +525,11 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         );
         assert_eq!(
             source_error["details"]["error"],
+            "No such file or directory (os error 2)"
+        );
+        assert_eq!(source_error["causes"][0]["kind"], "not_found");
+        assert_eq!(
+            source_error["causes"][0]["message"],
             "No such file or directory (os error 2)"
         );
         assert!(!serde_json::to_string(&(record.clone(), aggregate.clone()))

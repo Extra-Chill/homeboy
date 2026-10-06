@@ -251,6 +251,12 @@ fn full_source_error_evidence(error: &Error) -> serde_json::Value {
                 "code": homeboy_error.code.as_str(),
                 "message": homeboy_redaction::redact_string(&homeboy_error.message),
                 "details": homeboy_redaction::redact_json(&homeboy_error.details),
+                "hints": homeboy_error
+                    .hints
+                    .iter()
+                    .map(|hint| homeboy_redaction::redact_string(&hint.message))
+                    .collect::<Vec<_>>(),
+                "retryable": homeboy_error.retryable,
             }));
         } else if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
             causes.push(serde_json::json!({
@@ -269,6 +275,12 @@ fn full_source_error_evidence(error: &Error) -> serde_json::Value {
         "code": error.code.as_str(),
         "message": homeboy_redaction::redact_string(&error.message),
         "details": homeboy_redaction::redact_json(&error.details),
+        "hints": error
+            .hints
+            .iter()
+            .map(|hint| homeboy_redaction::redact_string(&hint.message))
+            .collect::<Vec<_>>(),
+        "retryable": error.retryable,
         "causes": causes,
     })
 }
