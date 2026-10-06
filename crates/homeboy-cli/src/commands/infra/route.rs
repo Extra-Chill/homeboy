@@ -1183,8 +1183,11 @@ fn admit_unmaterialized_cook(
     } else {
         None
     };
+    let caller_workspace =
+        crate::commands::agent_task::run::existing_cook_caller_workspace(&resolved)?;
     let binding = staged_intent.as_ref().map(|staged| serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-binding/v1",
+        "caller_workspace": caller_workspace,
         "request_ref": request_ref,
         "candidate_policy": resolved.candidate_completion,
         "placement": {

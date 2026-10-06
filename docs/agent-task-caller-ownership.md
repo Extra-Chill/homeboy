@@ -10,6 +10,15 @@ Controller workspace resolution publishes the authoritative repository and
 checkout in the existing plan/run `caller_workspace` projection. This is kept
 separate from a runner's execution directory and persists across transport.
 An original run's caller association cannot be reassigned by a later update.
+Follow-up plans inherit that association and controller checkout across retries,
+including when the worker reads a separate baseline or scratch checkout.
+Queued Lab admissions publish a verified existing destination before execution
+capacity becomes available.
+
+An explicit `caller_workspace: null` declares pending checkout ownership. Cook
+admission markers also retain that pending intent. A maintenance job may carry
+the caller reference for notifications without claiming checkout ownership; such
+unscoped jobs are outside the ownership index and its owner bound.
 
 ```sh
 homeboy agent-task active-scope --context opaque-caller-reference

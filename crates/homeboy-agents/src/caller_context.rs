@@ -9,6 +9,18 @@ pub fn capture(context: Value) -> Result<Value> {
     )
 }
 
+/// A child execution keeps the controller-owned checkout and original caller,
+/// independently of the worker's execution directory or ambient shell owner.
+pub fn inherit_ownership(target: &mut Value, source: &Value) {
+    for field in ["client_context", "caller_workspace"] {
+        if target.get(field).is_none() {
+            if let Some(value) = source.get(field) {
+                target[field] = value.clone();
+            }
+        }
+    }
+}
+
 pub fn capture_with(mut context: Value, caller: Option<&str>) -> Result<Value> {
     if context.is_null() {
         context = json!({});

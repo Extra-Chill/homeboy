@@ -8112,6 +8112,13 @@ impl CandidateAdoptionFixture {
         options.finalization.no_finalize = no_finalize;
         options.finalization.head = Some("fix/8058".to_string());
         options.ai_disclosure.ai_model = Some("openai/gpt-5.6-terra".to_string());
+        if let Ok(caller) = std::env::var("HOMEBOY_CALLER_CONTEXT") {
+            options.identity.initial_plan.metadata["client_context"] =
+                serde_json::json!({"caller_context": caller});
+            options.identity.initial_plan.metadata["caller_workspace"] = serde_json::json!({
+                "repository": "homeboy", "working_directory": target,
+            });
+        }
         super::super::persist_initial_recipe(&options).unwrap();
 
         let mut fixture = Self {
@@ -15277,6 +15284,48 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
         assert_eq!(adoption.candidate_sha, fixture.candidate);
         assert!(backend.body.contains("- **Model:** openai/gpt-5.6-terra"));
         assert!(backend.committed && backend.pushed && backend.created);
+    });
+}
+
+#[test]
+fn detached_review_follow_up_preserves_controller_ownership_after_ambient_caller_changes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        std::env::set_var("HOMEBOY_CALLER_CONTEXT", "original-review-caller");
+        let fixture = CandidateAdoptionFixture::new("ownership-follow-up", 2, 1, true, None);
+        std::env::set_var("HOMEBOY_CALLER_CONTEXT", "worker-review-caller");
+        let mut backend = CaptureBackend::default();
+        let result = fixture
+            .adopt(
+                |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
+                Arc::new(UnusedExecutor),
+                &mut backend,
+            )
+            .unwrap();
+        let follow_up = result.value.latest_run_id.as_deref().unwrap();
+        assert_ne!(follow_up, fixture.run_id);
+        let record = agent_task_lifecycle::exact_record(follow_up).unwrap();
+        assert_eq!(
+            record.metadata["client_context"]["caller_context"],
+            "original-review-caller"
+        );
+        assert_eq!(
+            record.metadata["caller_workspace"]["working_directory"],
+            serde_json::json!(fixture.target)
+        );
+        let scope = homeboy_core::observation::ObservationStore::open_readonly()
+            .unwrap()
+            .active_task_scope("original-review-caller")
+            .unwrap();
+        assert_eq!(scope["pending_run_ids"], serde_json::json!([]));
+        assert_eq!(
+            scope["workspaces"][0]["working_directory"],
+            serde_json::json!(fixture.target)
+        );
+        assert_eq!(
+            scope["workspaces"][0]["run_ids"],
+            serde_json::json!([follow_up])
+        );
+        std::env::remove_var("HOMEBOY_CALLER_CONTEXT");
     });
 }
 

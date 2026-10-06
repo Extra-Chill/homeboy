@@ -20,6 +20,21 @@ pub const MAX_RUN_PAGE_LIMIT: i64 = 1000;
 /// answer. A wrong answer is worse than a loud one.
 pub const MAX_EXHAUSTIVE_RUN_ROWS: i64 = 100_000;
 
+const ACTIVE_TASK_SCOPE_QUERY: &str = r#"
+    SELECT id,
+           json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
+           json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory')
+    FROM runs INDEXED BY idx_agent_task_active_scope
+    WHERE kind = 'agent-task'
+      AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+      AND json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context') = ?1
+      AND (json_type(metadata_json, '$.agent_task_run.metadata.caller_workspace') IS NOT NULL
+           OR json_type(metadata_json, '$.agent_task_run.metadata.detached_cook_handoff') = 'object'
+           OR json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'
+           OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text')
+    LIMIT 33
+"#;
+
 /// Turn a probe read of `limit + 1` rows into a page plus its resume position.
 ///
 /// The extra row is the whole mechanism: it is the difference between "the
@@ -1307,16 +1322,10 @@ impl ObservationStore {
     /// historical rows. Lifecycle writes maintain this covering index atomically.
     pub fn active_task_scope(&self, caller_context: &str) -> Result<serde_json::Value> {
         validate_required("caller_context", caller_context)?;
-        let mut statement = self.connection.prepare(
-            "SELECT id, \
-             json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'), \
-             json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory') \
-             FROM runs INDEXED BY idx_agent_task_active_scope \
-             WHERE kind = 'agent-task' \
-             AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running') \
-             AND json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context') = ?1 \
-             LIMIT 33"
-        ).map_err(sqlite_error("prepare indexed active task scope"))?;
+        let mut statement = self
+            .connection
+            .prepare(ACTIVE_TASK_SCOPE_QUERY)
+            .map_err(sqlite_error("prepare indexed active task scope"))?;
         let rows = statement
             .query_map(params![caller_context], |row| {
                 Ok((
@@ -2218,7 +2227,10 @@ mod tests {
             let scope = store.active_task_scope("caller").unwrap();
             assert_eq!(scope["workspaces"][0]["repository"], "repo-A");
             assert_eq!(scope["workspaces"].as_array().unwrap().len(), 1);
-            let mut explain = store.connection.prepare("EXPLAIN QUERY PLAN SELECT id FROM runs INDEXED BY idx_agent_task_active_scope WHERE kind='agent-task' AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued','running') AND json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context')=?1 LIMIT 33").unwrap();
+            let mut explain = store
+                .connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {ACTIVE_TASK_SCOPE_QUERY}"))
+                .unwrap();
             let details = explain
                 .query_map(params!["caller"], |row| row.get::<_, String>(3))
                 .unwrap()
@@ -2250,6 +2262,45 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .is_empty());
+        });
+    }
+
+    #[test]
+    fn active_scope_excludes_unscoped_maintenance_before_the_owner_bound() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            for number in 0..100 {
+                let mut maintenance =
+                    scoped_run(&format!("maintenance-{number}"), "caller", "queued", None);
+                maintenance.metadata_json["agent_task_run"]["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("caller_workspace");
+                store.upsert_imported_run(&maintenance).unwrap();
+            }
+            store
+                .upsert_imported_run(&scoped_run("owner", "caller", "running", Some("repo")))
+                .unwrap();
+            let scope = store.active_task_scope("caller").unwrap();
+            assert_eq!(scope["pending_run_ids"], serde_json::json!([]));
+            assert_eq!(
+                scope["workspaces"][0]["run_ids"],
+                serde_json::json!(["owner"])
+            );
+            let mut pending_cook = scoped_run("pending-cook", "caller", "queued", None);
+            let metadata = pending_cook.metadata_json["agent_task_run"]["metadata"]
+                .as_object_mut()
+                .unwrap();
+            metadata.remove("caller_workspace");
+            metadata.insert(
+                "detached_cook_handoff".into(),
+                serde_json::json!({"state": "pending"}),
+            );
+            store.upsert_imported_run(&pending_cook).unwrap();
+            assert_eq!(
+                store.active_task_scope("caller").unwrap()["pending_run_ids"],
+                serde_json::json!(["pending-cook"])
+            );
         });
     }
 
