@@ -513,31 +513,31 @@ pub(crate) fn is_transient_lock_error(error: &rusqlite::Error) -> bool {
     }
 }
 
-/// Runs a SQLite write closure with bounded exponential backoff, retrying only
-/// when the failure is a transient "database is locked"/"database is busy"
-/// condition. Genuine, persistent errors surface immediately, and the lock
-/// error is surfaced with context if every attempt is exhausted.
+/// Runs a SQLite write closure once. Writable connections already have a
+/// bounded native SQLite busy handler; layering operation retries over that
+/// handler would multiply the end-to-end contention budget. Maintenance paths
+/// with zero-timeout connections use `execute_with_retry_inner` explicitly.
 pub(crate) fn execute_with_retry<T>(
     context: impl Into<String>,
-    mut op: impl FnMut() -> rusqlite::Result<T>,
+    op: impl FnOnce() -> rusqlite::Result<T>,
 ) -> Result<T> {
-    execute_with_retry_inner(
-        context.into(),
-        SQLITE_WRITE_MAX_ATTEMPTS,
-        SQLITE_WRITE_BASE_BACKOFF_MS,
-        |attempt, backoff_ms| {
-            if backoff_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-            }
-            let _ = attempt;
-        },
-        &mut op,
-    )
+    let context = context.into();
+    match op() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let detail = if is_transient_lock_error(&error) {
+                format!("{context} (writer contention budget exhausted)")
+            } else {
+                context
+            };
+            Err(sqlite_error(detail)(error))
+        }
+    }
 }
 
-/// Backoff-injectable core so the retry policy can be unit-tested without
-/// sleeping. `sleep` is invoked with the upcoming attempt index and the
-/// computed backoff (ms) before each retry.
+/// Backoff-injectable retry core for zero-timeout maintenance paths. `sleep`
+/// is invoked with the upcoming attempt index and computed backoff (ms) before
+/// each retry; tests can inject a no-op sleeper.
 pub(crate) fn execute_with_retry_inner<T>(
     context: String,
     max_attempts: u32,
@@ -602,5 +602,51 @@ mod control_plane_admission_tests {
         assert!(error.message.contains("begin control-plane test admission"));
         assert!(error.message.contains("writer admission exhausted"));
         assert!(error.message.contains("10000ms budget"));
+    }
+
+    #[test]
+    fn retry_caller_uses_one_native_contention_budget_without_partial_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retry-budget.sqlite");
+        let store = super::ObservationStore::open_initialized_at(&path).unwrap();
+        store
+            .connection
+            .execute_batch("CREATE TABLE retry_budget_effect (id INTEGER PRIMARY KEY)")
+            .unwrap();
+
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(
+                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+            );
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+
+        let started = std::time::Instant::now();
+        let error = execute_with_retry("insert retry-budget effect", || {
+            store
+                .connection
+                .execute("INSERT INTO retry_budget_effect DEFAULT VALUES", [])
+        })
+        .expect_err("held writer must exhaust the single native busy timeout");
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+
+        println!(
+            "retry caller contention elapsed_ms={} diagnostic={}",
+            elapsed.as_millis(),
+            error.message
+        );
+        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
+        assert!(elapsed < SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(2));
+        assert!(error.message.contains("writer contention budget exhausted"));
+        let effects: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM retry_budget_effect", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(effects, 0, "exhaustion must not leave a partial effect");
     }
 }
