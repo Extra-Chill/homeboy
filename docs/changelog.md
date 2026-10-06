@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.408.1] - 2026-10-06
+
+### Changed
+- one RunStatus→control-plane state mapping; handed-off and stale runs are terminal
+
 ## [0.408.0] - 2026-10-06
 
 ### Added
