@@ -58,12 +58,6 @@ const HELPERS: &[RuntimeHelper] = &[
         env_var: WRITE_TEST_RESULTS_ENV,
     },
     RuntimeHelper {
-        id: "emit-lint-finding",
-        filename: "emit-lint-finding.sh",
-        content: assets::EMIT_LINT_FINDING_SH,
-        env_var: EMIT_LINT_FINDING_ENV,
-    },
-    RuntimeHelper {
         id: "emit-test-failure",
         filename: "emit-test-failure.sh",
         content: assets::EMIT_TEST_FAILURE_SH,
