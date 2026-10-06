@@ -292,6 +292,10 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
         AgentTaskCommand::PlacementUpdate(args) => run::placement_update(args),
         AgentTaskCommand::Cook(mut cook_args) => {
+            cook_args.dispatch.core.client_context =
+                homeboy::agents::agent_task_dispatch_plan::capture_client_context_spec(
+                    cook_args.dispatch.core.client_context.as_deref(),
+                )?;
             // Consume a redirected prompt before routing can hand Cook to another
             // process. The captured value, rather than stdin, is then the input
             // every preview and execution path compiles.
@@ -349,6 +353,22 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             } else {
                 status::list_runs_page(agent_task_service::AgentTaskDiscoveryFilter::All, list_args)
             }
+        }
+        AgentTaskCommand::ActiveScope(scope) => {
+            let path = homeboy::core::paths::observation_db()?;
+            let exists = path.try_exists().map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("active scope store".into()),
+                )
+            })?;
+            let value = if exists {
+                homeboy::core::observation::ObservationStore::open_readonly_at(path)?
+                    .active_task_scope(&scope.context)?
+            } else {
+                serde_json::json!({"schema": "homeboy/agent-task-active-scope/v1", "caller_context": scope.context, "workspaces": [], "pending_run_ids": []})
+            };
+            Ok((value, 0))
         }
         AgentTaskCommand::Active(active_args) => {
             if active_args.reconcile {

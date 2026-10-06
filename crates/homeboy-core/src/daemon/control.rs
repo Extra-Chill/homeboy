@@ -1562,6 +1562,12 @@ fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryRece
 /// process publishes its address (or a timeout elapses).
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
+    // Once admission is generation-routed, startup must use that same route.
+    // The router's original store may still have a live draining owner; its
+    // process and owner.lock are not evidence about the selected generation.
+    if !generation_store::bypassed() && generation_store::admitting()?.is_some() {
+        return ensure_running_with_idle_timeout(addr, 0);
+    }
     let _lock = acquire_daemon_operation_lock()?;
     start_or_return_live_unlocked_with_idle_timeout(addr, &uuid::Uuid::new_v4().to_string(), 0)
 }
@@ -1569,7 +1575,18 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// Return a live daemon under the lifecycle lock, or start one when its lease
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
-    if let Some(endpoint) = generation_store::admitting()? {
+    ensure_running_with_idle_timeout(addr, super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)
+}
+
+fn ensure_running_with_idle_timeout(
+    addr: &str,
+    default_idle_timeout: u64,
+) -> Result<DaemonStartResult> {
+    if let Some(endpoint) = (!generation_store::bypassed())
+        .then(generation_store::admitting)
+        .transpose()?
+        .flatten()
+    {
         let state_path = Path::new(&endpoint.state_dir).join("state.json");
         let validation = super::validate_lease_file(&state_path)?;
         if validation.fresh && validation.running && validation.reachable {
@@ -1581,13 +1598,37 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
                 lease_id: state.lease_id,
             });
         }
+        if validation.invalid_pid.is_some()
+            || (validation.state.is_none()
+                && validation.stale_reason.is_some()
+                && state_path.exists())
+        {
+            return Err(super::corrupt_daemon_lease_error(
+                &state_path,
+                validation.stale_reason,
+            ));
+        }
+        if !validation.running && super::try_acquire_daemon_owner_lock_at(&state_path)?.is_none() {
+            let mut error = Error::internal_unexpected(
+                "selected daemon generation has a live or starting owner without a valid lease; refusing replacement",
+            );
+            error.details = serde_json::json!({
+                "classification": "daemon_generation_owner_unverified",
+                "state_path": state_path,
+                "lease_id": endpoint.lease_id,
+            });
+            return Err(error);
+        }
+        // A dead or missing admission lease is still generation-routed. Start
+        // a verified successor in its own store instead of falling through to
+        // root-store cleanup, which can conflict with (or retire) a draining
+        // predecessor unrelated to this admission. Existing job custody stays
+        // registered until its own exact recovery proves it can be retired.
+        return start_admission_generation(addr, validation.state.as_ref(), default_idle_timeout);
     }
     let status = read_status()?;
     if status.running && !status.fresh {
-        return rotate_stale_generation(
-            addr,
-            status.state.as_ref().expect("running lease has state"),
-        );
+        return start_admission_generation(addr, status.state.as_ref(), default_idle_timeout);
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
 }
@@ -1595,10 +1636,16 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 /// Start B in an isolated state directory, then publish it as the admission
 /// owner. A remains untouched: its lease, job store, and endpoint continue to
 /// own all work admitted before this atomic registry update.
-fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<DaemonStartResult> {
+fn start_admission_generation(
+    addr: &str,
+    current: Option<&super::DaemonState>,
+    default_idle_timeout: u64,
+) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
-    generation_store::seed(current)?;
+    if let Some(current) = current {
+        generation_store::seed(current)?;
+    }
     if let Some(endpoint) = generation_store::admitting()? {
         let validation =
             super::validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))?;
@@ -1645,8 +1692,7 @@ fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<D
         .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
         .env(
             super::lifetime::IDLE_TIMEOUT_ENV,
-            super::lifetime::launch_idle_timeout(super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)?
-                .to_string(),
+            super::lifetime::launch_idle_timeout(default_idle_timeout)?.to_string(),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::null())

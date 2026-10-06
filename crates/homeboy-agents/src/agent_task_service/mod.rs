@@ -49,6 +49,7 @@ pub use cook_budget::*;
 #[cfg(test)]
 pub(crate) use cook_job::finalize_detached_cook_attempt;
 pub use cook_job::*;
+pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;
 pub use cook_pre_execution::{

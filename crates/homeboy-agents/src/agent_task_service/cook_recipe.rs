@@ -333,6 +333,27 @@ impl CookRecipeStore {
         record_recipe_attempt_in_store(self, cook_id, attempt, run_id, plan)
     }
 
+    /// Append a lifecycle retry of `source_run_id`, recording that lineage.
+    pub(crate) fn record_recipe_retry_attempt(
+        &self,
+        cook_id: &str,
+        attempt: u32,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        source_run_id: &str,
+    ) -> Result<AgentTaskCookRecipe> {
+        record_recipe_attempt_with_lineage_in_store(
+            self,
+            cook_id,
+            attempt,
+            run_id,
+            plan,
+            Some(super::cook_lineage::CookAttemptLineage::retry(
+                source_run_id,
+            )),
+        )
+    }
+
     pub fn record_recipe_attempt_replacement(
         &self,
         cook_id: &str,
@@ -553,6 +574,12 @@ pub struct AgentTaskCookRecipeAttempt {
     pub attempt: u32,
     pub run_id: String,
     pub plan: AgentTaskPlan,
+    /// The attempt this one continues, recorded in the same write that
+    /// appends it (#15567). Absent on an initial attempt and on attempts
+    /// recorded before lineage was persisted; read it through
+    /// `cook_lineage::recipe_attempt_lineage`, which derives those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<super::cook_lineage::CookAttemptLineage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -866,6 +893,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             attempt: 1,
             run_id: options.identity.initial_run_id.clone(),
             plan: options.identity.initial_plan.clone(),
+            lineage: None,
         }],
         promotion_transport: serde_json::json!({
             "provider_command": options.provider_transport.provider_command,
@@ -1348,6 +1376,7 @@ fn initial_attempt_inputs_match(
     attempt_inputs_match(&left, &right)
 }
 
+#[cfg(test)]
 pub(crate) fn record_recipe_attempt(
     cook_id: &str,
     attempt: u32,
@@ -1355,6 +1384,16 @@ pub(crate) fn record_recipe_attempt(
     plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
+}
+
+pub(crate) fn record_recipe_retry_attempt(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    source_run_id: &str,
+) -> Result<AgentTaskCookRecipe> {
+    default_store()?.record_recipe_retry_attempt(cook_id, attempt, run_id, plan, source_run_id)
 }
 
 pub(crate) fn record_recipe_attempt_replacement_with_plan(
@@ -1371,6 +1410,9 @@ pub(crate) fn record_recipe_attempt_replacement_with_plan(
     )
 }
 
+/// Append an attempt. A remediation's lineage is read from the provenance its
+/// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
+/// lifecycle retry, whose plan says nothing about where it came from.
 pub fn record_recipe_attempt_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
@@ -1378,20 +1420,48 @@ pub fn record_recipe_attempt_in_store(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<AgentTaskCookRecipe> {
+    record_recipe_attempt_with_lineage_in_store(
+        store,
+        cook_id,
+        attempt,
+        run_id,
+        plan,
+        super::cook_lineage::plan_lineage(plan),
+    )
+}
+
+/// The one writer of appended-attempt lineage (#15567): the edge lands in the
+/// same recipe write as the attempt, and `validate_recipe` checks it.
+fn record_recipe_attempt_with_lineage_in_store(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+    lineage: Option<super::cook_lineage::CookAttemptLineage>,
+) -> Result<AgentTaskCookRecipe> {
     let mut recipe = store.load_recipe(cook_id)?;
     let candidate = AgentTaskCookRecipeAttempt {
         attempt,
         run_id: run_id.to_string(),
         plan: plan.clone(),
+        lineage,
     };
     if let Some(existing) = recipe
         .attempts
         .iter()
         .find(|existing| existing.attempt == attempt || existing.run_id == run_id)
     {
+        // An attempt bound by an older Homeboy has no lineage record; it is
+        // still the same attempt when everything else matches. Replaying it
+        // must converge, not fail as a conflicting binding.
+        let mut comparable = candidate.clone();
+        if existing.lineage.is_none() {
+            comparable.lineage = None;
+        }
         let existing_value = serde_json::to_value(existing)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let candidate_value = serde_json::to_value(&candidate)
+        let candidate_value = serde_json::to_value(&comparable)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         if existing_value == candidate_value {
             return Ok(recipe);
@@ -1510,6 +1580,9 @@ fn record_recipe_attempt_replacement_in_store_with_plan(
         attempt: replaced.attempt,
         run_id: replacement_run_id.to_string(),
         plan: replacement_plan.clone(),
+        lineage: Some(super::cook_lineage::CookAttemptLineage::replacement(
+            replaced_run_id,
+        )),
     });
     recipe.sensitive_mappings = canonical_sensitive_mappings(&recipe.attempts)?;
     validate_recipe(&recipe)?;
@@ -3334,7 +3407,7 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
     {
         return Err(Error::validation_invalid_argument("cook_recipe", "cook recipe requires cook_id, at least one exact attempt, and pinned runtime generation", None, None));
     }
-    for attempt in &recipe.attempts {
+    for (index, attempt) in recipe.attempts.iter().enumerate() {
         if attempt.run_id.is_empty() || attempt.plan.tasks.is_empty() {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
@@ -3342,6 +3415,27 @@ fn validate_recipe(recipe: &AgentTaskCookRecipe) -> Result<()> {
                 Some(attempt.run_id.clone()),
                 None,
             ));
+        }
+        // A lineage edge points back into this recipe, at an attempt recorded
+        // before this one. Anything else is a dangling or cyclic lineage.
+        if let Some(lineage) = &attempt.lineage {
+            let source = recipe.attempts[..index]
+                .iter()
+                .find(|earlier| earlier.run_id == lineage.source_run_id);
+            let ordered = source.is_some_and(|source| match lineage.kind {
+                super::cook_lineage::CookLineageKind::Replacement => {
+                    source.attempt == attempt.attempt
+                }
+                _ => source.attempt < attempt.attempt,
+            });
+            if !ordered {
+                return Err(Error::validation_invalid_argument(
+                    "cook_recipe.attempts.lineage",
+                    "cook attempt lineage must name an earlier attempt of the same recipe",
+                    Some(attempt.run_id.clone()),
+                    None,
+                ));
+            }
         }
     }
     if recipe
@@ -3544,6 +3638,7 @@ mod tests {
             schema: COOK_RECIPE_SCHEMA.to_string(),
             cook_id: "cook".to_string(),
             attempts: vec![AgentTaskCookRecipeAttempt {
+                lineage: None,
                 attempt: 1,
                 run_id: "run".to_string(),
                 plan: plan.clone(),
@@ -3613,6 +3708,127 @@ mod tests {
             "gate_results": gate_results,
             "operator_notification": { "status": "completed", "message": "fixture" }
         })
+    }
+
+    fn lineage_store() -> (
+        homeboy_core::test_support::HermeticTestContext,
+        CookRecipeStore,
+        AgentTaskPlan,
+    ) {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let options = reconstruct_options(&recipe()).expect("recipe options");
+        store
+            .persist_initial_recipe(&options)
+            .expect("initial recipe");
+        (context, store, options.identity.initial_plan)
+    }
+
+    /// #15567: a lifecycle retry's plan says nothing about its source, so the
+    /// writer records it explicitly, in the same write as the attempt.
+    #[test]
+    fn a_retry_attempt_is_written_with_its_lineage() {
+        let (_context, store, plan) = lineage_store();
+        let recipe = store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .expect("retry attempt");
+        assert_eq!(
+            recipe.attempts[1].lineage,
+            Some(super::super::cook_lineage::CookAttemptLineage::retry("run"))
+        );
+        // Durable, not just returned.
+        assert_eq!(
+            store.load_recipe("cook").unwrap().attempts[1].lineage,
+            recipe.attempts[1].lineage
+        );
+    }
+
+    #[test]
+    fn a_gate_fix_attempt_is_written_with_its_provenance_lineage() {
+        let (_context, store, mut plan) = lineage_store();
+        plan.tasks[0].inputs = serde_json::json!({ "cook_loop": {
+            "review_form_required": false,
+            "artifact_provenance": {
+                "source_run_id": "run",
+                "source_patch_artifact_sha256": "abc",
+            },
+        }});
+        let recipe = store
+            .record_recipe_attempt("cook", 2, "run-2", &plan)
+            .expect("gate-fix attempt");
+        let lineage = recipe.attempts[1]
+            .lineage
+            .clone()
+            .expect("lineage recorded");
+        assert_eq!(lineage.source_run_id, "run");
+        assert_eq!(
+            lineage.kind,
+            super::super::cook_lineage::CookLineageKind::GateFix
+        );
+        assert_eq!(lineage.source_patch_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn a_replacement_is_written_with_its_lineage() {
+        let (_context, store, plan) = lineage_store();
+        store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .unwrap();
+        let recipe = store
+            .record_recipe_attempt_replacement("cook", "run-2", "run-2b")
+            .expect("replacement");
+        assert_eq!(
+            recipe.attempts[2].lineage,
+            Some(super::super::cook_lineage::CookAttemptLineage::replacement(
+                "run-2"
+            ))
+        );
+    }
+
+    /// An attempt bound by an older Homeboy has no lineage. Replaying the same
+    /// binding with lineage must converge rather than conflict.
+    #[test]
+    fn replaying_a_legacy_binding_with_lineage_converges() {
+        let (_context, store, plan) = lineage_store();
+        store
+            .record_recipe_attempt("cook", 2, "run-2", &plan)
+            .unwrap();
+        assert_eq!(store.load_recipe("cook").unwrap().attempts[1].lineage, None);
+        store
+            .record_recipe_retry_attempt("cook", 2, "run-2", &plan, "run")
+            .expect("legacy binding replays");
+    }
+
+    #[test]
+    fn lineage_must_name_an_earlier_attempt_of_the_same_recipe() {
+        let mut dangling = recipe();
+        let mut second = dangling.attempts[0].clone();
+        second.attempt = 2;
+        second.run_id = "run-2".to_string();
+        second.lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry(
+            "elsewhere",
+        ));
+        dangling.attempts.push(second.clone());
+        assert!(validate_recipe(&dangling)
+            .unwrap_err()
+            .to_string()
+            .contains("must name an earlier attempt"));
+
+        let mut forward = recipe();
+        forward.attempts[0].lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry(
+            "run-2",
+        ));
+        second.lineage = None;
+        forward.attempts.push(second.clone());
+        assert!(
+            validate_recipe(&forward).is_err(),
+            "edge to a later attempt"
+        );
+
+        let mut valid = recipe();
+        second.lineage = Some(super::super::cook_lineage::CookAttemptLineage::retry("run"));
+        valid.attempts.push(second);
+        validate_recipe(&valid).expect("edge to an earlier attempt is valid");
     }
 
     #[test]
@@ -5721,6 +5937,7 @@ mod tests {
         let mut replacement = previous.clone();
         replacement.finalization["title"] = serde_json::json!("corrected");
         replacement.attempts.push(AgentTaskCookRecipeAttempt {
+            lineage: None,
             attempt: 2,
             run_id: "run-2".to_string(),
             plan: previous.attempts[0].plan.clone(),

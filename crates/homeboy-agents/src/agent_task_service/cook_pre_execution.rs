@@ -1109,6 +1109,7 @@ mod tests {
             schema: COOK_RECIPE_SCHEMA.to_string(),
             cook_id: cook_id.to_string(),
             attempts: vec![AgentTaskCookRecipeAttempt {
+                lineage: None,
                 attempt: 1,
                 run_id: run_id.to_string(),
                 plan: plan.clone(),

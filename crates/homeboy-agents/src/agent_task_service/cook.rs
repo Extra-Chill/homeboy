@@ -563,7 +563,13 @@ fn claim_pre_artifact_interruption_retry_with_stores(
                     plan,
                 )?;
             } else {
-                recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+                recipe_store.record_recipe_retry_attempt(
+                    cook_id,
+                    next_attempt,
+                    &next_run_id,
+                    plan,
+                    run_id,
+                )?;
             }
             lifecycle_store.complete_cook_operation(
                 run_id,
@@ -4358,7 +4364,7 @@ pub(crate) fn dispatch_cook_follow_up(
     }
     let recipe = recipe_store.load_recipe(cook_id)?;
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
-        super::cook_lineage::plan_lineage(&recipe_attempt.plan)
+        super::cook_lineage::recipe_attempt_lineage(recipe_attempt, None)
             .is_some_and(|lineage| lineage.source_run_id == source_run_id)
     });
     let replay = related_attempts
@@ -4383,7 +4389,7 @@ pub(crate) fn dispatch_cook_follow_up(
     if replay.is_none() {
         if let Some(existing_run_id) = existing_candidate_remediation(
             related_attempts.clone().filter_map(|recipe_attempt| {
-                super::cook_lineage::plan_lineage(&recipe_attempt.plan).map(|lineage| {
+                super::cook_lineage::recipe_attempt_lineage(recipe_attempt, None).map(|lineage| {
                     (
                         recipe_attempt.attempt,
                         recipe_attempt.run_id.as_str(),
@@ -4748,8 +4754,7 @@ fn existing_candidate_remediation<'a>(
         .into_iter()
         .filter(|(attempt, _, lineage)| {
             *attempt > source_attempt
-                && lineage.kind
-                    == (super::cook_lineage::CookLineageKind::Remediation { review_form: false })
+                && lineage.kind == super::cook_lineage::CookLineageKind::GateFix
                 && lineage.source_patch_sha256.as_deref() == Some(source_patch_sha256)
         })
         .max_by_key(|(attempt, _, _)| *attempt)
@@ -10679,6 +10684,14 @@ pub fn bind_materialized_cook_component_workspace(
     repository_root: &Path,
     selected_component_id: Option<&str>,
 ) -> Result<()> {
+    if plan.metadata["caller_workspace"].is_null() {
+        if let Some(repository) = plan.metadata["repo"].as_str() {
+            plan.metadata["caller_workspace"] = serde_json::json!({
+                "repository": repository,
+                "working_directory": repository_root,
+            });
+        }
+    }
     let Some(component_id) = selected_component_id
         .map(str::to_string)
         .or_else(|| cook_repository_identity_component_id(plan))
@@ -11586,7 +11599,11 @@ mod candidate_remediation_idempotence_tests {
     fn lineage(review_form: bool, sha: &str) -> CookAttemptLineage {
         CookAttemptLineage {
             source_run_id: "run-1".to_string(),
-            kind: CookLineageKind::Remediation { review_form },
+            kind: if review_form {
+                CookLineageKind::ReviewForm
+            } else {
+                CookLineageKind::GateFix
+            },
             source_patch_sha256: Some(sha.to_string()),
         }
     }

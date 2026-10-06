@@ -2275,8 +2275,8 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let session = read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
-    let state = status_session_state_until(session.as_ref(), deadline);
+    let (session, state) =
+        read_session_for_status_until_in_root(roots.config(), runner_id, deadline)?;
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
         stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;
@@ -2491,8 +2491,8 @@ pub struct RunnerReconcileStatusOutcome {
     pub retained_evidence_generation_count: usize,
 }
 
-/// Return the persisted controller-side session projection without reconnecting,
-/// probing a daemon, or reconciling generation state.
+/// Return the controller-side session projection with bounded liveness
+/// observation, without reconnecting or reconciling generation state.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
     persisted_status_until(
         runner_id,
@@ -2508,8 +2508,7 @@ pub fn persisted_status_until(
     deadline: std::time::Instant,
 ) -> Result<RunnerStatusReport> {
     let session_path = session_path(runner_id)?;
-    let session = read_session_for_status_until(runner_id, deadline)?;
-    let state = status_session_state_until(session.as_ref(), deadline);
+    let (session, state) = read_session_for_status_until(runner_id, deadline)?;
     Ok(RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: state == RunnerSessionState::Connected,
@@ -4513,8 +4512,8 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let session = read_session_for_status(&runner.id)?;
-        let connected = status_session_state(session.as_ref()) == RunnerSessionState::Connected;
+        let (session, state) = read_session_for_status(&runner.id)?;
+        let connected = state == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
                 Some(session) => match runner_jobs(&runner.id, session) {
