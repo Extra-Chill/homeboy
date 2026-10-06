@@ -4898,7 +4898,7 @@ mod tests {
             std::fs::write(
                 &git,
                 format!(
-                    "#!/bin/sh\nprintf '%s' \"$$\" > {}\nexec /bin/sleep 30\n",
+                    "#!/bin/sh\npid_file={}\nprintf '%s' \"$$\" > \"$pid_file.tmp\"\n/bin/mv \"$pid_file.tmp\" \"$pid_file\"\nexec /bin/sleep 30\n",
                     homeboy_engine_primitives::shell::quote_arg(&started.to_string_lossy())
                 ),
             )
