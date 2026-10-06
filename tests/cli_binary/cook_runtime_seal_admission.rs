@@ -76,6 +76,17 @@ fn local_cook_identity_is_discoverable_while_runtime_admission_is_locked() {
         panic!("Cook identity was not durable while runtime admission was locked");
     };
     let original_launcher = record.metadata["detached_cook_handoff"]["launcher_id"].clone();
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                serde_json::json!("2020-01-01T00:00:00Z");
+            true
+        })
+        .expect("runtime seal wait outlasts the fallback lease");
+    let expired = homeboy::agents::agent_task_lifecycle::expire_detached_cook_admission_in_store(
+        &store, cook_id,
+    )
+    .expect("reconcile the blocked real launcher");
     let mut replay = context.controller_runtime_command(TestBinary::HomeboyFixture);
     replay
         .args([
@@ -112,6 +123,10 @@ fn local_cook_identity_is_discoverable_while_runtime_admission_is_locked() {
     drop(lock);
 
     assert_eq!(unlock_result, 0, "release isolated admission lock");
+    assert!(
+        !expired,
+        "runtime lock contention must not expire a live Cook launcher"
+    );
     assert!(
         remained_blocked,
         "Cook should be held at the fake admission lock"

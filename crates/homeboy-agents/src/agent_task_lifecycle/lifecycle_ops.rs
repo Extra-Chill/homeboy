@@ -2239,8 +2239,10 @@ pub fn detached_cook_admission_is_live(
             detached_cook_deadline(record, "child_supervisor_deadline_at")
                 .is_some_and(|deadline| deadline > now)
         }),
-        Some("pre_supervisor") | None => detached_cook_deadline(record, "admission_deadline_at")
-            .is_some_and(|deadline| deadline > now),
+        // Runtime sealing can outlast the initial lease. Use the same observed
+        // launcher custody as reclaim, falling back to the deadline only when
+        // process identity cannot be established.
+        Some("pre_supervisor") | None => detached_cook_launcher_is_live(record, now),
         _ => false,
     }
 }
