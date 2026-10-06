@@ -477,13 +477,18 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             LabJobAcceptanceDisposition::NoJobAccepted,
             source,
         );
-        agent_task_lifecycle::record_pre_execution_failure(
+        assert_eq!(error.details["source_error"]["retryable"], true);
+        let persisted = agent_task_lifecycle::record_pre_execution_failure(
             run_id,
             &plan,
             "lab_handoff_preacceptance",
             &error,
         )
         .expect("persist Lab transport failure");
+        assert_eq!(
+            persisted.metadata["pre_execution_failure"]["details"]["source_error"]["retryable"],
+            true
+        );
 
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("durable failed record");
         let aggregate = test_lifecycle_store()
