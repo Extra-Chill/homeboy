@@ -68,14 +68,14 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@8194050639aeb51728460051884f183aa74eade5
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@e598b0f6c53407b2680517ff36802daabdc30947
     with:
       commands: review test
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
-      # #526 isolates compatible source artifacts; includes #522/#524 retry proof.
-      action-ref: 8194050639aeb51728460051884f183aa74eade5
+      # Released cache ownership repair, including native colored-retry coverage.
+      action-ref: e598b0f6c53407b2680517ff36802daabdc30947
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto

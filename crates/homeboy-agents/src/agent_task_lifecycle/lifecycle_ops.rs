@@ -3429,8 +3429,8 @@ where
                 }
             }
         }
-        // A runner re-submitting a retry must not erase the predecessor identity
-        // that makes the reservation discoverable through the indexed lookup.
+        // A runner re-submitting a retry must not erase its lineage or runtime
+        // recovery receipt. Both are durable authority/evidence, not plan state.
         for key in [
             "retry_of",
             "retried_from",
@@ -3438,6 +3438,7 @@ where
             "retries",
             "retry_requested_at",
             "retry_origin",
+            "controller_runtime_recovery",
         ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();

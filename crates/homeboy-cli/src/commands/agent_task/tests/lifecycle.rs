@@ -2377,6 +2377,37 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             "execution_only",
             "{report:#}"
         );
+
+        test_lifecycle_store()
+            .mutate_record(run_id, |record| {
+                record.metadata["runner_job_id"] = json!("still-owned-runner-job");
+                true
+            })
+            .expect("persist ambiguous provider ownership");
+        let retry_error = homeboy::agents::agent_task_service::retry(
+            run_id,
+            Some("cook-pre-execution-null-model-attempt-2"),
+            false,
+            false,
+        )
+        .expect_err("ambiguous zero-execution ownership cannot rebind to this runtime");
+        assert!(
+            retry_error
+                .to_string()
+                .contains("No retry identity was reserved"),
+            "{retry_error:?}"
+        );
+        assert_eq!(
+            homeboy::agents::agent_task_service::load_recipe(cook_id)
+                .expect("recipe remains unchanged")
+                .attempts
+                .len(),
+            1
+        );
+        assert!(!agent_task_lifecycle::run_record_exists_readonly(
+            "cook-pre-execution-null-model-attempt-2"
+        )
+        .expect("inspect unreserved attempt"));
     });
 }
 
