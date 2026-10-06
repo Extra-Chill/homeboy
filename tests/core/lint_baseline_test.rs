@@ -9,6 +9,18 @@ fn lint_finding(id: &str, category: &str, message: &str) -> HomeboyFinding {
         .build()
 }
 
+fn full_scope() -> lint_baseline::LintBaselineProvenance {
+    lint_baseline::LintBaselineProvenance::new(
+        Vec::new(),
+        vec!["lint".into()],
+        "full",
+        None,
+        false,
+        None,
+        None,
+    )
+}
+
 #[test]
 fn test_save_baseline() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -17,8 +29,9 @@ fn test_save_baseline() {
         lint_finding("b", "cat2", "m2"),
     ];
 
-    let saved = lint_baseline::save_baseline(dir.path(), "homeboy", &findings)
-        .expect("save baseline should succeed");
+    let saved =
+        lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &findings, &full_scope())
+            .expect("save baseline should succeed");
     assert!(saved.exists());
 }
 
@@ -26,9 +39,11 @@ fn test_save_baseline() {
 fn test_load_baseline() {
     let dir = tempfile::tempdir().expect("temp dir");
     let findings = vec![lint_finding("a", "cat1", "m1")];
-    lint_baseline::save_baseline(dir.path(), "homeboy", &findings).expect("baseline saved");
+    lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &findings, &full_scope())
+        .expect("baseline saved");
 
-    let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
+    let loaded = lint_baseline::load_baseline_for_scope(dir.path(), &full_scope())
+        .expect("baseline should load");
     assert_eq!(loaded.context_id, "homeboy");
     assert_eq!(loaded.item_count, 1);
 }
@@ -37,8 +52,10 @@ fn test_load_baseline() {
 fn test_compare() {
     let dir = tempfile::tempdir().expect("temp dir");
     let base = vec![lint_finding("a", "cat1", "m1")];
-    lint_baseline::save_baseline(dir.path(), "homeboy", &base).expect("baseline saved");
-    let loaded = lint_baseline::load_baseline(dir.path()).expect("baseline should load");
+    lint_baseline::save_baseline_for_scope(dir.path(), "homeboy", &base, &full_scope())
+        .expect("baseline saved");
+    let loaded = lint_baseline::load_baseline_for_scope(dir.path(), &full_scope())
+        .expect("baseline should load");
 
     let current = vec![base[0].clone(), lint_finding("b", "cat2", "m2")];
 
