@@ -4537,11 +4537,37 @@ pub fn record_cook_progress_with_activity_in_store(
             {
                 return true;
             }
+            let phase_started_at = previous
+                .as_ref()
+                .filter(|previous| previous["phase"].as_str() == Some(phase))
+                .and_then(|previous| previous["phase_started_at"].as_str())
+                .unwrap_or(&now)
+                .to_string();
+            let elapsed_ms = chrono::DateTime::parse_from_rfc3339(&now)
+                .ok()
+                .zip(chrono::DateTime::parse_from_rfc3339(&phase_started_at).ok())
+                .map(|(now, started)| now.signed_duration_since(started).num_milliseconds().max(0))
+                .unwrap_or_default() as u64;
+            let wait_owner = match phase {
+                phase if phase.starts_with("worktree") => "worktree_provider",
+                phase if phase.starts_with("runtime_promotion") => "runtime_promotion",
+                phase if phase.starts_with("queue") || phase == "queued" => "cook_queue",
+                "provider_start" | "retry" => "provider_execution",
+                phase if phase.contains("readiness") || phase == "provider_ready" => {
+                    "provider_readiness"
+                }
+                phase if phase.starts_with("provider") => "provider_execution",
+                phase if phase.starts_with("gate") || phase == "promotion" => "gate_or_promotion",
+                _ => "cook_controller",
+            };
             let mut progress = json!({
                 "phase": phase,
                 "attempt": attempt,
                 "detail": detail,
                 "updated_at": now,
+                "phase_started_at": phase_started_at,
+                "elapsed_ms": elapsed_ms,
+                "wait_owner": wait_owner,
             });
             match activity {
                 Some(activity) => {
