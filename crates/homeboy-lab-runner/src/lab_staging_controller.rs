@@ -6473,6 +6473,7 @@ mod tests {
                         schema: "homeboy/agent-task-cook-recipe/v1".to_string(),
                         cook_id: cook_id.to_string(),
                         attempts: vec![AgentTaskCookRecipeAttempt {
+                            lineage: None,
                             attempt: 1,
                             run_id: run_id.clone(),
                             plan,

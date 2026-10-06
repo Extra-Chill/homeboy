@@ -6248,6 +6248,8 @@ fn cook_ai_lineage_with_stores(
                 attempt,
                 run_id: successful_run_id.to_string(),
                 plan: agent_task_lifecycle::load_plan_in_store(lifecycle_store, successful_run_id)?,
+                // In-memory only: orders the lineage chain, never persisted.
+                lineage: None,
             });
             attempts.len() - 1
         }
