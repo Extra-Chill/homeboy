@@ -1,10 +1,10 @@
 use homeboy::core::test_support::{HermeticTestContext, TestBinary};
 use serde_json::Value;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct KillOnDrop(std::process::Child);
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl KillOnDrop {
     fn terminate_tree(&mut self) -> homeboy::core::process::ProcessTreeTermination {
         homeboy::core::process::terminate_process_tree(self.0.id())
@@ -12,7 +12,7 @@ impl KillOnDrop {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
@@ -21,14 +21,14 @@ impl Drop for KillOnDrop {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct HermeticSiblingDaemonGuard<'a> {
     context: &'a HermeticTestContext,
     state_dir: std::path::PathBuf,
     active: bool,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl HermeticSiblingDaemonGuard<'_> {
     fn stop(&mut self) {
         if !self.active {
@@ -46,7 +46,7 @@ impl HermeticSiblingDaemonGuard<'_> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for HermeticSiblingDaemonGuard<'_> {
     fn drop(&mut self) {
         self.stop();
@@ -183,21 +183,7 @@ fn linux_lock_file_holders(lock_path: &std::path::Path) -> serde_json::Value {
     serde_json::Value::Array(holders)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn linux_process_snapshot(pid: u32) -> serde_json::Value {
-    serde_json::json!({ "pid": pid, "available": false })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn linux_descendant_snapshot(root_pid: u32) -> serde_json::Value {
-    serde_json::json!({ "root_pid": root_pid, "available": false })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn linux_lock_file_holders(_lock_path: &std::path::Path) -> serde_json::Value {
-    serde_json::json!({ "available": false })
-}
-
+#[cfg(target_os = "linux")]
 fn write_same_child_evidence(name: &str, value: &serde_json::Value) {
     let Some(directory) = std::env::var_os("HOMEBOY_SAME_CHILD_EVIDENCE_DIR") else {
         return;
@@ -587,7 +573,7 @@ fn pressured_public_continuation_preflight_bypasses_startup_resource_admission()
     assert!(!context.data_dir().join("agent-task-cooks").exists());
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remains_live() {
     use homeboy::agents::agent_task_batch::{
