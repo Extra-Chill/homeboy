@@ -6384,8 +6384,15 @@ fn retry_descends_from_recipe(
             ));
         }
         // Both retries and remediations are lineage edges (#15567).
-        let Some(parent) = super::cook_lineage::lineage_parent_in_store(lifecycle_store, &current)?
-        else {
+        let parent = match attempts.iter().find(|attempt| attempt.run_id == current) {
+            Some(attempt) => {
+                super::cook_lineage::recipe_attempt_lineage(attempt).map(|edge| edge.source_run_id)
+            }
+            None => {
+                super::cook_lineage::lifecycle_retry_parent_in_store(lifecycle_store, &current)?
+            }
+        };
+        let Some(parent) = parent else {
             return Ok(false);
         };
         if recipe_runs.contains(parent.as_str()) {

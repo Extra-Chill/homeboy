@@ -10796,11 +10796,12 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         let options = retryable_pre_provider_cook("cook-retry-terminal-success", 2);
         let successor_run_id =
             agent_task_lifecycle::cook_attempt_run_id(&options.identity.cook_id, 2);
-        super::super::record_recipe_attempt(
+        super::super::record_recipe_retry_attempt(
             &options.identity.cook_id,
             2,
             &successor_run_id,
             &options.identity.initial_plan,
+            &options.identity.initial_run_id,
         )
         .expect("reserve retry in recipe");
         agent_task_lifecycle::retry(&options.identity.initial_run_id, Some(&successor_run_id))
@@ -20051,6 +20052,171 @@ fn cook_follow_up_store_boundary_accepts_local_execution_and_rejects_split_roots
     assert!(split_root_error
         .to_string()
         .contains("recipe and lifecycle stores must share one data root"));
+}
+
+#[test]
+fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_twin() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
+        let recipes = CookRecipeStore::new(roots.clone());
+        let lifecycle = AgentTaskLifecycleStore::new(roots);
+        let mut options =
+            batch_cook_options("intent-crash", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.provider_transport.attempt_dispatcher = None;
+        let source = options.identity.initial_run_id.clone();
+        recipes.persist_initial_recipe(&options).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.test"],
+        ] {
+            homeboy_core::test_support::run_git_fixture_command(workspace.path(), &args);
+        }
+        std::fs::write(workspace.path().join("tracked"), "base\n").unwrap();
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["add", "."]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["commit", "-qm", "base"],
+        );
+        let head = git_output(workspace.path(), &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(workspace.path().join("tracked"), "candidate\n").unwrap();
+        let patch = Command::new("git")
+            .args(["diff", "--binary", "HEAD"])
+            .current_dir(workspace.path())
+            .output()
+            .unwrap()
+            .stdout;
+        let artifact = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(artifact.path(), &patch).unwrap();
+        let digest = homeboy_engine_primitives::content_hash::sha256_hex(&patch);
+        let promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+            "source":{"kind":"aggregate","task_id":options.identity.initial_plan.tasks[0].task_id,"run_id":source},
+            "to_worktree":"fixture@target", "target":{"worktree":"fixture@target","head":head},
+            "patch_artifact":{"id":"candidate","kind":"patch","path":artifact.path(),"sha256":digest},
+            "changed_files":["tracked"],"command_evidence":[],"deterministic_gates":[],"gate_results":[],
+            "provenance":{"worktree_path":workspace.path()},"operator_notification":{"status":"blocked","message":"red"}
+        })).unwrap();
+        let mut request = options.identity.initial_plan.tasks[0].clone();
+        request.task_id = "bound-gate-fix".into();
+        request.instructions = "repair the captured candidate".into();
+        request.policy.grant_workspace_read_tool();
+        request.expected_artifacts.clear();
+        request.artifact_declarations.clear();
+        request.inputs = serde_json::json!({"cook_loop":{"review_form_required":false,"artifact_provenance":{
+            "source_run_id":source,"source_task_id":promotion.source.task_id,"source_patch_artifact_sha256":digest
+        }}});
+        let plan = AgentTaskPlan::new("frozen-follow-up", vec![request.clone()]);
+        let run_id = agent_task_lifecycle::cook_attempt_run_id("intent-crash", 2);
+        recipes
+            .record_recipe_attempt("intent-crash", 2, &run_id, &plan)
+            .unwrap();
+        assert!(!lifecycle.record_exists(&run_id).unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let executor: SharedAgentTaskExecutor = Arc::new(RecordingImmediateSuccessExecutor {
+            starts: calls.clone(),
+        });
+        let aggregate = review_form_aggregate(&options.identity.initial_plan);
+        let budget = AgentTaskExecutionBudget::default();
+        let mut category = ExecutionBudgetUsage::default();
+        let mut conflicting = request.clone();
+        conflicting.instructions = "different intent".into();
+        let error = dispatch_cook_follow_up(
+            (&recipes, &lifecycle),
+            &options,
+            executor.clone(),
+            "intent-crash",
+            1,
+            &source,
+            &options.identity.initial_plan,
+            &aggregate,
+            &promotion,
+            conflicting.clone(),
+            true,
+            CookFollowUpBudgetScope::Cook,
+            &budget,
+            ExecutionBudgetUsage::default(),
+            &mut category,
+        )
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "conflicting intent was accepted: {} recipe attempts and {} provider starts",
+                recipes.load_recipe("intent-crash").unwrap().attempts.len(),
+                calls.load(Ordering::SeqCst)
+            )
+        });
+        assert!(error.message.contains("conflicts with replay inputs"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            let restarted = CookRecipeStore::from_data_root(recipes.data_root());
+            let result = dispatch_cook_follow_up(
+                (&restarted, &lifecycle),
+                &options,
+                executor.clone(),
+                "intent-crash",
+                1,
+                &source,
+                &options.identity.initial_plan,
+                &aggregate,
+                &promotion,
+                request.clone(),
+                true,
+                CookFollowUpBudgetScope::Cook,
+                &budget,
+                ExecutionBudgetUsage {
+                    executions: u32::MAX,
+                    ..Default::default()
+                },
+                &mut category,
+            )
+            .unwrap();
+            assert!(
+                matches!(result,CookFollowUpDispatch::Dispatched{run_id:ref id} if *id==run_id)
+            );
+            assert_eq!(
+                restarted
+                    .load_recipe("intent-crash")
+                    .unwrap()
+                    .attempts
+                    .len(),
+                2
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let before = std::fs::read(recipes.recipe_path("intent-crash")).unwrap();
+        let error = dispatch_cook_follow_up(
+            (&recipes, &lifecycle),
+            &options,
+            executor,
+            "intent-crash",
+            1,
+            &source,
+            &options.identity.initial_plan,
+            &aggregate,
+            &promotion,
+            conflicting,
+            true,
+            CookFollowUpBudgetScope::Cook,
+            &budget,
+            ExecutionBudgetUsage::default(),
+            &mut category,
+        )
+        .err()
+        .expect("submitted intent is equally immutable");
+        assert!(error.message.contains("conflicts with replay inputs"));
+        assert_eq!(
+            std::fs::read(recipes.recipe_path("intent-crash")).unwrap(),
+            before
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            category,
+            ExecutionBudgetUsage::default(),
+            "replay does not reserve budget again"
+        );
+    });
 }
 
 #[test]
