@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.406.2] - 2026-10-06
+
+### Changed
+- call the command-step PATH directly; delete the rig toolchain provider
+
+### Fixed
+- preserve configured runtime in bash shells
+- authorize exact run-owned runtime evidence
+- invoke scoped generation stop with valid CLI args
+- render default runner job lists
+- resume pre-admission batches through native cook
+- make default status compact and actionable
+
 ## [0.406.1] - 2026-10-06
 
 ### Fixed
