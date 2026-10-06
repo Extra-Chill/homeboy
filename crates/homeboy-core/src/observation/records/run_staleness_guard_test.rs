@@ -42,7 +42,7 @@ const SANCTIONED_STALENESS_THRESHOLDS: &[(&str, &str)] = &[
         "canonical: ownerless grace period, measured from `started_at`",
     ),
     (
-        "crates/homeboy-cli/src/commands/runs/reconcile.rs::RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES",
+        "crates/homeboy-core/src/observation/runs_service/reconcile.rs::RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES",
         "different concept: the 24h ceiling on a runner-backed record's reconciliation exemption, \
          where a live remote job is authoritative and the bound exists only so the exemption ends (#11107)",
     ),
@@ -352,7 +352,7 @@ fn test_sources_are_out_of_scope() {
         "crates/homeboy-core/src/observation/records/run_status.rs"
     ));
     assert!(!is_test_source(
-        "crates/homeboy-cli/src/commands/runs/reconcile.rs"
+        "crates/homeboy-core/src/observation/runs_service/reconcile.rs"
     ));
     assert!(!is_test_source("src/lib.rs"));
 }

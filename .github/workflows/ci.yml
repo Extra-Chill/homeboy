@@ -12,7 +12,9 @@ on:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Description/title edits retain the running verification. Source updates and
+  # base retargets supersede it; `edited` remains enabled for stacked PRs.
+  cancel-in-progress: ${{ github.event.action != 'edited' || github.event.changes.base != null }}
 
 permissions:
   actions: read

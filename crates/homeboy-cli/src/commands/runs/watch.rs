@@ -25,7 +25,7 @@ use homeboy::core::observation::{ObservationStore, RunRecord, RunStatus};
 
 use super::common::{parse_duration, RunSummary};
 use super::types::{actionable_for_run_summary, RunsOutput};
-use super::{reconcile, CmdResult};
+use super::CmdResult;
 use crate::commands::utils::response::CommandActionableMetadata;
 use crate::commands::utils::watch::{
     watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult, TIMEOUT_EXIT_CODE,
@@ -94,7 +94,7 @@ impl WatchPoller for StorePoller<'_> {
         let run = runs_service::require_run(self.store, run_id)?;
         runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
         let run = runs_service::require_run(self.store, run_id)?;
-        reconcile::reconcile_owned_stale_running_run(self.store, &run)?;
+        runs_service::reconcile_owned_stale_running_run(self.store, &run)?;
         runs_service::require_run(self.store, run_id)
     }
 
@@ -207,7 +207,7 @@ fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult<RunRecord>) -> Option
 }
 
 fn emit_progress(run_id: &str, run: &RunRecord, poll_count: u64) {
-    let note = reconcile::running_status_note(run)
+    let note = runs_service::running_status_note(run)
         .map(|note| format!(" ({note})"))
         .unwrap_or_default();
     eprintln!(

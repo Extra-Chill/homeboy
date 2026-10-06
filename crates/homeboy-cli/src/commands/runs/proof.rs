@@ -22,7 +22,7 @@ use homeboy::core::observation::evidence_report::evidence_failure_summary;
 use homeboy::core::observation::{runs_service, ObservationStore, RunRecord};
 use homeboy::fuzz::{derive_fuzz_proof, FuzzProof};
 
-use super::{reconcile, CmdResult, RunsOutput};
+use super::{CmdResult, RunsOutput};
 
 /// Declared proof/scorecard signal containers. Any of these objects/arrays in
 /// run metadata are flattened to scalar `key:value` signal leaves.
@@ -58,7 +58,7 @@ pub struct RunsProofOutput {
 }
 
 pub fn proof(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
-    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
+    runs_service::reconcile_owned_stale_running_runs(&store, 1000)?;
     runs_service::require_run(&store, run_id)?;
     runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
     let run = runs_service::require_run(&store, run_id)?;

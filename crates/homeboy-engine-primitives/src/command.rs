@@ -364,6 +364,23 @@ pub fn process_is_running(pid: u32) -> bool {
     }
 }
 
+/// Whether a PID names an exited process its parent has not reaped yet.
+///
+/// [`process_is_running`] already treats such a zombie as exited. Lifecycle
+/// observation reports it separately so an operator can tell "dead" from
+/// "dead, but still in the process table" (#15557). Always `false` off Linux.
+pub fn process_is_zombie(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        pid <= i32::MAX as u32 && linux_process_state(pid) == Some('Z')
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LinuxProcStat {

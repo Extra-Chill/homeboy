@@ -4,6 +4,60 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.409.0] - 2026-10-06
+
+### Added
+- add indexed active caller ownership
+
+### Changed
+- one stale-run reconciler in core; HTTP reads no longer write, the daemon tick reconciles
+- consolidate cleanup labels and verify manifest round trips
+- prune lifecycle label pin covered by literal wire assertions
+
+### Fixed
+- bound pre-routing runtime seal admission
+- document active scope caller reference
+
+## [0.408.1] - 2026-10-06
+
+### Changed
+- one RunStatus→control-plane state mapping; handed-off and stale runs are terminal
+
+## [0.408.0] - 2026-10-06
+
+### Added
+- observe() returns one total lifecycle view of every generation (#15557 C1)
+
+### Changed
+- agent-task status reads a run through the same resolver as the daemon
+- consolidate artifact type parity into envelope wire checks
+
+### Fixed
+- the run list includes every agent-task run, not only mission-bound ones
+- retain verification across PR metadata edits
+- persist attempt lineage in the recipe, written with the attempt
+- preserve the shared liveness deadline and observation
+- adopt color-safe exact test retry classification
+
+## [0.407.4] - 2026-10-06
+
+### Changed
+- advertise Reconcile by the fleet reconciler's liveness rule
+
+### Fixed
+- recover the selected admission generation
+
+## [0.407.3] - 2026-10-06
+
+### Fixed
+- an exiting Cook observer no longer cancels a verifiably live provider
+
+## [0.407.2] - 2026-10-06
+
+### Fixed
+- preserve evidence transport causes
+- one controller drives a Cook at a time
+
 ## [0.407.1] - 2026-10-06
 
 ### Fixed

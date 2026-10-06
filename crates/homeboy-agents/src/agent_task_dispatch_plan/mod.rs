@@ -423,9 +423,10 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "repo": repo,
         "component": component,
         "workspace": workspace_target.as_ref().map(|target| target.metadata.clone()),
-        "workspace_root": workspace_root.map(|path| path.display().to_string()),
+        "workspace_root": workspace_root.as_ref().map(|path| path.display().to_string()),
         "client_context": client_context,
         "task_url": request.task_url,
+        "caller_workspace": workspace_root.as_ref().map(|path| serde_json::json!({ "repository": &repo, "working_directory": path })),
         "runtime_dependency_graph": runtime_dependency_graph_evidence,
         "model_override_confirmation": request.core.acknowledge_model_override.then(|| {
             serde_json::json!({
@@ -752,9 +753,28 @@ fn dispatch_workspace_materialization(
     })
 }
 
+/// Freeze the caller's opaque identity before Cook hands admission to another process.
+pub fn capture_client_context_spec(spec: Option<&str>) -> Result<Option<String>> {
+    if std::env::var("HOMEBOY_CALLER_CONTEXT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        return Ok(spec.map(str::to_string));
+    }
+    let raw = match spec {
+        Some(spec) => read_text_spec(spec, "client-context")?,
+        None => "{}".to_string(),
+    };
+    let value = serde_json::from_str::<Value>(&raw).map_err(|error| {
+        Error::internal_json(error.to_string(), Some("capture caller context".into()))
+    })?;
+    Ok(Some(crate::caller_context::capture(value)?.to_string()))
+}
+
 fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> {
     let Some(spec) = &request.core.client_context else {
-        return Ok(serde_json::json!({}));
+        return crate::caller_context::capture(serde_json::json!({}));
     };
 
     let raw = read_text_spec(spec, "client-context")?;
@@ -775,7 +795,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
         ));
     }
 
-    Ok(context)
+    crate::caller_context::capture(context)
 }
 
 #[cfg(test)]

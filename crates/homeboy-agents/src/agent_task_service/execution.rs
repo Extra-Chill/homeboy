@@ -1614,11 +1614,12 @@ where
                         &cook_retry.plan,
                     )?;
                 } else {
-                    super::record_recipe_attempt(
+                    super::record_recipe_retry_attempt(
                         &cook_retry.cook_id,
                         cook_retry.attempt,
                         &retry_run_id,
                         &cook_retry.plan,
+                        &source.run_id,
                     )?;
                 }
                 agent_task_lifecycle::record_cook_attempt_locked_in_store(
@@ -2486,12 +2487,10 @@ fn retryable_cook_attempt(
                 }
             }
         }
-        // Read through the single lineage reader: a gate-fix successor carries
-        // its source in plan provenance, not `retry_of`, and used to be
-        // rejected here as not continuing the attempt it continues (#15567).
-        let continues_source =
-            super::cook_lineage::attempt_lineage(&record.metadata, Some(&recipe_attempt.plan))
-                .is_some_and(|lineage| lineage.source_run_id == source.run_id);
+        // Recipe-owned retries and remediations share one persisted parent
+        // authority; lifecycle metadata and artifact evidence do not grant it.
+        let continues_source = super::cook_lineage::recipe_attempt_lineage(recipe_attempt)
+            .is_some_and(|lineage| lineage.source_run_id == source.run_id);
         if !owned_replacement && !continues_source {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
@@ -3623,6 +3622,7 @@ mod tests {
                     schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
                     cook_id: cook_id.to_string(),
                     attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                        lineage: None,
                         attempt: 1,
                         run_id: run_id.to_string(),
                         plan: plan.clone(),
