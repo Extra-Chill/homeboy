@@ -4048,7 +4048,7 @@ mod runner_source_upgrade_tests {
                     .unwrap()
                     .source_url
                     .as_deref(),
-                Some("https://example.test/alias.git")
+                None
             );
             assert_eq!(
                 catalog

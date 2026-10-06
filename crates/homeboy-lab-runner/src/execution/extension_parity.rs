@@ -2538,7 +2538,7 @@ mod tests {
     fn parity_auto_sync_reports_controller_metadata_when_required_for_runner_job() {
         let source_error = homeboy_core::error::Error::validation_invalid_argument(
             "extension_id",
-            "Extension 'rust' has no sourceUrl or .source-url metadata",
+            "Extension 'rust' has no source_url or .source-url metadata",
             Some("rust".to_string()),
             None,
         );
@@ -2556,10 +2556,10 @@ mod tests {
             .contains("Controller-local extension metadata"));
         assert!(err
             .to_string()
-            .contains("no sourceUrl or .source-url metadata"));
+            .contains("no source_url or .source-url metadata"));
         assert!(err.details["diagnostic"]["source_error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains("no sourceUrl or .source-url metadata")));
+            .is_some_and(|message| message.contains("no source_url or .source-url metadata")));
         assert_eq!(
             err.details["diagnostic"]["code"].as_str(),
             Some("runner_extension.controller_extension_metadata_required")

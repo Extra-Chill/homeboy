@@ -2408,7 +2408,7 @@ exec '{}' "$@"
                 repair.source_url,
                 "https://github.com/Extra-Chill/homeboy-extensions"
             );
-            assert!(repair.reason.contains("manifest sourceUrl"));
+            assert!(repair.reason.contains("manifest source_url"));
             assert_eq!(
                 fs::read_to_string(extension_dir.join(".source-url"))
                     .expect("source url marker")
@@ -2419,7 +2419,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn manifest_source_url_alias_repairs_missing_source_url_marker() {
+    fn unknown_manifest_field_does_not_supply_update_source_or_repair_metadata() {
         with_isolated_home(|home| {
             let extension_dir = home.path().join(".config/homeboy/extensions/custom");
             fs::create_dir_all(&extension_dir).expect("extension dir");
@@ -2433,18 +2433,13 @@ exec '{}' "$@"
             )
             .expect("extension manifest");
 
-            let source =
-                source_metadata::resolve_source_url("custom").expect("manifest source repair");
-
-            assert_eq!(source.url, "https://example.com/custom.git");
-            let repair = source.repair.expect("repair result");
-            assert!(repair.reason.contains("manifest sourceUrl"));
-            assert_eq!(
-                fs::read_to_string(extension_dir.join(".source-url"))
-                    .expect("source url marker")
-                    .trim(),
-                "https://example.com/custom.git"
-            );
+            let before = fs::read(extension_dir.join("custom.json")).unwrap();
+            source_metadata::resolve_source_url_read_only("custom")
+                .expect_err("opaque fields do not confer source authority");
+            source_metadata::resolve_source_url("custom")
+                .expect_err("source authority cannot be repaired from opaque fields");
+            assert!(!extension_dir.join(".source-url").exists());
+            assert_eq!(fs::read(extension_dir.join("custom.json")).unwrap(), before);
         });
     }
 
@@ -2498,7 +2493,7 @@ exec '{}' "$@"
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert!(text.contains("no sourceUrl or .source-url metadata"));
+            assert!(text.contains("no source_url or .source-url metadata"));
             assert!(hints.contains("homeboy extension install <url> --id custom"));
             assert!(hints.contains(&extension_dir.to_string_lossy().to_string()));
         });
@@ -2517,7 +2512,7 @@ exec '{}' "$@"
             assert_eq!(result.skipped_details[0].extension_id, "custom");
             assert!(result.skipped_details[0]
                 .reason
-                .contains("no sourceUrl or .source-url metadata"));
+                .contains("no source_url or .source-url metadata"));
             assert!(result.skipped_details[0]
                 .hints
                 .iter()

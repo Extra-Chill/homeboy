@@ -203,14 +203,9 @@ pub struct ExtensionManifest {
     /// Unknown top-level manifest keys, preserved rather than rejected so an
     /// extension published against a newer or older core still deserializes.
     ///
-    /// This is a *forward-compatibility buffer*, not an extension point. Core
-    /// reads exactly one key out of it — the legacy camelCase `sourceUrl`
-    /// (`lifecycle::source_metadata`) — and nothing else in here has a reader.
-    /// `deployment_providers` (#13723) and `recipe_run_providers` (#13724) were
-    /// the other two and are now typed fields.
-    ///
-    /// With only a legacy alias left, a key appearing here is a key nothing
-    /// will ever act on.
+    /// Core configuration is read from typed fields. This map preserves opaque
+    /// extension data; its keys do not supply core update or execution policy.
+    /// Source configuration uses the typed `source_url` field.
     ///
     /// Landing anything else here makes it inert *silently*, which is how
     /// shipped manifests accumulated `required_output_declarations` (26 lines),
