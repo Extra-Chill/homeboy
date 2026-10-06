@@ -134,6 +134,16 @@ mkdir -p "${retry_dir}"
 attempt_receipts="${retry_dir}/attempts.jsonl"
 : > "${attempt_receipts}"
 
+# Test runners color their summaries when CARGO_TERM_COLOR=always (as CI
+# sets it): "\e[1m1\e[0m test run: \e[1m1\e[0m \e[32;1mpassed\e[0m". The outcome
+# patterns below are plain text, so a passing retry read as "no exact test
+# outcome" and blocked unrelated PRs (homeboy-action#523). Retries run with
+# color off, and logs are stripped of ANSI sequences before matching anyway.
+strip_ansi() {
+  [ -f "$1" ] && sed -i 's/\x1b\[[0-9;]*[A-Za-z]//g' "$1"
+  return 0
+}
+
 run_single_test() {
   local id="$1"
   local log
@@ -159,7 +169,8 @@ run_single_test() {
   test_name="${BASH_REMATCH[4]}"
   case "${mode}" in
     nextest)
-      if (cd "${workspace}" && cargo nextest run -p "${package}" -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
+      if (cd "${workspace}" && CARGO_TERM_COLOR=never cargo nextest run --color never -p "${package}" -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
+        strip_ansi "${log}"
         grep -Eq '1 tests? run: 1 passed' "${log}" && ok=0
       else exit_code=$?; fi
       ;;
@@ -175,11 +186,13 @@ run_single_test() {
         test) target_args+=(--test "${binary}") ;;
         *) printf 'Unsupported Rust test kind: %s\n' "${kind}" > "${log}"; exit_code=2 ;;
       esac
-      if [ "${exit_code}" -eq 0 ] && (cd "${workspace}" && cargo test -p "${package}" "${target_args[@]}" -- --exact "${test_name}") >"${log}" 2>&1; then
+      if [ "${exit_code}" -eq 0 ] && (cd "${workspace}" && CARGO_TERM_COLOR=never cargo test -p "${package}" "${target_args[@]}" -- --exact "${test_name}" --color never) >"${log}" 2>&1; then
+        strip_ansi "${log}"
         grep -Eq '(^| )1 passed(;| )' "${log}" && ok=0
       else exit_code=$?; fi
       ;;
   esac
+  strip_ansi "${log}"
   if [ "${ok}" -eq 0 ]; then
     outcome="passed"
   elif grep -Eq '1 tests? run: 0 passed, 1 failed|(^| )0 passed; 1 failed;' "${log}"; then

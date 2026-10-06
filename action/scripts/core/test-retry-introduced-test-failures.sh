@@ -200,6 +200,27 @@ case "${output}" in
   *) printf 'FAIL: still-failing announcement missing identity\n%s\n' "${output}"; exit 1 ;;
 esac
 
+# --- nextest: colored summaries still resolve (homeboy-action#523) ----------
+# CI sets CARGO_TERM_COLOR=always, and real nextest then colors its summary.
+# A passing retry must still be recognized as passed, not as "no exact test
+# outcome".
+color_nextest_dir="${tmp}/color-nextest"
+mkdir -p "${color_nextest_dir}"
+cat > "${color_nextest_dir}/cargo-nextest" <<'FAKE'
+#!/usr/bin/env bash
+printf '\033[32;1m        PASS\033[0m [   0.219s] (1/1) \033[35;1mfixture\033[0m \033[34;1mid_flaky\033[0m\n'
+printf '\033[32;1m     Summary\033[0m [   0.221s] \033[1m1\033[0m test run: \033[1m1\033[0m \033[32;1mpassed\033[0m, \033[1m2233\033[0m \033[33;1mskipped\033[0m\n'
+exit 0
+FAKE
+chmod +x "${color_nextest_dir}/cargo-nextest"
+reset_fixtures
+write_outcomes "${current_dir}" 'review test' nextest "${id_flaky}" -- "${id_flaky}" "${id_other}"
+write_outcomes "${base_dir}" 'review test' nextest -- "${id_other}"
+run_retry "${color_nextest_dir}" MAX_RETRIES=1 >/dev/null 2>&1 || true
+assert_equals "{\"flaky\":[\"${id_flaky}\"],\"still_failing\":[]}" \
+  "$(sidecar '{flaky,still_failing}')" \
+  "a passing retry with a colored nextest summary is classified flaky"
+
 # --- nextest: every identity fails every attempt -> none excluded -----------
 reset_fixtures
 rm -f "${state_dir}"/*.count
