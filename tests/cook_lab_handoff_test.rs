@@ -1034,7 +1034,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         .and_then(serde_json::Value::as_str)
         == Some("succeeded")
         && completed_json
-            .pointer("/data/artifacts")
+            .pointer("/data/artifacts_refs")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|artifacts| {
                 artifacts.iter().any(|artifact| {

@@ -228,7 +228,7 @@ impl RunnerContinuationProvider for AdmissionProbe {
 fn native_private_daemon_pending_action_terminal_owner_and_fence() {
     homeboy_core::test_support::with_isolated_home(|_| {
         eprintln!("NATIVE_PHASE=seed_private_roots");
-        let binary = std::env::var("HOMEBOY_NATIVE_BINARY").expect("candidate binary path");
+        let binary = env!("CARGO_BIN_EXE_homeboy");
         std::env::set_var("HOMEBOY_COMMAND", &binary);
         let store =
             AgentTaskLifecycleStore::from_current_environment().expect("private lifecycle store");
@@ -427,7 +427,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
             .open_observation_readonly()
             .expect("private event ledger")
             .control_plane_event_stream(
-                &homeboy_control_plane_contract::RunId::new(RUN_ID).unwrap(),
+                &homeboy_core::control_plane_contract::RunId::new(RUN_ID).unwrap(),
             )
             .expect("private run event stream")
             .unwrap()
