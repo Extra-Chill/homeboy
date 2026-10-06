@@ -24,9 +24,9 @@ Explicit `diagnose --full` now includes those complete source facts from the dur
 
 ## Linux verification
 
-Linux source: `/home/chubes/Developer/homeboy-15156-cause-publish`  
-Linux target: `/home/chubes/Developer/homeboy-15156-cause-publish/target`  
-Raw proof logs: `/home/chubes/Developer/homeboy-15156-cause-publish-evidence/`
+- Linux source: `/home/chubes/Developer/homeboy-15156-cause-publish`
+- Linux target: `/home/chubes/Developer/homeboy-15156-cause-publish/target`
+- Raw proof logs: `/home/chubes/Developer/homeboy-15156-cause-publish-evidence/`
 
 | Check | Result | Raw evidence |
 |---|---:|---|
