@@ -391,7 +391,7 @@ pub(crate) fn agent_task_promotion_source_is_controller_owned(source: &str) -> b
     // Keep its resolution, integrity verification, and target application on
     // the controller rather than splitting those phases across placements.
     source.starts_with("homeboy://agent-task/run/")
-        || agent_task_lifecycle::reconcile_status(source).is_ok()
+        || agent_task_lifecycle::status(source).is_ok()
         || std::path::Path::new(source).is_file()
 }
 

@@ -450,7 +450,7 @@ fn resolved_tool_identities(step: &DependencyMaterializationStepSpec) -> Result<
     if command.is_empty() {
         return Ok(Vec::new());
     }
-    let resolved = crate::toolchain::command_step_path()
+    let resolved = homeboy_engine_primitives::command_path::command_step_path()
         .as_deref()
         .and_then(|path| {
             std::env::split_paths(path)

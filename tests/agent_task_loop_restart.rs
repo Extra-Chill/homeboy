@@ -16,7 +16,7 @@ fn real_daemon_loop_restart_resumes_one_admitted_revolution() {
         &spec,
         r#"{
           "schema": "homeboy/controller-spec/v1",
-          "controller_id": "real-loop-restart",
+          "loop_id": "real-loop-restart",
           "phase": "repair",
           "actions": [{
             "action": "spawn_task",

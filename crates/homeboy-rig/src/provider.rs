@@ -9,7 +9,6 @@ use std::path::Path;
 use homeboy_core::component::{self, Component};
 use homeboy_core::paths;
 use homeboy_core::rig_provider::{register_rig_provider, RigProvider};
-use homeboy_core::rig_toolchain_provider::{register_rig_toolchain_provider, RigToolchainProvider};
 use homeboy_core::scope::ScopeComponentRef;
 use homeboy_core::Result;
 use serde_json::{json, Value};
@@ -90,17 +89,8 @@ impl RigProvider for RigProviderImpl {
     }
 }
 
-struct RigToolchainProviderImpl;
-
-impl RigToolchainProvider for RigToolchainProviderImpl {
-    fn command_step_path(&self) -> Option<std::ffi::OsString> {
-        crate::toolchain::command_step_path()
-    }
-}
-
-/// Register the rig providers so core's HTTP API, scope resolution, and
-/// extension exec-env builder work without depending on the rig subsystem.
+/// Register the rig providers so core's HTTP API and scope resolution work
+/// without depending on the rig subsystem.
 pub fn register() {
     register_rig_provider(Box::new(RigProviderImpl));
-    register_rig_toolchain_provider(Box::new(RigToolchainProviderImpl));
 }
