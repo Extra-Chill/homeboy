@@ -327,7 +327,6 @@ pub struct LabSelectedRunnerOutput {
     pub readiness_state: String,
     pub connected: bool,
     pub availability: RunnerAvailability,
-    pub status: RunnerStatusReport,
 }
 
 #[derive(Debug, Serialize)]

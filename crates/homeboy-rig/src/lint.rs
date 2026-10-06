@@ -132,18 +132,15 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "fuzz_workloads",
     "id",
     "lifecycle",
-    "package_dependencies",
     "pipeline",
     "requirements",
     "resources",
     "services",
-    "shared_templates",
     "shared_paths",
     "symlinks",
     "trace",
     "trace_experiments",
     "trace_guardrails",
-    "trace_phase_templates",
     "trace_profiles",
     "trace_variants",
     "trace_workload_defaults",
@@ -205,7 +202,7 @@ fn collect_materialized_rigs(root: &Path, files: &[PathBuf]) -> Result<Materiali
         };
         let declares_extends = content.contains("\"extends\"");
 
-        let materialized = template_source_root(root, file)
+        let materialized = template_source_root(root)
             .and_then(|source_root| super::install::materialize_rig_spec(file, &source_root));
         let value = match materialized {
             Ok(value) => value,
@@ -338,6 +335,47 @@ fn component_path_env_agreement_failures(rigs: &[MaterializedRig]) -> Vec<String
                     } else {
                         declared.join(", ")
                     }
+                ));
+            }
+        }
+        failures.extend(redundant_component_path_failures(rig, rig_id));
+    }
+    failures
+}
+
+/// A component's own `path: "${env.HOMEBOY_RIG_COMPONENT_PATH__<RIG>__<C>}"` or
+/// `path_setting: "HOMEBOY_RIG_COMPONENT_PATH__<RIG>__<C>"` restates the
+/// override Homeboy already derives and checks before `path`
+/// (`component_resolution.rs`): set, it wins first; unset, the reference
+/// expands to empty and resolution falls through exactly as with no `path`.
+/// The copy can only go stale when the rig is renamed (#11150), so it is
+/// rejected rather than tolerated.
+fn redundant_component_path_failures(rig: &MaterializedRig, rig_id: &str) -> Vec<String> {
+    let Some(components) = rig
+        .value
+        .get("components")
+        .and_then(|components| components.as_object())
+    else {
+        return Vec::new();
+    };
+    let mut failures = Vec::new();
+    for (component, spec) in components {
+        let derived = crate::expand::rig_component_path_override_env_name(rig_id, component);
+        let restated_path = format!("${{env.{derived}}}");
+        let redundant_fields = [
+            ("path", restated_path.as_str()),
+            ("path_setting", derived.as_str()),
+        ];
+        for (field, restated) in redundant_fields {
+            if spec
+                .get(field)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                == Some(restated)
+            {
+                failures.push(format!(
+                    "{}: /components/{component}/{field} restates `{derived}`, which Homeboy applies automatically before `path`; delete the field",
+                    rig.rel
                 ));
             }
         }
@@ -862,19 +900,7 @@ fn display_pointer(pointer: &str) -> &str {
     }
 }
 
-fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
-    let id = file
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .to_string();
-    let rig = super::DiscoveredRig {
-        id,
-        description: String::new(),
-        rig_path: file.to_path_buf(),
-    };
-    super::install::local_package_source_root_for_dependencies(root, &[rig])?;
+fn template_source_root(root: &Path) -> Result<PathBuf> {
     root.canonicalize().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1900,68 +1926,6 @@ mod tests {
         assert!(!error.contains("trace"));
     }
 
-    #[test]
-    fn package_lint_materializes_extends_from_declared_repo_shared_root() {
-        let temp = tempfile::TempDir::new().expect("temp repo");
-        git(temp.path(), &["init", "--quiet"]);
-        let package = temp.path().join("Product").join("plugin");
-        let rig_dir = package.join("rigs").join("browser-coverage");
-        let shared = temp.path().join("shared").join("wordpress-plugin");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::create_dir_all(&shared).expect("shared dir");
-        fs::write(
-            shared.join("browser-coverage.base.json"),
-            r#"{
-                "components": {
-                    "plugin": { "path": "${env.PLUGIN_PATH}" }
-                },
-                "trace": { "default_component": "plugin" },
-                "trace_workloads": {
-                    "nodejs": [
-                        { "path": "${package.root}/bench/browser-coverage.trace.mjs" }
-                    ]
-                }
-            }"#,
-        )
-        .expect("write shared base");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "browser-coverage",
-                "shared_templates": ["../../../../shared/wordpress-plugin"],
-                "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json",
-                "trace_profiles": { "smoke": { "scenario": "browser-coverage" } }
-            }"#,
-        )
-        .expect("write rig");
-        fs::create_dir_all(package.join("bench")).expect("bench dir");
-        fs::write(
-            package.join("bench/browser-coverage.trace.mjs"),
-            "// fixture\n",
-        )
-        .expect("workload");
-        git(temp.path(), &["add", "."]);
-
-        let outcome = run_package_lint_at(&package).expect("lint package");
-        let template_step = outcome
-            .steps
-            .iter()
-            .find(|step| step.label.contains("template specs materialize"))
-            .expect("template step");
-        let contract_step = outcome
-            .steps
-            .iter()
-            .find(|step| step.label.contains("Homeboy rig contract"))
-            .expect("contract step");
-
-        assert_eq!(template_step.status, "pass");
-        assert_eq!(
-            contract_step.status, "pass",
-            "contract error: {:?}",
-            contract_step.error
-        );
-    }
-
     fn json_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
         outcome
             .steps
@@ -2169,7 +2133,12 @@ mod tests {
                 "id": "gutenberg-pattern-assets",
                 "components": {
                     "gutenberg": {
-                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                        "checkout_root": "${env.HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__GUTENBERG_PATTERN_ASSETS__GUTENBERG}",
+                        "extensions": {
+                            "wordpress": {
+                                "wp_codebox_source_root": "${env.HOMEBOY_RIG_COMPONENT_PATH__GUTENBERG_PATTERN_ASSETS__GUTENBERG}"
+                            }
+                        }
                     }
                 },
                 "resources": {
@@ -2214,6 +2183,57 @@ mod tests {
             .as_ref()
             .expect("contract error")
             .contains("`HOMEBOY_RIG_COMPONENT_PATH__RENAMED__<COMPONENT>`"));
+    }
+
+    #[test]
+    fn package_lint_rejects_component_path_that_restates_the_automatic_override() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-fuzz");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "studio-fuzz",
+                "components": {
+                    "studio": {
+                        "path": "${env.HOMEBOY_RIG_COMPONENT_PATH__STUDIO_FUZZ__STUDIO}",
+                        "path_setting": "HOMEBOY_RIG_COMPONENT_PATH__STUDIO_FUZZ__STUDIO"
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("contract error");
+        assert!(
+            error.contains("/components/studio/path restates"),
+            "{error}"
+        );
+        assert!(
+            error.contains("/components/studio/path_setting restates"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_accepts_a_component_without_a_restated_path() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("studio-fuzz");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{ "id": "studio-fuzz", "components": { "studio": { "component_id": "studio" } } }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = contract_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
     }
 
     fn reference_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {

@@ -702,6 +702,69 @@ fn batch_resume_locked(
     args: AgentTaskFanoutBatchStatusArgs,
     placement: Placement,
 ) -> CmdResult<Value> {
+    batch_resume_locked_with_executor(
+        args,
+        placement,
+        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
+    )
+}
+
+fn batch_resume_locked_with_executor(
+    args: AgentTaskFanoutBatchStatusArgs,
+    placement: Placement,
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
+    let durable = batch::read_batch_record(&args.batch_id)?;
+    if durable.metadata["admission_blocker"].is_object() {
+        let private_plan = private_batch_plan_path(&args.batch_id)?;
+        if !private_plan.is_file() {
+            let recovery_action = durable.metadata["admission_blocker"]
+                .pointer("/failure/next_action")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| {
+                    durable.metadata["replan_command"]
+                        .as_str()
+                        .unwrap_or("re-run the original fanout run-plan")
+                });
+            return Ok((
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-cook-batch-resume/v1",
+                    "batch_id": args.batch_id,
+                    "status": "queued",
+                    "exit_code": 0,
+                    "summary": {
+                        "total": durable.child_runs.len(),
+                        "queued": durable.child_runs.len(),
+                        "running": 0,
+                        "succeeded": 0,
+                        "failed": 0,
+                        "cancelled": 0,
+                        "timed_out": 0,
+                    },
+                    "cooks": durable.child_runs.iter().map(|child| serde_json::json!({
+                        "cook_id": child.task_id,
+                        "initial_run_id": child.run_id,
+                        "status": "queued",
+                        "exit_code": 0,
+                        "terminal": false,
+                    })).collect::<Vec<_>>(),
+                    "recovery_action": recovery_action,
+                    "commands": {
+                        "status": fanout_command(placement, "status", &args.batch_id),
+                        "artifacts": fanout_command(placement, "artifacts", &args.batch_id),
+                        "resume": recovery_action,
+                    },
+                }),
+                0,
+            ));
+        }
+
+        // An admission blocker has no child execution to resume. Re-enter the
+        // original durable plan through native Cook admission so repaired
+        // worktrees are provisioned/bound by the same contract as run-plan.
+        return resume_pre_admission_plan(&args.batch_id, private_plan, placement, executor);
+    }
+
     let canonical = homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
     let idempotency_key = args.idempotency_key.clone().unwrap_or_else(|| {
         format!(
@@ -749,6 +812,42 @@ fn batch_resume_locked(
         Some(portfolio),
         placement,
     ))
+}
+
+fn resume_pre_admission_plan(
+    batch_id: &str,
+    private_plan: PathBuf,
+    placement: Placement,
+    executor: SharedAgentTaskExecutor,
+) -> CmdResult<Value> {
+    let mut plan = load_batch_cook_fanout_plan(
+        &AgentTaskFanoutInputArgs {
+            input: format!("@{}", private_plan.display()),
+            fanout_id: None,
+            backend: None,
+            selector: None,
+            model: None,
+            acknowledge_model_override: false,
+        },
+        true,
+    )?;
+    if plan.fanout_id != batch_id {
+        return Err(Error::validation_invalid_argument(
+            "fanout_id",
+            "persisted private plan does not match the blocked fanout identity",
+            Some(batch_id.to_string()),
+            None,
+        ));
+    }
+    plan.ensure_placement(invocation_placement_directive(placement))?;
+    admit_batch_provider_routes(&mut plan)?;
+    run_batch_cook_fanout_plan_with_executor_claim(
+        plan,
+        executor,
+        None,
+        placement,
+        provider::ProviderRuntimeReadinessCache::default(),
+    )
 }
 
 fn render_batch_resume_result(
@@ -6205,6 +6304,132 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn public_resume_replays_blocked_private_plan_through_native_admission() {
+        with_isolated_home(|home| {
+            let _transport = EnvRestore::set(&[
+                (
+                    homeboy::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                    None,
+                ),
+                (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+                ("HOMEBOY_RUNNER_HOSTED_EXEC", None),
+            ]);
+            install_fanout_agent_task_providers(home.path());
+
+            let probe = Arc::new(NativeDestinationProbe::default());
+            let mut plan = test_batch_plan();
+            plan.fanout_id = "resume-native-repair".to_string();
+            plan.cooks.truncate(1);
+            {
+                let cook = &mut plan.cooks[0];
+                cook.cook_id = "resume-native-child".to_string();
+                cook.cwd = None;
+                cook.workspace = None;
+                cook.repo = Some("repo".to_string());
+                cook.head = Some("fix/resume-native".to_string());
+                cook.to_worktree = "repo@fix-resume-native".to_string();
+                cook.task_url = Some("https://example.test/repo/issues/15499".to_string());
+                cook.backend = Some("test".to_string());
+                cook.selector = Some("fixture".to_string());
+                cook.no_finalize = true;
+                cook.max_attempts = 1;
+                cook.attempts = Some(1);
+                cook.same_provider_retries = Some(0);
+                cook.provider_rotations = Some(0);
+                cook.verify = vec!["true".to_string()];
+            }
+
+            persist_private_batch_plan(&plan).expect("persist canonical private plan");
+            batch::persist_fanout_run_batch(
+                &plan.fanout_id,
+                &plan.fanout_id,
+                &[batch::FanoutRunBatchChild {
+                    task_id: plan.cooks[0].cook_id.clone(),
+                    run_id: plan.cooks[0].run_id(),
+                }],
+                json!({
+                    "source": "fanout-run-plan",
+                    "cell_manifest": plan.cell_manifest().expect("manifest"),
+                    "declared_trackers": { "resume-native-child": "https://example.test/repo/issues/15499" },
+                    "replan_command": secure_batch_plan_execution(&plan.fanout_id, Placement::Local),
+                }),
+            )
+            .expect("persist durable batch before failed admission");
+            let claim = batch::claim_fanout_run_batch(&plan.fanout_id)
+                .expect("claim admission")
+                .expect("claim id");
+            batch::record_fanout_run_batch_failure(
+                &plan.fanout_id,
+                &claim,
+                "worktree_preflight",
+                json!({ "message": "native destination was absent during the first admission" }),
+            )
+            .expect("persist pre-admission blocker");
+
+            // Repair the admission blocker by restoring the native repository
+            // registration. The native Cook admission path must then create the
+            // absent destination and bind it to the durable child before dispatch.
+            let primary = home.path().join("repo");
+            init_git_primary(&primary);
+            write_component_registration(home.path(), "repo", &primary);
+
+            let result = batch_resume_locked_with_executor(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: plan.fanout_id.clone(),
+                    idempotency_key: None,
+                },
+                Placement::Local,
+                probe.clone(),
+            )
+            .expect("public resume re-admits the original plan");
+            let payload = &result.0;
+            assert_eq!(payload["status"], "failed");
+            assert_eq!(
+                probe.0.load(Ordering::SeqCst),
+                1,
+                "resume result: {payload}"
+            );
+            let after_first = batch::read_batch_record(&plan.fanout_id).expect("read first result");
+            assert!(after_first.metadata["admission_blocker"].is_null());
+            assert_eq!(after_first.state, batch::AgentTaskBatchState::Failed);
+            assert_eq!(
+                after_first.child_runs[0].state,
+                homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
+            );
+            let status = batch::status(&plan.fanout_id).expect("project recovered batch status");
+            assert_eq!(status.admission.expected, 1);
+            assert_eq!(status.admission.admitted, 1);
+            assert_eq!(status.admission.absent, 0);
+            assert_eq!(
+                after_first.metadata["declared_trackers"]["resume-native-child"],
+                "https://example.test/repo/issues/15499"
+            );
+            assert_eq!(payload["summary"]["failed"], 1);
+            let admitted_plan = test_lifecycle_store()
+                .read_controller_plan(&plan.cooks[0].run_id())
+                .expect("read admitted Cook plan");
+            assert_eq!(
+                admitted_plan.metadata["gate_contract_validation"]["status"],
+                "valid"
+            );
+            assert_eq!(
+                admitted_plan.tasks[0].workspace.task_url.as_deref(),
+                Some("https://example.test/repo/issues/15499")
+            );
+
+            let second =
+                agent_task_service::resume_cook_batch(&plan.fanout_id, probe.clone(), |_| Ok(None))
+                    .expect("second resume only harvests the admitted child");
+            assert_eq!(second.value.failed, 1);
+            assert_eq!(
+                probe.0.load(Ordering::SeqCst),
+                1,
+                "provider dispatch is exactly once"
+            );
+        });
     }
 
     #[test]

@@ -167,7 +167,6 @@ pub mod resource_policy_context;
 pub mod resource_topology;
 pub mod resources;
 pub mod rig_provider;
-pub mod rig_toolchain_provider;
 pub use homeboy_lifecycle_contract::run_lifecycle_record;
 pub mod run_lifecycle_status;
 pub mod run_outcome_envelope;

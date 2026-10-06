@@ -823,7 +823,6 @@ fn selected_lab_runner_status(
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
         availability: status.admission_availability(runner_config.settings.concurrency_limit),
-        status,
     }))
 }
 
