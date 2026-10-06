@@ -435,6 +435,12 @@ impl AdapterDependencyProvider {
         )
     }
 
+    fn install_command(&self, command: &AdapterCommand) -> DependencyProviderCommand {
+        let mut resolved = self.command(command);
+        resolved.cwd = self.adapter.install_path.clone();
+        resolved
+    }
+
     fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
         dependency_install_outputs(&self.adapter.package_manager().outputs)
     }
@@ -460,7 +466,7 @@ impl AdapterDependencyProvider {
                 .reusable
                 .as_ref()
                 .map(|command| DependencyProviderReusableState {
-                    command: self.command(command),
+                    command: self.install_command(command),
                     reusable_exit_codes: command.success_codes(),
                     reusable_reason: command
                         .reusable_reason
@@ -473,7 +479,7 @@ impl AdapterDependencyProvider {
                 });
         Ok(Some(DependencyProviderHydrationPlan {
             provider_id: manager.id.clone(),
-            install: self.command(install),
+            install: self.install_command(install),
             install_success_exit_codes: install.success_codes(),
             reusable,
             outputs: self.install_outputs()?,
@@ -486,7 +492,7 @@ impl AdapterDependencyProvider {
                 .adapter
                 .lockfile_priority
                 .iter()
-                .any(|lockfile| self.adapter.project_path.join(lockfile).exists())
+                .any(|lockfile| self.adapter.install_path.join(lockfile).exists())
         {
             return Err(Error::validation_invalid_argument(
                 "dependency_provider",
@@ -499,11 +505,12 @@ impl AdapterDependencyProvider {
                 None,
             ));
         }
-        run_adapter_command(
-            &self.command(command),
-            operation,
-            &command.success_exit_codes,
-        )
+        let resolved = if operation == "update" {
+            self.command(command)
+        } else {
+            self.install_command(command)
+        };
+        run_adapter_command(&resolved, operation, &command.success_exit_codes)
     }
 
     fn status(
@@ -643,6 +650,8 @@ struct InstalledDependencyAdapter {
     package_managers: Vec<AdapterPackageManager>,
     #[serde(skip)]
     project_path: PathBuf,
+    #[serde(skip)]
+    install_path: PathBuf,
 }
 
 impl InstalledDependencyAdapter {
@@ -663,17 +672,22 @@ impl InstalledDependencyAdapter {
         package_managers.sort_by_key(|manager| manager.selection.priority);
         let selected = package_managers
             .iter()
-            .find(|manager| manager.selection_matches(path))
+            .find_map(|manager| {
+                manager
+                    .selection_root(path)
+                    .map(|root| (manager.clone(), root))
+            })
             .or_else(|| {
                 package_managers
                     .iter()
                     .find(|manager| manager.selection.default)
+                    .map(|manager| (manager.clone(), path.to_path_buf()))
             });
         selected
-            .cloned()
-            .map(|package_manager| {
+            .map(|(package_manager, install_path)| {
                 let mut adapter = self.clone();
                 adapter.project_path = path.to_path_buf();
+                adapter.install_path = install_path;
                 adapter.package_managers = vec![package_manager];
                 adapter
             })
@@ -823,16 +837,20 @@ enum DependencyAdapterOutputKind {
 }
 
 impl AdapterPackageManager {
-    fn selection_matches(&self, path: &Path) -> bool {
-        self.selection
-            .files
-            .iter()
-            .any(|file| match self.selection.search.as_deref() {
-                Some("upward") => path
-                    .ancestors()
-                    .any(|directory| directory.join(file).exists()),
-                _ => path.join(file).exists(),
-            })
+    fn selection_root(&self, path: &Path) -> Option<PathBuf> {
+        let matches = |directory: &Path| {
+            self.selection
+                .files
+                .iter()
+                .any(|file| directory.join(file).exists())
+        };
+        match self.selection.search.as_deref() {
+            Some("upward") => path
+                .ancestors()
+                .find(|directory| matches(directory))
+                .map(Path::to_path_buf),
+            _ => matches(path).then(|| path.to_path_buf()),
+        }
     }
 }
 

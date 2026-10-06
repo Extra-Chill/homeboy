@@ -127,6 +127,8 @@ pub struct DependencyHydrationOutcome {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -314,7 +316,7 @@ fn hydrate_declared_dependencies_unlocked(
             if reusable
                 .reusable_exit_codes
                 .contains(&assessment.exit_code.unwrap_or(-1))
-                && declared_outputs_ready(path, &plan.outputs)
+                && declared_outputs_ready(&plan.install.cwd, &plan.outputs)
             {
                 outcomes.push(hydration_outcome(
                     workspace,
@@ -332,22 +334,6 @@ fn hydrate_declared_dependencies_unlocked(
                 ));
                 continue;
             }
-        } else if !plan.outputs.is_empty() && declared_outputs_ready(path, &plan.outputs) {
-            outcomes.push(hydration_outcome(
-                workspace,
-                package_root,
-                provider_id,
-                install_command,
-                plan.install.cwd.display().to_string(),
-                "provider_declared_outputs_ready".to_string(),
-                started.elapsed(),
-                DependencyHydrationTermination::NotStarted,
-                DependencyHydrationStatus::Reused,
-                None,
-                String::new(),
-                String::new(),
-            ));
-            continue;
         }
 
         (policy.on_progress)(&DependencyHydrationProgress {
@@ -394,8 +380,9 @@ fn hydrate_declared_dependencies_unlocked(
             ));
             break;
         }
-        if !declared_outputs_ready(path, &plan.outputs) {
-            outcomes.push(hydration_outcome(
+        let missing_outputs = missing_declared_outputs(&plan.install.cwd, &plan.outputs);
+        if !missing_outputs.is_empty() {
+            let mut outcome = hydration_outcome(
                 workspace,
                 package_root,
                 provider_id,
@@ -408,7 +395,9 @@ fn hydrate_declared_dependencies_unlocked(
                 exit_code,
                 execution.stdout,
                 execution.stderr,
-            ));
+            );
+            outcome.missing_outputs = missing_outputs;
+            outcomes.push(outcome);
             break;
         }
         outcomes.push(hydration_outcome(
@@ -610,14 +599,25 @@ fn hydration_progress(
 }
 
 fn declared_outputs_ready(path: &Path, outputs: &[DependencyInstallOutput]) -> bool {
-    outputs.iter().all(|output| {
-        let output_path = path.join(&output.path);
-        match output.kind {
-            DependencyInstallOutputKind::Path => output_path.exists(),
-            DependencyInstallOutputKind::File => output_path.is_file(),
-            DependencyInstallOutputKind::Directory => output_path.is_dir(),
-        }
-    })
+    missing_declared_outputs(path, outputs).is_empty()
+}
+
+fn missing_declared_outputs(path: &Path, outputs: &[DependencyInstallOutput]) -> Vec<String> {
+    outputs
+        .iter()
+        .filter_map(|output| {
+            let output_path = path.join(&output.path);
+            let ready = match output.kind {
+                DependencyInstallOutputKind::Path => output_path.exists(),
+                DependencyInstallOutputKind::File => output_path.is_file(),
+                DependencyInstallOutputKind::Directory => std::fs::read_dir(&output_path)
+                    .ok()
+                    .and_then(|mut entries| entries.next())
+                    .is_some_and(|entry| entry.is_ok()),
+            };
+            (!ready).then(|| crate::redaction::redact_string(&output_path.display().to_string()))
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -649,6 +649,7 @@ fn hydration_outcome(
         exit_code,
         stdout,
         stderr,
+        missing_outputs: Vec::new(),
     }
 }
 
@@ -2073,6 +2074,154 @@ mod tests {
                 DependencyHydrationTermination::NoProgress
             );
             assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn upward_selection_hydrates_the_matched_root_without_losing_package_identity() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("workspace");
+            let child = root.path().join("child");
+            std::fs::create_dir_all(child.join("deps")).unwrap();
+            std::fs::create_dir_all(root.path().join("deps")).unwrap();
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(root.path().join("workspace.lock"), "").unwrap();
+            std::fs::write(
+                child.join("project.json"),
+                r#"{"name":"child","dependencies":{"library":"1"}}"#,
+            )
+            .unwrap();
+            let adapters = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            std::fs::create_dir_all(&adapters).unwrap();
+            std::fs::write(
+                adapters.join("index.json"),
+                r#"{
+                "schema":"homeboy-extension/dependency-adapter-index/v1",
+                "manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]
+            }"#,
+            )
+            .unwrap();
+            std::fs::write(adapters.join("fixture.json"), r#"{
+                "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                "id":"fixture","version":1,"ecosystem":"fixture",
+                "project_signals":{"root_files":["project.json"]},
+                "package_managers":[{
+                    "id":"fixture","selection":{"priority":1,"files":["workspace.lock"],"search":"upward"},
+                    "commands":{"install":{"command":"mkdir -p deps && printf installed > deps/installed"}},
+                    "package_identity":{"manifest":"project.json","name":"name","dependencies":["dependencies"]},
+                    "outputs":[{"path":"deps","kind":"directory"}]
+                }]
+            }"#).unwrap();
+
+            let plan = dependency_install_plan(&child).expect("portable install plan");
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].workspace_relative_root, "");
+            assert_eq!(
+                dependency_install_step_output_path(root.path(), &plan[0], &plan[0].outputs[0])
+                    .unwrap(),
+                root.path().join("deps")
+            );
+            let identity = status(None, Some(&child.display().to_string()), None).unwrap();
+            assert_eq!(identity.packages[0].name, "library");
+
+            let outcomes = hydrate_declared_dependencies(
+                &child,
+                "fixture",
+                "child",
+                &hydration_policy(
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(Mutex::new(Vec::new())),
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                outcomes[0].status,
+                DependencyHydrationStatus::Succeeded,
+                "{outcomes:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("deps/installed")).unwrap(),
+                "installed"
+            );
+            assert!(!child.join("deps/installed").exists());
+        });
+    }
+
+    #[test]
+    fn hydration_validates_install_cwd_outputs_and_reports_missing_paths() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("workspace");
+            std::fs::create_dir_all(root.path().join("stage")).unwrap();
+            std::fs::write(root.path().join("ready"), "wrong root").unwrap();
+            let manifest = root.path().join("homeboy-deps.json");
+            std::fs::write(&manifest, r#"{
+                "provider":"fixture",
+                "commands":{"install":{"argv":["sh","-c","printf installed > ready"],"cwd":"stage"}},
+                "outputs":[{"path":"ready","kind":"file"}]
+            }"#).unwrap();
+            let policy = hydration_policy(
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(Vec::new())),
+            );
+            let outcomes =
+                hydrate_declared_dependencies(root.path(), "fixture", ".", &policy).unwrap();
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("stage/ready")).unwrap(),
+                "installed"
+            );
+
+            std::fs::remove_file(root.path().join("stage/ready")).unwrap();
+            std::fs::write(
+                &manifest,
+                r#"{
+                "provider":"fixture",
+                "commands":{"install":{"argv":["sh","-c","true"],"cwd":"stage"}},
+                "outputs":[{"path":"ready","kind":"file"}]
+            }"#,
+            )
+            .unwrap();
+            let outcomes =
+                hydrate_declared_dependencies(root.path(), "fixture", ".", &policy).unwrap();
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Failed);
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::OutputValidationFailed
+            );
+            assert_eq!(outcomes[0].exit_code, Some(0));
+            assert_eq!(
+                outcomes[0].missing_outputs,
+                vec![root.path().join("stage/ready").display().to_string()]
+            );
+
+            std::fs::create_dir(root.path().join("stage/empty")).unwrap();
+            std::fs::write(
+                &manifest,
+                r#"{
+                "provider":"fixture",
+                "commands":{"reusable":{"argv":["sh","-c","true"]},
+                    "install":{"argv":["sh","-c","true"],"cwd":"stage"}},
+                "outputs":[{"path":"empty","kind":"directory"}]
+            }"#,
+            )
+            .unwrap();
+            let outcomes =
+                hydrate_declared_dependencies(root.path(), "fixture", ".", &policy).unwrap();
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::OutputValidationFailed
+            );
+            assert_eq!(
+                outcomes[0].missing_outputs,
+                vec![root.path().join("stage/empty").display().to_string()]
+            );
         });
     }
 

@@ -4460,6 +4460,7 @@ mod gate_setup_message_tests {
             exit_code,
             stdout: String::new(),
             stderr: stderr.to_string(),
+            missing_outputs: Vec::new(),
         }
     }
 

@@ -68,6 +68,21 @@ update`, or `homeboy component setup` instead of scripting package-manager
 literals directly. New ecosystems should add or move provider adapters without
 changing dependency command orchestration.
 
+### Hydration readiness
+
+An adapter's upward selection binds installation and reusable-state checks to
+the nearest directory containing its declared selection signal. Package
+identity and package updates retain the requested project scope. Install outputs
+are relative to the install command's directory, consistently on the controller
+and in the portable Lab plan.
+
+Hydration reuses dependencies only when the provider's reusable-state check
+passes and all declared outputs are ready. Otherwise it runs the declared
+installer and validates its outputs before reporting success. Directory outputs
+must contain an entry; an empty dependency directory is not installed state.
+Failed output validation records the provider, command, install directory, and
+exact `missing_outputs` paths in the hydration outcome.
+
 ## Related
 
 - [component](component.md)
