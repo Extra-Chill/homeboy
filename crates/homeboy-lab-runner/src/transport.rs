@@ -1415,10 +1415,11 @@ mod tests {
             .expect("daemon response error remains in the source chain");
         assert_eq!(
             source.message,
-            format!("private upload parent rejected: {redacted_cause}")
+            format!("private upload parent rejected: {cause}")
         );
         assert_eq!(source.details["cause"], redacted_cause);
         assert_eq!(source.details["diagnostic_payload"], large_detail);
+        let redacted_source_message = homeboy_core::redaction::redact_string(&error.message);
         let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
             "attempt-denied-private-upload",
             "test-runner",
@@ -1433,6 +1434,7 @@ mod tests {
         );
         let source_error = &persisted_candidate.details["source_error"];
         assert_eq!(source_error["code"], "runner.lab_transport_failure");
+        assert_eq!(source_error["message"], redacted_source_message);
         assert_eq!(source_error["details"]["source"]["cause"], redacted_cause);
         assert_eq!(
             source_error["details"]["source"]["diagnostic_payload"],
