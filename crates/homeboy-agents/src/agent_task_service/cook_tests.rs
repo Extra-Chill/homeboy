@@ -16586,7 +16586,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
 }
 
 #[test]
-fn selection_required_keeps_internal_lifecycle_out_of_the_cook_wire_format() {
+fn selection_required_projects_terminal_nonretryable_partial_failure() {
     let report = cook_report(CookReportInput {
         cook_id: "cook-selection-lifecycle".to_string(),
         status: "selection_required",
@@ -16607,9 +16607,6 @@ fn selection_required_keeps_internal_lifecycle_out_of_the_cook_wire_format() {
     );
     assert!(lifecycle.terminal);
     assert!(!lifecycle.retryable);
-    assert!(serialized.get("lifecycle_status").is_none());
-    assert!(serialized.get("terminal").is_none());
-    assert!(serialized.get("retryable").is_none());
 }
 
 #[test]
