@@ -131,10 +131,9 @@ fn seed_pending(store: &AgentTaskLifecycleStore, with_envelope: bool) {
 }
 
 fn cli(binary: &str, args: &[&str]) -> Output {
-    Command::new(binary)
-        .args(args)
-        .output()
-        .expect("run private CLI")
+    let mut command = Command::new(binary);
+    command.args(args);
+    homeboy_core::test_support::bounded_output(command)
 }
 
 fn ack(output: &Output) -> Value {
@@ -228,6 +227,7 @@ impl RunnerContinuationProvider for AdmissionProbe {
 #[test]
 fn native_private_daemon_pending_action_terminal_owner_and_fence() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        eprintln!("NATIVE_PHASE=seed_private_roots");
         let binary = std::env::var("HOMEBOY_NATIVE_BINARY").expect("candidate binary path");
         std::env::set_var("HOMEBOY_COMMAND", &binary);
         let store =
@@ -241,6 +241,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
         seed_pending(&store, true);
         seed_pending(&other_root, false);
 
+        eprintln!("NATIVE_PHASE=start_private_daemon");
         std::env::set_var("HOMEBOY_COMMAND", &binary);
         let daemon_process = OwnedChild(
             Command::new(&binary)
@@ -269,6 +270,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
             "private daemon publishes its own lease"
         );
 
+        eprintln!("NATIVE_PHASE=admit_controlled_owner");
         let mut child = OwnedChild(
             Command::new("sh")
                 .args(["-c", "exec sleep 3600"])
@@ -346,6 +348,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
             "native private owner is running before cancellation"
         );
 
+        eprintln!("NATIVE_PHASE=request_cancellation");
         let cancel_args = [
             "agent-task",
             "cancel",
