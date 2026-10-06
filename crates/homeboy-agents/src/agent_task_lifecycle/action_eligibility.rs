@@ -219,6 +219,11 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     }
     match record.state {
         AgentTaskRunState::Queued => {
+            if record.is_controller_pre_provider_phase()
+                && record.metadata["phase"] == "source_materialization"
+            {
+                return unavailable("source materialization is controller-owned and has no runner job yet; watch or cancel this exact attempt");
+            }
             if super::is_transport_proxy(record)
                 || (record.runner_id().is_some()
                     && record

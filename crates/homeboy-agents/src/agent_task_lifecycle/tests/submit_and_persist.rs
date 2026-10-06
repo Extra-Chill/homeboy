@@ -975,15 +975,6 @@ fn a_claimed_handoff_parent_always_carries_the_owner_pid() {
         "a pending handoff must never be published without an owning PID"
     );
     assert!(record.metadata["detached_cook_handoff"]["launcher_start_identity"].is_object());
-    let phase = record.metadata.get("cook_progress").cloned().or_else(|| {
-        store
-            .read_record(cook_id)
-            .ok()
-            .and_then(|record| record.metadata.get("cook_progress").cloned())
-    });
-    let phase = phase
-        .map(|value| value["phase"].clone())
-        .unwrap_or(Value::Null);
     let stored = store.read_record(cook_id).expect("re-read parent");
     let phase = stored
         .metadata

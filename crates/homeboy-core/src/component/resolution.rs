@@ -1,6 +1,5 @@
 use crate::component::{
-    inventory, inventory_in_root, load, load_in_root, portable::read_portable_config,
-    try_discover_from_portable, Component,
+    load, load_in_root, portable::read_portable_config, try_discover_from_portable, Component,
 };
 use crate::error::{Error, Result};
 use crate::git::run_git;
@@ -20,14 +19,6 @@ use std::path::{Path, PathBuf};
 //
 // `config_root: None` means "this whole resolution is ambient"; `Some(root)`
 // means "this whole resolution is rooted". It is never a per-read choice.
-
-/// The registry inventory at the active boundary.
-fn inventory_at(config_root: Option<&Path>) -> Result<Vec<Component>> {
-    match config_root {
-        Some(config_root) => inventory_in_root(config_root),
-        None => inventory(),
-    }
-}
 
 /// Registered-component lookup at the active boundary.
 fn load_at(config_root: Option<&Path>, id: &str) -> Result<Component> {

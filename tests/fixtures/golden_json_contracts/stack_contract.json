@@ -4,6 +4,17 @@
       "payload": {
         "data": {
           "command": "stack.list",
+          "entities": [
+            {
+              "base": "origin/main",
+              "component": "homeboy",
+              "component_path": "/work/homeboy",
+              "description": "Combined fixes branch",
+              "id": "combined-fixes",
+              "pr_count": 1,
+              "target": "origin/dev/combined-fixes"
+            }
+          ],
           "stacks": [
             {
               "base": "origin/main",

@@ -218,34 +218,51 @@ pub(crate) fn record_lab_offload_phase_with_submission_in_store(
     submit: LabOffloadSubmission<'_>,
 ) -> Result<AgentTaskRunRecord> {
     let placeholder_workspace = input.remote_workspace.unwrap_or("pending");
-    let mut record = record_lab_offload_proxy_in_store(
-        lifecycle_store,
-        input.requested_run_id,
-        input.runner_id,
-        placeholder_workspace,
-        &[],
-        input.durable_plan,
-        submit,
-    )?;
-    if record.state.is_terminal() {
-        return Ok(record);
+    let record = match lifecycle_store.read_record(&sanitize_run_id(input.requested_run_id)) {
+        Ok(record) if record.state.is_terminal() => return Ok(record),
+        Ok(record)
+            if record.metadata["kind"] == "lab_offload_controller_proxy"
+                && record.runner_id() == Some(input.runner_id)
+                && record.runner_job_id().is_none()
+                && record.lab_handoff_validation_error().is_none()
+                && lifecycle_store.read_controller_plan(&record.run_id).is_ok() =>
+        {
+            record
+        }
+        _ => record_lab_offload_proxy_in_store(
+            lifecycle_store,
+            input.requested_run_id,
+            input.runner_id,
+            placeholder_workspace,
+            &[],
+            input.durable_plan,
+            submit,
+        )?,
+    };
+    let updated = lifecycle_store.mutate_record(&record.run_id, |record| {
+        if record.state.is_terminal() {
+            return false;
+        }
+        record.updated_at = Some(now_timestamp());
+        let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+        let metadata = record.ensure_metadata_object();
+        record_lab_offload_phase_metadata(metadata, input.phase, &phase_started_at);
+        metadata.insert("provider_state".to_string(), json!("pending"));
+        if let Some(remote_workspace) = input.remote_workspace {
+            metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
+        }
+        if let Some(source_checkout) = input.source_checkout {
+            metadata.insert("source_checkout".to_string(), source_checkout.clone());
+        }
+        if let Some(provider_rotation) = input.provider_rotation {
+            metadata.insert("provider_rotation".to_string(), provider_rotation.clone());
+        }
+        true
+    })?;
+    match updated {
+        Some(record) => Ok(record),
+        None => lifecycle_store.read_record(&record.run_id),
     }
-    record.updated_at = Some(now_timestamp());
-    let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    let metadata = record.ensure_metadata_object();
-    record_lab_offload_phase_metadata(metadata, input.phase, &phase_started_at);
-    metadata.insert("provider_state".to_string(), json!("pending"));
-    if let Some(remote_workspace) = input.remote_workspace {
-        metadata.insert("remote_workspace".to_string(), json!(remote_workspace));
-    }
-    if let Some(source_checkout) = input.source_checkout {
-        metadata.insert("source_checkout".to_string(), source_checkout.clone());
-    }
-    if let Some(provider_rotation) = input.provider_rotation {
-        metadata.insert("provider_rotation".to_string(), provider_rotation.clone());
-    }
-    lifecycle_store.write_record(&record)?;
-    Ok(record)
 }
 
 /// Replace a pre-acceptance Lab proxy with the verified controller-local

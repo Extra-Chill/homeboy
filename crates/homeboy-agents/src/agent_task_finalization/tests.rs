@@ -34,6 +34,9 @@ struct MockBackend {
     last_title: Option<String>,
     merged_pr: Option<AgentTaskPrRef>,
     create_error: bool,
+    /// A PR a concurrent publication opens between our lookup and create:
+    /// `create_pr` reports GitHub's conflict and the PR becomes findable.
+    concurrent_pr: Option<AgentTaskPrRef>,
     push_error: bool,
     identity_error: bool,
     committed_identity_error: bool,
@@ -382,6 +385,13 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         if self.create_error {
             return Err(Error::git_command_failed("gh pr create failed"));
         }
+        if let Some(concurrent) = self.concurrent_pr.take() {
+            let url = concurrent.url.clone();
+            self.existing_pr = Some(concurrent);
+            return Err(Error::git_command_failed(format!(
+                "gh pr failed: a pull request for branch \"{_head}\" into branch \"{_base}\" already exists:\n{url}"
+            )));
+        }
         self.created = true;
         self.last_title = Some(title.to_string());
         self.created_draft = draft;
@@ -712,6 +722,76 @@ fn post_mutation_drift_closes_new_pr_and_refuses_a_receipt() {
         .message
         .contains("observed_pr_head_sha=foreign-pr-head"));
     assert!(error.message.contains("cleanup_state=new_pr_closed"));
+}
+
+#[test]
+fn adopts_a_pr_a_concurrent_publication_created_after_the_lookup() {
+    // #15482: the lookup misses a seconds-old PR, so `gh pr create` reports
+    // that it already exists. Publication adopts it instead of failing.
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        concurrent_pr: Some(AgentTaskPrRef {
+            number: 683,
+            url: "https://github.com/Extra-Chill/homeboy/pull/683".to_string(),
+            is_draft: false,
+        }),
+        ..Default::default()
+    };
+
+    let report = finalize_pr_with_backend(options(), &mut backend).expect("adopted");
+
+    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.pr_action, "updated");
+    assert_eq!(report.pr_number, Some(683));
+    assert!(backend.updated);
+    assert!(!backend.created);
+    assert_eq!(backend.publication_binding_calls, 1);
+}
+
+#[test]
+fn adopted_pr_drift_is_quarantined_as_existing_never_closed() {
+    // An adopted PR was not created by this attempt, so binding drift must
+    // convert it to draft rather than close it.
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        concurrent_pr: Some(AgentTaskPrRef {
+            number: 683,
+            url: "https://github.com/Extra-Chill/homeboy/pull/683".to_string(),
+            is_draft: false,
+        }),
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "foreign-remote-sha".to_string(),
+            pr_head_sha: "foreign-pr-head".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error =
+        finalize_pr_with_backend(options(), &mut backend).expect_err("drift refuses a receipt");
+
+    assert!(backend.updated);
+    assert!(!backend.created);
+    assert!(error
+        .message
+        .contains("cleanup_state=existing_pr_converted_to_draft"));
+}
+
+#[test]
+fn other_create_failures_still_fail_publication() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        create_error: true,
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend).expect_err("create fails");
+    assert!(error.message.contains("gh pr create failed"));
+    assert!(!backend.updated);
 }
 
 #[test]

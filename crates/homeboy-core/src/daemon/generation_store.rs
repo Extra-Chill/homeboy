@@ -287,6 +287,7 @@ pub(super) fn endpoint_for_job_in_router_dir(
     }))
 }
 
+#[cfg(test)]
 pub(super) fn record_job(job_id: &str, lease_id: &str) -> Result<()> {
     mutate_registry(|registry| {
         let registry = registry.as_mut().ok_or_else(|| {
@@ -506,7 +507,7 @@ pub(super) fn activate(state: &DaemonState) -> Result<()> {
 
 /// Rebuild one durable job-to-generation binding during startup recovery.
 ///
-/// Unlike [`record_job`], a generation that is no longer registered is ordinary
+/// Unlike `record_job`, a generation that is no longer registered is ordinary
 /// history here rather than an invariant violation. Startup replays leases
 /// recorded by earlier daemons, so restarting must never require that every
 /// generation which ever admitted a job still be present in the registry.

@@ -87,6 +87,7 @@ fn controller_segment() -> String {
     super::controller_scope_segment(&controller_id())
 }
 
+#[cfg(test)]
 pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> String {
     render_service_unit_for(runner_id, &controller_id(), startup_token)
 }
@@ -117,6 +118,7 @@ WantedBy=default.target
     )
 }
 
+#[cfg(test)]
 /// Atomically point the unit's binary link at `binary`.
 pub(crate) fn point_binary_script(runner_id: &str, binary: &str) -> String {
     point_binary_script_for(runner_id, &controller_id(), binary)
@@ -133,6 +135,7 @@ mv -f "$link.next" "$link""#,
     )
 }
 
+#[cfg(test)]
 /// Write the rendered unit and reload systemd's view of it. Shared by
 /// install (which also enables and starts the unit for the first time) and
 /// repoint-and-restart (which only needs the file on disk to be current

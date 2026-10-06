@@ -135,7 +135,11 @@ pub struct SourcePackageScan {
 pub fn scan_source_package(root: &Path) -> SourcePackageScan {
     // `from_directory` is the sealed package scanner/builder. Reuse its output
     // so this read-only surface cannot drift from staging's v1/v2 identity.
-    match SourceArtifactTransfer::from_directory_with_exclusions("source-package-check", root) {
+    match SourceArtifactTransfer::from_directory_with_exclusions(
+        "source-package-check",
+        root,
+        &crate::workspace::WorkspaceControl::default(),
+    ) {
         Ok((transfer, excluded)) => {
             let file_count = transfer.package.entries.len();
             let bytes = transfer
@@ -989,13 +993,28 @@ impl SourceArtifactTransfer {
     /// manifest. Git-indexed, lexically in-tree symlinks retain their target
     /// text in v2; untracked links are omitted without reading their targets.
     pub fn from_directory(artifact_id: impl Into<String>, root: &Path) -> Result<Self> {
-        Self::from_directory_with_exclusions(artifact_id, root).map(|(transfer, _)| transfer)
+        Self::from_directory_controlled(
+            artifact_id,
+            root,
+            &crate::workspace::WorkspaceControl::default(),
+        )
+    }
+
+    pub(crate) fn from_directory_controlled(
+        artifact_id: impl Into<String>,
+        root: &Path,
+        control: &crate::workspace::WorkspaceControl,
+    ) -> Result<Self> {
+        Self::from_directory_with_exclusions(artifact_id, root, control)
+            .map(|(transfer, _)| transfer)
     }
 
     fn from_directory_with_exclusions(
         artifact_id: impl Into<String>,
         root: &Path,
+        control: &crate::workspace::WorkspaceControl,
     ) -> Result<(Self, Vec<SourcePackageExclusion>)> {
+        control.checkpoint()?;
         #[cfg(not(unix))]
         {
             let _ = artifact_id;
@@ -1008,7 +1027,10 @@ impl SourceArtifactTransfer {
         }
         #[cfg(unix)]
         {
-            fn tracked_symlinks(root: &std::fs::File) -> Result<BTreeSet<String>> {
+            fn tracked_symlinks(
+                root: &std::fs::File,
+                control: &crate::workspace::WorkspaceControl,
+            ) -> Result<BTreeSet<String>> {
                 use std::os::fd::AsRawFd;
                 use std::os::unix::process::CommandExt;
 
@@ -1026,12 +1048,14 @@ impl SourceArtifactTransfer {
                         }
                     });
                 }
-                let output = match command.output() {
+                let output = match control
+                    .output_exact(&mut command, "read source package Git index")
+                {
                     Ok(output) => output,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(error) if error.details["workspace_sync"]["program_missing"] == true => {
                         return Ok(BTreeSet::new())
                     }
-                    Err(error) => return Err(Error::internal_io(error.to_string(), None)),
+                    Err(error) => return Err(error),
                 };
                 if !output.status.success() {
                     // A non-Git source directory has no authoritative link inventory.
@@ -1066,16 +1090,25 @@ impl SourceArtifactTransfer {
                     .collect::<BTreeSet<_>>();
                 Ok(links)
             }
+            struct ScanControl<'a> {
+                root: &'a Path,
+                control: &'a crate::workspace::WorkspaceControl,
+                bytes_used: u64,
+            }
             #[cfg(unix)]
             fn collect(
-                root: &Path,
+                scan: &mut ScanControl<'_>,
                 directory: &std::fs::File,
                 relative_directory: &str,
                 tracked_links: &BTreeSet<String>,
                 entries: &mut BTreeMap<String, SourcePackagePayload>,
                 exclusions: &mut Vec<SourcePackageExclusion>,
             ) -> Result<()> {
+                let root = scan.root;
+                let control = scan.control;
+                control.checkpoint()?;
                 for name in source_directory::directory_entries(directory)? {
+                    control.checkpoint()?;
                     let name_text = name.to_str().ok_or_else(|| {
                         Error::validation_invalid_argument(
                             "source_path",
@@ -1128,6 +1161,7 @@ impl SourceArtifactTransfer {
                             None,
                         )
                     })?;
+                            scan.bytes_used += verdict.target.len() as u64;
                             entries.insert(
                                 relative,
                                 SourcePackagePayload::Symlink {
@@ -1135,11 +1169,7 @@ impl SourceArtifactTransfer {
                                 },
                             );
                             if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                                || entries
-                                    .values()
-                                    .map(SourcePackagePayload::size_bytes)
-                                    .sum::<u64>()
-                                    > MAX_SOURCE_ARTIFACT_BYTES
+                                || scan.bytes_used > MAX_SOURCE_ARTIFACT_BYTES
                             {
                                 return Err(source_package_limit_error(root, entries));
                             }
@@ -1147,10 +1177,12 @@ impl SourceArtifactTransfer {
                         }
                         libc::S_IFDIR => {
                             let child = source_directory::open_directory_at(directory, &name)?;
-                            collect(root, &child, &relative, tracked_links, entries, exclusions)?;
+                            collect(scan, &child, &relative, tracked_links, entries, exclusions)?;
                         }
                         libc::S_IFREG => {
                             let bytes = source_directory::read_regular_file_at(directory, &name)?;
+                            control.checkpoint()?;
+                            scan.bytes_used += bytes.len() as u64;
                             entries.insert(
                                 relative,
                                 SourcePackagePayload::File {
@@ -1169,18 +1201,7 @@ impl SourceArtifactTransfer {
                         }
                     }
                     if entries.len() > MAX_SOURCE_PACKAGE_ENTRIES
-                        || entries
-                            .values()
-                            .map(|entry| match entry {
-                                SourcePackagePayload::File { content_base64 } => {
-                                    base64::engine::general_purpose::STANDARD
-                                        .decode(content_base64)
-                                        .map_or(0, |bytes| bytes.len() as u64)
-                                }
-                                SourcePackagePayload::Symlink { target } => target.len() as u64,
-                            })
-                            .sum::<u64>()
-                            > MAX_SOURCE_ARTIFACT_BYTES
+                        || scan.bytes_used > MAX_SOURCE_ARTIFACT_BYTES
                     {
                         return Err(source_package_limit_error(root, entries));
                     }
@@ -1204,18 +1225,24 @@ impl SourceArtifactTransfer {
             #[cfg(unix)]
             let root_directory = source_directory::open_root(root)?;
             #[cfg(unix)]
-            let tracked_links = tracked_symlinks(&root_directory)?;
+            let tracked_links = tracked_symlinks(&root_directory, control)?;
             let mut payloads = BTreeMap::new();
             let mut exclusions = Vec::new();
+            let mut scan = ScanControl {
+                root,
+                control,
+                bytes_used: 0,
+            };
             #[cfg(unix)]
             collect(
-                root,
+                &mut scan,
                 &root_directory,
                 "",
                 &tracked_links,
                 &mut payloads,
                 &mut exclusions,
             )?;
+            control.checkpoint()?;
             if payloads.is_empty() {
                 return Err(Error::validation_invalid_argument(
                     "source_path",

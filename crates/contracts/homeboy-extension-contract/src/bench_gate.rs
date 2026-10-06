@@ -83,3 +83,16 @@ impl BenchGateOp {
         }
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn bench_gate_op_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [BenchGateOp::Eq, BenchGateOp::Gte, BenchGateOp::Lte]
+        );
+    }
+}

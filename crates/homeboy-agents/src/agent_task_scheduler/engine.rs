@@ -1822,6 +1822,7 @@ fn is_fingerprinted_actionable_patch_artifact(artifact: &AgentTaskArtifact) -> b
             .is_some_and(|fingerprint| !fingerprint.trim().is_empty())
 }
 
+#[cfg(test)]
 pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,

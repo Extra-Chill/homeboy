@@ -7606,6 +7606,7 @@ struct CookRecoveryActions {
     reason: String,
 }
 
+#[cfg(test)]
 /// Standard Cook actions are built once. Lab runtime repair is legal only for
 /// the exact failed admission record, so it is kept out of `next_actions`.
 fn cook_recovery_actions(
