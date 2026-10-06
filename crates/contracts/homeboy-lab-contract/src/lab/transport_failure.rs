@@ -262,6 +262,7 @@ fn full_source_error_evidence(error: &Error) -> serde_json::Value {
             causes.push(serde_json::json!({
                 "kind": LabTransportErrorKind::from_io_kind(io_error.kind()),
                 "message": homeboy_redaction::redact_string(&io_error.to_string()),
+                "raw_os_error": io_error.raw_os_error(),
             }));
         } else {
             causes.push(serde_json::json!({

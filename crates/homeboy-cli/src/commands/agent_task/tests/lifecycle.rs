@@ -534,6 +534,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             "No such file or directory (os error 2)"
         );
         assert_eq!(source_error["causes"][0]["kind"], "not_found");
+        assert_eq!(source_error["causes"][0]["raw_os_error"], 2);
         assert_eq!(
             source_error["causes"][0]["message"],
             "No such file or directory (os error 2)"
