@@ -326,35 +326,37 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.95.0
 
+      - name: Check out canonical Cargo cache resolver
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: 8194050639aeb51728460051884f183aa74eade5
+          path: .homeboy-action
+
       - name: Resolve Cargo build cache
         id: cargo-cache
-        run: |
-          lock_digest="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          fingerprint="$(printf 'Cargo.lock:%s\n' "${lock_digest}" | sha256sum | cut -d' ' -f1)"
-          {
-            echo "key=${RUNNER_OS}-cargo-build-${fingerprint}"
-            echo "paths<<HOMEBOY_CACHE_PATHS"
-            echo "${HOME}/.cargo/registry"
-            echo "${HOME}/.cargo/git"
-            echo "target"
-            echo "HOMEBOY_CACHE_PATHS"
-          } >> "$GITHUB_OUTPUT"
+        env:
+          SOURCE_PATH: .
+          SOURCE_BUILD_PROFILE: release
+        run: bash .homeboy-action/scripts/setup/resolve-source-cargo-cache.sh
 
       - name: Cache cargo
         uses: actions/cache@v5
         with:
           path: ${{ steps.cargo-cache.outputs.paths }}
           key: ${{ steps.cargo-cache.outputs.key }}
-          restore-keys: ${{ runner.os }}-cargo-build-
+          restore-keys: ${{ steps.cargo-cache.outputs.restore-keys }}
 
       - name: Build homeboy
-        run: cargo build --release
+        env:
+          CARGO_TARGET_DIR: ${{ steps.cargo-cache.outputs.target-path }}
+        run: cargo build --release --locked
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: homeboy-binary
-          path: target/release/homeboy
+          path: ${{ steps.cargo-cache.outputs.target-path }}/release/homeboy
           retention-days: 1
 
   # ── Step 3: Quality checks ──
