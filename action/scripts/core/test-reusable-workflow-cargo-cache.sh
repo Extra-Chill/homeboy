@@ -17,8 +17,8 @@ if grep -q 'cargo-cache-key\|Restore candidate cargo cache' "${WORKFLOW}"; then
   exit 1
 fi
 
-if [ "$(grep -c "if: hashFiles('Cargo.lock') != ''" "${WORKFLOW}")" -ne 1 ]; then
-  printf 'FAIL: Cargo cache discovery must remain conditional and owned by the candidate checkout\n'
+if [ "$(grep -c "if: inputs.build-command != '' && hashFiles('Cargo.lock') != ''" "${WORKFLOW}")" -ne 1 ]; then
+  printf 'FAIL: workflow cache discovery must belong only to custom candidate builds\n'
   exit 1
 fi
 

@@ -25,11 +25,12 @@ echo "Building homeboy from source at ${SOURCE_PATH} with the ${profile} profile
 # and leave the working tree dirty — which makes the downstream `homeboy
 # release` working-tree check refuse to release. Reproducible builds want the
 # committed lockfile honored verbatim anyway.
+export CARGO_TARGET_DIR="${HOMEBOY_SOURCE_TARGET_DIR:-${CARGO_TARGET_DIR:-${SOURCE_PATH}/target}}"
 BUILD_EXIT=0
 cargo build "${cargo_profile_args[@]}" --locked --manifest-path "${SOURCE_PATH}/Cargo.toml" 2>&1 || BUILD_EXIT=$?
 
 if [ "${BUILD_EXIT}" -eq 0 ]; then
-  BINARY="${SOURCE_PATH}/target/${target_profile}/homeboy"
+  BINARY="${CARGO_TARGET_DIR}/${target_profile}/homeboy"
   if [ -f "${BINARY}" ]; then
     chmod +x "${BINARY}"
     sudo cp "${BINARY}" /usr/local/bin/homeboy

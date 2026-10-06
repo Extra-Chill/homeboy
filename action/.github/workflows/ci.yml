@@ -246,37 +246,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        if: inputs.rust-toolchain != ''
+        if: inputs.build-command != '' && inputs.rust-toolchain != ''
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ inputs.rust-toolchain }}
-
-      - name: Resolve candidate Cargo cache
-        id: cargo-cache
-        if: hashFiles('Cargo.lock') != ''
-        run: |
-          lock_digest="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          fingerprint="$(printf 'Cargo.lock:%s\n' "${lock_digest}" | sha256sum | cut -d' ' -f1)"
-          {
-            echo "key=${RUNNER_OS}-cargo-build-${fingerprint}"
-            echo "paths<<HOMEBOY_CACHE_PATHS"
-            echo "${HOME}/.cargo/registry"
-            echo "${HOME}/.cargo/git"
-            echo "target"
-            echo "HOMEBOY_CACHE_PATHS"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Cache cargo
-        if: steps.cargo-cache.outputs.key != ''
-        uses: actions/cache@v5
-        with:
-          path: ${{ steps.cargo-cache.outputs.paths }}
-          key: ${{ steps.cargo-cache.outputs.key }}
-          restore-keys: ${{ runner.os }}-cargo-build-
-
-      - name: Build candidate Homeboy binary
-        if: inputs.build-command != ''
-        run: ${{ inputs.build-command }}
 
       - name: Check out Homeboy Action
         uses: actions/checkout@v6
@@ -284,6 +257,30 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.plan.outputs.action-sha }}
           path: .homeboy-action
+
+      # Custom build commands own their cache here. Source builds are restored
+      # exactly once by the composite action's canonical source cache resolver.
+      - name: Resolve candidate Cargo cache
+        id: cargo-cache
+        if: inputs.build-command != '' && hashFiles('Cargo.lock') != ''
+        env:
+          SOURCE_PATH: .
+          SOURCE_TARGET_DIR: target
+          SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
+          SOURCE_BUILD_COMMAND: ${{ inputs.build-command }}
+        run: bash .homeboy-action/scripts/setup/resolve-source-cargo-cache.sh
+
+      - name: Cache cargo
+        if: steps.cargo-cache.outputs.key != ''
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
+          restore-keys: ${{ steps.cargo-cache.outputs.restore-keys }}
+
+      - name: Build candidate Homeboy binary
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}
 
       - name: Reserve action checkout during candidate binary setup
         id: prepare-binary-workspace

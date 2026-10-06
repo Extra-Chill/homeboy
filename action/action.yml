@@ -381,6 +381,7 @@ runs:
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
+        SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve source Cargo cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-source-cargo-cache.sh
 
     - name: Cache cargo (source build)
@@ -388,8 +389,8 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ steps.source-cargo-cache.outputs.paths }}
-        key: ${{ runner.os }}-cargo-build-${{ steps.source-cargo-cache.outputs.fingerprint }}
-        restore-keys: ${{ runner.os }}-cargo-build-
+        key: ${{ steps.source-cargo-cache.outputs.key }}
+        restore-keys: ${{ steps.source-cargo-cache.outputs.restore-keys }}
 
     - name: Build from source
       id: source-build
@@ -398,6 +399,7 @@ runs:
       env:
         SOURCE_PATH: ${{ inputs.source }}
         SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
+        HOMEBOY_SOURCE_TARGET_DIR: ${{ steps.source-cargo-cache.outputs.target-path }}
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'build Homeboy from source' -- bash ${{ github.action_path }}/scripts/setup/build-source-homeboy.sh
 
     - name: Resolve Homeboy version
@@ -441,7 +443,7 @@ runs:
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'detect Homeboy placement support' -- bash ${{ github.action_path }}/scripts/setup/detect-homeboy-placement.sh
 
     - name: Install extension
-      if: steps.read-config.outputs.portable-extension != ''
+      if: inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension != ''
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -468,6 +470,7 @@ runs:
 
     - name: Detect runtime environment
       id: detect-env
+      if: inputs.prepare-only != 'true'
       shell: bash
       env:
         PHP_INPUT: ${{ inputs.php-version }}
@@ -478,6 +481,7 @@ runs:
 
     - name: Resolve extension CI cache
       id: extension-cache
+      if: inputs.prepare-only != 'true'
       shell: bash
       env:
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
@@ -532,7 +536,7 @@ runs:
       uses: taiki-e/install-action@nextest
 
     - name: Auto-setup environment
-      if: inputs.auto-setup == 'true'
+      if: inputs.prepare-only != 'true' && inputs.auto-setup == 'true'
       shell: bash
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'auto-setup environment' -- bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
 
