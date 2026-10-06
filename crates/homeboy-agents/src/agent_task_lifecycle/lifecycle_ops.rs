@@ -3815,8 +3815,7 @@ pub fn load_controller_plan_in_store(
     lifecycle_store.read_controller_plan(&run_id)
 }
 
-/// Load a durable plan for a scheduler or provider execution. This is the only
-/// read path allowed to upgrade a legacy execution-budget envelope.
+/// Load a durable plan for a scheduler or provider execution without mutation.
 pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     load_plan_for_execution_in_store(&lifecycle_store, run_id)
@@ -3825,17 +3824,13 @@ pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
 /// [`load_plan_for_execution`] against explicitly injected durable lifecycle
 /// roots.
 ///
-/// Both halves follow the injected root, and the second one is a write: the
-/// legacy execution-budget upgrade rewrites `plan.json` under this store's
-/// config lock. Resolving the Cook alias against one home's index and
-/// migrating another home's plan file would rewrite a plan this caller never
-/// read (#7505).
+/// Alias resolution and canonical plan validation follow the same rooted store.
 pub fn load_plan_for_execution_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskPlan> {
     let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
-    lifecycle_store.read_controller_plan_for_execution(&run_id)
+    lifecycle_store.read_controller_plan(&run_id)
 }
 
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted

@@ -394,10 +394,9 @@ impl AgentTaskLifecycleStore {
             {
                 return Ok(None);
             }
-            let mut plan = plan.clone();
-            migrate_execution_budget(&mut plan)?;
-            validate_managed_services(&plan)?;
-            write_private_json(&self.controller_plan_path(run_id), &plan)?;
+            validate_execution_budget(plan)?;
+            validate_managed_services(plan)?;
+            write_private_json(&self.controller_plan_path(run_id), plan)?;
 
             record.updated_at = Some(super::now_timestamp());
             super::set_run_state(&mut record, super::AgentTaskRunState::Running);
@@ -743,10 +742,6 @@ impl AgentTaskLifecycleStore {
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {
         read_controller_plan_in_store(self, run_id)
-    }
-
-    pub fn read_controller_plan_for_execution(&self, run_id: &str) -> Result<AgentTaskPlan> {
-        read_controller_plan_for_execution_in_store(self, run_id)
     }
 
     pub fn write_aggregate(&self, run_id: &str, aggregate: &AgentTaskAggregate) -> Result<PathBuf> {
@@ -1560,11 +1555,10 @@ pub(super) fn write_plan_in_store(
     plan: &AgentTaskPlan,
 ) -> Result<PathBuf> {
     store.with_config_lock(|| {
-        let mut plan = plan.clone();
-        migrate_execution_budget(&mut plan)?;
-        validate_managed_services(&plan)?;
+        validate_execution_budget(plan)?;
+        validate_managed_services(plan)?;
         let path = store.controller_plan_path(run_id);
-        write_private_json(&path, &plan)?;
+        write_private_json(&path, plan)?;
         Ok(path)
     })
 }
@@ -1601,32 +1595,9 @@ fn read_controller_plan_in_store(
     Ok(plan)
 }
 
-/// Controller lifecycle operations resolve the plan from their durable run
-/// identity. `AgentTaskRunRecord::plan_path` can be runner-local transport
-/// evidence after a Lab projection and is never controller execution authority.
-///
-/// There is no ambient `store::` shim for this any more: the migration branch
-/// below rewrites `plan.json`, so the last caller —
-/// `load_plan_for_execution` — now resolves one store and hands it here rather
-/// than letting the Cook-alias resolution and the plan rewrite land in
-/// separately resolved homes (#7505).
-fn read_controller_plan_for_execution_in_store(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskPlan> {
-    store.with_config_lock(|| {
-        let path = store.controller_plan_path(run_id);
-        let mut plan = read_controller_plan_in_store(store, run_id)?;
-        if migrate_execution_budget(&mut plan)? {
-            write_private_json(&path, &plan)?;
-        }
-        Ok(plan)
-    })
-}
-
 fn validate_execution_budget(plan: &AgentTaskPlan) -> Result<()> {
     match plan.options.execution_budget.version {
-        0 | crate::agent_task_scheduler::AgentTaskExecutionBudget::VERSION => Ok(()),
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::VERSION => Ok(()),
         version => Err(Error::validation_invalid_argument(
             "execution_budget.version",
             format!(
@@ -1643,20 +1614,6 @@ fn validate_managed_services(plan: &AgentTaskPlan) -> Result<()> {
     plan.validate_managed_services().map_err(|message| {
         Error::validation_invalid_argument("services.cleanup_deadline_ms", message, None, None)
     })
-}
-
-fn migrate_execution_budget(plan: &mut AgentTaskPlan) -> Result<bool> {
-    plan.options
-        .execution_budget
-        .migrate_legacy()
-        .map_err(|message| {
-            Error::validation_invalid_argument(
-                "execution_budget.version",
-                message,
-                Some(plan.options.execution_budget.version.to_string()),
-                None,
-            )
-        })
 }
 
 #[cfg(test)]

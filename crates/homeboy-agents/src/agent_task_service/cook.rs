@@ -6232,7 +6232,7 @@ fn dispatch_provider_ci_remediation(
 
     let result: Result<AgentTaskRunResult<AgentTaskCookReport>> = (|| {
         let record = lifecycle_store.read_record(run_id)?;
-        let plan = lifecycle_store.read_controller_plan_for_execution(run_id)?;
+        let plan = lifecycle_store.read_controller_plan(run_id)?;
         let aggregate = lifecycle_store.read_aggregate(run_id)?;
         let promotion: AgentTaskPromotionReport = serde_json::from_value(
             record.metadata["latest_promotion"].clone(),
@@ -8265,7 +8265,7 @@ fn run_cook_spine(
                 invocation_latest_run_id: Some(&run_id),
             }));
         }
-        let plan = lifecycle_store.read_controller_plan_for_execution(&run_id)?;
+        let plan = lifecycle_store.read_controller_plan(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let Some(source_request) = plan.tasks.first().cloned() else {
             return Ok(cook_report(CookReportInput {
