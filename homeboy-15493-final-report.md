@@ -87,3 +87,12 @@ At this initial checkpoint, the worktree/report were not a completed publication
 - The unchanged daemon process-group chaos test passed **1/1 in 7.71 seconds** on Linux. Its CI-only startup failure is not claimed repaired or classified as inherited until immutable baseline evidence is available.
 - Retained transcript basenames: `native-proof-cargo-fixture-supervisor.log`, `canonical-model-route-supervisor.log`, `canonical-artifact-refs-supervisor.log`, and `daemon-chaos-supervisor.log`.
 - AI assistance: OpenAI **gpt-6.1-sol** through **OpenCode** read the retained gate payload, integrated the native proof into the owning Cargo target, updated the canonical CLI fixtures, and verified those actual process boundaries.
+
+## Integrated managed-runner fixture proof — 2026-10-06
+
+- Immutable baseline evidence confirmed the model-route and compact-artifact failures also occur before this cancellation patch. The daemon startup failure did not occur in that baseline run; a separate baseline-only handoff case failed instead. No flaky result was waived.
+- Integrated current main at `3d8612b8a41da109adbc683346d8202037360a0e`. The registry merge preserves the common `read_registry_at` reader for both rooted cancellation and generation observation.
+- The native root integration target passed inside an actual managed runner on the integrated candidate. The model-route case then exposed a fixture-isolation gap: it passed over ordinary SSH but failed under managed execution because `HermeticTestContext::command` retained the launching runner's identity fields.
+- The shared fixture command now clears the same four owned runner identity variables that in-process isolation already clears. The nearest environment regression was extended. Managed run `homeboy-15549-hermetic-runner-identity` passed that regression and the actual model-route process boundary (**1/1 each**, model route **9.67 seconds**).
+- Foreground survival now observes the public client progress stream and polls canonical durable status instead of depending on a retired private `cook.log` path. It still terminates the observing client and requires succeeded provider work plus retrievable patch artifacts. Managed run `homeboy-15549-public-handoff-observation` passed that case (**1/1**, **16.38 seconds**) and the unchanged daemon process-group chaos case (**1/1**, **6.60 seconds**).
+- These changes are fixture ownership and verification repairs; they add no production format adapters, execution pipeline, or flag. Full exact-head CI remains required after publication.

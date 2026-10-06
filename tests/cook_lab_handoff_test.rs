@@ -935,34 +935,19 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         ));
     let mut client = client.spawn().expect("start foreground Cook client");
 
-    // Provider-start progress is written by the daemon-supervised Cook. The
-    // status check below then proves the provider is durably running before the
-    // foreground observer is terminated.
+    // Observe the client's public progress stream, then prove the provider is
+    // durably running before terminating that observer.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if std::fs::read_to_string(
-            context
-                .data_dir()
-                .join("agent-task-detached")
-                .join(cook_id)
-                .join("cook.log"),
-        )
-        .unwrap_or_default()
-        .contains("Cook provider_start")
+        if std::fs::read_to_string(&client_stderr)
+            .unwrap_or_default()
+            .contains("Cook provider_start")
         {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "Cook did not start provider work: child log={} client stdout={} stderr={}",
-            std::fs::read_to_string(
-                context
-                    .data_dir()
-                    .join("agent-task-detached")
-                    .join(cook_id)
-                    .join("cook.log"),
-            )
-            .unwrap_or_default(),
+            "Cook did not start provider work: client stdout={} stderr={}",
             std::fs::read_to_string(&client_stdout).unwrap_or_default(),
             std::fs::read_to_string(&client_stderr).unwrap_or_default(),
         );
@@ -1004,31 +989,26 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     client.wait().expect("reap observing client");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if std::fs::read_to_string(
-            context
-                .data_dir()
-                .join("agent-task-detached")
-                .join(cook_id)
-                .join("cook.log"),
-        )
-        .unwrap_or_default()
-        .contains("Cook terminal")
+    let (output, completed, completed_json) = loop {
+        let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        status.args(["agent-task", "status", cook_id]);
+        let output = bounded_output(status);
+        let completed = String::from_utf8_lossy(&output.stdout).into_owned();
+        let completed_json =
+            serde_json::from_str::<serde_json::Value>(&completed).expect("completed status JSON");
+        if completed_json
+            .pointer("/data/state")
+            .and_then(serde_json::Value::as_str)
+            == Some("succeeded")
         {
-            break;
+            break (output, completed, completed_json);
         }
         assert!(
             Instant::now() < deadline,
-            "Cook did not terminalize after client termination"
+            "Cook did not terminalize after client termination: {completed}"
         );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.args(["agent-task", "status", cook_id]);
-    let output = bounded_output(status);
-    let completed = String::from_utf8_lossy(&output.stdout).into_owned();
-    let completed_json =
-        serde_json::from_str::<serde_json::Value>(&completed).expect("completed status JSON");
+        std::thread::sleep(Duration::from_secs(1));
+    };
     let terminal_provider_success = completed_json
         .pointer("/data/state")
         .and_then(serde_json::Value::as_str)
