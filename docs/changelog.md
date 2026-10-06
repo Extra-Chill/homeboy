@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.410.0] - 2026-10-06
+
+### Changed
+- consolidate trace labels into literal wire oracles
+- cook-continue reserves retry successors through the control-plane Retry action
+- retire the actual owned generation in recovery fixture
+- consolidate bench artifact optional field fixtures
+- retire execution-budget migration and mutating plan reads
+- retire legacy readiness probe command descriptors
+- CLI actions dispatch through the same registry as the daemon
+- recover persisted follow-up intent through canonical lineage
+
+### Fixed
+- supervisor exits when its state directory is deleted
+- restore native destinations and retain replay diagnostics
+- adopt compatible source build cache ownership
+- keep recovery on registered generation
+- fence recovery against stale authority
+
 ## [0.409.0] - 2026-10-06
 
 ### Added
