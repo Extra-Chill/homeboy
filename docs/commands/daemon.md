@@ -72,11 +72,15 @@ candidate command lines, runtime-path, termination, and job-recovery evidence.
 
 `homeboy daemon status` already computes the repair its own evidence
 authorizes and reports it as `freshness.repair_plan`. `homeboy daemon recover`
-is the dispatcher for that plan: one authoritative status read resolves the
-matching recovery and **fills every argument from the report it just read**.
-After `--yes` applies every step, a mandatory second authoritative status read
-must prove the daemon fresh before the command succeeds. Nothing is transcribed
-by hand between two commands.
+is the dispatcher for that plan: the status resolves the selected generation,
+store, lease, and protected jobs. Before mutation, recovery re-reads that same
+authority identity and refuses with `stale_daemon_recovery_plan` and a dry-run
+handoff if the authority or protected job set changed. Restartable stale
+generations use `daemon ensure-running` so replacement is rotated through the
+admission registry; recovery does not stop a registered-generation store and
+then start in the caller's legacy state directory. After `--yes` applies every
+step, a final authoritative status read must prove the selected daemon fresh
+before the command succeeds. Nothing is transcribed by hand between commands.
 
 ```sh
 homeboy daemon recover            # resolve and print the plan (default)
@@ -86,9 +90,10 @@ homeboy daemon recover --yes      # resolve and run it
 Dry run is the default because recovery mutates the daemon that owns the
 caller's durable jobs. The output carries the resolved `plan` (each step with
 its code, its rendered command, and its argv), the `stale_reason_code` it
-matched, and `next_command`. A preview, blocked recovery, stale postcondition,
-or unavailable postcondition read returns a nonzero structured outcome while
-preserving the plan and any applied-step evidence.
+matched, the `store_path` and `lease_id` that own that plan, and `next_command`.
+A preview, blocked recovery, stale plan, stale postcondition, or unavailable
+postcondition read returns a nonzero structured outcome while preserving the
+plan and any applied-step evidence.
 
 A report the evidence authorizes nothing for does not produce an empty plan. It
 produces the read-only `daemon_diagnose` step and `blocked_on`, stating in the

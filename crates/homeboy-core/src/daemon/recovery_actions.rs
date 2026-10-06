@@ -21,6 +21,8 @@ use crate::error::{ActionSafety, ExecutableAction};
 pub const DAEMON_STOP: &str = "daemon_stop";
 /// Start a replacement daemon.
 pub const DAEMON_START: &str = "daemon_start";
+/// Replace or reuse the daemon selected by the generation admission authority.
+pub const DAEMON_ENSURE_RUNNING: &str = "daemon_ensure_running";
 /// Adopt one proven-dead lease and reconcile the jobs it owned.
 pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
 /// Reconcile durable jobs that outlived the lease that owned them.
@@ -83,6 +85,15 @@ pub fn start() -> ExecutableAction {
         "daemon.start",
         "start a replacement local daemon".to_string(),
         ["daemon".to_string(), "start".to_string()],
+        ActionSafety::Mutating,
+    )
+}
+
+pub fn ensure_running() -> ExecutableAction {
+    action(
+        "daemon.ensure_running",
+        "ensure a fresh daemon for the current admission generation".to_string(),
+        ["daemon".to_string(), "ensure-running".to_string()],
         ActionSafety::Mutating,
     )
 }
@@ -384,7 +395,7 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 ///
 /// This policy is intentionally independent of the command requesting daemon
 /// admission. It trusts only the authoritative status report and accepts only
-/// the bounded stop/start plan: an explicitly restartable lease whose active
+/// the bounded generation-replacement plan: an explicitly restartable lease whose active
 /// jobs all carry durable terminal evidence (so no workload remains), no
 /// attestations, and no other mutation mixed into the plan.
 pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
@@ -398,9 +409,8 @@ pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
         && status.freshness.restartable
         && plan.executable
         && plan.required_confirmations.is_empty()
-        && plan.steps.len() == 2
-        && plan.steps[0].code == DAEMON_STOP
-        && plan.steps[1].code == DAEMON_START
+        && plan.steps.len() == 1
+        && plan.steps[0].code == DAEMON_ENSURE_RUNNING
 }
 
 #[cfg(test)]
@@ -519,17 +529,18 @@ mod tests {
 
     /// The live reproduction this fix was written against: a reachable daemon
     /// whose build identity no longer matches the current binary, zero active
-    /// jobs, restartable. The dispatcher must resolve the stop/start pair with
+    /// jobs, restartable. The dispatcher must resolve the authority-bound
+    /// replacement with
     /// every argument already filled in — including the lease the fixture
-    /// carries, so the advertised stop is the exact-lease stop (#11220).
+    /// carries. Recovery must keep the selected authority while replacing it.
     #[test]
     fn a_version_mismatch_report_resolves_the_restart_plan() {
         let status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
-            vec![
-                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
-                DaemonRepairStep::executable(DAEMON_START, start()),
-            ],
+            vec![DaemonRepairStep::executable(
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
+            )],
             0,
         );
 
@@ -542,13 +553,7 @@ mod tests {
                 .iter()
                 .map(|step| (step.code.as_str(), step.command.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                (
-                    DAEMON_STOP,
-                    format!("homeboy daemon stop --lease-id {LEASE_ID}").as_str(),
-                ),
-                (DAEMON_START, "homeboy daemon start"),
-            ]
+            vec![(DAEMON_ENSURE_RUNNING, "homeboy daemon ensure-running")]
         );
         assert!(plan.reason.contains("VersionMismatch"), "{}", plan.reason);
         for step in &plan.steps {
@@ -561,20 +566,20 @@ mod tests {
     fn automatic_idle_restart_refuses_active_jobs_and_non_restart_plans() {
         let active = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
-            vec![
-                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
-                DaemonRepairStep::executable(DAEMON_START, start()),
-            ],
+            vec![DaemonRepairStep::executable(
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
+            )],
             1,
         );
         assert!(!authorizes_automatic_idle_restart(&active));
 
         let mut inconsistent = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
-            vec![
-                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
-                DaemonRepairStep::executable(DAEMON_START, start()),
-            ],
+            vec![DaemonRepairStep::executable(
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
+            )],
             0,
         );
         inconsistent
@@ -842,10 +847,10 @@ mod tests {
     fn terminal_evidence_authorizes_automatic_idle_restart() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
-            vec![
-                DaemonRepairStep::executable(DAEMON_STOP, stop_for_lease(LEASE_ID)),
-                DaemonRepairStep::executable(DAEMON_START, start()),
-            ],
+            vec![DaemonRepairStep::executable(
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
+            )],
             0,
         );
         status.active_job_recovery_evidence = vec![terminal_recovery_evidence(Uuid::nil())];
