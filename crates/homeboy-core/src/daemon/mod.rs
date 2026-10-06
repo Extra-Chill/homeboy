@@ -2256,6 +2256,17 @@ fn orchestration_tick_loop(
             isolated_tick(|| {
                 let _ = orchestration::drain_work_intents();
             });
+            // Observation runs (`runs` table) are reconciled here — one rule,
+            // one cadence — not as a side effect of reads. HTTP GETs on runs
+            // only read; stale-running settlement belongs to this pass.
+            isolated_tick(|| {
+                let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
+                    return;
+                };
+                let _ = crate::observation::runs_service::reconcile_owned_stale_running_runs(
+                    &store, 1000,
+                );
+            });
         }
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
