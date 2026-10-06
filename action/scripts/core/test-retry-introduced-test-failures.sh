@@ -276,7 +276,7 @@ full_cargo_bad='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::bad'
 full_cargo_other='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::other'
 write_outcomes "${current_dir}" 'review test' 'cargo test' "${full_cargo_ok}" "${full_cargo_bad}" -- "${full_cargo_ok}" "${full_cargo_bad}" "${full_cargo_other}"
 write_outcomes "${base_dir}" 'review test' 'cargo test' -- "${full_cargo_other}"
-output="$(run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
+output="$(CARGO_TERM_COLOR=always run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
 assert_equals "{\"flaky\":[\"${full_cargo_ok}\"],\"still_failing\":[\"${full_cargo_bad}\"]}" \
   "$(sidecar '{flaky,still_failing}')" \
   "cargo test fallback correctly classifies a real passing test as flaky and a real failing test as introduced"
@@ -320,7 +320,9 @@ EOF
   full_bad='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::bad'
   write_outcomes "${current_dir}" 'review test' nextest "${full_ok}" -- "${full_ok}" "${full_bad}"
   write_outcomes "${base_dir}" 'review test' nextest -- "${full_ok}" "${full_bad}"
-  output="$(PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
+  # GitHub's Rust setup forces Cargo color even for redirected logs. Outcome
+  # detection must still see the exact test's pass, not an infrastructure error.
+  output="$(CARGO_TERM_COLOR=always PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
   assert_equals "[\"${full_ok}\"]" "$(sidecar '.flaky')" \
     "real nextest executes the exact full Homeboy Rust identity"
   case "${output}" in
@@ -332,7 +334,7 @@ EOF
   full_missing='homeboy-retry-member::lib::homeboy_retry_member::tests::missing'
   write_outcomes "${current_dir}" 'review test' nextest "${full_missing}" -- "${full_missing}"
   write_outcomes "${base_dir}" 'review test' nextest -- "${full_missing}"
-  output="$(PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
+  output="$(CARGO_TERM_COLOR=always PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
   assert_equals "[\"${full_missing}\"]" "$(sidecar '.still_failing')" \
     "a zero-match nextest retry remains a blocking test identity"
   case "${output}" in

@@ -4,9 +4,9 @@
 # publishes for consumers. This one tests the action itself.
 #
 # A release here re-points the floating `v2` tag, so a regression breaks every
-# consumer at once with zero commits in their repositories. These tests are
-# pure bash — no cargo, no network, no homeboy binary (each script stubs its
-# own fake) — so they are cheap enough to gate both pull requests and release.
+# consumer at once with zero commits in their repositories. Most tests use
+# controlled CLI fixtures; Rust retry contract cases execute real cargo and
+# nextest against small owned workspaces.
 
 name: Self Test
 
@@ -32,6 +32,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Install nextest for native retry contract tests
+        uses: taiki-e/install-action@nextest
 
       - name: Run action shell tests
         run: bash scripts/run-tests.sh
