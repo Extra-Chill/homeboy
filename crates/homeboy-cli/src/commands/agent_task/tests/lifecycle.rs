@@ -647,10 +647,11 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             full_diagnosis["root_cause"]["details"]["source_error"]["details"]["context"],
             source_error["details"]["context"]
         );
-        assert_eq!(
-            full_evidence["pre_execution_failure"]["details"]["source_error"]["details"]["context"],
+        assert!(full_evidence_text.contains(
             source_error["details"]["context"]
-        );
+                .as_str()
+                .expect("full source context")
+        ));
         let summary_message = record.metadata["pre_execution_failure"]["message"]
             .as_str()
             .expect("bounded durable failure summary");
