@@ -19,7 +19,6 @@ use homeboy_extension_contract::{BenchGate, BenchGateOp};
 mod check;
 mod dependencies;
 mod pipeline;
-mod toolchain;
 mod trace;
 mod workload;
 
@@ -35,9 +34,6 @@ pub use pipeline::{
     GitOp, HostMutationOp, LifecycleWorkloadKind, LifecycleWorkloadRef, PatchOp, PipelineStep,
     ServiceOp, SharedPathOp, StackOp, SymlinkOp,
 };
-pub use toolchain::PathDiscoverySort;
-pub use toolchain::PathDiscoverySpec;
-pub use toolchain::ToolchainSpec;
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
@@ -152,11 +148,6 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_workload_defaults: HashMap<String, WorkloadDefaultsSpec>,
 
-    /// Rig-level reusable phase/span metadata templates. Workloads and workload
-    /// defaults can reference these by name with `trace_phase_template`.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub trace_phase_templates: HashMap<String, TracePhaseTemplateSpec>,
-
     /// Named trace variants that can apply overlays across rig components.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub trace_variants: HashMap<String, TraceVariantSpec>,
@@ -196,17 +187,6 @@ pub struct RigSpec {
     /// `homeboy rig up` before opening the target app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_launcher: Option<AppLauncherSpec>,
-
-    /// Declarative toolchain `PATH` assembly for this rig's `command` steps and
-    /// for extension executions that inherit the rig command-step PATH.
-    ///
-    /// Absent means "use Homeboy's built-in default discovery", which is what
-    /// every rig authored before this field gets — the default is unchanged.
-    /// Present replaces that default entirely, so a rig can state exactly which
-    /// bin directories its commands see instead of inheriting whatever
-    /// language-specific guesses the orchestrator ships with.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toolchain: Option<ToolchainSpec>,
 }
 
 /// Rig-level resource lifecycle defaults.
@@ -403,10 +383,6 @@ pub struct RigRequirementsSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystem_assertions: Vec<FilesystemAssertionSpec>,
 
-    /// Runner-resident tools/capabilities required before Lab evidence runs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runner_tools: Vec<RunnerToolRequirementSpec>,
-
     /// Extension/provider-owned requirement declarations. Core preserves these
     /// for downstream planners without interpreting domain-specific shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -428,33 +404,10 @@ impl RigRequirementsSpec {
     pub fn is_empty(&self) -> bool {
         self.executables.is_empty()
             && self.filesystem_assertions.is_empty()
-            && self.runner_tools.is_empty()
             && self.extensions.is_empty()
             && self.dependency_materialization.is_empty()
             && self.broker_targets.is_empty()
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunnerToolRequirementSpec {
-    /// Logical tool id, as declared by the extension that requires the tool.
-    pub tool: String,
-
-    /// Binary/command name used when no configured env path is present.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub command: String,
-
-    /// Environment variables that may point at the effective runner binary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env: Vec<String>,
-
-    /// Tool subcommands/capabilities that must be accepted by the binary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<String>,
-
-    /// Optional human remediation for rig authors/operators.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,7 +701,7 @@ impl BenchMetricGateCondition {
 ///
 /// The `{ trace_phase_presets, trace_span_metadata, trace_default_phase_preset }`
 /// group is declared once here and flattened into every spec that carries it
-/// (`WorkloadSpec`, `WorkloadDefaultsSpec`, `TracePhaseTemplateSpec`), so the
+/// (`WorkloadSpec`, `WorkloadDefaultsSpec`), so the
 /// on-disk JSON keys stay flat while the field group lives in a single type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TraceConfig {
@@ -771,9 +724,6 @@ pub struct WorkloadSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_postprocess: Vec<ArtifactPostprocessSpec>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_phase_template: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_preview: Option<TracePublicPreviewSpec>,
@@ -815,9 +765,6 @@ pub struct WorkloadDefaultsSpec {
     pub artifact_postprocess: Vec<ArtifactPostprocessSpec>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_phase_template: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_preview: Option<TracePublicPreviewSpec>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -848,17 +795,8 @@ pub struct WorkloadDefaultsSpec {
     pub runner_capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct TracePhaseTemplateSpec {
-    #[serde(flatten)]
-    pub trace: TraceConfig,
-}
-
 impl WorkloadSpec {
     pub(crate) fn apply_defaults(&mut self, defaults: &WorkloadDefaultsSpec) {
-        if self.trace_phase_template.is_none() {
-            self.trace_phase_template = defaults.trace_phase_template.clone();
-        }
         if self.public_preview.is_none() {
             self.public_preview = defaults.public_preview.clone();
         }
@@ -891,21 +829,6 @@ impl WorkloadSpec {
             &defaults.trace.trace_span_metadata,
         );
         merge_defaults_map(&mut self.trace_variants, &defaults.trace_variants);
-    }
-
-    pub(crate) fn apply_phase_template(&mut self, template: &TracePhaseTemplateSpec) {
-        if self.trace.trace_default_phase_preset.is_none() {
-            self.trace.trace_default_phase_preset =
-                template.trace.trace_default_phase_preset.clone();
-        }
-        merge_defaults_map(
-            &mut self.trace.trace_phase_presets,
-            &template.trace.trace_phase_presets,
-        );
-        merge_defaults_map(
-            &mut self.trace.trace_span_metadata,
-            &template.trace.trace_span_metadata,
-        );
     }
 }
 
@@ -1110,7 +1033,6 @@ mod tests {
             path: "bench.mjs".to_string(),
             env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
-            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: Some(8),
@@ -1140,7 +1062,6 @@ mod tests {
             path: "bench.mjs".to_string(),
             env_provider_extensions: Vec::new(),
             artifact_postprocess: Vec::new(),
-            trace_phase_template: None,
             public_preview: None,
             check_groups: None,
             port_range_size: None,
@@ -1379,11 +1300,6 @@ pub struct ComponentSpec {
     /// components or repo-owned `homeboy.json` files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<HashMap<String, ScopedExtensionConfig>>,
-
-    /// Optional generic runner-side dependency cache declaration. Rigs declare
-    /// inputs and cache paths; Homeboy owns key computation, restore, and save.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency_cache: Option<DependencyCacheSpec>,
 }
 
 /// A reproducible stack that a Lab runner can materialize without a controller
@@ -1449,22 +1365,6 @@ fn validate_lab_stack_ref(label: &str, reference: &LabStackRef) -> std::result::
         ));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DependencyCacheSpec {
-    /// Stable dependency materialization step ID supplied by the rig/extension.
-    pub step_id: String,
-    /// Relative paths inside the materialized checkout to restore/save.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub paths: Vec<String>,
-    /// Relative lockfile paths whose contents participate in the cache key.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lockfiles: Vec<String>,
-    /// Relative package/dependency metadata paths whose contents participate in
-    /// the cache key. The name is generic: Homeboy does not interpret contents.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub package_metadata: Vec<String>,
 }
 
 /// A background service the rig manages.

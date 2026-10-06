@@ -384,10 +384,7 @@ pub(crate) fn build_exec_env(
         env.extend(helper_pairs);
     }
 
-    // No rig context reaches this exec-env builder yet, so this resolves to the
-    // built-in default. The provider now takes a rig id so a rig-aware caller
-    // can thread its declaration through without another signature change.
-    if let Some(path) = homeboy_core::rig_toolchain_provider::command_step_path(None) {
+    if let Some(path) = homeboy_core::rig_toolchain_provider::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().to_string()));
     }
 
