@@ -3495,7 +3495,10 @@ mod preview_tests {
     }
 
     #[test]
-    fn auto_local_fallback_preview_does_not_change_placement_for_default_handoff() {
+    /// #15614: a read-only Auto preview never authorizes a silent local
+    /// fallback from a disconnected Lab. It blocks on the Lab state and offers
+    /// the explicit local replay instead.
+    fn auto_preview_with_a_disconnected_lab_blocks_and_offers_local_replay() {
         let _reset = ResetCapturedPreflight;
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -3530,7 +3533,12 @@ mod preview_tests {
         ]);
 
         assert_eq!(policy["selected"], "local");
-        assert_eq!(policy["admission"]["state"], "admissible");
+        assert_eq!(policy["admission"]["state"], "blocked");
+        assert_eq!(policy["admission"]["remaining_blocker"], "not_connected");
+        assert_eq!(
+            policy["admission"]["next_action"],
+            "homeboy --placement local agent-task cook --preview"
+        );
     }
 
     #[test]
@@ -3567,7 +3575,12 @@ mod preview_tests {
                 let policy = preview_placement_policy_with_admission(&argv);
                 let state = policy.pointer("/admission/state").and_then(Value::as_str);
                 match (placement, detached) {
-                    ("auto", _) | ("lab-or-local", _) => {
+                    // #15614: Auto never silently falls back from a
+                    // disconnected Lab; it names the explicit local replay.
+                    ("auto", _) => {
+                        assert_eq!(state, Some("blocked"), "{placement}, detached={detached}")
+                    }
+                    ("lab-or-local", _) => {
                         assert_eq!(
                             state,
                             Some("admissible"),
