@@ -8106,23 +8106,21 @@ fn run_cook_spine(
                 }
                 let record = match rooted_status(lifecycle_store, &run_id) {
                     Ok(record)
-                        if record.state == agent_task_lifecycle::AgentTaskRunState::Queued =>
+                        if record.state.is_terminal()
+                            || (record.state
+                                == agent_task_lifecycle::AgentTaskRunState::Running
+                                && !super::cook_recipe::has_unambiguous_zero_execution(
+                                    &record,
+                                )) =>
                     {
-                        let phase = pre_execution_failure_phase(
-                            &error,
-                            options.provider_transport.attempt_dispatcher.as_deref(),
-                        );
-                        record_pre_execution_failure(
-                            lifecycle_store,
-                            &plan,
-                            &run_id,
-                            &error,
-                            phase,
-                        )?;
-                        rooted_status(lifecycle_store, &run_id).ok()
+                        Some(record)
                     }
-                    Ok(record) => Some(record),
-                    Err(_) => {
+                    _ => {
+                        // A queue claim marks the controller Running before any
+                        // provider receives work. Record its admission failure
+                        // through the same owner as an unclaimed Queued attempt.
+                        // Accepted/ambiguous execution and terminal winners stay
+                        // owned by their existing lifecycle above.
                         let phase = pre_execution_failure_phase(
                             &error,
                             options.provider_transport.attempt_dispatcher.as_deref(),

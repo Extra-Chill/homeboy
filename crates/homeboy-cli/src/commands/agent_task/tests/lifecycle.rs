@@ -1682,16 +1682,22 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
 
 #[test]
 fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
+    for block_capacity in [false, true] {
+        assert_cook_rearm_queue_ownership(block_capacity);
+    }
+}
+
+fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
     with_isolated_home(|home| {
         // This fixture verifies retry ownership and exactly-once execution.
-        // Give its tiny Git/patch workspace an explicit reserve rather than
-        // making success depend on the host having the default 20 GiB free.
+        // Own the fixture's capacity policy instead of depending on the host's
+        // free space. The blocked case below explicitly enables a failing guard.
         let config_path = home.path().join(".config/homeboy/homeboy.json");
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("config directory");
         std::fs::write(
             config_path,
-            r#"{"retention":{"reconstructable_artifact_reserve_bytes":1048576}}"#,
+            r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
         )
         .expect("fixture workspace reserve");
         homeboy::core::defaults::reset_config_cache_for_test();
@@ -1870,6 +1876,58 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
         );
 
         let executions = Arc::new(AtomicUsize::new(0));
+        if block_capacity {
+            // Reproduce a genuine admission failure after the queue has claimed
+            // the successor, before its executor receives any work.
+            std::fs::write(
+                home.path().join(".config/homeboy/homeboy.json"),
+                r#"{"retention":{"reconstructable_artifact_reserve_bytes":18446744073709551615}}"#,
+            )
+            .expect("constrained fixture capacity");
+            homeboy::core::defaults::reset_config_cache_for_test();
+            let (failed, exit_code) = super::super::run::run_next_with_executor_and_fanout(
+                Arc::new(CountingCookExecutor {
+                    executions: Arc::clone(&executions),
+                    patch_path: Some(patch.display().to_string()),
+                }),
+                None,
+            )
+            .expect("queue reports its failed admission");
+            assert_eq!(exit_code, 1, "{failed:#}");
+            assert_eq!(failed["status"], "failed", "{failed:#}");
+            assert_eq!(
+                failed["outcomes"][0]["diagnostics"][0]["data"]["error_code"],
+                "resource.capacity_reserve",
+                "{failed:#}"
+            );
+            assert_eq!(failed["outcomes"][0]["failure_classification"], "capacity");
+            let terminal = agent_task_lifecycle::exact_record(&successor_run_id)
+                .expect("claimed successor has a durable failure");
+            assert_eq!(terminal.state, AgentTaskRunState::Failed, "{terminal:#?}");
+            assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
+            assert_eq!(
+                terminal.metadata["pre_execution_failure"]["error_code"],
+                "resource.capacity_reserve"
+            );
+            assert_eq!(
+                terminal.metadata["pre_execution_failure"]["retryable"],
+                false
+            );
+            assert!(terminal.metadata["pre_execution_failure"]["message"]
+                .as_str()
+                .expect("specific cause")
+                .contains("Filesystem reserve shortfall"));
+            assert!(terminal.aggregate_path.is_some());
+            assert_eq!(executions.load(Ordering::SeqCst), 0);
+            let (idle, idle_exit) = super::super::run::run_next_with_executor_and_fanout(
+                Arc::new(CapturingExecutor::default()),
+                None,
+            )
+            .expect("failed admission is not automatically replayed");
+            assert_eq!(idle_exit, 0);
+            assert_eq!(idle["claimed"], false);
+            return;
+        }
         let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
             Arc::new(CountingCookExecutor {
                 executions: Arc::clone(&executions),
