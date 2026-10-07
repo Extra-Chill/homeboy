@@ -2154,7 +2154,7 @@ mod tests {
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.metadata["runner_id"] = serde_json::json!("fixture-lab");
                 record.metadata["cook_progress"] = serde_json::json!({
-                    "phase": "provider_start",
+                    "phase": "workspace_capacity_reservation",
                     "attempt": 1,
                     "updated_at": now.to_rfc3339(),
                 });

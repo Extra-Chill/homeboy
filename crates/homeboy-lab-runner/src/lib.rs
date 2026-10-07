@@ -473,13 +473,13 @@ pub use session::{
     LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
     RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
     RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDaemonVerification, RunnerDisconnectReport,
-    RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
-    RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
-    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    RunnerDaemonGenerationStatus, RunnerDaemonLeaseVerdict, RunnerDaemonVerification,
+    RunnerDisconnectReport, RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
+    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
+    RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
@@ -1066,6 +1066,12 @@ fn lab_runner_admission_candidate_with_credential(
     exact_version: bool,
     submit_credential_ready: bool,
 ) -> DefaultLabRunnerCandidate {
+    let lease_verdict = status.daemon_lease_verdict(None);
+    // A freshness observation without a published generation identity cannot
+    // prove that the observed daemon is the session's current generation. Keep
+    // it unverified (not stale); `admission_fresh` still fences all work until
+    // the lease is published and matched.
+    let unverified_daemon = !lease_verdict.lease_published || status.unverified_daemon().is_some();
     let version_blocked = status.stale_daemon.is_none()
         && lab::offload::metadata::session_reported_version_blocks_admission(status);
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
@@ -1077,7 +1083,7 @@ fn lab_runner_admission_candidate_with_credential(
         connected: status.connected,
         capacity,
         stale_daemon: admission_warning.is_some() || version_blocked,
-        unverified_daemon: status.unverified_daemon().is_some(),
+        unverified_daemon,
         admission_fresh: lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
             status,
             exact_version,
@@ -1249,10 +1255,9 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Absent
     } else if !available_runner_ids.is_empty() {
         LabRunnerReadinessState::ConnectedReady
-    } else if candidates
-        .iter()
-        .any(|candidate| candidate.stale_daemon || !candidate.admission_fresh)
-    {
+    } else if candidates.iter().any(|candidate| {
+        candidate.stale_daemon || (!candidate.admission_fresh && !candidate.unverified_daemon)
+    }) {
         LabRunnerReadinessState::Stale
     } else if reasons.iter().any(|reason| reason == "capacity_reached") {
         LabRunnerReadinessState::CapacityBlocked
@@ -1282,7 +1287,10 @@ fn lab_runner_readiness_from_candidates(
         }
         LabRunnerReadinessState::Stale => candidates
             .iter()
-            .filter(|candidate| candidate.stale_daemon || !candidate.admission_fresh)
+            .filter(|candidate| {
+                candidate.stale_daemon
+                    || (!candidate.admission_fresh && !candidate.unverified_daemon)
+            })
             .map(|candidate| {
                 candidate.admission_remediation.clone().unwrap_or_else(|| {
                     format!("homeboy runner doctor {} --scope lab-offload", candidate.id)
@@ -1312,9 +1320,9 @@ struct DefaultLabRunnerCandidate {
     /// A *proven* compatibility mismatch, or a probe that failed on a runner
     /// that has one. Hard-fences selection.
     stale_daemon: bool,
-    /// The runner has no controller-side verification path at all, so its
-    /// freshness was never established. Deliberately not a fence — see
-    /// `DefaultLabRunnerCandidate::readiness`.
+    /// The daemon freshness/lease identity is not attributable to a current
+    /// generation. It is not proof of staleness, but missing lease identity
+    /// still fails closed through `admission_fresh`.
     unverified_daemon: bool,
     admission_fresh: bool,
     admission_failure_reason: Option<String>,
@@ -1385,8 +1393,8 @@ impl DefaultLabRunnerCandidate {
                 .push("broker_submit_credential_missing".to_string());
             availability.accepts_jobs = false;
         }
-        // Named, not fenced: an unverifiable runner keeps accepting work, but
-        // an operator reading availability can see that nothing checked it.
+        // Name missing evidence separately from proven stale state. Admission
+        // still stays closed above whenever freshness/lease proof is absent.
         if self.unverified_daemon {
             availability.reasons.push("daemon_unverified".to_string());
         }
@@ -1432,11 +1440,8 @@ impl DefaultLabRunnerCandidate {
         if self.mode == RunnerTunnelMode::DirectSsh {
             score += 5;
         }
-        // A runner whose freshness was never established ranks below every
-        // verified peer but stays selectable. Excluding it would take every
-        // reverse-connected lab out of service the moment the gap is reported,
-        // which trades this bug for #11101's — an unverified runner is neither
-        // healthy nor stale, and the ordering is where that shows up.
+        // A non-blocking identity warning ranks below every verified peer. A
+        // missing lease still cannot pass the `admission_fresh` gate above.
         if self.unverified_daemon {
             score -= UNVERIFIED_DAEMON_SELECTION_PENALTY;
         }
@@ -2129,7 +2134,23 @@ mod tests {
             session: None,
             stale_daemon: None,
             configured_job_binary_build_identity: None,
-            daemon_freshness: None,
+            daemon_freshness: Some(DaemonFreshnessReport {
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
+                lease_id: Some("lease-test".to_string()),
+                pid: Some(42),
+                recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
+                ownership_evidence: None,
+                adoption_command: None,
+                binary_hash: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),
@@ -2742,13 +2763,19 @@ mod tests {
         let mut lease_missing =
             default_lab_candidate("lease-missing", RunnerTunnelMode::DirectSsh, true);
         lease_missing.admission_fresh = false;
-        lease_missing.admission_remediation =
-            Some("homeboy runner doctor lease-missing --scope lab-offload".to_string());
+        lease_missing.unverified_daemon = true;
         let lease_missing = lab_runner_readiness_from_candidates(None, vec![lease_missing]);
-        assert_eq!(lease_missing.state, LabRunnerReadinessState::Stale);
+        assert_eq!(
+            lease_missing.state,
+            LabRunnerReadinessState::ConnectedIneligible
+        );
+        assert!(lease_missing.available_runner_ids.is_empty());
+        assert!(lease_missing
+            .reasons
+            .contains(&"daemon_freshness_unavailable".to_string()));
         assert_eq!(
             lease_missing.remediation_commands,
-            ["homeboy runner doctor lease-missing --scope lab-offload"]
+            ["homeboy runner status lease-missing"]
         );
 
         let mut full = default_lab_candidate("full", RunnerTunnelMode::DirectSsh, true);

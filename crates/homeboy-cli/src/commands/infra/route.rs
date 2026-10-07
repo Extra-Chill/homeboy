@@ -1947,7 +1947,7 @@ fn consume_unmaterialized_replay_claim() -> homeboy::core::Result<Option<i32>> {
     Ok((!consumed).then_some(0))
 }
 
-fn is_unmaterialized_replay_worker() -> bool {
+pub(crate) fn is_unmaterialized_replay_worker() -> bool {
     std::env::var_os(COOK_REPLAY_CLAIM_COOK_ENV).is_some()
 }
 

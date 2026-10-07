@@ -317,16 +317,32 @@ fn materialize_cook_attempt_with_stores_and_runtime(
                 run_id,
             )?;
         }
-        let submission = match admission_status {
-            Some(project) => lifecycle_store.submit_plan_with_runtime_admission_status(
-                plan,
-                run_id,
-                execution_runner_id,
-                project,
-                admit_runtime,
-            ),
-            None => lifecycle_store.submit_plan_with_runtime_admission(plan, run_id, admit_runtime),
+        // The durable identity/progress observation must accompany the first
+        // queued record commit. Publishing it immediately afterward leaves a
+        // window where the daemon watchdog sees an ownerless queued Cook and
+        // cancels it before controller setup can advance to runner dispatch.
+        let submission_metadata = if plan.metadata.get("cook_progress").is_none() {
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(
+                "cook_progress".to_string(),
+                serde_json::json!({
+                    "phase": "durable_identity",
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            Some(metadata)
+        } else {
+            None
         };
+        let submission = agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
+            lifecycle_store,
+            plan,
+            Some(run_id),
+            execution_runner_id,
+            submission_metadata,
+            admission_status,
+            admit_runtime,
+        );
         if let Err(error) = submission {
             // `submit_plan` persists admission failures before returning them.
             if lifecycle_store.record_exists(run_id)? {
@@ -981,6 +997,35 @@ mod tests {
                 rearmed.metadata["controller_runtime_recovery"]["current"],
                 rearmed.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
             );
+        });
+    }
+
+    #[test]
+    fn initial_cook_materialization_publishes_pre_provider_heartbeat_with_run() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle_store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let recipe_store = CookRecipeStore::from_current_data_root().expect("recipe store");
+            let cook_id = "atomic-cook-progress";
+            let run_id = "atomic-cook-progress-attempt-1";
+            let plan = plan("atomic-cook-progress-plan", "materialize Cook");
+            recipe_store
+                .persist_recipe(&recipe(cook_id, run_id, plan.clone()))
+                .expect("persist Cook recipe");
+
+            materialize_initial_cook_attempt_with_stores(
+                &recipe_store,
+                &lifecycle_store,
+                &options_for(cook_id, run_id, plan),
+            )
+            .expect("materialize initial attempt");
+
+            let record = lifecycle_store.read_record(run_id).expect("read attempt");
+            assert_eq!(
+                record.metadata["cook_progress"]["phase"],
+                "durable_identity"
+            );
+            assert!(record.has_fresh_controller_pre_provider_heartbeat());
         });
     }
 

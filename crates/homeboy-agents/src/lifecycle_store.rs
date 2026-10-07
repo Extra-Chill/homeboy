@@ -188,6 +188,7 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn submit_plan_with_runtime_admission_status(
         &self,
         plan: &AgentTaskPlan,

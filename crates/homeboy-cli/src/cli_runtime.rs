@@ -1449,7 +1449,12 @@ impl CliRuntime {
         // The pass persists projection state (and its lock), so read-only
         // commands must not start it: they may run while a runtime promotion
         // holds the mutation lock and must leave config and runtime untouched.
-        if command_capability == CommandCapability::Mutation {
+        // The replay worker carries a one-use claim token. Background startup
+        // reconcilers spawn sibling Homeboy processes, which would inherit and
+        // race to consume that exact token before the supervised Cook runs.
+        let is_unmaterialized_replay_worker =
+            crate::commands::route::is_unmaterialized_replay_worker();
+        if command_capability == CommandCapability::Mutation && !is_unmaterialized_replay_worker {
             schedule_controller_fallback_reconciliation();
         }
         // Deferred records outlive their worker. Startup restarts the singleton
@@ -1457,6 +1462,7 @@ impl CliRuntime {
         // deferred-workload family itself is exempt: the worker would restart
         // itself, and `reconcile` would spawn the worker it is about to judge.
         if command_capability == CommandCapability::Mutation
+            && !is_unmaterialized_replay_worker
             && normalized.get(1).map(String::as_str) != Some("deferred-workload")
         {
             if let Ok(config_root) = crate::core::paths::homeboy() {
