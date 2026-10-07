@@ -1,5 +1,4 @@
-use super::{CodeAuditResult, Finding, Severity};
-use crate::baseline::finding_baseline_fingerprint;
+use super::{CodeAuditResult, Severity};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuditConvergenceScoring {
@@ -40,31 +39,11 @@ pub fn weighted_finding_score_with(
     scoring.weighted_finding_score(result)
 }
 
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by this crate's tests"
-)]
-pub(crate) fn score_delta(
-    before: &CodeAuditResult,
-    after: &CodeAuditResult,
-    scoring: AuditConvergenceScoring,
-) -> isize {
-    weighted_finding_score_with(before, scoring) as isize
-        - weighted_finding_score_with(after, scoring) as isize
-}
-
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by this crate's tests"
-)]
-pub(crate) fn finding_fingerprint(finding: &Finding) -> String {
-    finding_baseline_fingerprint(finding)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuditFinding, AuditSummary};
+    use crate::baseline::finding_baseline_fingerprint;
+    use crate::{AuditFinding, AuditSummary, Finding};
 
     fn mk_result_with_findings(findings: Vec<Finding>) -> CodeAuditResult {
         CodeAuditResult {
@@ -83,21 +62,6 @@ mod tests {
             findings,
             duplicate_groups: vec![],
         }
-    }
-
-    #[test]
-    fn finding_fingerprint_same_for_identical() {
-        let f1 = Finding {
-            convention: "naming".to_string(),
-            severity: Severity::Warning,
-            file: "src/target.rs".to_string(),
-            description: "Existing finding".to_string(),
-            suggestion: String::new(),
-            kind: AuditFinding::NamingMismatch,
-            line: None,
-        };
-        let f2 = f1.clone();
-        assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
     }
 
     #[test]
@@ -126,8 +90,14 @@ mod tests {
             ..f3.clone()
         };
 
-        assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
-        assert_eq!(finding_fingerprint(&f3), finding_fingerprint(&f4));
+        assert_eq!(
+            finding_baseline_fingerprint(&f1),
+            finding_baseline_fingerprint(&f2)
+        );
+        assert_eq!(
+            finding_baseline_fingerprint(&f3),
+            finding_baseline_fingerprint(&f4)
+        );
     }
 
     #[test]
@@ -151,12 +121,12 @@ mod tests {
         };
 
         assert_ne!(
-            finding_fingerprint(&finding),
-            finding_fingerprint(&different_kind)
+            finding_baseline_fingerprint(&finding),
+            finding_baseline_fingerprint(&different_kind)
         );
         assert_ne!(
-            finding_fingerprint(&finding),
-            finding_fingerprint(&different_file)
+            finding_baseline_fingerprint(&finding),
+            finding_baseline_fingerprint(&different_file)
         );
     }
 
@@ -180,44 +150,14 @@ mod tests {
             ..f1.clone()
         };
 
-        assert_eq!(finding_fingerprint(&f1), finding_fingerprint(&f2));
-        assert_ne!(
-            finding_fingerprint(&f1),
-            finding_fingerprint(&distinct_policy)
+        assert_eq!(
+            finding_baseline_fingerprint(&f1),
+            finding_baseline_fingerprint(&f2)
         );
-    }
-
-    #[test]
-    fn finding_fingerprint_filters_new_findings() {
-        let baseline = Finding {
-            convention: "naming".to_string(),
-            severity: Severity::Warning,
-            file: "src/target.rs".to_string(),
-            description: "Existing finding".to_string(),
-            suggestion: String::new(),
-            kind: AuditFinding::NamingMismatch,
-            line: None,
-        };
-        let new = Finding {
-            convention: "duplication".to_string(),
-            severity: Severity::Warning,
-            file: "src/target.rs".to_string(),
-            description: "Duplicate function `foo`".to_string(),
-            suggestion: String::new(),
-            kind: AuditFinding::DuplicateFunction,
-            line: None,
-        };
-
-        let baseline_set: std::collections::HashSet<String> =
-            vec![finding_fingerprint(&baseline)].into_iter().collect();
-        let post = [&baseline, &new];
-        let new_findings: Vec<_> = post
-            .iter()
-            .filter(|f| !baseline_set.contains(&finding_fingerprint(f)))
-            .collect();
-
-        assert_eq!(new_findings.len(), 1);
-        assert_eq!(new_findings[0].kind, AuditFinding::DuplicateFunction);
+        assert_ne!(
+            finding_baseline_fingerprint(&f1),
+            finding_baseline_fingerprint(&distinct_policy)
+        );
     }
 
     #[test]
@@ -252,68 +192,6 @@ mod tests {
                 }
             ),
             7
-        );
-    }
-
-    #[test]
-    fn score_delta_zero_means_no_progress() {
-        let result = mk_result_with_findings(vec![Finding {
-            convention: "Test".to_string(),
-            severity: Severity::Warning,
-            file: "src/a.rs".to_string(),
-            description: "Warning finding".to_string(),
-            suggestion: "Fix it".to_string(),
-            kind: AuditFinding::MissingMethod,
-            line: None,
-        }]);
-        assert_eq!(
-            score_delta(&result, &result, AuditConvergenceScoring::default()),
-            0
-        );
-    }
-
-    #[test]
-    fn score_delta_uses_configured_weights() {
-        let before = mk_result_with_findings(vec![
-            Finding {
-                convention: "Test".to_string(),
-                severity: Severity::Warning,
-                file: "src/a.rs".to_string(),
-                description: "Warning finding".to_string(),
-                suggestion: "Fix it".to_string(),
-                kind: AuditFinding::MissingMethod,
-                line: None,
-            },
-            Finding {
-                convention: "Test".to_string(),
-                severity: Severity::Info,
-                file: "src/b.rs".to_string(),
-                description: "Info finding".to_string(),
-                suggestion: "Investigate".to_string(),
-                kind: AuditFinding::MissingImport,
-                line: None,
-            },
-        ]);
-        let after = mk_result_with_findings(vec![Finding {
-            convention: "Test".to_string(),
-            severity: Severity::Info,
-            file: "src/b.rs".to_string(),
-            description: "Info finding".to_string(),
-            suggestion: "Investigate".to_string(),
-            kind: AuditFinding::MissingImport,
-            line: None,
-        }]);
-
-        assert_eq!(
-            score_delta(
-                &before,
-                &after,
-                AuditConvergenceScoring {
-                    warning_weight: 5,
-                    info_weight: 1,
-                }
-            ),
-            5
         );
     }
 }

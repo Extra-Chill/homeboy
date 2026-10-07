@@ -1,10 +1,9 @@
 //! fingerprint — extracted from conventions.rs.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::conventions::Language;
-use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
 
 /// A structural fingerprint extracted from a single source file.
 #[derive(Debug, Clone, Default)]
@@ -117,7 +116,8 @@ pub struct FileFingerprint {
 ///
 /// Reads `path` from disk, then delegates to [`fingerprint_content`]. Use
 /// `fingerprint_content` directly when content has already been loaded
-/// (e.g., from a [`CodebaseSnapshot`]) to avoid double-reads.
+/// (e.g., from a [`homeboy_engine_primitives::codebase_scan::CodebaseSnapshot`])
+/// to avoid double-reads.
 pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
     let content = std::fs::read_to_string(path).ok()?;
     fingerprint_content(path, root, &content)
@@ -130,9 +130,8 @@ pub fn fingerprint_file(path: &Path, root: &Path) -> Option<FileFingerprint> {
 /// fingerprint. Falls back to the extension fingerprint wholesale if no
 /// grammar is available or the core engine can't handle the file.
 ///
-/// This is the content-taking primitive used by [`FingerprintIndex::from_snapshot`]
-/// to avoid re-reading every file from disk after a [`CodebaseSnapshot`] has
-/// already loaded them. [`fingerprint_file`] is a convenience wrapper that
+/// Audit discovery uses this primitive to reuse its source snapshot without
+/// re-reading every file from disk. [`fingerprint_file`] is a convenience wrapper that
 /// reads from disk and delegates here so behavior stays identical.
 pub fn fingerprint_content(path: &Path, root: &Path, content: &str) -> Option<FileFingerprint> {
     let ext = path.extension()?.to_str()?;
@@ -278,72 +277,6 @@ pub(crate) fn normalize_convention_tags(tags: Vec<String>) -> Vec<String> {
 }
 
 // ============================================================================
-// FingerprintIndex — built once from a CodebaseSnapshot
-// ============================================================================
-
-/// Pre-computed fingerprints for every file in a [`CodebaseSnapshot`].
-///
-/// Slice 1 of Extra-Chill/homeboy#1492. Built once via
-/// [`FingerprintIndex::from_snapshot`], shared by audit detectors,
-/// fixability planning, and refactor primitives instead of each consumer
-/// re-walking the tree and re-fingerprinting from disk.
-///
-/// Files whose extension has no grammar and no extension-script
-/// fingerprinter are silently dropped from the index — same semantics as
-/// [`fingerprint_file`] returning `None`.
-///
-/// This is opt-in scaffolding: existing callsites still use `fingerprint_file`
-/// directly. Consumer migration lands in subsequent slices.
-#[derive(Debug, Clone, Default)]
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by this crate's tests"
-)]
-pub(crate) struct FingerprintIndex {
-    inner: HashMap<PathBuf, FileFingerprint>,
-}
-
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by this crate's tests"
-)]
-impl FingerprintIndex {
-    /// Build an index by fingerprinting every file in `snapshot` once,
-    /// reusing the snapshot's already-loaded content (no disk re-reads).
-    pub(crate) fn from_snapshot(snapshot: &CodebaseSnapshot) -> Self {
-        let root = snapshot.root();
-        let mut inner = HashMap::with_capacity(snapshot.len());
-        for (path, content) in snapshot.iter() {
-            if let Some(fp) = fingerprint_content(path, root, content) {
-                inner.insert(path.to_path_buf(), fp);
-            }
-        }
-        Self { inner }
-    }
-
-    /// Look up the fingerprint for an absolute file path from the snapshot.
-    pub(crate) fn get(&self, path: &Path) -> Option<&FileFingerprint> {
-        self.inner.get(path)
-    }
-
-    /// Number of fingerprinted files (may be less than the source snapshot
-    /// if some extensions have no fingerprinter).
-    pub(crate) fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Whether the index is empty.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Iterate `(path, fingerprint)` pairs.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Path, &FileFingerprint)> {
-        self.inner.iter().map(|(p, fp)| (p.as_path(), fp))
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -352,7 +285,6 @@ mod tests {
     use super::*;
     use crate::fingerprint_script_provider::FingerprintScriptProvider;
     use homeboy_audit_contract::FingerprintOutput;
-    use homeboy_engine_primitives::codebase_scan::ScanConfig;
 
     struct FakeSemanticProvider {
         output: FingerprintOutput,
@@ -528,70 +460,5 @@ pub fn build_other() -> Other { Other { x: 1, y: 2 } }
         assert_eq!(fingerprint.aggregate_projections.len(), 1);
         assert_eq!(fingerprint.decision_branches.len(), 1);
         assert_eq!(fingerprint.method_calls.len(), 1);
-    }
-
-    #[test]
-    fn from_snapshot_index_matches_per_file_get_calls() {
-        let _audit_guard = homeboy_core::test_support::AuditGuard::new();
-        let dir = std::env::temp_dir().join(format!(
-            "homeboy_fingerprint_index_parity_test_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(dir.join("src"));
-
-        std::fs::write(
-            dir.join("src/alpha.rs"),
-            "pub fn alpha_one() {}\npub fn alpha_two() {}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("src/beta.rs"),
-            "pub struct Beta;\nimpl Beta { pub fn new() -> Self { Self } }\n",
-        )
-        .unwrap();
-
-        let snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
-        let index = FingerprintIndex::from_snapshot(&snapshot);
-
-        // For every file the snapshot saw, the index either contains a
-        // fingerprint identical to the snapshot-content fingerprinter, or both
-        // routes return None (extension with no fingerprinter).
-        for (path, content) in snapshot.iter() {
-            let from_index = index.get(path);
-            let from_file = fingerprint_content(path, snapshot.root(), content);
-            assert_eq!(from_index.is_some(), from_file.is_some());
-            if let (Some(a), Some(b)) = (from_index, from_file.as_ref()) {
-                assert_eq!(a.relative_path, b.relative_path);
-                assert_eq!(sorted(&a.methods), sorted(&b.methods));
-                assert_eq!(sorted(&a.public_api), sorted(&b.public_api));
-                assert_eq!(sorted(&a.imports), sorted(&b.imports));
-                assert_eq!(a.content, b.content);
-            }
-        }
-
-        // The index should be non-empty for a tree with .rs files when a
-        // Rust grammar is available; if no grammar/extension is registered
-        // in this build, the test still passes (both routes return None).
-        assert_eq!(index.len(), index.iter().count());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn from_snapshot_get_returns_none_for_empty_snapshot() {
-        let dir = std::env::temp_dir().join("homeboy_fingerprint_index_empty_test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-
-        let snapshot = CodebaseSnapshot::build(&dir, &ScanConfig::default());
-        let index = FingerprintIndex::from_snapshot(&snapshot);
-
-        assert!(index.is_empty());
-        assert_eq!(index.len(), 0);
-        assert_eq!(index.iter().count(), 0);
-        assert!(index.get(&dir.join("nope.rs")).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

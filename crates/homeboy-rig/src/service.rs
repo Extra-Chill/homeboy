@@ -175,21 +175,6 @@ pub(crate) fn discover_external_pid(discover: &DiscoverSpec) -> Result<Option<u3
     Ok(discover_newest_for_spec(discover)?.map(|p| p.pid))
 }
 
-/// Parse `ps -o etime` output into total seconds.
-///
-/// Re-exported as a module-scope helper so tests in
-/// `tests/core/rig/service_test.rs` can exercise the format parser
-/// without needing to drive a real `ps` invocation. Production callers
-/// only see this through `discover_newest`.
-#[cfg(unix)]
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) fn parse_etime_seconds(s: &str) -> Option<u64> {
-    platform::parse_etime_seconds(s)
-}
-
 #[cfg(unix)]
 mod platform {
     use std::fs::{File, OpenOptions};

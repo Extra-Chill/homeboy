@@ -747,33 +747,6 @@ pub(super) struct LoadedComponents {
     pub(crate) extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
-/// Load effective project components, resolve artifact paths via extension patterns,
-/// and filter non-deployable.
-///
-/// Validates that any extensions declared in the component's `extensions` field are installed.
-/// Returns an actionable error with install instructions when extensions are missing,
-/// rather than silently skipping the component.
-///
-/// In `check` mode (read-only diff), a component this host cannot resolve — an
-/// uninstalled extension, an unresolvable artifact, or an absent local checkout — is
-/// *not* a hard error: it is skipped, recorded in `extension_skipped`, and reported so
-/// operators can see the project-wide diff without installing every build toolchain
-/// or holding a checkout of every component.
-///
-/// Returns both the deployable components and the IDs of skipped (non-deployable) ones,
-/// so callers can produce accurate error messages.
-#[allow(
-    dead_code,
-    reason = "No production caller: exercised by orchestration tests that assert component loading in isolation."
-)]
-pub(super) fn load_project_components(
-    project: &Project,
-    requested_ids: &[String],
-    check: bool,
-) -> Result<LoadedComponents> {
-    load_project_components_with_projection(project, requested_ids, check, None)
-}
-
 pub(super) fn load_project_components_with_projection(
     project: &Project,
     requested_ids: &[String],
@@ -1703,8 +1676,8 @@ mod tests {
                 ..Project::default()
             };
 
-            let loaded =
-                load_project_components(&project, &[], false).expect("load components succeeds");
+            let loaded = load_project_components_with_projection(&project, &[], false, None)
+                .expect("load components succeeds");
 
             // Only the active component is a deploy obligation.
             let deployable_ids: Vec<&str> =
@@ -1792,7 +1765,7 @@ mod tests {
             // Resolution itself must actually materialize both components from
             // their GitHub Release, exactly as `--outdated`/`--all` planning
             // does for a project with no local checkouts at all.
-            let loaded = load_project_components(&project, &[], false)
+            let loaded = load_project_components_with_projection(&project, &[], false, None)
                 .expect("project-wide load must resolve every checkout-less component");
 
             let deployable_ids: Vec<&str> =

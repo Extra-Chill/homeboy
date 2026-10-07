@@ -103,8 +103,6 @@ pub use types::{ConventionReport, DirectoryConvention, DirectoryOutlier};
 
 #[allow(unused_imports)] // consumed by in-crate `#[cfg(test)]` modules
 pub(crate) use conventions::Language;
-#[allow(unused_imports)] // consumed by this crate's `#[cfg(test)]` modules
-pub(crate) use entry::audit_path;
 
 #[cfg(test)]
 mod tests {
@@ -159,17 +157,11 @@ mod tests {
     }
 
     #[test]
-    fn audit_nonexistent_path_returns_error() {
-        let result = audit_path("/nonexistent/path/that/does/not/exist");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn audit_empty_directory_returns_clean() {
         let dir = std::env::temp_dir().join("homeboy_audit_test_empty");
         let _ = fs::create_dir_all(&dir);
 
-        let result = audit_path(dir.to_str().unwrap()).unwrap();
+        let result = audit_path_with_id("empty-fixture", dir.to_str().unwrap()).unwrap();
         assert_eq!(result.summary.files_scanned, 0);
         assert!(result.summary.alignment_score.is_none());
         assert!(result.conventions.is_empty());
@@ -399,7 +391,7 @@ class StepC {
         )
         .unwrap();
 
-        let result = audit_path(dir.to_str().unwrap()).unwrap();
+        let result = audit_path_with_id("steps-fixture", dir.to_str().unwrap()).unwrap();
 
         assert_eq!(result.summary.files_scanned, 3);
         assert!(result.summary.conventions_detected >= 1);

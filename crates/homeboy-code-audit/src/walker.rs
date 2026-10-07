@@ -94,7 +94,7 @@ pub(crate) fn walk_shared_audit_files_snapshot(
 ///
 /// Uses extension-provided file types, post-filters extension index files, and
 /// reads each file once during the walk and returns owned `(path, content)` pairs ready for
-/// downstream consumers (`fingerprint_content`, `FingerprintIndex`, etc.).
+/// downstream fingerprinting and audit-discovery consumers.
 ///
 /// This is the entry point audit consumers should use. Slice 2 of #1492
 /// migrates `discovery::auto_discover_groups` and `fingerprint_reference_paths`

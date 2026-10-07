@@ -27,31 +27,6 @@ fn read_reference_paths_from_env() -> Vec<String> {
         .collect()
 }
 
-/// Audit a filesystem path directly (no registered component needed).
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by this crate's tests"
-)]
-pub(crate) fn audit_path(path: &str) -> Result<CodeAuditResult> {
-    let p = Path::new(path);
-    if !p.is_dir() {
-        return Err(homeboy_error::Error::validation_invalid_argument(
-            "path",
-            format!("Not a directory: {}", path),
-            None,
-            None,
-        ));
-    }
-
-    // Use directory name as component_id
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    audit_path_with_id(&name, path)
-}
-
 /// Core audit logic shared by both entry points.
 /// Also available for callers that have a component ID and an overridden path.
 pub fn audit_path_with_id(component_id: &str, source_path: &str) -> Result<CodeAuditResult> {
