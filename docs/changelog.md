@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.3] - 2026-10-07
+
+### Fixed
+- scope terminal Cook continuation ownership
+- report refresh phases with one elapsed clock
+- preserve the native macOS browser cache
+
 ## [0.417.2] - 2026-10-07
 
 ### Fixed
