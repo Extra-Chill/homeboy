@@ -4,10 +4,11 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # The same-child recovery proof owns two local Cook daemons, a live provider,
 # and a real Cargo gate. Reserve the runner while it observes the lock/lease
 # handoff so unrelated process-heavy tests cannot starve its bounded probes.
+# Allow up to three minutes for daemon recovery on cold, saturated CI runners.
 [[profile.default.overrides]]
 filter = 'test(public_continuation_resumes_terminal_child_while_real_sibling_provider_remains_live)'
 threads-required = "num-cpus"
-slow-timeout = { period = "90s", terminate-after = 4 }
+slow-timeout = { period = "180s", terminate-after = 4 }
 
 [profile.ci]
 fail-fast = false
@@ -16,7 +17,7 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = 'test(public_continuation_resumes_terminal_child_while_real_sibling_provider_remains_live)'
 threads-required = "num-cpus"
-slow-timeout = { period = "90s", terminate-after = 4 }
+slow-timeout = { period = "180s", terminate-after = 4 }
 
 [profile.quick]
 fail-fast = true

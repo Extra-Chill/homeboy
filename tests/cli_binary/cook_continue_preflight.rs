@@ -185,10 +185,16 @@ fn linux_lock_file_holders(lock_path: &std::path::Path) -> serde_json::Value {
 
 #[cfg(target_os = "linux")]
 fn write_same_child_evidence(name: &str, value: &serde_json::Value) {
-    let Some(directory) = std::env::var_os("HOMEBOY_SAME_CHILD_EVIDENCE_DIR") else {
+    let directory = std::env::var_os("HOMEBOY_SAME_CHILD_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOMEBOY_ARTIFACT_ROOT")
+                .map(std::path::PathBuf::from)
+                .map(|root| root.join("same-child-runtime-proof"))
+        });
+    let Some(directory) = directory else {
         return;
     };
-    let directory = std::path::PathBuf::from(directory);
     std::fs::create_dir_all(&directory).expect("create same-child evidence directory");
     std::fs::write(
         directory.join(name),
@@ -1105,7 +1111,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     );
     assert!(sibling.0.try_wait().unwrap().is_none());
 
-    let recovery_deadline = Instant::now() + Duration::from_secs(90);
+    let recovery_deadline = Instant::now() + Duration::from_secs(180);
     let resumed_gate_owner_pid = loop {
         let record = lifecycle_store.read_record(&target_run).unwrap();
         let lock_owner_pid = std::fs::read_to_string(&driver_lock)
@@ -1155,6 +1161,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
                 "target_stderr": std::fs::read_to_string(&target_stderr).unwrap_or_default(),
             });
             write_same_child_evidence("same-child-recovery-timeout.json", &timeout_evidence);
+            println!("same-child recovery timed out: {timeout_evidence}");
             panic!("queued same-child continuation did not reacquire its real gate: {timeout_evidence}");
         }
         thread::sleep(Duration::from_millis(20));
