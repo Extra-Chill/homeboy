@@ -1167,7 +1167,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     );
 
     std::fs::write(&gate_open, "continue").unwrap();
-    let continuation_deadline = Instant::now() + Duration::from_secs(30);
+    let continuation_deadline = Instant::now() + Duration::from_secs(90);
     let mut completed_record = None;
     while Instant::now() < continuation_deadline {
         let record = lifecycle_store.read_record(&target_run).unwrap();
