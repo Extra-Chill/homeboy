@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.1] - 2026-10-07
+
+### Changed
+- update tests outdated by #15613 and #15614 (unblocks releases)
+
+### Fixed
+- retain exact artifact reference selectors
+
 ## [0.417.0] - 2026-10-07
 
 ### Added
