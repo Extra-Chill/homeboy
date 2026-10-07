@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.416.0] - 2026-10-07
+
+### Added
+- every mutating daemon entry point shares the lifecycle gate (#15557 C4)
+
 ## [0.415.0] - 2026-10-06
 
 ### Added
