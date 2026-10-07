@@ -5631,30 +5631,39 @@ pub fn preflight_cook_continuation_admission_for_observation(
 pub fn live_owner_continuation_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<Error> {
-    let child_owner_is_running = record
+    let child_provider_owner_pid = record
         .metadata
         .get("provider_executions")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|execution| execution["state"] == "running")
-        .any(|execution| {
+        .find_map(|execution| {
             execution["owner_pid"]
                 .as_u64()
                 .and_then(|pid| u32::try_from(pid).ok())
-                .is_some_and(|pid| {
+                .filter(|pid| {
                     homeboy_core::process::process_identity_state(
-                        pid,
+                        *pid,
                         execution["owner_linux_starttime_ticks"].as_u64(),
                     ) == homeboy_core::process::ProcessIdentityState::Live
                 })
-        })
-        || record.metadata["promotion_progress"]["active"] == true
-            && record.metadata["promotion_progress"]["owner_pid"]
+        });
+    let child_gate_owner_pid = (record.metadata["promotion_progress"]["active"] == true)
+        .then(|| {
+            record.metadata["promotion_progress"]["owner_pid"]
                 .as_u64()
                 .and_then(|pid| u32::try_from(pid).ok())
-                .is_some_and(homeboy_core::process::pid_is_running);
-    if !record.owner_process_is_running() || record.state.is_terminal() && !child_owner_is_running {
+        })
+        .flatten()
+        .filter(|pid| homeboy_core::process::pid_is_running(*pid));
+    let child_owner_pid = child_provider_owner_pid.or(child_gate_owner_pid);
+    let generic_owner_is_running = record.owner_process_is_running();
+    if record.state.is_terminal() {
+        if child_owner_pid.is_none() {
+            return None;
+        }
+    } else if !generic_owner_is_running && child_owner_pid.is_none() {
         return None;
     }
     let phase = record
@@ -5685,7 +5694,7 @@ pub fn live_owner_continuation_denial(
     );
     error.details["continuation_admission"] = serde_json::json!({
         "first_authoritative_denial": "live_owner_in_progress",
-        "owner_pid": record.owner_pid(),
+        "owner_pid": child_owner_pid.or_else(|| record.owner_pid()),
         "phase": phase,
         "status_command": format!("homeboy agent-task status {}", record.run_id),
         "logs_command": format!("homeboy agent-task logs {}", record.run_id),
@@ -11709,6 +11718,59 @@ mod cook_deadline_tests {
             "live_owner_in_progress"
         );
         assert_eq!(error.details["continuation_admission"]["phase"], "gate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_child_gate_fence_reports_gate_owner_not_live_batch_parent() {
+        struct SleepChild(std::process::Child);
+        impl Drop for SleepChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let coordinator = SleepChild(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start live batch coordinator PID"),
+        );
+        let gate_owner_pid = std::process::id();
+        let mut record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-child-gate-owner",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "runner_pid": coordinator.0.id(),
+                    "promotion_progress": {
+                        "active": true,
+                        "phase": "gate",
+                        "owner_pid": gate_owner_pid
+                    }
+                }
+            }))
+            .expect("record");
+
+        let error = live_owner_continuation_denial(&record).expect("live gate owner denial");
+        assert_eq!(
+            error.details["continuation_admission"]["owner_pid"], gate_owner_pid,
+            "the batch parent PID is not the gate owner"
+        );
+        assert_eq!(error.details["continuation_admission"]["phase"], "gate");
+
+        record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
+        let error = live_owner_continuation_denial(&record)
+            .expect("live exact-child gate owner fences a dead parent");
+        assert_eq!(
+            error.details["continuation_admission"]["owner_pid"],
+            gate_owner_pid
+        );
     }
 
     /// Expiry must terminalize cleanly and inspectably: a known status, a
