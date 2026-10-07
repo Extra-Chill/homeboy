@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.2] - 2026-10-07
+
+### Fixed
+- persist zero-execution failures after queue claims
+
 ## [0.417.1] - 2026-10-07
 
 ### Changed
