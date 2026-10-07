@@ -32,6 +32,11 @@ const XDG_ENV_VARS: &[&str] = &[
     "XDG_STATE_HOME",
     "XDG_RUNTIME_DIR",
 ];
+const PLAYWRIGHT_CACHE_SUBPATH: &str = if cfg!(target_os = "macos") {
+    "Library/Caches/ms-playwright"
+} else {
+    ".cache/ms-playwright"
+};
 
 /// Temp-dir variables pinned to the invocation temp dir so every gate process
 /// — preflight probes included — shares one temporary root.
@@ -3330,7 +3335,6 @@ fn preserve_playwright_cache(
     report: &mut AgentTaskGateEnvironment,
 ) {
     const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
-    const SOURCE: &str = "HOME/.cache/ms-playwright";
     if policy.mode == AgentTaskGateEnvironmentMode::Replace
         || (!policy.isolate_home && !policy.isolate_xdg)
         || policy.variables.contains_key(NAME)
@@ -3338,14 +3342,14 @@ fn preserve_playwright_cache(
     {
         return;
     }
-    let Some(cache) = host_home.map(|home| home.join(".cache/ms-playwright")) else {
+    let Some(cache) = host_home.map(|home| home.join(PLAYWRIGHT_CACHE_SUBPATH)) else {
         return;
     };
     if cache.is_dir() {
         values.insert(NAME.to_string(), cache.display().to_string());
         report
             .preserved
-            .insert(NAME.to_string(), SOURCE.to_string());
+            .insert(NAME.to_string(), format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"));
     }
 }
 
@@ -7189,7 +7193,7 @@ mod tests {
     #[test]
     fn playwright_cache_is_mapped_only_for_isolated_non_replace_gate_environments() {
         let home = tempfile::tempdir().expect("host home");
-        let cache = home.path().join(".cache/ms-playwright");
+        let cache = home.path().join(PLAYWRIGHT_CACHE_SUBPATH);
         fs::create_dir_all(&cache).expect("browser cache");
         let policy = AgentTaskGateEnvironmentPolicy::default();
         let mut values = BTreeMap::new();
@@ -7203,8 +7207,41 @@ mod tests {
         );
         assert_eq!(
             report.preserved["PLAYWRIGHT_BROWSERS_PATH"],
-            "HOME/.cache/ms-playwright"
+            format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}")
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn isolated_gate_preserves_native_macos_browser_cache_without_host_credentials() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let cache = home.path().join("Library/Caches/ms-playwright");
+            fs::create_dir_all(&cache).expect("native browser cache");
+            fs::write(cache.join("ready-browser"), "installed resource").expect("browser resource");
+            fs::write(home.path().join(".npmrc"), "private host configuration")
+                .expect("host config");
+            let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                home.path(),
+                1,
+                "test -f \"$PLAYWRIGHT_BROWSERS_PATH/ready-browser\" && test ! -e \"$HOME/.npmrc\"",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+            )
+            .expect("isolated gate");
+            assert_eq!(
+                report.status,
+                AgentTaskGateStatus::Succeeded,
+                "{}",
+                report.stderr
+            );
+            assert_eq!(
+                report.environment.preserved["PLAYWRIGHT_BROWSERS_PATH"],
+                "HOME/Library/Caches/ms-playwright"
+            );
+        });
     }
 
     #[test]
@@ -7232,7 +7269,7 @@ mod tests {
         assert!(values.is_empty());
 
         let home = tempfile::tempdir().expect("host home");
-        fs::create_dir_all(home.path().join(".cache/ms-playwright")).expect("browser cache");
+        fs::create_dir_all(home.path().join(PLAYWRIGHT_CACHE_SUBPATH)).expect("browser cache");
 
         // Explicit values, explicit preserve mappings, replace mode, and
         // non-isolated gates all suppress the automatic mapping.
