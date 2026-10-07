@@ -2644,9 +2644,17 @@ fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
         .env("PATH", "/usr/bin:/bin")
         .args(["-axo", "pid=,ppid=,lstart="])
         .output()?;
+    parse_unix_process_snapshot(output)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parse_unix_process_snapshot(
+    output: std::process::Output,
+) -> io::Result<Vec<UnixProcessIdentity>> {
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "process identity discovery failed: {}",
+            "process identity discovery failed ({}): {}",
+            output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -3825,6 +3833,37 @@ impl CapturedOutput {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn process_snapshot_failure_keeps_observer_exit_status_with_empty_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // A killed observer emits no stderr, exactly the failure shape retained
+        // by the failed Cook staging attempt. Never accept its partial snapshot.
+        let output = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '1 0 Thu Jan 1 00:00:00 2026\\n'; kill -TERM $$",
+            ])
+            .output()
+            .expect("run interrupted observer");
+        assert_eq!(output.status.signal(), Some(libc::SIGTERM));
+        assert!(output.stderr.is_empty());
+        let error = parse_unix_process_snapshot(output).expect_err("reject failed observation");
+        assert!(error
+            .to_string()
+            .contains("process identity discovery failed"));
+        assert!(error.to_string().contains("signal: 15"), "{error}");
+
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf 'observer denied\\n' >&2; exit 7"])
+            .output()
+            .expect("run failed observer");
+        let error = parse_unix_process_snapshot(output).expect_err("reject failed observation");
+        assert!(error.to_string().contains("exit status: 7"), "{error}");
+        assert!(error.to_string().contains("observer denied"), "{error}");
+    }
 
     #[test]
     fn tail_capture_retains_last_bytes_and_marks_truncated() {

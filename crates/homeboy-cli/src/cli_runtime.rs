@@ -2878,15 +2878,11 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
                 }
                 record.map(|record| record.run_id)
             }
-            crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
-                if args.preflight || matches!(cli.placement, crate::cli_surface::Placement::Local) {
-                    return Ok(None);
-                }
-                return delegate_cook_continue_to_pinned_runtime(
-                    &args.cook_or_attempt_id,
-                    normalized_args,
-                );
-            }
+            // Cook continuation owns the controller-local recipe in every
+            // lifecycle state. Its dispatcher preserves provider execution
+            // ownership; the provider's runtime pin must never move the whole
+            // coordinator to Lab (#9181, #10670).
+            crate::commands::agent_task::AgentTaskCommand::CookContinue(_) => None,
             _ => None,
         },
         _ => None,
@@ -2894,29 +2890,6 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let Some(run_id) = run_id else {
         return Ok(None);
     };
-    delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
-}
-
-fn delegate_cook_continue_to_pinned_runtime(
-    cook_or_attempt_id: &str,
-    normalized_args: &[String],
-) -> homeboy::core::Result<Option<i32>> {
-    let run_id =
-        crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
-    let record = crate::agents::agent_tasks::lifecycle::exact_record(&run_id)?;
-    if let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(&run_id)? {
-        if crate::agents::agent_tasks::service::pre_execution_runtime_recovery_is_eligible(
-            &recipe, &record,
-        ) {
-            crate::agents::agent_tasks::service::validate_recipe_attempt_record(
-                &recipe, &run_id, &record,
-            )?;
-            return Ok(None);
-        }
-    }
-    if current_runtime_owns_terminal_cook_continuation(&run_id)? {
-        return Ok(None);
-    }
     delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
 }
 
@@ -3010,26 +2983,6 @@ fn annotate_runner_pinned_runtime_failure(
     error.with_hint(format!(
         "Verify runner `{runner_id}` is reachable, then retry the exact durable command."
     ))
-}
-
-/// A terminal recipe-bound continuation is controller-owned. Provider execution
-/// remains pinned, but harvest, artifact hydration, gates, and finalization must
-/// run where the immutable Cook recipe is stored rather than on Lab.
-fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::core::Result<bool> {
-    let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
-        return Ok(false);
-    };
-    let record = crate::agents::agent_tasks::lifecycle::status(run_id)?;
-    if !matches!(
-        record.state,
-        crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded
-            | crate::agents::agent_tasks::lifecycle::AgentTaskRunState::CandidateRecoverable
-            | crate::agents::agent_tasks::lifecycle::AgentTaskRunState::PartialRecoverable
-    ) {
-        return Ok(false);
-    }
-    crate::agents::agent_tasks::service::validate_recipe_attempt_record(&recipe, run_id, &record)?;
-    Ok(true)
 }
 
 /// Fanout coordination is controller-owned and may span children from distinct
@@ -7683,7 +7636,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn terminal_cook_with_a_controller_recipe_does_not_route_to_lab_or_origin_runtime() {
+    fn cook_continuation_keeps_controller_ownership_across_attempt_states() {
         crate::test_support::with_isolated_home(|home| {
             let target = home.path().join("active-task-worktree");
             std::fs::create_dir(&target).expect("create active task worktree");
@@ -7774,19 +7727,34 @@ mod tests {
 
             let _env = EnvGuard::remove("HOMEBOY_TEST_RUNTIME_A_INVOCATION");
             std::env::set_var("HOMEBOY_TEST_RUNTIME_A_INVOCATION", &invocation);
-            let exit_code = delegate_cook_continue_to_pinned_runtime(
-                cook_id,
-                &[
-                    "homeboy".to_string(),
-                    "agent-task".to_string(),
-                    "cook-continue".to_string(),
-                    cook_id.to_string(),
-                    "--full".to_string(),
-                ],
-            )
-            .expect("current runtime delegates to verified runtime A");
-
-            assert_eq!(exit_code, None);
+            use crate::agents::agent_tasks::lifecycle::AgentTaskRunState;
+            for state in [
+                AgentTaskRunState::Queued,
+                AgentTaskRunState::Running,
+                AgentTaskRunState::Succeeded,
+                AgentTaskRunState::Failed,
+                AgentTaskRunState::Cancelled,
+                AgentTaskRunState::CandidateRecoverable,
+                AgentTaskRunState::PartialRecoverable,
+            ] {
+                crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                    record.state = state;
+                })
+                .expect("persist attempt state");
+                // Both the Cook ID and exact attempt ID must resolve on the
+                // controller before observing, retrying, or harvesting work.
+                for id in [cook_id, run_id] {
+                    let args = ["homeboy", "agent-task", "cook-continue", id, "--full"]
+                        .map(str::to_string);
+                    let cli = Cli::parse_from(&args);
+                    assert_eq!(
+                        delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &args)
+                            .expect("Cook coordinator remains controller-owned"),
+                        None,
+                        "attempt state {state:?}, selector {id}"
+                    );
+                }
+            }
             assert!(
                 !invocation.exists(),
                 "controller continuation must not re-exec"
@@ -7879,8 +7847,8 @@ mod tests {
             .expect("mark recipe-bound legacy attempt terminal");
 
             assert_eq!(
-                delegate_cook_continue_to_pinned_runtime(
-                    cook_id,
+                delegate_agent_task_lifecycle_to_pinned_runtime(
+                    &Cli::parse_from(["homeboy", "agent-task", "cook-continue", cook_id]),
                     &[
                         "homeboy".to_string(),
                         "agent-task".to_string(),

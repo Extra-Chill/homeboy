@@ -11,8 +11,15 @@ unset CARGO_TARGET_DIR
 # outside each test's isolated home.
 unset HOMEBOY_RUNTIME_TMPDIR
 
-# Caller transport metadata belongs to the outer CLI invocation. Tests that
-# exercise caller context declare their own fixture value inside the harness.
+# The outer runner job owns its snapshot, placement, and caller identity. Each
+# test owns an independent controller/runner fixture; inheriting the outer job
+# makes fixture harvest validate unrelated transport metadata and changes CLI
+# routing before the test can establish its own context.
+unset HOMEBOY_SOURCE_SNAPSHOT_JSON HOMEBOY_LAB_OFFLOAD_JSON
+unset HOMEBOY_RUNNER_HOSTED_EXEC HOMEBOY_RUNNER_PLACEMENT_RESOLVED
+unset HOMEBOY_RUNNER_ID HOMEBOY_LAB_RUNNER_ID HOMEBOY_LAB_EXECUTION_RUNNER_ID
+unset HOMEBOY_RUNNER_JOB_ID HOMEBOY_RUNNER_CHILD_RESERVATION
+unset HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID
 unset HOMEBOY_CALLER_CONTEXT
 
 # Give the test a PRIVATE temp root rather than unsetting TMPDIR (#12345).
@@ -183,7 +190,16 @@ exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
         $owned{$_->{pid}} = $_->{started} for $descendants->($child, $snapshot);
         $signal_owned->("KILL", \%owned);
         waitpid $child, 0;
-        while (waitpid(-1, WNOHANG) > 0) {}
+        # SIGKILL is asynchronous. A single WNOHANG poll can run before an
+        # adopted descendant exits, leaving its zombie visible after cleanup.
+        # Keep reaping within a bounded grace period before releasing test state.
+        my $reap_deadline = time + 1;
+        while (1) {
+            my $reaped = waitpid(-1, WNOHANG);
+            next if $reaped > 0;
+            last if $reaped < 0 || time >= $reap_deadline;
+            select undef, undef, undef, 0.01;
+        }
     };
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub {
         $cleanup->();
