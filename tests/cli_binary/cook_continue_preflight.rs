@@ -1163,8 +1163,29 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
                 "target_stderr": std::fs::read_to_string(&target_stderr).unwrap_or_default(),
             });
             write_same_child_evidence("same-child-recovery-timeout.json", &timeout_evidence);
-            println!("same-child recovery timed out: {timeout_evidence}");
-            panic!("queued same-child continuation did not reacquire its real gate: {timeout_evidence}");
+            let timeout_summary = serde_json::json!({
+                "run_id": target_run,
+                "record_state": record.state,
+                "cook_continuation": record.metadata["cook_continuation"],
+                "cook_continuation_scheduler": record.metadata["cook_continuation_scheduler"],
+                "promotion_progress": {
+                    "active": record.metadata["promotion_progress"]["active"],
+                    "phase": record.metadata["promotion_progress"]["phase"],
+                    "owner_pid": record.metadata["promotion_progress"]["owner_pid"],
+                    "detail": record.metadata["promotion_progress"]["detail"],
+                },
+                "driver_lock_content": timeout_evidence["driver_lock_content"],
+                "driver_lock_holders": timeout_evidence["driver_lock_holders"],
+                "batch_coordinator_pid": std::process::id(),
+                "sibling_provider_pid": sibling_provider_owner,
+                "sibling_provider": linux_process_snapshot(sibling_provider_owner),
+                "sibling_still_running": timeout_evidence["sibling_still_running"],
+                "target_stderr": timeout_evidence["target_stderr"],
+            });
+            println!("same-child recovery timeout summary: {timeout_summary}");
+            panic!(
+                "queued same-child continuation did not reacquire its real gate: {timeout_summary}"
+            );
         }
         thread::sleep(Duration::from_millis(20));
     };
