@@ -170,9 +170,11 @@ fn test_run_check_persists_failing_observation() {
         let runs = list_rig_runs(&rig.id);
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        let persisted_index = crate::artifact_index_for_run(
-            &ObservationStore::open_initialized().expect("store"),
+        let store = ObservationStore::open_initialized().expect("store");
+        let persisted_index = crate::artifact_index_for_run_with_artifacts(
+            &store.artifact_root().expect("artifact root"),
             run,
+            &store.list_artifacts(&run.id).expect("run artifacts"),
         )
         .expect("persisted run artifact index");
         assert_eq!(persisted_index.run_id, run_id);

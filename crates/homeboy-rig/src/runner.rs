@@ -686,17 +686,6 @@ fn merge_prepare_outcomes(
     }
 }
 
-/// Tear down a rig. Runs the `down` pipeline if defined, then stops every
-/// service the rig knows about (belt + suspenders — spec authors sometimes
-/// forget to add `service stop` steps to `down`).
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) fn run_down(rig: &RigSpec) -> Result<DownReport> {
-    run_down_with_settings(rig, &[])
-}
-
 /// Tear down a rig with invocation settings available to resource expansion and
 /// the `down` pipeline as `HOMEBOY_SETTINGS_<KEY>` env vars.
 pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> Result<DownReport> {

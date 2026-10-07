@@ -659,11 +659,6 @@ fn normalize_shell_export_value(value: &str) -> String {
         .replace("\\n", "\n")
 }
 
-// Core function tests (finding_fingerprint, score_delta, weighted_finding_score_with,
-// build_chunk_verifier, apply_fix_policy, default_audit_exit_code) have been relocated
-// to their respective core modules: code_audit/compare.rs, code_audit/run.rs,
-// refactor/auto/apply.rs, refactor/plan/verify.rs.
-
 #[cfg(test)]
 mod tests {
     use super::*;

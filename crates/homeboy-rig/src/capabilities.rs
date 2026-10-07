@@ -2,48 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use super::expand::expand_vars;
 use super::pipeline::{PipelineOutcome, PipelineStepOutcome};
 use super::spec::{ExecutableRequirementSpec, FilesystemAssertionSpec, RigSpec};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) struct RigRequirementCheckPlan {
-    pub kind: String,
-    pub label: String,
-    pub target: String,
-}
-
-#[allow(
-    dead_code,
-    reason = "no production caller; exercised by the rig test suite"
-)]
-pub(crate) fn plan_requirement_checks(rig: &RigSpec) -> Vec<RigRequirementCheckPlan> {
-    rig.requirements
-        .executables
-        .iter()
-        .map(|requirement| RigRequirementCheckPlan {
-            kind: "executable".to_string(),
-            label: executable_label(requirement),
-            target: requirement.executable.clone(),
-        })
-        .chain(
-            rig.requirements
-                .filesystem_assertions
-                .iter()
-                .map(|assertion| RigRequirementCheckPlan {
-                    kind: "filesystem".to_string(),
-                    label: filesystem_label(assertion),
-                    target: assertion.path.clone(),
-                }),
-        )
-        .collect()
-}
 
 pub(crate) fn evaluate_requirements(rig: &RigSpec) -> PipelineOutcome {
     let mut steps = Vec::new();
@@ -247,31 +208,6 @@ mod tests {
 
     use super::*;
     use crate::spec::{FilesystemAssertionKind, RigRequirementsSpec, RigSpec};
-
-    #[test]
-    fn plans_executable_and_filesystem_requirements() {
-        let rig = RigSpec {
-            requirements: RigRequirementsSpec {
-                executables: vec![ExecutableRequirementSpec {
-                    executable: "sh".to_string(),
-                    ..Default::default()
-                }],
-                filesystem_assertions: vec![FilesystemAssertionSpec {
-                    path: "Cargo.toml".to_string(),
-                    kind: FilesystemAssertionKind::File,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let plan = plan_requirement_checks(&rig);
-
-        assert_eq!(plan.len(), 2);
-        assert_eq!(plan[0].kind, "executable");
-        assert_eq!(plan[1].kind, "filesystem");
-    }
 
     #[test]
     fn evaluates_filesystem_assertions() {

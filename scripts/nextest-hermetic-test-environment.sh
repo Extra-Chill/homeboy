@@ -11,6 +11,10 @@ unset CARGO_TARGET_DIR
 # outside each test's isolated home.
 unset HOMEBOY_RUNTIME_TMPDIR
 
+# Caller transport metadata belongs to the outer CLI invocation. Tests that
+# exercise caller context declare their own fixture value inside the harness.
+unset HOMEBOY_CALLER_CONTEXT
+
 # Give the test a PRIVATE temp root rather than unsetting TMPDIR (#12345).
 #
 # Unsetting it did not isolate anything. It handed every test the shared system

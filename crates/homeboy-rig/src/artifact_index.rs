@@ -88,20 +88,6 @@ pub(crate) fn for_completed_rig_run(
     Some(index)
 }
 
-#[allow(
-    dead_code,
-    reason = "no production caller; driven by tests/core/rig/runner_observation_test.rs"
-)]
-pub fn for_run(store: &ObservationStore, run: &RunRecord) -> Option<RigRunArtifactIndex> {
-    if run.rig_id.is_none() || run.kind != "rig" {
-        return None;
-    }
-    let artifacts = store.list_artifacts(&run.id).unwrap_or_default();
-    // The store knows which home it indexes; re-resolving here is how a
-    // listing ends up naming another home's index path (#7505).
-    for_run_with_artifacts(&store.artifact_root().ok()?, run, &artifacts)
-}
-
 /// Report where an already-recorded run's index lives, under an explicitly
 /// supplied artifact root.
 ///

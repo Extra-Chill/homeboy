@@ -53,10 +53,6 @@ pub use artifact_index::{
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
 };
 pub use artifact_index::{RigRunArtifactRef, RigRunFailedStepRef};
-// `tests/core/rig/runner_observation_test.rs` drives this through the alias;
-// production builds the index via `artifact_index_for_run_with_artifacts`.
-#[allow(unused_imports)]
-pub(crate) use artifact_index::for_run as artifact_index_for_run;
 
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use homeboy_rig_contract::{MaterializedRigResource, MATERIALIZED_RIG_RESOURCE_SCHEMA};
@@ -89,8 +85,6 @@ pub use runner::{
     FuzzPrepareReport, RepairReport, RigStatusReport, UpReport,
 };
 // Reachable through `RepairReport`/`RigStatusReport` public fields.
-#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
-pub(crate) use runner::run_down;
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
 pub use runner::SymlinkStatusState;
 pub use runner::{RepairResourceReport, RigComponentStatusReport, SymlinkStatusReport};

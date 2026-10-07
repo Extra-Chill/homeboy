@@ -4,7 +4,7 @@
 //!
 //! - Report shape tests (originally authored in #1468) — verify the JSON
 //!   envelope contract that CLI JSON output and scheduled jobs depend on.
-//! - End-to-end tests for `run_up` / `run_check` / `run_down` / `run_status`
+//! - End-to-end tests for `run_up` / `run_check` / `run_down_with_settings` / `run_status`
 //!   against a minimal spec with no pipeline and no services. These exercise
 //!   the bookkeeping path (state file write, report assembly) without
 //!   spinning up real services. Richer integration is still smoke-tested
@@ -20,8 +20,8 @@ use crate::dependency_materialization_cache::{
 };
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
-    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
-    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport, RepairReport,
+    head_sha_and_branch, run_check, run_check_groups, run_down_with_settings, run_fuzz_prepare,
+    run_repair, run_status, run_up, snapshot_state, CheckReport, RepairReport,
     RepairResourceReport, RigComponentStatusReport, RigStatusReport, ServiceStatusReport,
     SymlinkStatusState, UpReport,
 };
@@ -440,7 +440,7 @@ fn test_run_down() {
             "precondition: up writes ownership"
         );
 
-        let report = run_down(&rig).expect("run_down succeeds with no services");
+        let report = run_down_with_settings(&rig, &[]).expect("teardown succeeds with no services");
         assert_eq!(report.rig_id, "run-down-fixture");
         assert!(
             report.stopped.is_empty(),
@@ -1070,7 +1070,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
         assert!(up.is_success());
         assert!(link.is_symlink());
 
-        let down = run_down(&rig).expect("run_down");
+        let down = run_down_with_settings(&rig, &[]).expect("run_down_with_settings");
         assert!(down.success);
         assert!(!link.exists(), "run_down removes owned shared-path symlink");
     });
