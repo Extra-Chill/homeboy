@@ -2003,6 +2003,23 @@ pub(crate) struct GenerationReconcileResult {
     pub retired_generation_ids: Vec<String>,
     pub retirement_blockers: std::collections::BTreeMap<String, String>,
     pub retained_evidence_generation_count: usize,
+    /// Idle draining generations whose only blocker is retained-evidence
+    /// verification (#15653). `--release-unverified-evidence` can retire them.
+    pub evidence_blocked_generation_ids: std::collections::BTreeSet<String>,
+    /// Generations retired under `--release-unverified-evidence`, with the
+    /// exact verification failure each was released despite. Their run and
+    /// artifact ownership stays recorded as retired evidence; nothing is
+    /// deleted on the controller or the runner.
+    pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
+}
+
+/// Operator choices for one generation reconcile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GenerationReconcilePolicy {
+    /// Retire idle draining generations whose retained evidence cannot be
+    /// verified (legacy custody, unreachable source inventory). Explicit only:
+    /// the default stays fail-closed (#15653).
+    pub release_unverified_evidence: bool,
 }
 
 /// Result references are provenance, not a reason to keep a process alive.
@@ -2188,6 +2205,14 @@ pub(crate) fn reconcile(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
 ) -> Result<GenerationReconcileResult> {
+    reconcile_with_policy(runner_id, legacy, GenerationReconcilePolicy::default())
+}
+
+pub(crate) fn reconcile_with_policy(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    policy: GenerationReconcilePolicy,
+) -> Result<GenerationReconcileResult> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -2195,10 +2220,11 @@ pub(crate) fn reconcile(
         .map_err(|error| {
             Error::internal_unexpected(format!("build generation reconcile client: {error}"))
         })?;
-    reconcile_with(
+    reconcile_with_operations(
         runner_id,
         legacy,
         &HttpGenerationEndpointOperations { client },
+        policy,
     )
 }
 
@@ -2206,10 +2232,11 @@ pub(crate) fn reconcile(
 /// to the same recorded loopback daemon endpoints over the trusted SSH runner.
 /// This restores observability after an old generation's local tunnel exits
 /// without weakening the daemon's terminal-job, zero-active-job, or stop gates.
-pub(crate) fn reconcile_with_ssh(
+pub(crate) fn reconcile_with_ssh_and_policy(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
     ssh_client: &SshClient,
+    policy: GenerationReconcilePolicy,
 ) -> Result<GenerationReconcileResult> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
@@ -2220,21 +2247,39 @@ pub(crate) fn reconcile_with_ssh(
         })?;
     let local = HttpGenerationEndpointOperations { client };
     let remote = SshGenerationEndpointOperations { client: ssh_client };
-    reconcile_with(
+    reconcile_with_operations(
         runner_id,
         legacy,
         &FallbackGenerationEndpointOperations {
             primary: &local,
             fallback: &remote,
         },
+        policy,
     )
 }
 
+#[cfg(test)]
 fn reconcile_with(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
     operations: &impl GenerationEndpointOperations,
 ) -> Result<GenerationReconcileResult> {
+    reconcile_with_operations(
+        runner_id,
+        legacy,
+        operations,
+        GenerationReconcilePolicy::default(),
+    )
+}
+
+fn reconcile_with_operations(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    operations: &impl GenerationEndpointOperations,
+    policy: GenerationReconcilePolicy,
+) -> Result<GenerationReconcileResult> {
+    let mut evidence_blocked_generation_ids = std::collections::BTreeSet::new();
+    let mut released_unverified_evidence = std::collections::BTreeMap::new();
     let Some(generations) = read(runner_id, legacy)? else {
         return Ok(GenerationReconcileResult::default());
     };
@@ -2247,6 +2292,7 @@ fn reconcile_with(
             retired_generation_ids: Vec::new(),
             retirement_blockers,
             retained_evidence_generation_count: generations.retired_evidence.len(),
+            ..Default::default()
         });
     }
     let live_idle = generations
@@ -2374,6 +2420,22 @@ fn reconcile_with(
             } else {
                 None
             };
+            // Only evidence verification stands between this idle generation
+            // and retirement. Record it, and release it when the operator
+            // explicitly asked (#15653); otherwise it stays a blocker.
+            let evidence_error = match evidence_error {
+                Some(error) => {
+                    evidence_blocked_generation_ids.insert(generation.clone());
+                    if policy.release_unverified_evidence {
+                        released_unverified_evidence
+                            .insert(generation.clone(), error.message.clone());
+                        None
+                    } else {
+                        Some(error)
+                    }
+                }
+                None => None,
+            };
             if let Some(entry) = generations.generations.get_mut(generation) {
                 entry.observed_active_jobs = *observed_active_jobs;
                 if let Some(active_jobs) = observed_active_jobs {
@@ -2470,8 +2532,14 @@ fn reconcile_with(
                     session,
                     operations,
                 ) {
-                    retirement_blockers.insert(generation.clone(), error.to_string());
-                    continue;
+                    evidence_blocked_generation_ids.insert(generation.clone());
+                    if policy.release_unverified_evidence {
+                        released_unverified_evidence
+                            .insert(generation.clone(), error.message.clone());
+                    } else {
+                        retirement_blockers.insert(generation.clone(), error.to_string());
+                        continue;
+                    }
                 }
                 if !already_stopped.contains(generation) && !operations.stop(session) {
                     retirement_blockers.insert(
@@ -2508,11 +2576,16 @@ fn reconcile_with(
         write(runner_id, &generations)?;
         Ok(retired)
     })?;
+    // A release is only reported for generations that actually retired.
+    released_unverified_evidence
+        .retain(|generation, _| retired_generation_ids.contains(generation));
     Ok(GenerationReconcileResult {
         retired_generation_ids,
         retirement_blockers,
         retained_evidence_generation_count: read(runner_id, None)?
             .map_or(0, |registry| registry.retired_evidence.len()),
+        evidence_blocked_generation_ids,
+        released_unverified_evidence,
     })
 }
 
@@ -3643,6 +3716,121 @@ mod tests {
         assert_eq!(operations.active_jobs(&endpoint), Some(0));
         assert!(cancelled.load(Ordering::SeqCst));
         server.join().expect("fixture server");
+    }
+
+    fn idle_generation_with_unverifiable_evidence() -> RunnerSession {
+        let idle = session("lease-idle", "daemon-idle", Some(101));
+        let current = session("lease-current", "daemon-current", Some(303));
+        let mut generations = RollingGenerations::new("lease-current".to_string(), current.clone());
+        generations.begin("lease-idle", idle);
+        // A legacy run the controller never recorded: verification fails with
+        // "controller run is missing", like the Lab's pre-0.40 generations.
+        generations
+            .run_owners
+            .insert("run-legacy".to_string(), "lease-idle".to_string());
+        write("runner-a", &generations).expect("persist generations");
+        current
+    }
+
+    /// #15653: by default an idle generation whose retained evidence cannot be
+    /// verified stays registered and is reported as evidence-blocked.
+    #[test]
+    fn unverifiable_evidence_blocks_retirement_by_default_and_is_classified() {
+        test_support::with_isolated_home(|_| {
+            let current = idle_generation_with_unverifiable_evidence();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+
+            let result =
+                reconcile_with("runner-a", Some(&current), &operations).expect("reconcile");
+
+            assert!(result.retired_generation_ids.is_empty(), "{result:?}");
+            assert!(result.released_unverified_evidence.is_empty());
+            assert!(result
+                .evidence_blocked_generation_ids
+                .contains("lease-idle"));
+            assert!(result
+                .retirement_blockers
+                .get("lease-idle")
+                .is_some_and(|reason| reason.contains("retained evidence run-legacy")));
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    /// #15653: the explicit release retires the idle generation and keeps its
+    /// run ownership as retired evidence. Nothing is deleted.
+    #[test]
+    fn release_unverified_evidence_retires_and_keeps_provenance() {
+        test_support::with_isolated_home(|_| {
+            let current = idle_generation_with_unverifiable_evidence();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-current".to_string(), 0),
+            ]);
+
+            let result = reconcile_with_operations(
+                "runner-a",
+                Some(&current),
+                &operations,
+                GenerationReconcilePolicy {
+                    release_unverified_evidence: true,
+                },
+            )
+            .expect("reconcile with release");
+
+            assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            assert!(result
+                .released_unverified_evidence
+                .get("lease-idle")
+                .is_some_and(|reason| reason.contains("retained evidence run-legacy")));
+            assert!(!result.retirement_blockers.contains_key("lease-idle"));
+            assert_eq!(
+                operations.stopped_leases.borrow().as_slice(),
+                ["lease-idle"]
+            );
+            let registry = read("runner-a", None).expect("read").expect("registry");
+            assert!(!registry.generations.contains_key("lease-idle"));
+            assert_eq!(
+                registry.run_owners.get("run-legacy").map(String::as_str),
+                Some("lease-idle"),
+                "run ownership is preserved"
+            );
+            assert!(
+                registry.retired_evidence.contains_key("lease-idle"),
+                "the endpoint is kept as retired evidence provenance"
+            );
+        });
+    }
+
+    /// The release never overrides live work: a busy generation stays.
+    #[test]
+    fn release_unverified_evidence_never_retires_a_busy_generation() {
+        test_support::with_isolated_home(|_| {
+            let current = idle_generation_with_unverifiable_evidence();
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 2),
+                ("lease-current".to_string(), 0),
+            ]);
+
+            let result = reconcile_with_operations(
+                "runner-a",
+                Some(&current),
+                &operations,
+                GenerationReconcilePolicy {
+                    release_unverified_evidence: true,
+                },
+            )
+            .expect("reconcile");
+
+            assert!(result.retired_generation_ids.is_empty());
+            assert!(result.released_unverified_evidence.is_empty());
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
     }
 
     /// Relaxing the global fence for a dangling job owner must still retire only

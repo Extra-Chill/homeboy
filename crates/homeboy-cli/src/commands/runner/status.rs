@@ -353,13 +353,27 @@ pub(super) fn execution_capabilities_with_local_placement(
 pub(super) fn reconcile(
     id: &str,
     confirm_workload_processes_absent: bool,
+    release_unverified_evidence: bool,
 ) -> CmdResult<RunnerOutput> {
+    let policy = runner::GenerationReconcilePolicy {
+        release_unverified_evidence,
+    };
     let (reconcile_outcome, attested_recovery) = if confirm_workload_processes_absent {
         let with_attestation = runner::reconcile_status_with_outcome_with_remote_attestation(id)?;
-        (with_attestation.outcome, with_attestation.attested)
+        let outcome = if release_unverified_evidence {
+            runner::reconcile_status_with_outcome_with_policy(id, policy)?
+        } else {
+            with_attestation.outcome
+        };
+        (outcome, with_attestation.attested)
     } else {
-        (runner::reconcile_status_with_outcome(id)?, None)
+        (
+            runner::reconcile_status_with_outcome_with_policy(id, policy)?,
+            None,
+        )
     };
+    let evidence_blocked = reconcile_outcome.evidence_blocked_generation_ids.clone();
+    let released = reconcile_outcome.released_unverified_evidence.clone();
     let (mut output, mut exit_code) = reconcile_output(
         id,
         reconcile_outcome.status,
@@ -377,15 +391,37 @@ pub(super) fn reconcile(
                 RunnerReconciliationStatus::Blocked
             };
             if reconciliation.remaining_blocker.is_none() {
-                reconciliation.remaining_blocker =
-                    Some("generation_retirement_blocked".to_string());
-                reconciliation.retry_predicate = Some(
-                    "active work completes or the reported ownership/evidence blocker is resolved"
-                        .to_string(),
-                );
+                if evidence_only_blockers(&reconciliation.retirement_blockers, &evidence_blocked) {
+                    // Every blocker is an idle generation whose retained
+                    // evidence cannot be verified. Name the one explicit
+                    // operator action instead of dead-ending (#15653).
+                    reconciliation.remaining_blocker =
+                        Some("unverified_retained_evidence".to_string());
+                    reconciliation.next_action = Some(format!(
+                        "homeboy runner reconcile {} --release-unverified-evidence",
+                        shell_arg(id)
+                    ));
+                    reconciliation.retry_predicate = Some(
+                        "the operator releases the unverifiable evidence, or its source inventory becomes verifiable".to_string(),
+                    );
+                } else {
+                    reconciliation.remaining_blocker =
+                        Some("generation_retirement_blocked".to_string());
+                    reconciliation.retry_predicate = Some(
+                        "active work completes or the reported ownership/evidence blocker is resolved"
+                            .to_string(),
+                    );
+                }
             }
             exit_code = 1;
         }
+        reconciliation.released_unverified_evidence = released.clone();
+    }
+    if !released.is_empty() {
+        output.extra.operator_hints.push(format!(
+            "retired {} generation(s) despite unverifiable retained evidence; their run and artifact ownership is kept as retired evidence and nothing was deleted",
+            released.len()
+        ));
     }
     if let Some(applied) = attested_recovery {
         output.extra.operator_hints.push(format!(
@@ -397,6 +433,15 @@ pub(super) fn reconcile(
         ));
     }
     Ok((output, exit_code))
+}
+
+/// Whether every retirement blocker is an idle generation blocked only by
+/// retained-evidence verification.
+pub(super) fn evidence_only_blockers(
+    blockers: &std::collections::BTreeMap<String, String>,
+    evidence_blocked: &std::collections::BTreeSet<String>,
+) -> bool {
+    !blockers.is_empty() && blockers.keys().all(|key| evidence_blocked.contains(key))
 }
 
 pub(super) fn reconcile_output(
@@ -465,6 +510,7 @@ pub(crate) fn reconciliation_outcome(
             retired_generation_ids,
             retirement_blockers: Default::default(),
             retained_evidence_generation_count: 0,
+            released_unverified_evidence: Default::default(),
         };
     }
 
@@ -574,6 +620,7 @@ pub(crate) fn reconciliation_outcome(
         retired_generation_ids,
         retirement_blockers: Default::default(),
         retained_evidence_generation_count: 0,
+        released_unverified_evidence: Default::default(),
     }
 }
 

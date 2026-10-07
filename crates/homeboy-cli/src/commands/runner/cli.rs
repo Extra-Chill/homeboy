@@ -357,6 +357,14 @@ pub(super) enum RunnerCommand {
         /// refusal surfaced verbatim (#15556).
         #[arg(long)]
         confirm_workload_processes_absent: bool,
+
+        /// Retire idle draining generations whose retained evidence cannot be
+        /// verified (legacy evidence custody, unreachable source inventory).
+        /// Their run and artifact ownership stays recorded as retired
+        /// evidence, and nothing is deleted. Each release is reported with
+        /// the exact verification failure (#15653).
+        #[arg(long)]
+        release_unverified_evidence: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {

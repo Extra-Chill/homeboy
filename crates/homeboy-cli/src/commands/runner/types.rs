@@ -129,6 +129,10 @@ pub struct RunnerReconciliationOutcome {
     pub retired_generation_count: usize,
     pub retirement_blockers: std::collections::BTreeMap<String, String>,
     pub retained_evidence_generation_count: usize,
+    /// Generations retired under `--release-unverified-evidence`, each with the
+    /// verification failure it was released despite (#15653).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
     /// IDs retired by this reconciliation operation under the generation lock.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub retired_generation_ids: Vec<String>,
