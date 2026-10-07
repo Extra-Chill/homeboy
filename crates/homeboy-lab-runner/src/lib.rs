@@ -59,6 +59,7 @@ mod execution_bundle;
 mod extension_materialization;
 pub mod gate_transport;
 mod generation_store;
+pub use generation_store::GenerationReconcilePolicy;
 pub mod lab_staging_controller;
 pub mod runner_staging_operation;
 pub mod runner_staging_store;
@@ -368,11 +369,12 @@ pub use connection::{
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
     diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
-    reconcile_status_with_outcome, reconcile_status_with_outcome_with_remote_attestation,
-    reconcile_terminal_jobs, reconnect_job_log_owner, remote_lifecycle_plan,
-    reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, statuses_indexed, submit_runner_api_request,
-    PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
+    reconcile_status_with_outcome, reconcile_status_with_outcome_with_policy,
+    reconcile_status_with_outcome_with_remote_attestation, reconcile_terminal_jobs,
+    reconnect_job_log_owner, remote_lifecycle_plan, reverse_broker_artifact,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
+    statuses, statuses_indexed, submit_runner_api_request, PeerSessionMaintenanceReport,
+    RunnerReconcileWithAttestationOutcome,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,

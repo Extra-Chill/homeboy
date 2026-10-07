@@ -2127,3 +2127,36 @@ fn sample_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
         extra: BTreeMap::new(),
     }
 }
+
+/// #15653: a blocked reconcile names `--release-unverified-evidence` only when
+/// every blocker is an idle generation blocked by evidence verification.
+#[test]
+fn evidence_only_blockers_are_recognized_exactly() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let evidence: BTreeSet<String> = ["gen-a", "gen-b"].map(String::from).into();
+    let only_evidence: BTreeMap<String, String> = [
+        (
+            "gen-a".to_string(),
+            "retained evidence run-1: source artifact inventory unavailable".to_string(),
+        ),
+        (
+            "gen-b".to_string(),
+            "retained evidence run-2: controller run is missing".to_string(),
+        ),
+    ]
+    .into();
+    assert!(super::super::status::evidence_only_blockers(
+        &only_evidence,
+        &evidence
+    ));
+
+    let mut mixed = only_evidence.clone();
+    mixed.insert("gen-c".to_string(), "1 active jobs".to_string());
+    assert!(!super::super::status::evidence_only_blockers(
+        &mixed, &evidence
+    ));
+    assert!(!super::super::status::evidence_only_blockers(
+        &BTreeMap::new(),
+        &evidence
+    ));
+}

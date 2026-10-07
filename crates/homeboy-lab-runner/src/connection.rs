@@ -2469,10 +2469,35 @@ pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileS
     )
 }
 
+/// [`reconcile_status_with_outcome`] with explicit operator choices, such as
+/// releasing idle generations whose retained evidence cannot be verified.
+pub fn reconcile_status_with_outcome_with_policy(
+    runner_id: &str,
+    policy: super::generation_store::GenerationReconcilePolicy,
+) -> Result<RunnerReconcileStatusOutcome> {
+    reconcile_status_with_outcome_in_roots_with_policy(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        policy,
+    )
+}
+
 /// [`reconcile_status_with_outcome`] against an explicitly injected root.
 pub fn reconcile_status_with_outcome_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
+) -> Result<RunnerReconcileStatusOutcome> {
+    reconcile_status_with_outcome_in_roots_with_policy(
+        roots,
+        runner_id,
+        super::generation_store::GenerationReconcilePolicy::default(),
+    )
+}
+
+fn reconcile_status_with_outcome_in_roots_with_policy(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    policy: super::generation_store::GenerationReconcilePolicy,
 ) -> Result<RunnerReconcileStatusOutcome> {
     let runner = load_in_roots(roots, runner_id)?;
     let mut report = status_in_roots(roots, runner_id)?;
@@ -2488,9 +2513,14 @@ pub fn reconcile_status_with_outcome_in_roots(
     let generation_reconcile = if let Ok(Some((_, _, client))) =
         remote_daemon::resolve_ssh_runner(&runner)
     {
-        super::generation_store::reconcile_with_ssh(runner_id, report.session.as_ref(), &client)?
+        super::generation_store::reconcile_with_ssh_and_policy(
+            runner_id,
+            report.session.as_ref(),
+            &client,
+            policy,
+        )?
     } else {
-        super::generation_store::reconcile(runner_id, report.session.as_ref())?
+        super::generation_store::reconcile_with_policy(runner_id, report.session.as_ref(), policy)?
     };
     if report.connected {
         if let (Some(session), Some(_)) =
@@ -2504,6 +2534,8 @@ pub fn reconcile_status_with_outcome_in_roots(
         retired_generation_ids: generation_reconcile.retired_generation_ids,
         retirement_blockers: generation_reconcile.retirement_blockers,
         retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
+        evidence_blocked_generation_ids: generation_reconcile.evidence_blocked_generation_ids,
+        released_unverified_evidence: generation_reconcile.released_unverified_evidence,
     })
 }
 
@@ -2513,6 +2545,10 @@ pub struct RunnerReconcileStatusOutcome {
     pub retired_generation_ids: Vec<String>,
     pub retirement_blockers: std::collections::BTreeMap<String, String>,
     pub retained_evidence_generation_count: usize,
+    /// Idle generations blocked only by retained-evidence verification.
+    pub evidence_blocked_generation_ids: std::collections::BTreeSet<String>,
+    /// Generations retired under `--release-unverified-evidence`, with reasons.
+    pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
 }
 
 /// The result of a reconcile that was allowed to apply the operator-attested
