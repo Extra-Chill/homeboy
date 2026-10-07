@@ -28,6 +28,26 @@ run_bounded() {
     perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!\n"' 8 "$runner" "$@"
 }
 
+# Replay the environment injected by runner exec. The test process establishes
+# its own transport context after startup, rather than inheriting this job's.
+HOMEBOY_SOURCE_SNAPSHOT_JSON='{"outer":"snapshot"}' \
+HOMEBOY_LAB_OFFLOAD_JSON='{"outer":"offload"}' \
+HOMEBOY_RUNNER_HOSTED_EXEC=1 HOMEBOY_RUNNER_PLACEMENT_RESOLVED=1 \
+HOMEBOY_RUNNER_ID=outer-runner HOMEBOY_LAB_RUNNER_ID=outer-runner \
+HOMEBOY_LAB_EXECUTION_RUNNER_ID=outer-runner HOMEBOY_CALLER_CONTEXT=outer-caller \
+HOMEBOY_RUNNER_JOB_ID=outer-job HOMEBOY_RUNNER_CHILD_RESERVATION=outer-reservation \
+HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID=outer-context \
+run_bounded perl -e '
+    for my $name (@ARGV) {
+        die "outer transport leaked into test: $name\n" if exists $ENV{$name};
+    }
+' HOMEBOY_SOURCE_SNAPSHOT_JSON HOMEBOY_LAB_OFFLOAD_JSON \
+    HOMEBOY_RUNNER_HOSTED_EXEC HOMEBOY_RUNNER_PLACEMENT_RESOLVED \
+    HOMEBOY_RUNNER_ID HOMEBOY_LAB_RUNNER_ID HOMEBOY_LAB_EXECUTION_RUNNER_ID \
+    HOMEBOY_RUNNER_JOB_ID HOMEBOY_RUNNER_CHILD_RESERVATION \
+    HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID \
+    HOMEBOY_CALLER_CONTEXT
+
 started="$(date +%s)"
 run_bounded sh -c 'printf "%s" "$TMPDIR" > "$1"; exit 0' sh "$scratch/clean-tmp"
 elapsed=$(( $(date +%s) - started ))

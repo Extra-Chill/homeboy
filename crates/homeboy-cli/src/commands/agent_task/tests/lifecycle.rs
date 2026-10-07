@@ -1682,7 +1682,19 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
 
 #[test]
 fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
-    with_temp_home(|| {
+    with_isolated_home(|home| {
+        // This fixture verifies retry ownership and exactly-once execution.
+        // Give its tiny Git/patch workspace an explicit reserve rather than
+        // making success depend on the host having the default 20 GiB free.
+        let config_path = home.path().join(".config/homeboy/homeboy.json");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("config directory");
+        std::fs::write(
+            config_path,
+            r#"{"retention":{"reconstructable_artifact_reserve_bytes":1048576}}"#,
+        )
+        .expect("fixture workspace reserve");
+        homeboy::core::defaults::reset_config_cache_for_test();
         let cook_id = "cook-readiness-rearm";
         let source_run_id = "cook-readiness-rearm-attempt-1";
         let (root, source) = recoverable_runner_worktree();
