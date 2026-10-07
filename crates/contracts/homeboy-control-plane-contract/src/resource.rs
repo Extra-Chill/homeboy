@@ -828,7 +828,9 @@ pub struct ControlPlaneLocation {
     pub remote_run_id: Option<String>,
 }
 
-/// Evidence or artifact pointer. The URI is a reference, not payload.
+/// Evidence or artifact pointer. `id` identifies this control-plane reference,
+/// not an artifact-store byte record. The URI is a reference, not payload; an
+/// artifact URI retains its producing task/artifact selectors for exact lookup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneEvidenceRef {

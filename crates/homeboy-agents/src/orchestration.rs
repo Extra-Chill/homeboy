@@ -6427,6 +6427,13 @@ fn stable_reference_id(prefix: &str, parts: &[&str]) -> String {
 }
 
 fn redacted_reference_uri(value: &str, max: usize) -> String {
+    if let Some(reference) = crate::agent_task_service::selected_artifact_reference_uri(value) {
+        // Truncating a selector changes its identity. Only emit the complete
+        // owned locator; other references retain the bounded collection form.
+        if reference.chars().count() <= max {
+            return reference;
+        }
+    }
     let without_fragment = value.split_once('#').map_or(value, |(uri, _)| uri);
     bounded(
         &homeboy_core::redaction::RedactionPolicy::default().redact_url(without_fragment),
@@ -8207,6 +8214,63 @@ mod tests {
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
         "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+
+    #[test]
+    fn status_artifact_reference_selects_the_exact_producing_task() {
+        let mut service = service();
+        let mut source = snapshot(AGENT_TASK_RUN, None);
+        source.record.artifact_refs = ["first", "second"]
+            .into_iter()
+            .map(|task| AgentTaskArtifactRef {
+                task_id: task.to_string(),
+                kind: "patch".to_string(),
+                uri: format!(
+                    "homeboy://agent-task/run/{AGENT_TASK_RUN}/artifacts#task={task}&artifact=patch&token=private-value"
+                ),
+                role: Some("patch".to_string()),
+                label: None,
+                semantic_key: None,
+                size_bytes: None,
+            })
+            .collect();
+        service
+            .lookup
+            .snapshots
+            .insert(AGENT_TASK_RUN.to_string(), source);
+        let resource = service
+            .run(&RunId::new(AGENT_TASK_RUN).expect("run"))
+            .expect("status");
+        let aggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "artifact-reference",
+            "status": "succeeded",
+            "totals": {"skipped": 0},
+            "outcomes": [
+                {"task_id": "first", "status": "succeeded", "artifacts": [{"id": "patch", "kind": "patch"}]},
+                {"task_id": "second", "status": "succeeded", "artifacts": [{"id": "patch", "kind": "patch"}]}
+            ]
+        })).expect("aggregate");
+
+        assert_eq!(resource.artifacts.len(), 2);
+        assert_ne!(resource.artifacts[0].id, resource.artifacts[1].id);
+        for (reference, task) in resource.artifacts.iter().zip(["first", "second"]) {
+            assert!(!reference.uri.contains("private-value"));
+            let hydrated = crate::agent_task_service::hydrate_evidence_ref(
+                AGENT_TASK_RUN,
+                &crate::agent_task::AgentTaskEvidenceRef {
+                    kind: reference.kind.clone(),
+                    uri: reference.uri.clone(),
+                    label: None,
+                },
+                None,
+                None,
+                Some(&aggregate),
+            );
+            assert_eq!(hydrated.status, "ok");
+            assert_eq!(hydrated.content["task_id"], task);
+            assert_eq!(hydrated.content["artifact"]["id"], "patch");
+        }
+    }
 
     #[test]
     fn default_status_payload_deduplicates_and_bounds_top_level_artifacts() {

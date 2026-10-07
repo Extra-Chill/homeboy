@@ -47,6 +47,15 @@ Paged `agent-task list` and `agent-task active` inspect at most 100 physical lif
 
 `agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
+Each status `artifacts` entry has a control-plane reference `id`, distinct from an
+artifact-store byte ID. A producer-artifact `uri` retains the exact task and artifact,
+for example `homeboy://agent-task/run/<run-id>/artifacts#task=<task-id>&artifact=<artifact-id>`.
+Use that URI for artifact selection and `agent-task artifacts <run-id>` to inspect
+the producer's recorded artifact. For byte downloads, obtain the storage-owned
+ID from `runs artifacts <run-id>` and pass it to `runs artifact get`. Unknown
+fragment fields are omitted from status; artifact selection does not preserve
+credential-bearing fragments or arbitrary URLs.
+
 `agent-task status <run-id> --watch` polls the same canonical resource. Every material resource change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
 ### Resource Behavior
