@@ -4647,7 +4647,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             args.artifact_id.as_deref(),
         )
     };
-    if let Some(error) = agent_task_service::live_owner_continuation_denial(&record) {
+    if let Some(error) =
+        agent_task_service::cook_continuation_owner_denial(&record, &recipe.cook_id)?
+    {
         let mut report = cook_continuation_preflight_report(
             selected_run_id,
             None,

@@ -1177,6 +1177,13 @@ fn short_tempdir_candidates() -> Vec<PathBuf> {
         }
     };
 
+    // Hermetic callers can reuse the canonical invocation-runtime override to
+    // select a short, socket-safe base on a disk-backed filesystem.
+    if let Some(runtime_root) =
+        std::env::var_os(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV)
+    {
+        push_if_usable(PathBuf::from(runtime_root));
+    }
     push_if_usable(PathBuf::from("/tmp"));
     push_if_usable(PathBuf::from("/var/tmp"));
     push_if_usable(PathBuf::from("/dev/shm"));

@@ -24,6 +24,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
+/// Hermetic tests may give an independent provider a separate local-dispatch
+/// admission root while keeping its durable lifecycle and batch stores shared.
+pub const TEST_LOCAL_DISPATCH_LEASE_ROOT_ENV: &str = "HOMEBOY_TEST_LOCAL_DISPATCH_LEASE_ROOT";
+
 /// On-disk lease held by one active local Cook provider dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LocalDispatchLease {
@@ -124,6 +128,11 @@ pub fn evaluate_local_dispatch_admission(
 }
 
 fn lease_dir(data_root: &Path) -> PathBuf {
+    if std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE").is_some() {
+        if let Some(root) = std::env::var_os(TEST_LOCAL_DISPATCH_LEASE_ROOT_ENV) {
+            return homeboy_paths::local_cook_dispatch_leases_dir_in_root(&PathBuf::from(root));
+        }
+    }
     homeboy_paths::local_cook_dispatch_leases_dir_in_root(data_root)
 }
 

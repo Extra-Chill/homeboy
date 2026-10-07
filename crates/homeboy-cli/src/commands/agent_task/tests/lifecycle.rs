@@ -2233,6 +2233,24 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
         );
+        use fs4::fs_std::FileExt;
+        use std::io::Write;
+        let driver_dir = homeboy::core::paths::homeboy_data()
+            .expect("data root")
+            .join("agent-task-cooks")
+            .join(cook_id);
+        std::fs::create_dir_all(&driver_dir).expect("driver lock directory");
+        let mut driver_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(driver_dir.join("driver.lock"))
+            .expect("open Cook driver lock");
+        write!(driver_lock, "{}", std::process::id()).expect("record driver PID");
+        driver_lock
+            .lock_exclusive()
+            .expect("hold the live child Cook driver lock");
         test_lifecycle_store()
             .mutate_record(run_id, |record| {
                 record.metadata["provider_executions"] = json!([{
