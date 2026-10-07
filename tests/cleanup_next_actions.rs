@@ -208,25 +208,11 @@ fn explicit_local_shared_cargo_apply_succeeds_without_a_daemon() {
     let leased_store = cargo_root.join(format!("homeboy-{}", "b".repeat(64)));
     std::fs::create_dir_all(&store).expect("cargo target store");
     std::fs::create_dir_all(&leased_store).expect("leased cargo target store");
-    std::fs::write(store.join("artifact"), "artifact").expect("cargo target artifact");
+    create_old_cargo_target(&store);
     std::fs::write(leased_store.join("artifact"), "active artifact").expect("active artifact");
     std::fs::write(leased_store.join(".homeboy-lock"), "").expect("cargo target lock");
     std::fs::write(leased_store.join(".homeboy-lease"), "active").expect("cargo target lease");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
-    let touch = Command::new("touch")
-        .args([
-            "-t",
-            "202001010000",
-            store.join("artifact").to_str().expect("artifact path"),
-            store.to_str().expect("store path"),
-        ])
-        .output()
-        .expect("age cargo target store");
-    assert!(
-        touch.status.success(),
-        "{}",
-        String::from_utf8_lossy(&touch.stderr)
-    );
 
     // No daemon is started: explicit local placement must run the bounded
     // controller-owned category synchronously instead of submitting a job.
@@ -542,24 +528,18 @@ fn daemon_pid_owns_token(pid: u32, token: &str) -> bool {
 }
 
 #[cfg(unix)]
+/// Last use recorded in a store's current lifecycle metadata: 2020-01-01T00:00Z.
+/// Cleanup only acts on stores with this metadata; filesystem timestamps no
+/// longer grant cleanup authority (#15613).
+const OLD_LAST_USED_MS: &str = "1577836800000";
+
 fn create_old_cargo_target(path: &Path) {
     std::fs::create_dir_all(path).expect("cargo target store");
-    let artifact = path.join("artifact");
-    std::fs::write(&artifact, "artifact").expect("cargo target artifact");
-    let touch = Command::new("touch")
-        .args([
-            "-t",
-            "202001010000",
-            artifact.to_str().expect("artifact path"),
-            path.to_str().expect("store path"),
-        ])
-        .output()
-        .expect("age cargo target store");
-    assert!(
-        touch.status.success(),
-        "{}",
-        String::from_utf8_lossy(&touch.stderr)
-    );
+    std::fs::write(path.join("artifact"), "artifact").expect("cargo target artifact");
+    // A current producer's store: its removal lock and last-use metadata.
+    std::fs::write(path.join(".homeboy-lock"), "").expect("cargo target lock");
+    std::fs::write(path.join(".homeboy-last-used-ms"), OLD_LAST_USED_MS)
+        .expect("cargo target lifecycle metadata");
 }
 
 fn run_cleanup(context: &HermeticTestContext, cwd: &Path, args: &[&str]) -> Value {
