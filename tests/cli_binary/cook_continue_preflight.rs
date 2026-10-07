@@ -1173,13 +1173,24 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
                     "phase": record.metadata["promotion_progress"]["phase"],
                     "owner_pid": record.metadata["promotion_progress"]["owner_pid"],
                     "detail": record.metadata["promotion_progress"]["detail"],
+                    "output_tail": record.metadata["promotion_progress"]["output_tail"],
                 },
                 "driver_lock_content": timeout_evidence["driver_lock_content"],
                 "driver_lock_holders": timeout_evidence["driver_lock_holders"],
+                "driver_lock_owner_process": timeout_evidence["driver_lock_content"]
+                    .as_str()
+                    .and_then(|pid| pid.parse::<u32>().ok())
+                    .map(linux_process_snapshot),
                 "batch_coordinator_pid": std::process::id(),
                 "sibling_provider_pid": sibling_provider_owner,
                 "sibling_provider": linux_process_snapshot(sibling_provider_owner),
                 "sibling_still_running": timeout_evidence["sibling_still_running"],
+                "gate_started": gate_started.exists(),
+                "gate_count": std::fs::read_to_string(&gate_count).ok(),
+                "target_worktree_document": std::fs::read_to_string(
+                    worktree.join("docs/agent-task-smoke.md"),
+                )
+                .ok(),
                 "target_stderr": timeout_evidence["target_stderr"],
             });
             println!("same-child recovery timeout summary: {timeout_summary}");
