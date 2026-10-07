@@ -834,14 +834,35 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
             "driver_lock_holders": driver_lock_holders_before,
         }),
     );
-    // Use a separate daemon namespace for the sibling so the target's
-    // automatic continuation recovery cannot consume its provider slot.
+    // Give the sibling an independent local-dispatch admission root so the
+    // target's lease cannot consume its provider slot on small CI hosts. Keep
+    // its durable Cook/lifecycle stores shared with the target: the two real
+    // providers must still be children in the same durable batch below.
     let sibling_cook = "continue-wave-15503-live-sibling";
     let sibling_started = context.root().join("sibling-provider-started");
     let sibling_stdout = context.root().join("sibling.stdout");
     let sibling_stderr = context.root().join("sibling.stderr");
     let sibling_daemon_root = context.root().join("sibling-daemon");
+    let sibling_admission_root = context.root().join("sibling-admission");
     std::fs::create_dir_all(&sibling_daemon_root).unwrap();
+    std::fs::create_dir_all(&sibling_admission_root).unwrap();
+    let target_lease_root =
+        homeboy::core::paths::local_cook_dispatch_leases_dir_in_root(&context.data_dir());
+    let sibling_lease_root =
+        homeboy::core::paths::local_cook_dispatch_leases_dir_in_root(&sibling_admission_root);
+    assert_ne!(target_lease_root, sibling_lease_root);
+    write_same_child_evidence(
+        "same-child-admission-roots.json",
+        &serde_json::json!({
+            "data_root": context.data_dir(),
+            "lifecycle_root": context.data_dir().join("agent-task-runs"),
+            "cook_root": context.data_dir().join("agent-task-cooks"),
+            "target_lease_root": target_lease_root,
+            "sibling_lease_root": sibling_lease_root,
+            "target_daemon_root": context.daemon_dir(),
+            "sibling_daemon_root": sibling_daemon_root,
+        }),
+    );
     let mut sibling_daemon_guard = HermeticSiblingDaemonGuard {
         context: &context,
         state_dir: sibling_daemon_root.clone(),
@@ -849,6 +870,10 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     };
     let mut sibling_command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     sibling_command
+        .env(
+            homeboy::core::local_dispatch_admission::TEST_LOCAL_DISPATCH_LEASE_ROOT_ENV,
+            &sibling_admission_root,
+        )
         .env(
             homeboy::core::paths::DAEMON_STATE_DIR_ENV,
             &sibling_daemon_root,
@@ -1022,6 +1047,22 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         })
         .expect("keep claimed parallel wave running");
     assert_eq!(claim.len(), 36, "durable coordinator claim is retained");
+    let batch_record = batch_store
+        .read_batch_record("continue-wave-15503-batch")
+        .expect("read persisted batch");
+    let batch_child_runs = batch_record
+        .child_runs
+        .iter()
+        .map(|child| child.run_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        batch_child_runs,
+        [target_run.as_str(), sibling_run.as_str()]
+    );
+    assert_eq!(
+        batch_record.metadata["coordinator"]["owner_pid"],
+        std::process::id()
+    );
     lifecycle_store
         .mutate_record(&target_run, |record| {
             // Keep the batch coordinator live as the generic parent PID while
@@ -1031,14 +1072,19 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         })
         .unwrap();
 
-    let preflight = |run_id: &str| {
-        context
-            .command(TestBinary::HomeboyFixture)
+    let preflight = |run_id: &str, daemon_root: Option<&std::path::Path>| {
+        let mut command = context.command(TestBinary::HomeboyFixture);
+        if let Some(daemon_root) = daemon_root {
+            command
+                .env(homeboy::core::paths::DAEMON_STATE_DIR_ENV, daemon_root)
+                .env("HOMEBOY_TEST_DAEMON_NAMESPACE", daemon_root);
+        }
+        command
             .args(["agent-task", "cook-continue", run_id, "--preflight"])
             .output()
             .unwrap()
     };
-    let sibling_preflight = preflight(&sibling_run);
+    let sibling_preflight = preflight(&sibling_run, Some(&sibling_daemon_root));
     assert_eq!(
         sibling_preflight.status.code(),
         Some(1),
@@ -1048,7 +1094,8 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     assert_eq!(
         sibling_report["data"]["failure_context"]["diagnostic"]["details"]
             ["continuation_admission"]["first_authoritative_denial"],
-        "live_owner_in_progress"
+        "live_owner_in_progress",
+        "sibling preflight remains fenced by its own live provider: {sibling_report:#}"
     );
     assert_eq!(
         sibling_report["data"]["failure_context"]["diagnostic"]["details"]
@@ -1114,6 +1161,9 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
     };
     let resumed_record = lifecycle_store.read_record(&target_run).unwrap();
     let recovery_evidence = serde_json::json!({
+        "batch_id": "continue-wave-15503-batch",
+        "batch_child_run_ids": batch_child_runs,
+        "batch_coordinator_pid": std::process::id(),
         "interrupted_gate_owner_pid": interrupted_gate_owner_pid,
         "interrupted_gate_owner_running": homeboy::core::process::pid_is_running(interrupted_gate_owner_pid),
         "resumed_gate_owner_pid": resumed_gate_owner_pid,
@@ -1126,11 +1176,10 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         "target_driver_lock_holders": linux_lock_file_holders(&driver_lock),
         "sibling_provider_pid": sibling_provider_owner,
         "sibling_provider": linux_process_snapshot(sibling_provider_owner),
-        "batch_coordinator_pid": std::process::id(),
     });
     write_same_child_evidence("same-child-scheduler-handoff.json", &recovery_evidence);
 
-    let target_preflight = preflight(&target_run);
+    let target_preflight = preflight(&target_run, None);
     let target_report: Value = serde_json::from_slice(&target_preflight.stdout).unwrap();
     write_same_child_evidence(
         "same-child-active-gate-preflight.json",
@@ -1260,7 +1309,7 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
             true
         })
         .unwrap();
-    let terminal_parent_preflight = preflight(&target_run);
+    let terminal_parent_preflight = preflight(&target_run, None);
     let terminal_parent_report: Value =
         serde_json::from_slice(&terminal_parent_preflight.stdout).unwrap();
     let terminal_parent_denial = terminal_parent_report["data"]["failure_context"]["diagnostic"]
