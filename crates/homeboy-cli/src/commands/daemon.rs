@@ -64,7 +64,8 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
-    /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
+    /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs.
+    /// Prefer `homeboy daemon recover`, which picks this step when it applies.
     #[command(hide = true)]
     AdoptOrphan {
         /// Exact lease ID reported by `homeboy daemon status`
@@ -76,7 +77,8 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
     },
-    /// Reconcile an exact PID-less job set after one proven unexpected daemon exit
+    /// Reconcile an exact PID-less job set after one proven unexpected daemon exit.
+    /// Prefer `homeboy daemon recover --confirm-workload-processes-absent`.
     #[command(hide = true)]
     ReconcileDeadLeaseOrphans {
         #[arg(long)]
@@ -116,7 +118,8 @@ enum DaemonCommand {
         #[arg(long)]
         child_starttime_ticks: u64,
     },
-    /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
+    /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner.
+    /// Prefer `homeboy daemon recover`, which picks this step when it applies.
     #[command(hide = true)]
     ReconcileLeaselessOrphans {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
@@ -451,14 +454,20 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             lease_id,
             confirm_untracked_child_dead,
             addr,
-        } => Ok((
-            DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
-                &lease_id,
-                &confirm_untracked_child_dead,
-                &addr,
-            )?),
-            0,
-        )),
+        } => {
+            // The shared lifecycle gate (#15557 C4): `daemon recover` is the
+            // primary entry point; this explicit step still never runs beside
+            // live workload or an unleased daemon process.
+            daemon::lifecycle_apply::ensure_mutation_allowed("daemon adopt-orphan")?;
+            Ok((
+                DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
+                    &lease_id,
+                    &confirm_untracked_child_dead,
+                    &addr,
+                )?),
+                0,
+            ))
+        }
         // `confirm_workload_processes_absent` stays load-bearing: no PID exists
         // for these jobs, so only the operator can attest workload absence.
         DaemonCommand::ReconcileDeadLeaseOrphans {
@@ -467,16 +476,24 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             confirm_workload_processes_absent,
             addr,
             no_replacement,
-        } => Ok((
-            DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
-                &lease_id,
-                &job_ids,
-                confirm_workload_processes_absent,
-                &addr,
-                !no_replacement,
-            )?),
-            0,
-        )),
+        } => {
+            // The shared lifecycle gate (#15557 C4): `daemon recover` is the
+            // primary entry point; this explicit step still never runs beside
+            // live workload or an unleased daemon process.
+            daemon::lifecycle_apply::ensure_mutation_allowed(
+                "daemon reconcile-dead-lease-orphans",
+            )?;
+            Ok((
+                DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
+                    &lease_id,
+                    &job_ids,
+                    confirm_workload_processes_absent,
+                    &addr,
+                    !no_replacement,
+                )?),
+                0,
+            ))
+        }
         DaemonCommand::RecoverMissingChildIdentity {
             lease_id,
             recorded_daemon_pid,
@@ -498,13 +515,19 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ReconcileLeaselessOrphans {
             addr,
             replacement_operation_id,
-        } => Ok((
-            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
-                &addr,
-                replacement_operation_id.as_deref(),
-            )?),
-            0,
-        )),
+        } => {
+            // The shared lifecycle gate (#15557 C4): `daemon recover` is the
+            // primary entry point; this explicit step still never runs beside
+            // live workload or an unleased daemon process.
+            daemon::lifecycle_apply::ensure_mutation_allowed("daemon reconcile-leaseless-orphans")?;
+            Ok((
+                DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
+                    &addr,
+                    replacement_operation_id.as_deref(),
+                )?),
+                0,
+            ))
+        }
         DaemonCommand::ReconcileUnleasedCandidates {
             addr,
             apply,
@@ -992,7 +1015,7 @@ fn recovery_route(
         Plan::Blocked { reason, .. } => {
             RecoveryRoute::Refuse(format!("lifecycle_blocked: {reason}"))
         }
-        Plan::Wait { reason } => RecoveryRoute::Refuse(format!("lifecycle_wait: {reason}")),
+        Plan::Wait { reason, .. } => RecoveryRoute::Refuse(format!("lifecycle_wait: {reason}")),
         // One attestation over the complete job set, applied by the lifecycle
         // executor so its scope matches what the store will accept.
         Plan::NeedsAttestation(_) => RecoveryRoute::Lifecycle,
@@ -1564,6 +1587,7 @@ mod tests {
         fn wait_and_safety_blocks_never_execute_even_when_legacy_would() {
             for lifecycle in [
                 Plan::Wait {
+                    cause: homeboy::core::daemon::lifecycle_plan::WaitCause::LiveWorkload,
                     reason: "child 42 is live".to_string(),
                 },
                 Plan::Blocked {

@@ -677,6 +677,23 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
         return Err(error);
     }
 
+    // The lifecycle plan is the shared gate (#15557 C4): never rotate beside
+    // a live workload process or an unleased daemon that may own the store.
+    if let Some(reason) = lifecycle_apply::mutation_refusal(&lifecycle_apply::plan_local()) {
+        let mut error = Error::validation_invalid_argument(
+            "daemon_build_identity",
+            format!(
+                "controller upgrade left a resident daemon that cannot be automatically converged: {reason}"
+            ),
+            status.freshness.daemon_build_identity,
+            Some(vec!["Run: homeboy daemon recover --dry-run".to_string()]),
+        );
+        error.details["restart_required"] = serde_json::Value::Bool(true);
+        error.details["recovery_command"] =
+            serde_json::Value::String("homeboy daemon recover --dry-run".to_string());
+        return Err(error);
+    }
+
     match status.freshness.lease_id.as_deref() {
         Some(lease_id) => {
             stop_for_lease(lease_id)?;

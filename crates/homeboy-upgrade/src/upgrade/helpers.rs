@@ -2195,7 +2195,13 @@ fn converge_resident_daemon_after_controller_reconciliation(
         status.running,
         daemon_identity,
         status.freshness.active_jobs,
-        homeboy_core::daemon::recovery_actions::authorizes_automatic_idle_restart(&status),
+        homeboy_core::daemon::recovery_actions::authorizes_automatic_idle_restart(&status)
+            // The shared lifecycle gate (#15557 C4): a live workload process or
+            // an unleased daemon process defers the restart.
+            && homeboy_core::daemon::lifecycle_apply::mutation_refusal(
+                &homeboy_core::daemon::lifecycle_apply::plan_local(),
+            )
+            .is_none(),
         status.freshness.lease_id.as_deref().is_some(),
     ) {
         PromotedDaemonStart::InProcess => converge_invoking_daemon(),
