@@ -534,6 +534,8 @@ pub enum RunnerCommandOutput {
     List(Box<RunnerListOutput>),
     Registry(Box<RunnerOutput>),
     Doctor(Box<serde_json::Value>),
+    /// `runner plan`: the runner daemon's own lifecycle plan (#15557).
+    LifecyclePlan(Box<serde_json::Value>),
     Preflight(Box<homeboy::runner::runners::PlacementReadiness>),
     Execution(Box<RunnerExecutionCommandOutput>),
     Env(Box<RunnerEnvOutput>),

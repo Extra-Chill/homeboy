@@ -23,7 +23,7 @@
 //! - A live generation is never stopped by PID when it is externally
 //!   supervised.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::lifecycle::{
@@ -31,7 +31,7 @@ use super::lifecycle::{
     RegistryObservation, Supervision,
 };
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "plan")]
 pub enum Plan {
     Converged,
@@ -42,7 +42,7 @@ pub enum Plan {
 }
 
 /// What the planner is waiting for.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitCause {
     /// A dead generation's job still has a live workload process.
@@ -52,7 +52,7 @@ pub enum WaitCause {
 }
 
 /// Why the planner refuses to act.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockCause {
     /// The registry or a lease could not be read. Another repair (legacy
@@ -66,7 +66,7 @@ pub enum BlockCause {
 
 /// One recovery step. Each names the exact generation it applies to, so the
 /// executor (C3) can re-check the same precondition at apply time.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "step")]
 pub enum Step {
     /// Terminalize jobs of a dead generation whose workload is proven gone
@@ -100,13 +100,13 @@ pub enum Step {
 }
 
 /// The one operator confirmation the view cannot prove itself.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Attestation {
     pub lease_id: String,
     pub state_dir: std::path::PathBuf,
     /// The generation's complete active job set (compare-and-swap scope).
     pub job_ids: Vec<Uuid>,
-    pub confirmation: &'static str,
+    pub confirmation: String,
 }
 
 /// The confirmation flag an attestation requires.
@@ -209,7 +209,7 @@ fn plan_dead_generation_jobs(generation: &GenerationView) -> Option<Plan> {
             lease_id,
             state_dir: generation.state_dir.clone(),
             job_ids: generation.jobs.iter().map(|job| job.job_id).collect(),
-            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT,
+            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
         }));
     }
     let proven: Vec<Uuid> = generation

@@ -139,7 +139,7 @@ fn unproven_orphans_need_one_attestation_over_the_whole_job_set() {
             lease_id: "KILLED".to_string(),
             state_dir: PathBuf::from("/daemon/KILLED"),
             job_ids: vec![Uuid::from_u128(1), Uuid::from_u128(2)],
-            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT,
+            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
         })
     );
 }

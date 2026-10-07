@@ -307,6 +307,24 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             artifacts,
             run_id,
         )),
+        RunnerCommand::Plan { id } => {
+            let plan = homeboy::runner::remote_lifecycle_plan(&id)?;
+            let supported = plan.is_some();
+            Ok((
+                RunnerCommandOutput::LifecyclePlan(Box::new(serde_json::json!({
+                    "command": "runner.plan",
+                    "runner_id": id,
+                    "supported": supported,
+                    "plan": plan,
+                    "note": if supported {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!("the runner's Homeboy predates `daemon plan`; upgrade the runner")
+                    },
+                }))),
+                0,
+            ))
+        }
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
         RunnerCommand::Lifecycle {
             runner_id,

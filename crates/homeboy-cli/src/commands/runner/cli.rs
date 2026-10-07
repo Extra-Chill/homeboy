@@ -477,6 +477,14 @@ pub(super) enum RunnerCommand {
     },
     /// List installed extension-owned recipe-run providers.
     RecipeProviders,
+    /// Show the runner daemon's own lifecycle plan (read-only).
+    ///
+    /// Runs `homeboy daemon plan` in the runner's daemon frame: the same
+    /// planner `daemon recover` follows locally (#15557).
+    Plan {
+        /// Runner ID
+        id: String,
+    },
     /// Show the effective environment injected into runner jobs
     Env {
         /// Runner ID
