@@ -26,10 +26,19 @@ use super::{
     RunnerFileTransfer, RunnerKind,
 };
 
-const REFRESH_SUBPHASES: &[&str] = &["fetch", "build", "install", "verify"];
+const REFRESH_SUBPHASES: &[&str] = &[
+    "prepare",
+    "reconcile",
+    "materialize",
+    "fetch",
+    "build",
+    "install",
+    "verify",
+    "promote",
+    "reconnect",
+];
 
 struct RefreshLiveState {
-    started: Instant,
     sub_phase: String,
 }
 
@@ -40,7 +49,6 @@ static REFRESH_LIVE: Mutex<Option<RefreshLiveState>> = Mutex::new(None);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefreshLiveProgress {
     pub sub_phase: String,
-    pub elapsed_seconds: u64,
 }
 
 pub fn refresh_live_progress() -> Option<RefreshLiveProgress> {
@@ -48,7 +56,6 @@ pub fn refresh_live_progress() -> Option<RefreshLiveProgress> {
     let live = live.as_ref()?;
     Some(RefreshLiveProgress {
         sub_phase: live.sub_phase.clone(),
-        elapsed_seconds: live.started.elapsed().as_secs(),
     })
 }
 
@@ -56,7 +63,6 @@ pub(crate) fn begin_refresh_live_progress(sub_phase: &str) {
     let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
     if live.is_none() {
         *live = Some(RefreshLiveState {
-            started: Instant::now(),
             sub_phase: normalize_refresh_sub_phase(sub_phase).to_string(),
         });
     } else {
@@ -68,7 +74,6 @@ pub(crate) fn set_refresh_live_sub_phase(sub_phase: &str) {
     let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
     if live.is_none() {
         *live = Some(RefreshLiveState {
-            started: Instant::now(),
             sub_phase: normalize_refresh_sub_phase(sub_phase).to_string(),
         });
         return;
@@ -97,7 +102,7 @@ fn normalize_refresh_sub_phase(phase: &str) -> &str {
     if REFRESH_SUBPHASES.contains(&phase) {
         phase
     } else {
-        "fetch"
+        "prepare"
     }
 }
 
@@ -550,6 +555,8 @@ pub fn refresh_homeboy_binary_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
+    begin_refresh_live_progress("prepare");
+    let _refresh_live = RefreshLiveGuard;
     let mut plan = plan_homeboy_binary_refresh_in_roots(roots, &options)?;
     if options.dry_run {
         return Ok((
@@ -628,12 +635,11 @@ pub fn refresh_homeboy_binary_in_roots(
         .uses_diagnostic_ssh();
     let exec_options =
         refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
-    begin_refresh_live_progress(if plan.mode == "materialize" {
-        "fetch"
+    set_refresh_live_sub_phase(if plan.mode == "materialize" {
+        "materialize"
     } else {
         "verify"
     });
-    let _refresh_live = RefreshLiveGuard;
     let (exec_output, exit_code) = exec_with_status_snapshot_in_roots(
         roots,
         &plan.runner_id,
@@ -754,6 +760,7 @@ pub fn refresh_homeboy_binary_in_roots(
     // persisted after the candidate has been verified, whether or not this
     // invocation also replaces the active daemon.
     let ancestry_failure = RefCell::new(None);
+    set_refresh_live_sub_phase("promote");
     let bootstrap = if diagnostic_ssh_bootstrap {
         ssh_bootstrap_promote_with(
             &plan,
@@ -943,6 +950,7 @@ pub fn refresh_homeboy_binary_in_roots(
         let replacement = reconciled_refresh_admission_in_roots(roots, &plan.runner_id)?;
         let active_jobs =
             super::connection::active_jobs_from_replacement_observation(replacement.status)?;
+        set_refresh_live_sub_phase("reconnect");
         let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
             &plan.runner_id,
             refresh_session.as_ref(),
@@ -2077,6 +2085,7 @@ where
     Reconcile: FnOnce(&str) -> Result<super::RunnerStatusReport>,
     Project: FnOnce(super::RunnerStatusReport) -> Result<super::RunnerAdmissionSnapshot>,
 {
+    set_refresh_live_sub_phase("reconcile");
     project(reconcile(runner_id)?)
 }
 
