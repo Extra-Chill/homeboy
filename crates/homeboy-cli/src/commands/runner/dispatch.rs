@@ -650,11 +650,8 @@ fn refresh_progress_payload(
     let live = runner::refresh_live_progress();
     serde_json::json!({
         "phase": "refresh",
-        "sub_phase": live.as_ref().map(|progress| progress.sub_phase.as_str()).unwrap_or(match requested_mode {
-            "select" => "verify",
-            _ => "fetch",
-        }),
-        "elapsed_seconds": live.map(|progress| progress.elapsed_seconds).unwrap_or_else(|| started.elapsed().as_secs()),
+        "sub_phase": live.as_ref().map(|progress| progress.sub_phase.as_str()).unwrap_or("prepare"),
+        "elapsed_seconds": started.elapsed().as_secs(),
         "requested_mode": requested_mode,
         "state": "running",
         "heartbeat": heartbeat,
@@ -1037,13 +1034,13 @@ mod tests {
             assert_eq!(heartbeat["phase"], "refresh");
             assert_eq!(heartbeat["heartbeat"], serde_json::Value::Bool(true));
             assert!(
-                matches!(
-                    heartbeat["sub_phase"].as_str(),
-                    Some("fetch" | "build" | "install" | "verify")
-                ),
+                matches!(heartbeat["sub_phase"].as_str(), Some("prepare")),
                 "{heartbeat}"
             );
-            assert!(heartbeat["elapsed_seconds"].is_number(), "{heartbeat}");
+            assert!(
+                heartbeat["elapsed_seconds"].as_u64().unwrap() >= 1,
+                "{heartbeat}"
+            );
             assert_eq!(
                 run.metadata_json["homeboy_run_owner"],
                 admission_metadata["homeboy_run_owner"]

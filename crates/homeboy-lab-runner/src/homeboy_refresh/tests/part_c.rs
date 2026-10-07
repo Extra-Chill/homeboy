@@ -11,6 +11,25 @@ use crate::{
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::error::Error;
 
+#[test]
+fn admission_reconciliation_reports_its_phase_before_the_probe() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        begin_refresh_live_progress("prepare");
+        let guard = RefreshLiveGuard;
+        let result = reconciled_refresh_admission_with(
+            "lab",
+            |_| {
+                assert_eq!(refresh_live_progress().unwrap().sub_phase, "reconcile");
+                Err(Error::internal_unexpected("probe failed".to_string()))
+            },
+            |_| unreachable!("a failed probe cannot project admission"),
+        );
+        assert!(result.is_err());
+        drop(guard);
+        assert!(refresh_live_progress().is_none());
+    });
+}
+
 fn readiness_report(freshness: DaemonFreshnessReport) -> RunnerStatusReport {
     RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
