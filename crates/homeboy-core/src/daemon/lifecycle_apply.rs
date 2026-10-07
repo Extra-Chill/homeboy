@@ -251,7 +251,7 @@ mod tests {
             lease_id: "DEAD".to_string(),
             state_dir: PathBuf::from("/daemon"),
             job_ids: vec![uuid::Uuid::nil()],
-            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT,
+            confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
         })
     }
 

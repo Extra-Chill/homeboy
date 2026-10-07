@@ -194,6 +194,11 @@ enum DaemonCommand {
         #[arg(long, requires = "lease_id")]
         force: bool,
     },
+    /// Show the daemon lifecycle view and its one next action (read-only).
+    ///
+    /// The same planner `daemon recover` follows. Runners are evaluated by
+    /// running this in their remote daemon frame (#15557).
+    Plan,
     /// Show daemon health and actionable recovery state
     Status {
         /// Include complete daemon process and recovery evidence.
@@ -303,9 +308,20 @@ pub struct DaemonArtifactGetArgs {
     pub daemon_url: Option<String>,
 }
 
+/// Schema of `homeboy daemon plan` data, read by remote runner evaluation.
+pub const DAEMON_PLAN_SCHEMA: &str = "homeboy/daemon-lifecycle-plan/v1";
+
+#[derive(Debug, Serialize)]
+pub struct DaemonPlanOutput {
+    pub schema: &'static str,
+    pub plan: daemon::lifecycle_plan::Plan,
+    pub view: daemon::lifecycle::DaemonView,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DaemonOutput {
+    Plan(DaemonPlanOutput),
     Start(DaemonStartResult),
     EnsureRunning(DaemonStartResult),
     Recover(DaemonRecoverOutput),
@@ -607,6 +623,18 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
                 ));
             }
             Ok((DaemonOutput::Stop(result), 0))
+        }
+        DaemonCommand::Plan => {
+            let view = daemon::lifecycle::observe_local();
+            let plan = daemon::lifecycle_plan::plan(&view);
+            Ok((
+                DaemonOutput::Plan(DaemonPlanOutput {
+                    schema: DAEMON_PLAN_SCHEMA,
+                    plan,
+                    view,
+                }),
+                0,
+            ))
         }
         DaemonCommand::Status { full } => {
             let status = daemon::read_status()?;
@@ -1624,7 +1652,7 @@ mod tests {
                 lease_id: "DEAD".to_string(),
                 state_dir: std::path::PathBuf::from("/daemon"),
                 job_ids: vec![uuid::Uuid::nil()],
-                confirmation: "confirm-workload-processes-absent",
+                confirmation: "confirm-workload-processes-absent".to_string(),
             });
             for executable in [false, true] {
                 assert_eq!(

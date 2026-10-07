@@ -1693,6 +1693,39 @@ mod tests {
     }
 
     #[test]
+    fn the_remote_lifecycle_plan_parser_pins_its_schema() {
+        let attest = serde_json::json!({
+            "schema": "homeboy/daemon-lifecycle-plan/v1",
+            "plan": {
+                "plan": "needs_attestation",
+                "lease_id": "lease-lab",
+                "state_dir": "/lab/daemon/primary",
+                "job_ids": [uuid::Uuid::nil()],
+                "confirmation": "confirm-workload-processes-absent"
+            },
+            "view": {}
+        });
+        assert!(matches!(
+            parse_remote_lifecycle_plan(&attest).expect("parse"),
+            homeboy_core::daemon::lifecycle_plan::Plan::NeedsAttestation(attestation)
+                if attestation.lease_id == "lease-lab"
+        ));
+        let foreign = serde_json::json!({ "schema": "other", "plan": { "plan": "converged" } });
+        assert!(parse_remote_lifecycle_plan(&foreign)
+            .expect_err("foreign")
+            .contains("unexpected schema"));
+    }
+
+    #[test]
+    fn an_older_runner_without_daemon_plan_is_detected() {
+        assert!(remote_subcommand_unsupported(
+            "",
+            "error: unrecognized subcommand 'plan'"
+        ));
+        assert!(!remote_subcommand_unsupported("", "permission denied"));
+    }
+
+    #[test]
     fn the_attested_reconcile_command_targets_the_exact_generation() {
         let first = uuid::Uuid::from_u128(1);
         let second = uuid::Uuid::from_u128(2);
@@ -2420,6 +2453,68 @@ fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
     let controller_segment = crate::connection::controller_scope_segment(controller_id);
     format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/primary")
+}
+
+/// Schema of `homeboy daemon plan` data (#15557 C5).
+pub(crate) const REMOTE_DAEMON_PLAN_SCHEMA: &str = "homeboy/daemon-lifecycle-plan/v1";
+
+/// Run the runner daemon's own lifecycle planner in its router frame.
+///
+/// The remote daemon observes and plans itself with the same planner
+/// `daemon recover` follows locally, so controller and runner never disagree
+/// on what a generation's state means. `Ok(None)` when the runner's Homeboy
+/// predates `daemon plan`; callers fall back to their own probes.
+pub(crate) fn remote_daemon_lifecycle_plan(
+    client: &SshClient,
+    runner_id: &str,
+    homeboy: &str,
+) -> std::result::Result<Option<homeboy_core::daemon::lifecycle_plan::Plan>, String> {
+    let command = remote_daemon_command(runner_id, homeboy, "daemon plan");
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        if remote_subcommand_unsupported(&output.stdout, &output.stderr) {
+            return Ok(None);
+        }
+        return Err(command_failure_message(
+            "remote daemon lifecycle plan failed",
+            &output,
+        ));
+    }
+    let envelope = parse_envelope(&output.stdout)
+        .map_err(|error| format!("remote daemon lifecycle plan returned invalid JSON: {error}"))?;
+    if !envelope.success {
+        return Err(format!(
+            "remote daemon lifecycle plan returned an error: {}",
+            envelope.error.unwrap_or(Value::Null)
+        ));
+    }
+    let data = envelope
+        .data
+        .ok_or_else(|| "remote daemon lifecycle plan returned no data".to_string())?;
+    parse_remote_lifecycle_plan(&data).map(Some)
+}
+
+/// Parse `daemon plan` data, refusing any other schema.
+pub(crate) fn parse_remote_lifecycle_plan(
+    data: &Value,
+) -> std::result::Result<homeboy_core::daemon::lifecycle_plan::Plan, String> {
+    if data.get("schema").and_then(Value::as_str) != Some(REMOTE_DAEMON_PLAN_SCHEMA) {
+        return Err(format!(
+            "remote daemon lifecycle plan has unexpected schema {:?}",
+            data.get("schema")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+        ));
+    }
+    serde_json::from_value(data.get("plan").cloned().unwrap_or(Value::Null))
+        .map_err(|error| format!("remote daemon lifecycle plan is unreadable: {error}"))
+}
+
+/// Whether a remote Homeboy rejected a subcommand it does not know.
+fn remote_subcommand_unsupported(stdout: &str, stderr: &str) -> bool {
+    [stdout, stderr].iter().any(|text| {
+        text.contains("unrecognized subcommand") || text.contains("unexpected argument 'plan'")
+    })
 }
 
 /// Hard wall clock for one attested dead-lease recovery. The remote command

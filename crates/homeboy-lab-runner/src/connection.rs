@@ -135,6 +135,7 @@ pub(crate) use stop_transport_recovery::{
 
 #[path = "connection_dead_lease_attestation.rs"]
 mod dead_lease_attestation;
+pub use dead_lease_attestation::remote_lifecycle_plan;
 
 use super::daemon_http_get::daemon_get;
 
