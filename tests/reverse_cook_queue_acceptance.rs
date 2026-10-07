@@ -98,6 +98,122 @@ impl Drop for WritableTreeOnDrop {
     }
 }
 
+struct DaemonProcessGuard(Option<std::process::Child>);
+
+impl Drop for DaemonProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+struct FailureEvidenceDirGuard {
+    root: PathBuf,
+    retain: bool,
+}
+
+impl Drop for FailureEvidenceDirGuard {
+    fn drop(&mut self) {
+        if !self.retain && !std::thread::panicking() {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+impl FailureEvidenceDirGuard {
+    fn retain(&mut self) {
+        self.retain = true;
+    }
+}
+
+fn redact_evidence(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "token"
+                        | "claim_token"
+                        | "authorization"
+                        | "password"
+                        | "secret"
+                        | "credential"
+                ) {
+                    *value = serde_json::json!("<redacted>");
+                } else {
+                    redact_evidence(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_evidence(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn persist_record_evidence(
+    evidence_dir: &Path,
+    label: &str,
+    record: &homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord,
+) {
+    let Ok(mut value) = serde_json::to_value(record) else {
+        return;
+    };
+    redact_evidence(&mut value);
+    let path = evidence_dir.join(format!("{label}.json"));
+    let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
+}
+
+fn persist_replay_worker_log(
+    evidence_dir: &Path,
+    record: &homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord,
+) {
+    let Some(worker_log) = record
+        .metadata
+        .pointer("/unmaterialized_cook_admission/replay_receipt/worker_log")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    if let Ok(contents) = std::fs::read(worker_log) {
+        let _ = std::fs::write(evidence_dir.join("replay-worker.log"), contents);
+    }
+}
+
+struct LeasePublicationGuard {
+    published: PathBuf,
+    withheld: PathBuf,
+}
+
+impl LeasePublicationGuard {
+    fn withhold(published: PathBuf) -> Self {
+        let withheld = published.with_extension("state.json.withheld");
+        std::fs::rename(&published, &withheld).expect("withhold runner service lease");
+        Self {
+            published,
+            withheld,
+        }
+    }
+
+    fn publish(&self) {
+        std::fs::rename(&self.withheld, &self.published)
+            .expect("republish the exact runner service lease");
+    }
+}
+
+impl Drop for LeasePublicationGuard {
+    fn drop(&mut self) {
+        if !self.published.exists() && self.withheld.exists() {
+            let _ = std::fs::rename(&self.withheld, &self.published);
+        }
+    }
+}
+
 /// Wall-clock ledger for the acceptance run.
 ///
 /// This test is the slowest binary in the suite and its deadlines are wall
@@ -184,7 +300,17 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
 
     let mut ledger = PhaseLedger::new();
     let _env_guard = homeboy_core::test_support::home_env_guard();
+    let evidence_parent = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     let context = HermeticTestContext::new();
+    let evidence_dir =
+        evidence_parent.join(format!("homeboy-replay-evidence-{}", std::process::id()));
+    std::fs::create_dir_all(&evidence_dir).expect("create persistent replay evidence directory");
+    let mut replay_evidence_dir_guard = FailureEvidenceDirGuard {
+        root: evidence_dir.clone(),
+        retain: false,
+    };
     std::env::set_var("HOME", context.home());
     std::env::set_var("XDG_CONFIG_HOME", context.root().join(".config"));
     std::env::set_var("XDG_DATA_HOME", context.root().join("data"));
@@ -268,10 +394,53 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
     .expect("write provider");
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
         .expect("make provider executable");
+    let notification_extension = context
+        .config_dir()
+        .join("homeboy/extensions/test-notification");
+    std::fs::create_dir_all(&notification_extension).expect("create test notification extension");
+    std::fs::write(
+        notification_extension.join("test-notification.json"),
+        serde_json::json!({
+            "name": "Reverse Cook acceptance notification fixture",
+            "version": "0.0.0",
+            "notification_transports": [{
+                "id": "test.completed",
+                "command": ["true"],
+                "route_resolver": { "command": ["sh", "-c", "printf '%s' 'fixture-route'"] }
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write notification transport fixture");
     let ssh = context.root().join("ssh");
     std::fs::write(
         &ssh,
-        "#!/bin/sh\nif [ \"${1:-}\" = -G ]; then\n  printf '%s\\n' 'hostname reverse-fixture.invalid' 'port 22' 'proxycommand fixture-proxy'\n  exit 0\nfi\nfor argument do command=$argument; done\ncase \"$command\" in\n  *'self identity'*) identity=\"${HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY:?}\"; version=\"${identity#homeboy }\"; version=\"${version%%+*}\"; printf '{\"version\":\"%s\",\"display\":\"%s\"}\\n' \"$version\" \"$identity\" ;;\n  *'daemon status'*) printf '%s\\n' '{\"success\":true,\"data\":{\"running\":false,\"fresh\":true,\"reachable\":true,\"active_jobs\":0}}' ;;\n  *'df -Pk'*) printf '%s\\n' 'fixture-device 5242880 1048576' ;;\n  *) exec /bin/sh -c \"$command\" ;;\nesac\n",
+        r#"#!/bin/sh
+if [ "${1:-}" = -G ]; then
+  printf '%s\n' 'hostname reverse-fixture.invalid' 'port 22' 'proxycommand fixture-proxy'
+  exit 0
+fi
+for argument do command=$argument; done
+run_remote() {
+  # SSH does not forward the controller's one-shot replay claim into the
+  # remote process environment. Preserve that boundary in this local SSH shim.
+  exec env \
+    -u HOMEBOY_COOK_REPLAY_CLAIM_COOK_ID \
+    -u HOMEBOY_COOK_REPLAY_CLAIM_FENCE \
+    -u HOMEBOY_COOK_REPLAY_CLAIM_TOKEN \
+    /bin/sh -c "$command"
+}
+case "$command" in
+  *'self identity'*)
+    identity="${HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY:?}"
+    version="${identity#homeboy }"
+    version="${version%%+*}"
+    printf '{"version":"%s","display":"%s"}\n' "$version" "$identity"
+    ;;
+  *'df -Pk'*) printf '%s\n' 'fixture-device 5242880 1048576' ;;
+  *) run_remote ;;
+esac
+"#,
     )
     .expect("write capability probe SSH shim");
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
@@ -301,7 +470,7 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
         ))
         .spawn()
         .expect("start controller daemon fixture");
-    let daemon_status = wait_until(Duration::from_secs(10), || {
+    let _daemon_status = wait_until(Duration::from_secs(10), || {
         let output = context
             .command(TestBinary::HomeboyFixture)
             .args(["daemon", "status"])
@@ -311,15 +480,6 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
         (output.status.success() && json_field(&status, "running")?.as_bool()? == true)
             .then_some(status)
     });
-    let daemon_lease_id = json_field(&daemon_status, "lease_id")
-        .and_then(serde_json::Value::as_str)
-        .expect("daemon lease id");
-    let daemon_address = json_field(&daemon_status, "address")
-        .and_then(serde_json::Value::as_str)
-        .expect("daemon address");
-    let daemon_pid = json_field(&daemon_status, "pid")
-        .and_then(serde_json::Value::as_u64)
-        .expect("daemon pid");
     ledger.mark("daemon_ready");
 
     output(context.command(TestBinary::HomeboyFixture).args([
@@ -349,6 +509,53 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
     );
 
     ledger.mark("server_and_runner_configured");
+    let controller_scope = format!(
+        "fixture-controller-{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(b"fixture-controller")
+    );
+    let remote_daemon_dir = context.home().join(format!(
+        ".config/homeboy/daemon-generations/lab/controllers/{controller_scope}/primary"
+    ));
+    let remote_daemon = context
+        .command(TestBinary::HomeboyFixture)
+        .env("PATH", &path)
+        .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
+        .env(
+            homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+            &remote_daemon_dir,
+        )
+        .args(["daemon", "serve", "--addr", "127.0.0.1:0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            std::fs::File::create(context.root().join("remote-daemon.stderr"))
+                .expect("create runner daemon stderr"),
+        ))
+        .spawn()
+        .expect("start runner-scoped daemon fixture");
+    let _remote_daemon = DaemonProcessGuard(Some(remote_daemon));
+    let remote_daemon_status = wait_until(Duration::from_secs(10), || {
+        let output = context
+            .command(TestBinary::HomeboyFixture)
+            .env(
+                homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+                &remote_daemon_dir,
+            )
+            .args(["daemon", "status"])
+            .output()
+            .ok()?;
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+        (output.status.success() && json_field(&status, "running")?.as_bool()? == true)
+            .then_some(status)
+    });
+    let remote_daemon_lease_id = json_field(&remote_daemon_status, "lease_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("runner daemon lease id");
+    let remote_daemon_address = json_field(&remote_daemon_status, "address")
+        .and_then(serde_json::Value::as_str)
+        .expect("runner daemon address");
+    let remote_daemon_pid = json_field(&remote_daemon_status, "pid")
+        .and_then(serde_json::Value::as_u64)
+        .expect("runner daemon pid");
     let session_path = context
         .config_dir()
         .join("runner-sessions/lab/fixture-controller.json");
@@ -364,9 +571,9 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
             "role": "controller",
             "controller_id": "fixture-controller",
             "broker_url": broker.url(),
-            "remote_daemon_address": daemon_address,
-            "remote_daemon_pid": daemon_pid,
-            "remote_daemon_lease_id": daemon_lease_id,
+            "remote_daemon_address": remote_daemon_address,
+            "remote_daemon_pid": remote_daemon_pid,
+            "remote_daemon_lease_id": remote_daemon_lease_id,
             "homeboy_version": env!("CARGO_PKG_VERSION"),
             "homeboy_build_identity": runtime_identity,
             "connected_at": "2026-01-01T00:00:00Z",
@@ -374,11 +581,18 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
             "worker_pid": 1,
         }),
     );
+    let lease_publication = LeasePublicationGuard::withhold(remote_daemon_dir.join("state.json"));
 
     let mut cook_command = context.command(TestBinary::HomeboyFixture);
     cook_command
         .env("PATH", &path)
         .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
+        .args([
+            "--notification-transport",
+            "test.completed",
+            "--notification-route",
+            "fixture-route",
+        ])
         .args([
             "agent-task",
             "cook",
@@ -463,43 +677,196 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
         accepted["status"].as_str(),
         Some("pending_resource_admission")
     ));
-    assert!(matches!(
-        accepted["admission_state"].as_str(),
-        Some("queued" | "blocked_runner_unavailable")
-    ));
+    assert_eq!(
+        accepted["admission_state"], "blocked_runner_unavailable",
+        "missing generation lease must remain pending without a route claim: {accepted:#}"
+    );
     assert_eq!(accepted["materialized"], false);
     assert!(accepted["commands"]["status"].is_string());
     assert!(accepted["commands"]["cancel"].is_string());
+    assert!(
+        broker.jobs().is_empty(),
+        "no job may route without lease proof"
+    );
+
+    let admitted_parent =
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("open delayed admission lifecycle store")
+            .read_record(accepted["run_id"].as_str().expect("accepted Cook id"))
+            .expect("read delayed admission parent");
+    assert_eq!(
+        admitted_parent.metadata["unmaterialized_cook_admission"]["binding"]["placement"]
+            ["requested"],
+        "Lab",
+        "the delayed record retains the explicit Lab request"
+    );
+
+    // Publish the exact lease the session was bound to, then revalidate via
+    // the public resume command. No new generation or replacement is created.
+    lease_publication.publish();
+    let restored_status = context
+        .command(TestBinary::HomeboyFixture)
+        .env(
+            homeboy_core::paths::DAEMON_STATE_DIR_ENV,
+            &remote_daemon_dir,
+        )
+        .args(["daemon", "status"])
+        .output()
+        .expect("inspect republished runner service lease");
+    assert!(restored_status.status.success());
+    let restored_status: serde_json::Value =
+        serde_json::from_slice(&restored_status.stdout).expect("runner service status JSON");
+    assert_eq!(
+        json_field(&restored_status, "lease_id").and_then(serde_json::Value::as_str),
+        Some(remote_daemon_lease_id),
+        "resume must validate the exact original lease"
+    );
+    let run_id = accepted["run_id"].as_str().expect("accepted Cook id");
+    let resumed = context
+        .command(TestBinary::HomeboyFixture)
+        .env("PATH", &path)
+        .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
+        .args([
+            "--notification-transport",
+            "test.completed",
+            "--notification-route",
+            "fixture-route",
+            "agent-task",
+            "resume",
+            run_id,
+        ])
+        .output()
+        .expect("resume delayed explicit Lab Cook through public CLI");
+    assert!(
+        resumed.status.success(),
+        "resume stdout={} stderr={}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr),
+    );
+    let runner_status = context
+        .command(TestBinary::HomeboyFixture)
+        .env("PATH", &path)
+        .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
+        .args(["runner", "status", "lab"])
+        .output()
+        .expect("inspect public runner admission after lease publication");
+    assert!(
+        runner_status.status.success(),
+        "runner status stdout={} stderr={}",
+        String::from_utf8_lossy(&runner_status.stdout),
+        String::from_utf8_lossy(&runner_status.stderr),
+    );
+    let runner_status: serde_json::Value =
+        serde_json::from_slice(&runner_status.stdout).expect("public runner status JSON");
+    let lease_verdict = json_field(&runner_status, "daemon_lease_verdict")
+        .expect("runner status contains canonical lease verdict");
+    assert_eq!(
+        lease_verdict["generation_id"].as_str(),
+        Some(remote_daemon_lease_id),
+        "runner status must observe the session's exact service generation: {runner_status:#}"
+    );
+    assert_eq!(
+        lease_verdict["fresh"], true,
+        "the republished service lease must become fresh for admission: {runner_status:#}"
+    );
 
     // The submitting CLI is gone before the reverse worker exists. The local
     // controller daemon must finish staging and durably enqueue the final job.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let lifecycle_store =
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("open resumed Cook lifecycle store");
+    let run_id = accepted["run_id"].as_str().expect("accepted Cook id");
+    let deadline = Instant::now() + Duration::from_secs(75);
     let queued = loop {
         let jobs = broker.jobs();
         if !jobs.is_empty() {
             break jobs;
         }
+        let current = lifecycle_store
+            .read_record(run_id)
+            .expect("read resumed Cook admission");
+        let admission = &current.metadata["unmaterialized_cook_admission"];
+        if admission["reason"] == "replay worker exited before attempt publication" {
+            let worker_log = admission["replay_receipt"]["worker_log"]
+                .as_str()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .unwrap_or_else(|| "<unavailable>".to_string());
+            persist_record_evidence(&evidence_dir, "parent-before-replay-exit", &current);
+            persist_replay_worker_log(&evidence_dir, &current);
+            replay_evidence_dir_guard.retain();
+            panic!("replay worker exited before publication after lease recovery\nrecord={current:#?}\nworker log={worker_log}");
+        }
+        let attempt = current.metadata["detached_cook_handoff"]["attempt_run_id"]
+            .as_str()
+            .and_then(|attempt_id| lifecycle_store.read_record(attempt_id).ok());
+        if let Some(attempt) = attempt.filter(|attempt| attempt.state.is_terminal()) {
+            persist_record_evidence(&evidence_dir, "parent-before-terminal-attempt", &current);
+            persist_record_evidence(
+                &evidence_dir,
+                "attempt-before-terminal-diagnostics",
+                &attempt,
+            );
+            persist_replay_worker_log(&evidence_dir, &current);
+            std::fs::write(
+                evidence_dir.join("daemon.stderr"),
+                std::fs::read(&daemon_stderr_path).unwrap_or_default(),
+            )
+            .expect("persist daemon stderr before status diagnostics");
+            std::fs::write(
+                evidence_dir.join("broker-jobs.json"),
+                serde_json::to_vec_pretty(&broker.jobs()).unwrap_or_default(),
+            )
+            .expect("persist broker jobs before status diagnostics");
+            replay_evidence_dir_guard.retain();
+            panic!(
+                "Cook attempt became terminal before reverse broker acceptance: {attempt:#?}\nparent={current:#?}\n{}",
+                ledger.render(),
+            );
+        }
         if Instant::now() >= deadline {
-            let run_id = accepted["run_id"].as_str().unwrap_or("unknown");
+            let parent = lifecycle_store
+                .read_record(run_id)
+                .expect("read stalled Cook parent");
+            let attempt_id = parent.metadata["detached_cook_handoff"]["attempt_run_id"]
+                .as_str()
+                .map(str::to_string);
+            let attempt = attempt_id
+                .as_deref()
+                .and_then(|attempt_id| lifecycle_store.read_record(attempt_id).ok());
+            persist_record_evidence(&evidence_dir, "parent-before-diagnostics", &parent);
+            persist_replay_worker_log(&evidence_dir, &parent);
+            if let Some(attempt) = attempt.as_ref() {
+                persist_record_evidence(&evidence_dir, "attempt-before-diagnostics", attempt);
+            }
+            replay_evidence_dir_guard.retain();
+            std::fs::write(
+                evidence_dir.join("daemon.stderr"),
+                std::fs::read(&daemon_stderr_path).unwrap_or_default(),
+            )
+            .expect("persist daemon stderr before status diagnostics");
+            std::fs::write(
+                evidence_dir.join("broker-jobs.json"),
+                serde_json::to_vec_pretty(&broker.jobs()).unwrap_or_default(),
+            )
+            .expect("persist broker jobs before status diagnostics");
             let status = context
                 .command(TestBinary::HomeboyFixture)
                 .env("PATH", &path)
                 .args(["agent-task", "status", run_id])
                 .output()
                 .expect("inspect stalled controller parent");
-            let status_json = serde_json::from_slice::<serde_json::Value>(&status.stdout).ok();
-            let worker_log = status_json
-                .as_ref()
-                .and_then(|value| {
-                    value.pointer(
-                        "/data/metadata/unmaterialized_cook_admission/replay_receipt/worker_log",
-                    )
+            let worker_log = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .ok()
+                .and_then(|store| store.read_record(run_id).ok())
+                .and_then(|record| {
+                    record.metadata["unmaterialized_cook_admission"]["replay_receipt"]["worker_log"]
+                        .as_str()
+                        .map(str::to_string)
                 })
-                .and_then(serde_json::Value::as_str)
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .unwrap_or_else(|| "<unavailable>".to_string());
             panic!(
-                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\nworker stderr={}\ndaemon stderr={}",
+                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\nparent={parent:#?}\nattempt={attempt:#?}\nworker stderr={}\ndaemon stderr={}",
                 ledger.render(),
                 String::from_utf8_lossy(&status.stdout),
                 String::from_utf8_lossy(&status.stderr),

@@ -959,7 +959,20 @@ impl AgentTaskRunRecord {
                         .pointer("/cook_progress/phase")
                         .and_then(Value::as_str),
                     Some(
-                        "worktree_provider_lookup" | "worktree_provider_ensure" | "provider_start"
+                        "durable_identity"
+                            | "destination_resolution"
+                            | "destination_provisioning"
+                            | "workspace_provider_canonicalization"
+                            | "workspace_base_preflight"
+                            | "workspace_base_capture"
+                            | "workspace_base_convergence"
+                            | "workspace_disk_pressure"
+                            | "workspace_capacity_reservation"
+                            | "worktree_provider_lookup"
+                            | "worktree_provider_ensure"
+                            | "provider_ready"
+                            | "provider_start"
+                            | "in_flight"
                     )
                 ))
     }
