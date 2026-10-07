@@ -1630,7 +1630,12 @@ fn collect_portable_config_paths_for_id(
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || should_skip_portable_duplicate_scan_dir(&path) {
+        // A nested checkout owns its manifests independently, including linked
+        // worktrees whose .git marker is a file rather than a directory.
+        if !path.is_dir()
+            || should_skip_portable_duplicate_scan_dir(&path)
+            || path.join(".git").exists()
+        {
             continue;
         }
         collect_portable_config_paths_for_id(&path, component_id, seen, paths)?;
@@ -2037,6 +2042,64 @@ mod tests {
 
         validate_duplicate_portable_component_ids("fixture", repo.path(), None)
             .expect("a generated .homeboy-build manifest must not count as a duplicate");
+    }
+
+    #[test]
+    fn duplicate_portable_ids_stay_inside_the_selected_git_checkout() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init"]);
+        write_portable(repo.path(), "fixture");
+        git(repo.path(), &["add", "homeboy.json"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        );
+
+        // Checkout identity, rather than a directory-name allowlist, defines
+        // the boundary. A linked worktree has a .git file; a clone has a dir.
+        let linked = repo.path().join("cache/checkouts/linked");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().expect("linked path"),
+            ],
+        );
+        assert!(linked.join(".git").is_file());
+        let independent = repo.path().join("components/independent");
+        write_portable(&independent, "fixture");
+        git(&independent, &["init"]);
+        assert!(independent.join(".git").is_dir());
+
+        for checkout in [repo.path(), linked.as_path(), independent.as_path()] {
+            validate_duplicate_portable_component_ids("fixture", checkout, None)
+                .expect("each checkout owns one declaration");
+            assert_eq!(
+                portable_config_paths_for_id(checkout, "fixture").expect("declarations"),
+                vec![canonical_config_path(checkout.join("homeboy.json"))]
+            );
+        }
+
+        write_portable(&repo.path().join("packages/duplicate"), "fixture");
+        let error = validate_duplicate_portable_component_ids("fixture", repo.path(), None)
+            .expect_err("same-checkout duplicate remains invalid");
+        assert!(error.message.contains("packages/duplicate/homeboy.json"));
+        assert!(!error
+            .message
+            .contains("cache/checkouts/linked/homeboy.json"));
+        assert!(!error
+            .message
+            .contains("components/independent/homeboy.json"));
     }
 
     #[test]
