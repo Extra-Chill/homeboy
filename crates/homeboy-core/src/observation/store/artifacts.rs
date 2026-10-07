@@ -193,6 +193,18 @@ impl ObservationStore {
         run: &RunRecord,
         publications: &[ArtifactPublication],
     ) -> Result<Vec<ArtifactRecord>> {
+        self.publish_run_artifacts_with_owner(run, publications, |_| Ok(false))
+    }
+
+    /// Attach verified evidence while allowing its caller to retain an existing
+    /// lifecycle owner. Resolve ownership inside the publication transaction,
+    /// after downloads, so concurrent controller progress is never overwritten.
+    pub fn publish_run_artifacts_with_owner(
+        &self,
+        run: &RunRecord,
+        publications: &[ArtifactPublication],
+        retain_owner: impl Fn(&RunRecord) -> Result<bool>,
+    ) -> Result<Vec<ArtifactRecord>> {
         validate_required("run.id", &run.id)?;
         let mut seen = HashSet::new();
         let publication_id = Uuid::new_v4().to_string();
@@ -400,13 +412,21 @@ impl ObservationStore {
                     "artifact publication lost its durable finalization lease",
                 ));
             }
-            let metadata_json = serialize_metadata(&run.metadata_json)?;
-            tx.execute(
+            let retained = self
+                .get_run(&run.id)?
+                .as_ref()
+                .map(&retain_owner)
+                .transpose()?
+                .unwrap_or(false);
+            if !retained {
+                let metadata_json = serialize_metadata(&run.metadata_json)?;
+                tx.execute(
                 r#"INSERT INTO runs(id, kind, component_id, started_at, finished_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                    ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, component_id=excluded.component_id, started_at=excluded.started_at, finished_at=excluded.finished_at, status=excluded.status, command=excluded.command, cwd=excluded.cwd, homeboy_version=excluded.homeboy_version, git_sha=excluded.git_sha, rig_id=excluded.rig_id, metadata_json=excluded.metadata_json"#,
                 params![run.id, run.kind, run.component_id, run.started_at, run.finished_at, run.status, run.command, run.cwd, run.homeboy_version, run.git_sha, run.rig_id, metadata_json],
-            ).map_err(sqlite_error("publish observation run"))?;
+                ).map_err(sqlite_error("publish observation run"))?;
+            }
             for (artifact, staged_path, _) in &prepared {
                 if staged_path.is_none() {
                     continue;

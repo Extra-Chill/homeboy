@@ -1795,6 +1795,152 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
 }
 
 #[test]
+fn remote_artifacts_preserve_controller_ownership_and_terminal_projection() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle");
+        let runner = ssh_runner();
+        let command = vec!["cargo".to_string(), "--version".to_string()];
+        // Both canonical controller owners share this remote publication seam.
+        for (run_id, agent_task) in [("owned-agent", true), ("owned-gate", false)] {
+            let mut job = terminal_runner_job();
+            job.runner_job_projection = Some(RunnerJobProjection {
+                runner_id: runner.id.clone(),
+                command: "cargo --version".to_string(),
+                cwd: Some("/runner/workspace".to_string()),
+                source: "runner-daemon".to_string(),
+                kind: "runner.exec".to_string(),
+                lifecycle: Some(RunnerJobLifecycleMetadata {
+                    durable_run_id: Some(run_id.to_string()),
+                    ..Default::default()
+                }),
+            });
+            if agent_task {
+                lifecycle
+                    .record_lab_offload_planned(
+                        homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
+                            run_id,
+                            runner_id: &runner.id,
+                            remote_workspace: "/runner/workspace",
+                            remote_command: &command,
+                            durable_plan: None,
+                        },
+                    )
+                    .expect("agent owner");
+            } else {
+                homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                    run_id,
+                    &runner.id,
+                    &job.id.to_string(),
+                    "/runner/workspace",
+                    &command,
+                )
+                .expect("gate owner");
+            }
+            let before = store.get_run(run_id).expect("lookup").expect("owner");
+            let artifact_id = format!("{run_id}-receipt");
+            let detail = json!({
+                "id": run_id, "kind": "runner.exec", "status": "pass",
+                "started_at": "2023-11-14T22:13:20Z", "finished_at": "2023-11-14T22:13:21Z",
+                "metadata": {},
+                "artifacts": [{"id": artifact_id, "kind": "receipt", "type": "file", "mime": "text/plain",
+                    "size_bytes": 1, "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"}]
+            });
+            let mut foreign = job.clone();
+            foreign
+                .runner_job_projection
+                .as_mut()
+                .expect("projection")
+                .lifecycle
+                .as_mut()
+                .expect("claim")
+                .durable_run_id = Some("foreign".to_string());
+            let error = mirror_remote_observation_runs_by_id_with_downloader(
+                &store,
+                &runner,
+                &foreign,
+                &[run_id.to_string()],
+                None,
+                |_| Ok(Some(detail.clone())),
+                |_| panic!("foreign claims must fail before artifact download"),
+            )
+            .expect_err("foreign claim");
+            assert_eq!(error.details["field"], "observation.owner");
+            assert!(store.get_artifact(&artifact_id).expect("lookup").is_none());
+
+            let download = tempfile::tempdir().expect("download");
+            let runs = mirror_remote_observation_runs_by_id_with_downloader(
+                &store,
+                &runner,
+                &job,
+                &[run_id.to_string()],
+                None,
+                |_| Ok(Some(detail.clone())),
+                |_| {
+                    let mut metadata = store
+                        .get_run(run_id)
+                        .expect("lookup")
+                        .expect("owner")
+                        .metadata_json;
+                    metadata["controller_progress"] = json!("advanced-during-download");
+                    store
+                        .update_run_metadata(run_id, metadata)
+                        .expect("advance owner");
+                    let path = download.path().join("receipt");
+                    fs::write(&path, b"a").expect("bytes");
+                    Ok(path)
+                },
+            )
+            .expect("publish evidence");
+            assert_eq!(runs[0].kind, before.kind);
+            assert_eq!(runs[0].status, before.status);
+            assert_eq!(runs[0].command, before.command);
+            let mut expected = before.metadata_json;
+            expected["controller_progress"] = json!("advanced-during-download");
+            assert_eq!(runs[0].metadata_json, expected);
+            let artifact = store
+                .get_artifact(&artifact_id)
+                .expect("lookup")
+                .expect("receipt");
+            assert_eq!(artifact.run_id, run_id);
+            assert_eq!(fs::read(&artifact.path).expect("durable bytes"), b"a");
+            if agent_task {
+                assert_eq!(
+                    lifecycle
+                        .read_record(run_id)
+                        .expect("readable agent")
+                        .run_id,
+                    run_id
+                );
+            } else {
+                homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_in_store(
+                    &lifecycle,
+                    run_id,
+                    &[],
+                )
+                .expect("artifacts complete");
+                let snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                    job,
+                    events: vec![],
+                };
+                assert!(
+                    homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
+                        &lifecycle, run_id, &snapshot,
+                    )
+                    .expect("terminal projection")
+                );
+                assert!(
+                    !homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
+                        &lifecycle, run_id, &snapshot,
+                    )
+                    .expect("idempotent projection")
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn terminal_mirroring_withholds_output_when_declared_run_projection_is_missing() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");

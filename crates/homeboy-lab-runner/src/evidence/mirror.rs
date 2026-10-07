@@ -822,6 +822,11 @@ where
 
 pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
     let store = ObservationStore::open_initialized()?;
+    if let Some(owner) = store.get_run(run_id)? {
+        if controller_owns_observation(&owner) {
+            return Ok(Some(owner));
+        }
+    }
     for report in super::super::connection::statuses()? {
         if !report.connected {
             continue;
@@ -843,7 +848,7 @@ pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
         for artifact in remote_detail_artifacts(detail, &runner, &run.id)? {
             import_mirrored_artifact(&store, &artifact)?;
         }
-        return Ok(Some(run));
+        return store.get_run(&run.id);
     }
     Ok(None)
 }
@@ -1739,6 +1744,9 @@ where
             Err(error) => return Err(error),
         };
         let mut run = remote_detail_to_run_record(&detail, runner, Some(job))?;
+        if let Some(owner) = store.get_run(&run.id)? {
+            retain_controller_observation(&owner, Some(job))?;
+        }
         if let Some(notification_route) = notification_route {
             notification_route.insert_into_metadata(&mut run.metadata_json);
         }
@@ -1812,7 +1820,9 @@ where
             }
         }
         store
-            .publish_run_artifacts_atomically(&run, &publications)
+            .publish_run_artifacts_with_owner(&run, &publications, |owner| {
+                retain_controller_observation(owner, Some(job))
+            })
             .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
         mirrored.push(
             store.get_run(&run.id)?.ok_or_else(|| {
@@ -1914,8 +1924,38 @@ fn missing_optional_run_projection(error: &Error, run_id: &str) -> bool {
             == Some(&format!("/runs/{}", encode_uri_component(run_id)))
 }
 
+/// Remote observations supply evidence; the accepted controller job remains
+/// the authority for a colliding run's identity, custody and terminal state.
+fn retain_controller_observation(owner: &RunRecord, job: Option<&Job>) -> Result<bool> {
+    if !controller_owns_observation(owner) {
+        return Ok(false);
+    }
+    let accepted_run_id = job
+        .and_then(|job| job.runner_job_projection.as_ref())
+        .and_then(|projection| projection.lifecycle.as_ref())
+        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref());
+    if accepted_run_id != Some(owner.id.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "observation.owner",
+            "remote observation lacks the accepted claim for its controller owner",
+            Some(owner.id.clone()),
+            None,
+        ));
+    }
+    Ok(true)
+}
+
+fn controller_owns_observation(run: &RunRecord) -> bool {
+    run.metadata_json.get("agent_task_run").is_some()
+        || run.metadata_json.get("kind").and_then(Value::as_str) == Some("runner_exec")
+}
+
 fn import_run_if_absent(store: &ObservationStore, run: &RunRecord) -> Result<()> {
-    store.upsert_imported_run(run)
+    store
+        .publish_run_artifacts_with_owner(run, &[], |owner| {
+            retain_controller_observation(owner, None)
+        })
+        .map(|_| ())
 }
 
 fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord) -> Result<()> {
