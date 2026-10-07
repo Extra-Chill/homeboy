@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.0] - 2026-10-07
+
+### Added
+- runners plan themselves with the daemon lifecycle planner (#15557 C5)
+
+### Changed
+- retire test-only production fossils
+- exercise service-managed lease publication
+- cover lease publication retry race
+
+### Fixed
+- preserve controller ownership during remote import
+- bound duplicate discovery to one checkout
+- keep continuation coordination on the controller
+- preserve detached Lab replay ownership
+- surface canonical lease observation verdict
+- fail admission closed without a daemon lease
+
 ## [0.416.0] - 2026-10-07
 
 ### Added
