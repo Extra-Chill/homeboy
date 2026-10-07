@@ -886,7 +886,9 @@ fn public_continuation_resumes_terminal_child_while_real_sibling_provider_remain
         )
         .env("HOMEBOY_TEST_DAEMON_NAMESPACE", &sibling_daemon_root)
         .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &sibling_started)
-        .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "120000")
+        // Keep the real sibling owner alive across cold-runner startup and the
+        // full bounded target-recovery window; the RAII guard reaps it below.
+        .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "600000")
         .args([
             "--wait",
             "--placement",
