@@ -537,6 +537,42 @@ pub fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<Strin
         .and_then(|parsed| parsed.task.or(parsed.outcome))
 }
 
+/// Retain only the selectors owned by the artifact-evidence grammar. Unknown
+/// fragments may carry credentials and must never survive status projection.
+pub(crate) fn selected_artifact_reference_uri(uri: &str) -> Option<String> {
+    let parsed = parse_agent_task_homeboy_uri(uri).ok()?;
+    if parsed.section != "artifacts" {
+        return None;
+    }
+    let task = parsed.task?;
+    let artifact = parsed.artifact?;
+    let fragment = uri.split_once('#')?.1;
+    for key in ["task", "artifact"] {
+        if fragment
+            .split('&')
+            .filter(|part| part.split_once('=').map(|(name, _)| name) == Some(key))
+            .count()
+            != 1
+        {
+            return None;
+        }
+    }
+    for identifier in [&parsed.run_id, &task, &artifact] {
+        if identifier.is_empty()
+            || identifier.contains('\0')
+            || homeboy_core::redaction::redact_string(identifier) != *identifier
+        {
+            return None;
+        }
+    }
+    Some(format!(
+        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
+        homeboy_core::execution_contract::encode_uri_component(&parsed.run_id),
+        homeboy_core::execution_contract::encode_uri_component(&task),
+        homeboy_core::execution_contract::encode_uri_component(&artifact),
+    ))
+}
+
 pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) -> Option<Value> {
     if let Some(summary) = runtime_stream_evidence_summary(task_id, evidence) {
         return Some(summary);
@@ -1446,6 +1482,32 @@ mod tests {
             hydrated.content["diagnostic"]["message"],
             "opencode is unavailable"
         );
+    }
+
+    #[test]
+    fn selected_artifact_reference_preserves_encoded_identity_without_unknown_fragments() {
+        let uri = "homeboy://agent-task/run/run%2Fone/artifacts#task=task%20%26%20one&artifact=patch%2F%25%3F&access_token=private-value";
+        let selected = selected_artifact_reference_uri(uri).expect("owned artifact reference");
+        assert!(!selected.contains("private-value"));
+        let parsed = parse_agent_task_homeboy_uri(&selected).expect("round trip");
+        assert_eq!(parsed.run_id, "run/one");
+        assert_eq!(parsed.task.as_deref(), Some("task & one"));
+        assert_eq!(parsed.artifact.as_deref(), Some("patch/%?"));
+    }
+
+    #[test]
+    fn selected_artifact_reference_rejects_ambiguous_or_unowned_selectors() {
+        for uri in [
+            "homeboy://agent-task/run/run/artifacts#task=one&artifact=patch&artifact=other",
+            "homeboy://agent-task/run/run/artifacts#task=one&task=other&artifact=patch",
+            "homeboy://agent-task/run/run/artifacts#task=one&artifact=%ZZ",
+            "homeboy://agent-task/run/run/artifacts#task=one&artifact=token%3Dsecret",
+            "homeboy://agent-task/run/run/artifacts#artifact=patch",
+            "homeboy://agent-task/run/run/aggregate#task=one&artifact=patch",
+            "https://example.test/artifacts#task=one&artifact=patch",
+        ] {
+            assert_eq!(selected_artifact_reference_uri(uri), None, "{uri}");
+        }
     }
 
     #[test]
