@@ -583,6 +583,35 @@ struct CoordinatorHeartbeat {
     stale_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
+fn fanout_child_progress_event(
+    task_id: &str,
+    run_id: &str,
+    status: Result<agent_task_lifecycle::AgentTaskRunRecord>,
+) -> Value {
+    match status {
+        Ok(run) => serde_json::json!({
+            "event": "fanout_child_progress",
+            "task_id": task_id,
+            "run_id": run_id,
+            "state": run.state,
+            "phase": run.metadata.get("phase")
+                .or_else(|| run.metadata.get("current_phase"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!(run.state)),
+            "updated_at": run.updated_at,
+            "provider": run.provider_handles.last().map(|handle| &handle.backend),
+        }),
+        Err(error) => serde_json::json!({
+            "event": "fanout_child_progress",
+            "task_id": task_id,
+            "run_id": run_id,
+            "state": "unavailable",
+            "phase": "waiting_for_child_record",
+            "detail": error.message,
+        }),
+    }
+}
+
 impl CoordinatorHeartbeat {
     fn start(batch_id: String, claim_id: String, status_command: String) -> Result<Self> {
         // Claim admission before preflight, then renew it synchronously before
@@ -608,6 +637,14 @@ impl CoordinatorHeartbeat {
                             serde_json::to_string(&status_command)
                             .expect("status command serializes"),
                         );
+                        for child in &record.child_runs {
+                            let progress = fanout_child_progress_event(
+                                &child.task_id,
+                                &child.run_id,
+                                agent_task_lifecycle::status(&child.run_id),
+                            );
+                            eprintln!("{progress}");
+                        }
                     }
                 }
             }
@@ -11946,6 +11983,28 @@ fi
                 before
             );
         });
+    }
+
+    #[test]
+    fn fanout_child_progress_identifies_children_waiting_for_durable_records() {
+        let child = batch::FanoutRunBatchChild {
+            task_id: "child-task".to_string(),
+            run_id: "child-run".to_string(),
+        };
+
+        let event = fanout_child_progress_event(
+            &child.task_id,
+            &child.run_id,
+            Err(Error::internal_unexpected(
+                "child status is not available yet",
+            )),
+        );
+
+        assert_eq!(event["event"], "fanout_child_progress");
+        assert_eq!(event["task_id"], "child-task");
+        assert_eq!(event["run_id"], "child-run");
+        assert_eq!(event["phase"], "waiting_for_child_record");
+        assert_eq!(event["state"], "unavailable");
     }
 
     #[test]
