@@ -135,7 +135,12 @@ fn mutate_registry<T>(
     })?;
     let mut registry = read_registry()?;
     let output = mutation(&mut registry)?;
-    if let Some(registry) = registry.as_ref() {
+    if let Some(registry) = registry.as_mut() {
+        // Older pinned binaries read `active_jobs` from disk to decide
+        // retirement, so every registry write refreshes the write-only
+        // compatibility counter from the owner ledger, whose terminal-job
+        // routes keep it at or above the live count.
+        registry.generations.sync_compat_active_jobs();
         write_registry(registry)?;
     }
     Ok(output)
@@ -368,13 +373,14 @@ pub(super) fn record_job_for_admission(
 /// Count a generation's active jobs from its own durable job store:
 /// non-terminal jobs whose `job_owners` entry names that generation.
 ///
-/// The stored `active_jobs` counter is admission-side bookkeeping that this
-/// registry never decrements; only each generation's own `jobs.json` owns
-/// terminality. The owner filter attributes a shared store's jobs to exactly
-/// one generation, because a replacement daemon can restart in the dead
-/// lease's directory and share its store. A job compacted out of the store
-/// no longer counts. An unreadable store is an error so callers can fail
-/// closed and never retire the generation on incomplete evidence.
+/// The stored `active_jobs` counter is write-only compatibility bookkeeping
+/// that registry writes refresh from the owner ledger; only each
+/// generation's own `jobs.json` owns terminality. The owner filter
+/// attributes a shared store's jobs to exactly one generation, because a
+/// replacement daemon can restart in the dead lease's directory and share
+/// its store. A job compacted out of the store no longer counts. An
+/// unreadable store is an error so callers can fail closed and never retire
+/// the generation on incomplete evidence.
 fn generation_active_jobs(
     registry: &RollingGenerations<LocalDaemonEndpoint>,
     lease_id: &str,
@@ -404,13 +410,13 @@ fn generation_is_idle(registry: &RollingGenerations<LocalDaemonEndpoint>, lease_
 /// Retire drained generations whose derived active-job count is zero.
 ///
 /// This is the daemon's drain retirement for the registry, replacing the
-/// counter-based `retire_drained` inside the shared primitive's `recover`:
-/// the stored counter is never decremented, so only the derived count can
-/// prove a drained generation idle. Mirrors the retirement protocol of
-/// `reconcile_drained_generations`: terminal custody is archived before the
-/// entry and its job routes are removed, and the admission owner is never
-/// retired here. An unreadable store counts as busy. Runs inside an open
-/// registry mutation.
+/// counter-based retirement the shared primitive used to perform: the
+/// stored counter is write-only compatibility bookkeeping, so only the
+/// derived count can prove a drained generation idle. Mirrors the retirement
+/// protocol of `reconcile_drained_generations`: terminal custody is archived
+/// before the entry and its job routes are removed, and the admission owner
+/// is never retired here. An unreadable store counts as busy. Runs inside an
+/// open registry mutation.
 fn retire_derived_idle_drained_generations(
     registry: &mut LocalDaemonGenerationRegistry,
 ) -> Result<()> {
@@ -474,9 +480,9 @@ pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> R
         {
             // A non-empty registry re-points admission at a remaining
             // generation; an empty one is re-seeded by the next daemon start.
-            // The shared primitive's `recover` would also retire drained
-            // generations from the stored counter, which this registry never
-            // decrements, so the derived sweep below owns that decision.
+            // The shared primitive never retires draining generations on
+            // activation, and the stored counter is write-only bookkeeping,
+            // so the derived sweep below owns that decision.
             let fallback = registry
                 .generations
                 .generations
@@ -1354,10 +1360,11 @@ mod tests {
                 generation_active_jobs(&registry.generations, "B").expect("derived B"),
                 1
             );
-            // The stored counters are never rewritten: admission history only
-            // ever grows.
-            assert_eq!(registry.generations.generations["A"].active_jobs, 3);
-            assert_eq!(registry.generations.generations["B"].active_jobs, 0);
+            // Every registry write refreshes the write-only compat counters
+            // from the owner ledger: A keeps its retained route and B owns
+            // both transferred jobs.
+            assert_eq!(registry.generations.generations["A"].active_jobs, 1);
+            assert_eq!(registry.generations.generations["B"].active_jobs, 2);
 
             // Each generation still owns durable work, so neither retires.
             assert!(

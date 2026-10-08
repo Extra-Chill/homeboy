@@ -392,12 +392,12 @@ fn materialization_race_rotates_the_newly_connected_daemon_and_preserves_active_
         "active work selects generation rotation instead of daemon replacement"
     );
     let mut generations = crate::RollingGenerations::new("lease-old", "old daemon");
-    generations.admit_job(&active_job.job_id);
+    assert!(generations.admit_job_for("lease-old", &active_job.job_id));
     assert_eq!(
         generations.begin("lease-new", "promoted daemon"),
         crate::RollingStart::Start
     );
-    assert!(generations.activate("lease-new"));
+    assert!(generations.activate_preserving_drained("lease-new"));
     assert_eq!(
         generations.job_owner(&active_job.job_id),
         Some("lease-old"),
