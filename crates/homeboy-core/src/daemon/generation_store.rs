@@ -1,6 +1,5 @@
 //! Stable routing state for local daemon generations.
 
-use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -43,8 +42,6 @@ impl LocalDaemonEndpoint {
 struct LocalDaemonGenerationRegistry {
     schema: String,
     generations: RollingGenerations<LocalDaemonEndpoint>,
-    #[serde(default)]
-    completed_jobs: BTreeSet<String>,
 }
 
 const SCHEMA: &str = "homeboy.daemon.generations.v1";
@@ -204,7 +201,6 @@ pub(super) fn seed(state: &DaemonState) -> Result<()> {
             *registry = Some(LocalDaemonGenerationRegistry {
                 schema: SCHEMA.to_string(),
                 generations: RollingGenerations::new(endpoint.lease_id.clone(), endpoint),
-                completed_jobs: BTreeSet::new(),
             });
         }
         Ok(())
@@ -369,14 +365,90 @@ pub(super) fn record_job_for_admission(
     })
 }
 
+/// Count a generation's active jobs from its own durable job store:
+/// non-terminal jobs whose `job_owners` entry names that generation.
+///
+/// The stored `active_jobs` counter is admission-side bookkeeping that this
+/// registry never decrements; only each generation's own `jobs.json` owns
+/// terminality. The owner filter attributes a shared store's jobs to exactly
+/// one generation, because a replacement daemon can restart in the dead
+/// lease's directory and share its store. A job compacted out of the store
+/// no longer counts. An unreadable store is an error so callers can fail
+/// closed and never retire the generation on incomplete evidence.
+fn generation_active_jobs(
+    registry: &RollingGenerations<LocalDaemonEndpoint>,
+    lease_id: &str,
+) -> Result<usize> {
+    let Some(entry) = registry.generations.get(lease_id) else {
+        return Ok(0);
+    };
+    let store = crate::api_jobs::JobStore::open_without_reconciliation(
+        Path::new(&entry.endpoint.state_dir).join("jobs.json"),
+    )?;
+    Ok(store
+        .list()
+        .into_iter()
+        .filter(|job| !job.status.is_terminal())
+        .filter(|job| registry.job_owner(&job.id.to_string()) == Some(lease_id))
+        .count())
+}
+
+/// Whether a generation owns no non-terminal durable job, derived from its
+/// own `jobs.json`. An unreadable store counts as busy.
+fn generation_is_idle(registry: &RollingGenerations<LocalDaemonEndpoint>, lease_id: &str) -> bool {
+    generation_active_jobs(registry, lease_id)
+        .map(|count| count == 0)
+        .unwrap_or(false)
+}
+
+/// Retire drained generations whose derived active-job count is zero.
+///
+/// This is the daemon's drain retirement for the registry, replacing the
+/// counter-based `retire_drained` inside the shared primitive's `recover`:
+/// the stored counter is never decremented, so only the derived count can
+/// prove a drained generation idle. Mirrors the retirement protocol of
+/// `reconcile_drained_generations`: terminal custody is archived before the
+/// entry and its job routes are removed, and the admission owner is never
+/// retired here. An unreadable store counts as busy. Runs inside an open
+/// registry mutation.
+fn retire_derived_idle_drained_generations(
+    registry: &mut LocalDaemonGenerationRegistry,
+) -> Result<()> {
+    let admission_owner = registry.generations.admission_owner.clone();
+    let idle = registry
+        .generations
+        .generations
+        .iter()
+        .filter(|(lease_id, generation)| {
+            generation.drain_state == RollingDrainState::Draining
+                && lease_id.as_str() != admission_owner
+                && generation_is_idle(&registry.generations, lease_id)
+        })
+        .map(|(lease_id, _)| lease_id.clone())
+        .collect::<Vec<_>>();
+    for lease_id in &idle {
+        let state_dir = registry.generations.generations[lease_id]
+            .endpoint
+            .state_dir
+            .clone();
+        archive_generation_terminal_custody(&state_dir)?;
+        registry.generations.generations.remove(lease_id);
+        registry
+            .generations
+            .job_owners
+            .retain(|_, owner| owner != lease_id);
+    }
+    Ok(())
+}
+
 /// Remove one exact dead+idle generation endpoint from the registry.
 ///
 /// Retirement of a stopped lease previously left its registry generation
 /// behind, so a successor's admission could be rejected with "job owner was
 /// not present in the generation registry". This cleanup runs only for a
-/// generation that is dead, idle (`active_jobs == 0`), and registered against
-/// the exact state directory that proved it retired; a live or busy
-/// generation, or a mismatched frame, is left untouched.
+/// generation that is dead, idle (no non-terminal durable job of its own),
+/// and registered against the exact state directory that proved it retired;
+/// a live or busy generation, or a mismatched frame, is left untouched.
 pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> Result<bool> {
     mutate_registry(|registry| {
         let Some(registry) = registry.as_mut() else {
@@ -386,7 +458,8 @@ pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> R
             .generations
             .generations
             .get(lease_id)
-            .is_some_and(|entry| entry.active_jobs == 0 && entry.endpoint.state_dir == state_dir);
+            .is_some_and(|entry| entry.endpoint.state_dir == state_dir)
+            && generation_is_idle(&registry.generations, lease_id);
         if !matched {
             return Ok(false);
         }
@@ -401,11 +474,19 @@ pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> R
         {
             // A non-empty registry re-points admission at a remaining
             // generation; an empty one is re-seeded by the next daemon start.
-            registry.generations.recover();
+            // The shared primitive's `recover` would also retire drained
+            // generations from the stored counter, which this registry never
+            // decrements, so the derived sweep below owns that decision.
+            let fallback = registry
+                .generations
+                .generations
+                .keys()
+                .next_back()
+                .cloned()
+                .expect("checked non-empty");
+            registry.generations.activate_preserving_drained(&fallback);
+            retire_derived_idle_drained_generations(registry)?;
         }
-        registry
-            .completed_jobs
-            .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
         Ok(true)
     })
 }
@@ -471,25 +552,13 @@ pub(super) fn transfer_proven_dead_job(
             return Ok(());
         }
 
-        let completed = registry.completed_jobs.contains(job_id);
+        // Routing only: the replacement generation's active-job count is
+        // derived from its own jobs.json, so the transfer needs no counter
+        // shuffle and cannot double-count a job in a shared store.
         registry
             .generations
             .job_owners
             .insert(job_id.to_string(), replacement_lease_id.clone());
-        if !completed {
-            let old = registry
-                .generations
-                .generations
-                .get_mut(proven_dead_lease_id)
-                .expect("proven-dead generation was validated");
-            old.active_jobs = old.active_jobs.saturating_sub(1);
-            let replacement = registry
-                .generations
-                .generations
-                .get_mut(replacement_lease_id)
-                .expect("replacement generation was inserted or found");
-            replacement.active_jobs += 1;
-        }
         Ok(())
     })
 }
@@ -535,36 +604,23 @@ pub(super) fn rebuild_job_owner(job_id: &str, lease_id: &str) -> Result<()> {
     })
 }
 
-pub(super) fn mark_job_terminal(job_id: &str) -> Result<()> {
-    mutate_registry(|registry| {
-        let Some(registry) = registry.as_mut() else {
-            return Ok(());
-        };
-        if !registry.completed_jobs.insert(job_id.to_string()) {
-            return Ok(());
-        }
-        if let Some(owner) = registry.generations.job_owner(job_id).map(str::to_string) {
-            if let Some(generation) = registry.generations.generations.get_mut(&owner) {
-                generation.active_jobs = generation.active_jobs.saturating_sub(1);
-            }
-        }
-        Ok(())
-    })
-}
-
 pub(super) fn reconcile_drained_generations(
     serving_lease_id: &str,
     stop: impl Fn(&LocalDaemonEndpoint) -> Result<()>,
 ) -> Result<()> {
-    let endpoints = read_registry()?
-        .into_iter()
-        .flat_map(|registry| registry.generations.generations.into_iter())
-        .filter_map(|(lease_id, generation)| {
-            (lease_id != serving_lease_id
+    let Some(registry) = read_registry()? else {
+        return Ok(());
+    };
+    let endpoints = registry
+        .generations
+        .generations
+        .iter()
+        .filter(|(lease_id, generation)| {
+            lease_id.as_str() != serving_lease_id
                 && generation.drain_state == RollingDrainState::Draining
-                && generation.active_jobs == 0)
-                .then_some((lease_id, generation.endpoint))
+                && generation_is_idle(&registry.generations, lease_id)
         })
+        .map(|(lease_id, generation)| (lease_id.clone(), generation.endpoint.clone()))
         .collect::<Vec<_>>();
     let mut first_error = None;
     for (lease_id, endpoint) in endpoints {
@@ -580,7 +636,7 @@ pub(super) fn reconcile_drained_generations(
                         .get(&lease_id)
                         .is_some_and(|generation| {
                             generation.drain_state == RollingDrainState::Draining
-                                && generation.active_jobs == 0
+                                && generation_is_idle(&registry.generations, &lease_id)
                         });
                 if can_retire {
                     archive_generation_terminal_custody(&endpoint.state_dir)?;
@@ -589,9 +645,6 @@ pub(super) fn reconcile_drained_generations(
                         .generations
                         .job_owners
                         .retain(|_, owner| owner != &lease_id);
-                    registry
-                        .completed_jobs
-                        .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
                 }
                 Ok(())
             })
@@ -711,6 +764,35 @@ mod tests {
                 paths: Vec::new(),
             },
         }
+    }
+
+    fn state_dir_of(state: &DaemonState) -> &str {
+        state
+            .state_path
+            .strip_suffix("/state.json")
+            .expect("state path has filename")
+    }
+
+    /// Open one registered generation's own durable job store, stamped with
+    /// its lease so created jobs carry the generation's `daemon_lease_id`.
+    fn open_generation_store(lease_id: &str) -> crate::api_jobs::JobStore {
+        let endpoint = endpoint_for_lease(lease_id)
+            .expect("endpoint lookup")
+            .expect("registered generation");
+        crate::api_jobs::JobStore::open_without_reconciliation(
+            Path::new(&endpoint.state_dir).join("jobs.json"),
+        )
+        .expect("open generation job store")
+        .with_daemon_lease(lease_id.to_string())
+    }
+
+    /// Admit one durable non-terminal job owned by `lease_id` in the
+    /// generation's own store, and record its registry owner.
+    fn admitted_job(lease_id: &str, operation: &str) -> uuid::Uuid {
+        let store = open_generation_store(lease_id);
+        let job = store.create(operation);
+        record_job(&job.id.to_string(), lease_id).expect("record owner");
+        job.id
     }
 
     #[test]
@@ -948,9 +1030,9 @@ mod tests {
                 b.address
             );
             assert!(is_draining("A").expect("A drains"));
-            mark_job_terminal("job-a").expect("mark A terminal");
-            // A failed stop retains the terminal job's owner for status and the
-            // next lifecycle pass rather than losing its recovery identity.
+            // A failed stop retains the drained generation's job routes for
+            // status and the next lifecycle pass rather than losing its
+            // recovery identity.
             assert!(
                 reconcile_drained_generations("B", |_| Err(Error::internal_unexpected(
                     "stop failed"
@@ -1044,7 +1126,9 @@ mod tests {
             store
                 .prune_terminal_controller_jobs("retained-loop", 1, &[id])
                 .unwrap();
-            mark_job_terminal(&id.to_string()).unwrap();
+            // The terminal job is already compacted out of the generation's
+            // store, so nothing pins the drained generation and no registry
+            // sweep is required before retirement.
             activate(&state("retained-new", "127.0.0.1:1002")).unwrap();
             reconcile_drained_generations("retained-new", |_| Ok(())).unwrap();
             assert!(endpoint_for_job(&id.to_string()).unwrap().is_none());
@@ -1069,12 +1153,28 @@ mod tests {
     fn a_blocked_retirement_does_not_strand_other_idle_generations() {
         with_isolated_home(|_| {
             seed(&state("A", "127.0.0.1:1001")).expect("seed A");
-            record_job("retained-a", "A").expect("admit A job");
-            mark_job_terminal("retained-a").expect("finish A job");
+            let finished_a = admitted_job("A", "blocked-retirement-finished");
+            open_generation_store("A")
+                .fail(finished_a, "finished")
+                .expect("finish A job");
             activate(&state("B", "127.0.0.1:1002")).expect("activate B");
             activate(&state("C", "127.0.0.1:1003")).expect("activate C");
-            record_job("active-c", "C").expect("admit active C job");
+            let active_c = admitted_job("C", "blocked-retirement-live");
             activate(&state("D", "127.0.0.1:1004")).expect("activate D");
+
+            // One durable store is shared by every generation here; the
+            // owner filter keeps each job attributed to exactly one
+            // generation.
+            let registry = read_registry().expect("read registry").expect("registry");
+            assert_eq!(
+                generation_active_jobs(&registry.generations, "A").expect("derived A"),
+                0,
+                "a terminal job no longer pins its generation"
+            );
+            assert_eq!(
+                generation_active_jobs(&registry.generations, "C").expect("derived C"),
+                1
+            );
 
             let stopped = std::sync::Mutex::new(Vec::new());
             let result = reconcile_drained_generations("D", |endpoint| {
@@ -1090,10 +1190,19 @@ mod tests {
             assert!(endpoint_for_lease("B").unwrap().is_none());
             assert!(endpoint_for_lease("A").unwrap().is_some());
             assert_eq!(
-                endpoint_for_job("retained-a").unwrap().unwrap().lease_id,
+                endpoint_for_job(&finished_a.to_string())
+                    .unwrap()
+                    .unwrap()
+                    .lease_id,
                 "A"
             );
-            assert_eq!(endpoint_for_job("active-c").unwrap().unwrap().lease_id, "C");
+            assert_eq!(
+                endpoint_for_job(&active_c.to_string())
+                    .unwrap()
+                    .unwrap()
+                    .lease_id,
+                "C"
+            );
             assert!(super::super::lifetime::owns_global_work("D"));
             assert!(!super::super::lifetime::owns_global_work("A"));
             assert!(!super::super::lifetime::owns_global_work("C"));
@@ -1198,36 +1307,70 @@ mod tests {
             let a = state("A", "127.0.0.1:1001");
             let b = state("B", "127.0.0.1:1002");
             seed(&a).expect("seed A");
-            record_job("recovered", "A").expect("record recovered job");
-            record_job("terminal", "A").expect("record terminal job");
-            record_job("other", "A").expect("record other job");
-            mark_job_terminal("terminal").expect("mark terminal job");
+            // A restart in place shares the dead lease's durable store with
+            // its replacement: both registered generations name the same
+            // state directory, so jobs must count for exactly one owner.
+            let store = open_generation_store("A");
+            let recovered = store.create("proven-dead-recovered");
+            let terminal = store.create("proven-dead-terminal");
+            let other = store.create("proven-dead-other");
+            record_job(&recovered.id.to_string(), "A").expect("record recovered job");
+            record_job(&terminal.id.to_string(), "A").expect("record terminal job");
+            record_job(&other.id.to_string(), "A").expect("record other job");
+            store
+                .fail(terminal.id, "finished before the daemon died")
+                .expect("mark terminal job");
 
-            transfer_proven_dead_job("recovered", "A", &b).expect("transfer recovered job");
-            transfer_proven_dead_job("terminal", "A", &b).expect("transfer terminal job");
-            // The same recovery can be retried without moving active counts again.
-            transfer_proven_dead_job("recovered", "A", &b).expect("repeat transfer");
+            transfer_proven_dead_job(&recovered.id.to_string(), "A", &b)
+                .expect("transfer recovered job");
+            transfer_proven_dead_job(&terminal.id.to_string(), "A", &b)
+                .expect("transfer terminal job");
+            // The same recovery can be retried without re-counting the job.
+            transfer_proven_dead_job(&recovered.id.to_string(), "A", &b).expect("repeat transfer");
 
             assert_eq!(
-                endpoint_for_job("recovered")
+                endpoint_for_job(&recovered.id.to_string())
                     .expect("route recovered")
                     .expect("replacement endpoint")
                     .lease_id,
                 "B"
             );
             assert_eq!(
-                endpoint_for_job("other")
+                endpoint_for_job(&other.id.to_string())
                     .expect("route unrelated")
                     .expect("original endpoint")
                     .lease_id,
                 "A"
             );
             let registry = read_registry().expect("read registry").expect("registry");
-            assert_eq!(registry.generations.generations["A"].active_jobs, 1);
-            assert_eq!(registry.generations.generations["B"].active_jobs, 1);
+            // The transferred job counts for the replacement generation only,
+            // with no double count in the shared store, and the terminal job
+            // counts for nobody.
+            assert_eq!(
+                generation_active_jobs(&registry.generations, "A").expect("derived A"),
+                1
+            );
+            assert_eq!(
+                generation_active_jobs(&registry.generations, "B").expect("derived B"),
+                1
+            );
+            // The stored counters are never rewritten: admission history only
+            // ever grows.
+            assert_eq!(registry.generations.generations["A"].active_jobs, 3);
+            assert_eq!(registry.generations.generations["B"].active_jobs, 0);
+
+            // Each generation still owns durable work, so neither retires.
+            assert!(
+                !retire_exact_dead_generation("A", state_dir_of(&a)).expect("consult registry"),
+                "the retained job keeps A busy"
+            );
+            assert!(
+                !retire_exact_dead_generation("B", state_dir_of(&b)).expect("consult registry"),
+                "the transferred job keeps its replacement busy"
+            );
 
             let before = registry.clone();
-            assert!(transfer_proven_dead_job("other", "wrong", &b).is_err());
+            assert!(transfer_proven_dead_job(&other.id.to_string(), "wrong", &b).is_err());
             assert_eq!(
                 read_registry().expect("read unchanged registry"),
                 Some(before)
@@ -1330,12 +1473,16 @@ mod tests {
                 *registry = Some(LocalDaemonGenerationRegistry {
                     schema: SCHEMA.to_string(),
                     generations,
-                    completed_jobs: BTreeSet::new(),
                 });
                 Ok(())
             })
             .expect("register two generations");
-            record_job("busy", "exact").expect("record busy job");
+            let store =
+                crate::api_jobs::JobStore::open_without_reconciliation(state_dir.join("jobs.json"))
+                    .expect("open exact store")
+                    .with_daemon_lease("exact".to_string());
+            let busy = store.create("exact-retirement");
+            record_job(&busy.id.to_string(), "exact").expect("record busy job");
 
             // A generation with durable work is never retired.
             assert!(!retire_exact_dead_generation("exact", exact_dir.as_str())
@@ -1346,13 +1493,170 @@ mod tests {
                 registry.generations.generations.contains_key("exact")
             }));
 
-            mark_job_terminal("busy").expect("drain exact generation");
+            store
+                .fail(busy.id, "finished")
+                .expect("terminalize the exact store job");
+            drop(store);
             assert!(retire_exact_dead_generation("exact", exact_dir.as_str())
                 .expect("consult registry"));
             let registry = read_registry().expect("read registry").expect("registry");
             assert!(!registry.generations.generations.contains_key("exact"));
             assert!(registry.generations.generations.contains_key("other"));
-            assert!(!registry.completed_jobs.contains("busy"));
+            assert!(endpoint_for_job(&busy.id.to_string())
+                .expect("route")
+                .is_none());
+        });
+    }
+
+    /// Offline CLI reconciliation terminalizes jobs in the generation's own
+    /// store without any daemon running, so no registry counter was ever
+    /// decremented. The derived count must still release the dead generation
+    /// for retirement.
+    #[test]
+    fn offline_reconciliation_releases_the_dead_generation_for_retirement() {
+        with_isolated_home(|_| {
+            use crate::api_jobs::JobStatus;
+            let offline = state("offline", "127.0.0.1:1001");
+            seed(&offline).expect("seed offline generation");
+            let job = admitted_job("offline", "offline-reconciled");
+
+            // No daemon runs here: the CLI reconciliation terminalizes the
+            // job in its own store, and nothing ever touched the registry.
+            let store = open_generation_store("offline");
+            let reconciled = store
+                .reconcile_dead_daemon_lease_jobs("offline")
+                .expect("offline reconciliation");
+            assert_eq!(reconciled.matching_job_ids, vec![job]);
+            assert_eq!(
+                store.get(job).expect("job").status,
+                JobStatus::Failed,
+                "offline reconciliation terminalizes the job in its own store"
+            );
+            drop(store);
+
+            assert!(
+                retire_exact_dead_generation("offline", state_dir_of(&offline))
+                    .expect("consult registry"),
+                "a dead generation whose jobs were reconciled offline must retire"
+            );
+            assert!(endpoint_for_lease("offline").expect("lookup").is_none());
+            assert!(endpoint_for_job(&job.to_string()).expect("route").is_none());
+        });
+    }
+
+    /// With the orchestration interval disabled no registry sweep ever runs;
+    /// a terminal job in the generation's own store must still let the
+    /// drained generation retire.
+    #[test]
+    fn a_terminal_job_releases_its_generation_without_an_orchestration_tick() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            let job = admitted_job("A", "tickless-terminal");
+            open_generation_store("A")
+                .fail(job, "finished")
+                .expect("terminalize the store job");
+
+            activate(&state("B", "127.0.0.1:1002")).expect("activate B");
+            reconcile_drained_generations("B", |endpoint| {
+                assert_eq!(endpoint.lease_id, "A");
+                Ok(())
+            })
+            .expect("a terminal store job alone releases the drained generation");
+            assert!(endpoint_for_lease("A").expect("lookup").is_none());
+            assert!(endpoint_for_job(&job.to_string()).expect("route").is_none());
+        });
+    }
+
+    /// A live job blocks retirement on both paths, and an unreadable store
+    /// counts as busy so the generation is never retired on incomplete
+    /// evidence.
+    #[test]
+    fn a_live_job_and_an_unreadable_store_block_retirement() {
+        with_isolated_home(|home| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            let live = admitted_job("A", "still-running");
+            let mut b = state("B", "127.0.0.1:1002");
+            b.state_path = home
+                .path()
+                .join("unreadable-generation")
+                .join("state.json")
+                .display()
+                .to_string();
+            activate(&b).expect("activate B");
+            let unreadable_dir = home.path().join("unreadable-generation");
+            std::fs::create_dir_all(&unreadable_dir).expect("unreadable generation dir");
+            std::fs::write(unreadable_dir.join("jobs.json"), b"{ not json")
+                .expect("write unreadable store");
+            activate(&state("C", "127.0.0.1:1003")).expect("activate C");
+
+            assert!(
+                !retire_exact_dead_generation("A", state_dir_of(&a)).expect("consult registry"),
+                "a live job blocks exact retirement"
+            );
+            assert!(
+                !retire_exact_dead_generation("B", state_dir_of(&b)).expect("consult registry"),
+                "an unreadable store counts as busy"
+            );
+            let stopped = std::sync::Mutex::new(Vec::new());
+            reconcile_drained_generations("C", |endpoint| {
+                stopped.lock().unwrap().push(endpoint.lease_id.clone());
+                Ok(())
+            })
+            .expect("busy generations are skipped, not stopped");
+            assert!(stopped.lock().unwrap().is_empty());
+            assert!(endpoint_for_lease("A").expect("lookup").is_some());
+            assert!(endpoint_for_lease("B").expect("lookup").is_some());
+
+            // Once the job turns terminal in the store, A retires while the
+            // unreadable generation stays registered.
+            open_generation_store("A")
+                .fail(live, "finished")
+                .expect("terminalize the live job");
+            assert!(
+                retire_exact_dead_generation("A", state_dir_of(&a)).expect("consult registry"),
+                "a terminal job releases its generation"
+            );
+            assert!(endpoint_for_lease("A").expect("lookup").is_none());
+            assert!(endpoint_for_lease("B").expect("lookup").is_some());
+        });
+    }
+
+    /// A legacy registry still carrying `completed_jobs` loads unchanged;
+    /// the removed set is ignored on read and never written back.
+    #[test]
+    fn a_legacy_registry_with_completed_jobs_still_loads() {
+        with_isolated_home(|_| {
+            seed(&state("legacy", "127.0.0.1:1001")).expect("seed legacy generation");
+            let path = registry_path().expect("registry path");
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("read registry"))
+                    .expect("parse registry");
+            value["completed_jobs"] = serde_json::json!(["finished-job"]);
+            std::fs::write(
+                &path,
+                serde_json::to_vec_pretty(&value).expect("serialize legacy registry"),
+            )
+            .expect("write legacy registry");
+
+            let registry = read_registry()
+                .expect("a legacy registry with completed_jobs still loads")
+                .expect("registry");
+            assert!(registry.generations.generations.contains_key("legacy"));
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "legacy"
+            );
+
+            record_job("legacy-job", "legacy").expect("record owner");
+            let rewritten: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("reread registry"))
+                    .expect("reparse registry");
+            assert!(
+                rewritten.get("completed_jobs").is_none(),
+                "the retired set must not be written back"
+            );
         });
     }
 }
