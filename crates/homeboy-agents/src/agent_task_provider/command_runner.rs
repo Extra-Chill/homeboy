@@ -1173,6 +1173,8 @@ fn run_materialized_provider_command_once_contained(
         .unwrap_or_default();
     let mut workspace_progress_events = 0_u64;
     let mut next_workspace_progress_check_ms = 0_u64;
+    let mut descendant_activity = child.descendant_activity();
+    let mut descendant_activity_events = 0_u64;
 
     let (stdout_runtime_capture, stderr_runtime_capture) =
         runtime_output_captures(request, run_id, attempt);
@@ -1280,6 +1282,12 @@ fn run_materialized_provider_command_once_contained(
                 if liveness_timeout.is_some() && elapsed_ms >= next_workspace_progress_check_ms {
                     next_workspace_progress_check_ms =
                         elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
+                    let current_activity = child.descendant_activity();
+                    if current_activity.advanced_since(&descendant_activity) {
+                        progressed = true;
+                        descendant_activity_events = descendant_activity_events.saturating_add(1);
+                    }
+                    descendant_activity = current_activity;
                     if let Some(root) = attestation_root.as_deref() {
                         let current_workspace_progress = workspace_progress_snapshot(root);
                         if workspace_progress_advanced(
@@ -1423,6 +1431,7 @@ fn run_materialized_provider_command_once_contained(
                 "stderr_bytes": stderr_capture.total_bytes,
                 "runtime_progress_events": runtime_progress_events,
                 "workspace_progress_events": workspace_progress_events,
+                "descendant_activity_events": descendant_activity_events,
             }),
         );
     }
@@ -2192,7 +2201,7 @@ fn classify_stall_or_rate_limit(
         AgentTaskOutcomeStatus::ProviderError,
         AgentTaskFailureClassification::Stalled,
         format!(
-            "provider '{provider_id}' produced no process output, structured runtime progress, or workspace file activity before liveness_timeout_ms={liveness_timeout_ms}"
+                "provider '{provider_id}' produced no process output, structured runtime progress, workspace file activity, or owned descendant activity before liveness_timeout_ms={liveness_timeout_ms}"
         ),
     )
 }

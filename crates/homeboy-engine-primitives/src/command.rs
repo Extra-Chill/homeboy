@@ -161,6 +161,65 @@ impl ExecutionOwner {
         self.identity
     }
 
+    /// Sample work performed by tool descendants, excluding the workload root.
+    /// Unsupported or unreadable counters provide no liveness evidence.
+    pub fn descendant_activity(&self) -> DescendantActivity {
+        #[cfg(target_os = "linux")]
+        {
+            if !root_identity_is_live(self.identity) {
+                return DescendantActivity::default();
+            }
+            let processes: Vec<_> = std::fs::read_dir("/proc")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|entry| {
+                    let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                    Some((pid, linux_process_stat(pid)?))
+                })
+                .collect();
+            let mut owned = vec![self.identity.root_pid];
+            let mut cursor = 0;
+            let mut activity = DescendantActivity::default();
+            while cursor < owned.len() {
+                let parent = owned[cursor];
+                for (pid, stat) in &processes {
+                    if stat.parent_pid != parent || owned.contains(pid) {
+                        continue;
+                    }
+                    owned.push(*pid);
+                    if stat.state == 'Z' {
+                        continue;
+                    }
+                    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default();
+                    let counter = |name: &str| {
+                        io.lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                (key == name)
+                                    .then(|| value.trim().parse::<u64>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0)
+                    };
+                    if linux_process_stat(*pid)
+                        .is_none_or(|current| current.starttime_ticks != stat.starttime_ticks)
+                    {
+                        continue;
+                    }
+                    activity.counters.insert(
+                        (*pid, stat.starttime_ticks),
+                        [stat.cpu_ticks, counter("rchar"), counter("wchar")],
+                    );
+                }
+                cursor += 1;
+            }
+            activity
+        }
+        #[cfg(not(target_os = "linux"))]
+        DescendantActivity::default()
+    }
+
     pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
         self.child.stdin.take()
     }
@@ -250,6 +309,25 @@ impl Drop for ExecutionOwner {
             return;
         }
         let _ = self.drain_and_reap();
+    }
+}
+
+#[derive(Default)]
+pub struct DescendantActivity {
+    counters: std::collections::BTreeMap<(u32, u64), [u64; 3]>,
+}
+
+impl DescendantActivity {
+    /// New process identities establish a baseline; existence is not progress.
+    pub fn advanced_since(&self, previous: &Self) -> bool {
+        self.counters.iter().any(|(identity, counters)| {
+            previous.counters.get(identity).is_some_and(|before| {
+                counters
+                    .iter()
+                    .zip(before)
+                    .any(|(now, before)| now > before)
+            })
+        })
     }
 }
 
@@ -387,6 +465,7 @@ struct LinuxProcStat {
     state: char,
     parent_pid: u32,
     starttime_ticks: u64,
+    cpu_ticks: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -402,10 +481,13 @@ fn parse_linux_proc_stat(stat: &str) -> Option<LinuxProcStat> {
     let state = fields.next()?.chars().next()?;
     let parent_pid = fields.next()?.parse().ok()?;
     let starttime_ticks = after_command.split_whitespace().nth(19)?.parse().ok()?;
+    let user_ticks: u64 = after_command.split_whitespace().nth(11)?.parse().ok()?;
+    let system_ticks: u64 = after_command.split_whitespace().nth(12)?.parse().ok()?;
     Some(LinuxProcStat {
         state,
         parent_pid,
         starttime_ticks,
+        cpu_ticks: user_ticks.saturating_add(system_ticks),
     })
 }
 
@@ -3121,6 +3203,27 @@ mod process_group_liveness_tests {
         assert_eq!(parsed.state, 'Z');
         assert_eq!(parsed.parent_pid, 1);
         assert_eq!(parsed.starttime_ticks, 4242);
+    }
+
+    #[test]
+    fn descendant_activity_requires_advancing_counters_for_the_same_identity() {
+        let previous = DescendantActivity {
+            counters: [((123, 42), [10, 20, 30])].into(),
+        };
+        for counters in [
+            [((123, 42), [10, 20, 30])].into(),
+            [((123, 43), [100, 200, 300])].into(),
+            [((456, 42), [100, 200, 300])].into(),
+            std::collections::BTreeMap::new(),
+        ] {
+            assert!(!DescendantActivity { counters }.advanced_since(&previous));
+        }
+        for advanced in [[11, 20, 30], [10, 21, 30], [10, 20, 31]] {
+            assert!(DescendantActivity {
+                counters: [((123, 42), advanced)].into(),
+            }
+            .advanced_since(&previous));
+        }
     }
 }
 
