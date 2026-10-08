@@ -272,9 +272,51 @@ pub(crate) fn fanout_with_placement(
         }
         AgentTaskFanoutCommand::Status(status_args) => batch_status(status_args, placement),
         AgentTaskFanoutCommand::Resume(resume_args) => batch_resume(resume_args, placement),
+        AgentTaskFanoutCommand::Cancel(cancel_args) => batch_cancel(cancel_args),
         AgentTaskFanoutCommand::Artifacts(status_args) => batch_artifacts(status_args),
         AgentTaskFanoutCommand::RunPlan(run_args) => run_batch_cook_fanout(run_args, placement),
     }
+}
+
+/// Cancel a durable fanout through its canonical control-plane action. The
+/// delegate records the coordinator stop signal before cancelling children, so
+/// a coordinator racing the request cannot admit more work.
+fn batch_cancel(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
+    homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| format!("fanout-cancel:{}", args.batch_id));
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.batch_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.batch_id,
+                "cancel",
+                &idempotency_key,
+            ),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "reason": "operator cancelled fanout" }),
+            },
+            confirmed: true,
+        },
+    )?;
+    Ok((
+        serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-cancel/v1",
+            "batch_id": args.batch_id,
+            "outcome": acknowledgement.outcome,
+            "result": acknowledgement.result.data,
+        }),
+        0,
+    ))
 }
 
 fn invocation_placement_directive(placement: Placement) -> PlacementDirective {
@@ -5887,12 +5929,53 @@ mod tests {
     }
     use super::*;
     use crate::cli_surface::{Cli, Commands, Placement};
+    use crate::commands::agent_task::args::AgentTaskFanoutBatchStatusArgs;
     use crate::commands::agent_task::{AgentTaskCommand, AgentTaskFanoutCommand};
     use crate::test_support::{env_lock, with_isolated_home};
     use clap::{CommandFactory, Parser};
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn fanout_cancel_marks_the_coordinator_before_returning_success() {
+        with_isolated_home(|_| {
+            homeboy::agents::orchestration::register();
+            let store =
+                homeboy::agents::agent_task_batch::AgentTaskBatchStore::from_current_data_root()
+                    .expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "cli-cancel-fanout",
+                    "cli-cancel-plan",
+                    &[batch::FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "cli-cancel-child".to_string(),
+                    }],
+                    serde_json::json!({}),
+                )
+                .expect("persist fanout batch");
+
+            let (output, exit_code) = batch_cancel(AgentTaskFanoutBatchStatusArgs {
+                batch_id: "cli-cancel-fanout".to_string(),
+                idempotency_key: None,
+            })
+            .expect("cancel fanout");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(output["schema"], "homeboy/agent-task-fanout-cancel/v1");
+            assert_eq!(output["batch_id"], "cli-cancel-fanout");
+            assert!(store.coordinator_is_cancelled("cli-cancel-fanout"));
+
+            let (replayed, replay_exit_code) = batch_cancel(AgentTaskFanoutBatchStatusArgs {
+                batch_id: "cli-cancel-fanout".to_string(),
+                idempotency_key: None,
+            })
+            .expect("replay cancellation");
+            assert_eq!(replay_exit_code, 0);
+            assert_eq!(replayed, output, "repeated cancellation replays its result");
+        });
+    }
 
     #[test]
     fn cook_batch_help_documents_the_complete_verification_profile_contract() {

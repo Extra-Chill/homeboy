@@ -154,6 +154,7 @@ pub(super) fn agent_task_resource_behavior(
                 AgentTaskResourceBehavior::BoundedMetadataRead
             }
             agent_task::AgentTaskFanoutCommand::Resume(_)
+            | agent_task::AgentTaskFanoutCommand::Cancel(_)
             | agent_task::AgentTaskFanoutCommand::RunPlan(_) => {
                 AgentTaskResourceBehavior::AdmittedWorkload
             }

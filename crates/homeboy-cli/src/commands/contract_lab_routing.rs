@@ -230,6 +230,15 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
+                        command: agent_task::AgentTaskFanoutCommand::Cancel(_),
+                    }),
+            }) => agent_task_fanout_local_only_contract(
+                AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
+                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
+            ),
+            Commands::AgentTask(agent_task::AgentTaskArgs {
+                command:
+                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                         command:
                             agent_task::AgentTaskFanoutCommand::Status(_)
                             | agent_task::AgentTaskFanoutCommand::Artifacts(_),
