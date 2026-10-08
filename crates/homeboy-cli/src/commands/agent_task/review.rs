@@ -327,6 +327,11 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
             .as_ref()
             .map(|reference| reference.artifact_id.clone()),
     )?;
+    // Recover source evidence only after controller-owned routing has resolved
+    // the promotion. The provider's runtime pin does not own this operation.
+    if let Ok(record) = agent_task_lifecycle::status(source_spec) {
+        agent_task_service::recover_missing_promotion_aggregate(&record.run_id)?;
+    }
     let (mut raw, mut source_path) = read_promotion_source(source_spec)?;
     let source_run_id = match source_path.as_deref() {
         Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,

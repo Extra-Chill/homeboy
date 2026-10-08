@@ -151,8 +151,8 @@ fn cook_continue_command_with_prefix(
     command
 }
 
-/// Render the executable and global flags authorized by this exact durable Cook
-/// attempt. Callers append `agent-task` and the lifecycle subcommand.
+/// Render recovery on the Cook's controller. Provider placement is retained in
+/// the durable attempt and consumed by its dispatcher, not by this CLI prefix.
 ///
 /// A local prefix is only recovered from an explicit, durable override. Other
 /// controller-local attempts remain subject to current resource policy instead
@@ -189,15 +189,6 @@ fn cook_recovery_command_prefix_for_decision(
                 && decision.override_authorization.authorized =>
         {
             "homeboy --placement local".to_string()
-        }
-        Some(decision)
-            if decision.selected
-                == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab =>
-        {
-            decision.runner.as_ref().map_or_else(
-                || "homeboy".to_string(),
-                |runner| format!("homeboy --runner {}", quote_arg(&runner.runner_id)),
-            )
         }
         _ => "homeboy".to_string(),
     }
@@ -2665,7 +2656,23 @@ mod run_lifecycle_projection_tests {
         );
         assert_eq!(
             cook_recovery_command_prefix_for_decision(Some(&lab)),
-            "homeboy --runner lab-fixture"
+            "homeboy"
+        );
+        assert_eq!(
+            cook_continue_command_with_prefix(
+                &cook_recovery_command_prefix_for_decision(Some(&lab)),
+                "cook-attempt-1",
+                true,
+                Some("patch"),
+            ),
+            "homeboy agent-task cook-continue cook-attempt-1 --rearm --artifact-id patch"
+        );
+        assert_eq!(
+            lab.runner
+                .as_ref()
+                .expect("provider runner remains recorded")
+                .runner_id,
+            "lab-fixture"
         );
     }
 

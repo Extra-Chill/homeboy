@@ -2861,23 +2861,11 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             crate::commands::agent_task::AgentTaskCommand::Accept(args) => {
                 Some(args.run_id.clone())
             }
-            // Promotion mutates the durable source run (checkpointing apply and
-            // final reports) and must therefore execute under the controller
-            // runtime that admitted that run. Without this branch a promoted
-            // runtime could own the process that writes an older run's record,
-            // and any live stderr progress would be stranded behind a later
-            // routing boundary.
-            crate::commands::agent_task::AgentTaskCommand::Promote(args) => {
-                let record = crate::agents::agent_tasks::lifecycle::status(&args.source).ok();
-                if let Some(record) = record.as_ref() {
-                    // Repair immutable evidence before handing mutation back to
-                    // the historical controller that admitted this run.
-                    crate::agents::agent_tasks::service::recover_missing_promotion_aggregate(
-                        &record.run_id,
-                    )?;
-                }
-                record.map(|record| record.run_id)
-            }
+            // Promotion owns the controller's target and finalized artifact
+            // projection, not the provider attempt's runtime. Re-executing a
+            // runner pin here bypasses its controller-owned portability contract
+            // and moves recipe/target resolution onto the producing runner.
+            crate::commands::agent_task::AgentTaskCommand::Promote(_) => None,
             // Cook continuation owns the controller-local recipe in every
             // lifecycle state. Its dispatcher preserves provider execution
             // ownership; the provider's runtime pin must never move the whole
@@ -7631,6 +7619,41 @@ mod tests {
                     .run_id,
                 run_id
             );
+
+            for placement in [
+                vec![],
+                vec!["--placement", "local"],
+                vec!["--runner", "homeboy-lab"],
+            ] {
+                let mut args = vec![
+                    "homeboy",
+                    "agent-task",
+                    "promote",
+                    run_id,
+                    "--to-worktree",
+                    "fixture@candidate",
+                    "--verify",
+                    "true",
+                    "--dry-run",
+                ];
+                args.extend(placement);
+                let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+                let cli = Cli::parse_from(&args);
+                assert_eq!(
+                    delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &args)
+                        .expect("promotion must resolve its controller-owned target before provider routing"),
+                    None,
+                    "provider runtime must not capture promotion: {args:?}"
+                );
+                assert!(matches!(
+                    cli.command
+                        .portability_contract()
+                        .lab_command()
+                        .expect("promotion declares ownership")
+                        .portability,
+                    crate::command_contract::LabCommandPortability::LocalOnly(_)
+                ));
+            }
         });
     }
 
