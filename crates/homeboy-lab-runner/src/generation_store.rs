@@ -2530,9 +2530,13 @@ fn reconcile_with_operations(
                 .generations
                 .get(generation)
                 .is_some_and(|entry| {
+                    // A proven-stopped generation cannot be observed, so its
+                    // proof of stop stands in for an observed zero; both
+                    // still require an empty durable owner set.
                     entry.drain_state == crate::RollingDrainState::Draining
                         && entry.endpoint == *session
-                        && entry.observed_active_jobs == Some(0)
+                        && (entry.observed_active_jobs == Some(0)
+                            || already_stopped.contains(generation))
                         && job_owner_ids_for(&generations, generation, &entry.endpoint).is_empty()
                 });
             if should_remove {
@@ -5055,7 +5059,7 @@ mod tests {
     }
 
     #[test]
-    fn proven_stopped_draining_generation_without_an_observed_zero_stays_retained() {
+    fn proven_stopped_draining_generation_retires_without_touching_live_owner() {
         test_support::with_isolated_home(|_| {
             let stopped = session("lease-stopped", "daemon-stopped", Some(101));
             let live = session("lease-live", "daemon-live", Some(202));
@@ -5073,22 +5077,18 @@ mod tests {
                 .stopped_leases_proven
                 .borrow_mut()
                 .insert("lease-stopped".to_string());
+            // A proven-stopped generation is never observed (#15685): its
+            // stop proof and empty owner set stand in for an observed zero.
             let result = reconcile_with("runner-a", Some(&live), &operations)
-                .expect("reconcile proven stopped generation");
+                .expect("retire proven stopped generation");
 
-            assert!(result.retired_generation_ids.is_empty());
             assert_eq!(
-                result
-                    .retirement_blockers
-                    .get("lease-stopped")
-                    .map(String::as_str),
-                Some("endpoint identity/active work unavailable; stop is not authorized")
+                result.retired_generation_ids,
+                vec!["lease-stopped".to_string()]
             );
             let projection = status_projection("runner-a", Some(&live)).expect("projection");
-            assert_eq!(projection.len(), 2);
-            assert!(projection
-                .iter()
-                .any(|entry| entry.generation == "lease-stopped"));
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].generation, "lease-live");
             assert!(operations.stopped_leases.borrow().is_empty());
             assert!(operations.terminated_pids.borrow().is_empty());
         });
