@@ -1684,6 +1684,14 @@ mod preview_tests {
         *cook
     }
 
+    fn declare_preview_fixture_capacity() {
+        // These fixtures test preview/replay semantics, not the host volume's
+        // free space. Capacity-specific tests declare their own reserve.
+        let mut config = homeboy::core::defaults::load_config();
+        config.retention.reconstructable_artifact_reserve_bytes = 0;
+        homeboy::core::defaults::save_config(&config).expect("fixture capacity policy");
+    }
+
     fn linked_preview_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
         let (repository, primary) =
             crate::test_support::shared_committed_git_repo_fixture("primary");
@@ -2449,6 +2457,7 @@ mod preview_tests {
     #[test]
     fn compiled_plan_preview_emits_placement_admission_schema() {
         crate::test_support::with_isolated_home(|_| {
+            declare_preview_fixture_capacity();
             let (_repository, workspace) = linked_preview_workspace();
             let cli = Cli::try_parse_from([
                 "homeboy".to_string(),
@@ -2524,6 +2533,7 @@ mod preview_tests {
     #[test]
     fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
         crate::test_support::with_isolated_home(|_| {
+            declare_preview_fixture_capacity();
             let source = tempfile::NamedTempFile::new().expect("prompt source");
             std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
             let repository = tempfile::tempdir().expect("repository");
@@ -2993,6 +3003,7 @@ mod preview_tests {
     #[test]
     fn local_preview_projects_prompt_evidence_without_execution_admission() {
         crate::test_support::with_isolated_home(|_| {
+            declare_preview_fixture_capacity();
             let source = tempfile::NamedTempFile::new().expect("evidence source");
             std::fs::write(source.path(), "Read this task evidence before editing.\n")
                 .expect("write prompt");
@@ -3597,6 +3608,7 @@ mod preview_tests {
     #[test]
     fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
         crate::test_support::with_isolated_home(|_| {
+            declare_preview_fixture_capacity();
             let root = tempfile::tempdir().expect("repository root");
             let remote = tempfile::tempdir().expect("bare origin");
             assert!(Command::new("git")
@@ -3882,14 +3894,15 @@ mod preview_tests {
 
     #[test]
     fn preview_and_execution_reject_missing_task_url_for_absent_provider_worktree() {
-        crate::test_support::with_isolated_home(|_| {
-            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()
-                .expect("workspace repository")
-                .display()
-                .to_string();
-            let handle = "homeboy@feature-missing-task-url";
+        crate::test_support::with_isolated_home(|home| {
+            let (_root, repository) =
+                homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::test_support::write_component_registration(
+                home.path(),
+                "fixture",
+                &repository,
+            );
+            let handle = "fixture@feature-missing-task-url";
             let args = cook(&[
                 "homeboy",
                 "agent-task",
@@ -3899,9 +3912,9 @@ mod preview_tests {
                 "--prompt",
                 "implement the issue",
                 "--repo",
-                "homeboy",
+                "fixture",
                 "--workspace",
-                &repository,
+                repository.to_str().expect("repository path"),
                 "--base",
                 "main",
                 "--head",
@@ -3916,7 +3929,10 @@ mod preview_tests {
             let execution = provision_cook_destination(&args)
                 .expect_err("execution rejects before durable Cook admission");
 
-            assert_eq!(preview.code, execution.code, "preview: {preview:?}");
+            assert_eq!(
+                preview.code, execution.code,
+                "preview: {preview:?}; execution: {execution:?}"
+            );
             assert_eq!(preview.message, execution.message);
             let missing = preview.details["args"]
                 .as_array()
