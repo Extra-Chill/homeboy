@@ -4402,7 +4402,7 @@ pub(crate) fn dispatch_cook_follow_up(
         });
     }
     let mut execution_recovery = None;
-    for bound in recipe.attempts.iter().rev().filter(|bound| {
+    if let Some(bound) = recipe.attempts.iter().rev().find(|bound| {
         bound.attempt > attempt
             && super::cook_lineage::execution_lineage(bound, &recipe.attempts).as_ref()
                 == Some(&requested_edge)
@@ -4450,25 +4450,26 @@ pub(crate) fn dispatch_cook_follow_up(
                 && retryable_provider_discovery_failure_with_store(lifecycle_store, &bound.run_id)
             {
                 execution_recovery = Some(bound.clone());
-                break;
+            } else {
+                return Ok(CookFollowUpDispatch::Dispatched {
+                    run_id: bound.run_id.clone(),
+                });
             }
-            return Ok(CookFollowUpDispatch::Dispatched {
-                run_id: bound.run_id.clone(),
-            });
+        } else {
+            return dispatch_bound_cook_follow_up(
+                recipe_store,
+                lifecycle_store,
+                options,
+                executor,
+                cook_id,
+                bound.clone(),
+                source_run_id,
+                promotion,
+                budget_scope,
+                remediation_category_usage,
+                ExecutionBudgetUsage::default(),
+            );
         }
-        return dispatch_bound_cook_follow_up(
-            recipe_store,
-            lifecycle_store,
-            options,
-            executor,
-            cook_id,
-            bound.clone(),
-            source_run_id,
-            promotion,
-            budget_scope,
-            remediation_category_usage,
-            ExecutionBudgetUsage::default(),
-        );
     }
     let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
         super::cook_lineage::execution_lineage(recipe_attempt, &recipe.attempts)

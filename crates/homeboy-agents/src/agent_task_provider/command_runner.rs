@@ -1621,10 +1621,8 @@ fn run_materialized_provider_command_once_contained(
                 &provider.backend,
                 &command,
                 &status,
-                &stdout,
-                &stderr,
-                stdout_capture.total_bytes,
-                stderr_capture.total_bytes,
+                (&stdout, stdout_capture.total_bytes),
+                (&stderr, stderr_capture.total_bytes),
                 &provider_output_redactions(request, provider),
             ),
         );
@@ -1702,10 +1700,8 @@ fn run_materialized_provider_command_once_contained(
                 &provider.backend,
                 &command,
                 &status,
-                &stdout,
-                &stderr,
-                stdout_capture.total_bytes,
-                stderr_capture.total_bytes,
+                (&stdout, stdout_capture.total_bytes),
+                (&stderr, stderr_capture.total_bytes),
                 &provider_output_redactions(request, provider),
             ),
         ),
@@ -2297,10 +2293,8 @@ fn executor_process_diagnostic_data(
     provider_backend: &str,
     command: &str,
     status: &std::process::ExitStatus,
-    stdout: &str,
-    stderr: &str,
-    stdout_bytes: u64,
-    stderr_bytes: u64,
+    (stdout, stdout_bytes): (&str, u64),
+    (stderr, stderr_bytes): (&str, u64),
     redactions: &[String],
 ) -> Value {
     let command = redact_sensitive_text(command, redactions);
@@ -2422,10 +2416,8 @@ fn signal_termination_outcome(
         &provider.backend,
         command,
         status,
-        stdout,
-        stderr,
-        stdout.len() as u64,
-        stderr.len() as u64,
+        (stdout, stdout.len() as u64),
+        (stderr, stderr.len() as u64),
         &provider_output_redactions(request, provider),
     );
     if let Some(object) = data.as_object_mut() {
@@ -2524,10 +2516,8 @@ fn surface_provider_process_failure(
         &provider.backend,
         command,
         status,
-        stdout,
-        stderr,
-        stdout.len() as u64,
-        stderr.len() as u64,
+        (stdout, stdout.len() as u64),
+        (stderr, stderr.len() as u64),
         &redactions,
     );
     let exit_description = status
@@ -3228,16 +3218,15 @@ fn redact_readiness_credentials(
 ) {
     let credentials = credential_env
         .iter()
-        .filter_map(|(_, value)| {
-            (!value.is_empty()).then(|| {
-                (
-                    value.as_str(),
-                    format!(
-                        "[REDACTED:{}]",
-                        homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes())
-                    ),
-                )
-            })
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(_, value)| {
+            (
+                value.as_str(),
+                format!(
+                    "[REDACTED:{}]",
+                    homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes())
+                ),
+            )
         })
         .collect::<Vec<_>>();
     for (credential, _) in &credentials {
@@ -3287,7 +3276,9 @@ fn redact_json_credential(value: &mut Value, credential: &str, replacement: &str
                 entries.insert(key.replace(credential, replacement), item);
             }
         }
-        Value::Null | Value::Bool(_) | Value::Number(_) if value.to_string() == credential => {
+        Value::Null | Value::Bool(_) | Value::Number(_)
+            if serde_json::from_str::<Value>(credential).is_ok_and(|parsed| &parsed == value) =>
+        {
             *value = Value::String(replacement.to_string());
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
