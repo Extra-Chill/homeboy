@@ -6,9 +6,9 @@
 use crate::observation::ArtifactRecord;
 
 pub use homeboy_artifact_ref_contract::artifact_ref::{
-    artifact_uri, validate_reviewer_facing_artifact_ref, ArtifactRef, ArtifactReference,
-    EvidenceRef, ReviewerFacingArtifactRefError, ARTIFACT_REF_SCHEMA, EVIDENCE_REF_SCHEMA,
-    HOMEBOY_REF_SCHEME, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
+    artifact_uri, validate_reviewer_facing_artifact_ref, AgentTaskArtifactSelector, ArtifactRef,
+    ArtifactReference, EvidenceRef, ReviewerFacingArtifactRefError, ARTIFACT_REF_SCHEMA,
+    EVIDENCE_REF_SCHEMA, HOMEBOY_REF_SCHEME, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
 };
 
 /// Build an [`ArtifactRef`] from an observation [`ArtifactRecord`].

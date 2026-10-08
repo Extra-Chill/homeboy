@@ -540,24 +540,8 @@ pub fn evidence_ref_task_id(evidence_ref: &AgentTaskEvidenceRef) -> Option<Strin
 /// Retain only the selectors owned by the artifact-evidence grammar. Unknown
 /// fragments may carry credentials and must never survive status projection.
 pub(crate) fn selected_artifact_reference_uri(uri: &str) -> Option<String> {
-    let parsed = parse_agent_task_homeboy_uri(uri).ok()?;
-    if parsed.section != "artifacts" {
-        return None;
-    }
-    let task = parsed.task?;
-    let artifact = parsed.artifact?;
-    let fragment = uri.split_once('#')?.1;
-    for key in ["task", "artifact"] {
-        if fragment
-            .split('&')
-            .filter(|part| part.split_once('=').map(|(name, _)| name) == Some(key))
-            .count()
-            != 1
-        {
-            return None;
-        }
-    }
-    for identifier in [&parsed.run_id, &task, &artifact] {
+    let parsed = homeboy_core::artifact_ref::AgentTaskArtifactSelector::parse(uri)?;
+    for identifier in [&parsed.run_id, &parsed.task_id, &parsed.logical_artifact_id] {
         if identifier.is_empty()
             || identifier.contains('\0')
             || homeboy_core::redaction::redact_string(identifier) != *identifier
@@ -565,12 +549,7 @@ pub(crate) fn selected_artifact_reference_uri(uri: &str) -> Option<String> {
             return None;
         }
     }
-    Some(format!(
-        "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
-        homeboy_core::execution_contract::encode_uri_component(&parsed.run_id),
-        homeboy_core::execution_contract::encode_uri_component(&task),
-        homeboy_core::execution_contract::encode_uri_component(&artifact),
-    ))
+    Some(parsed.uri())
 }
 
 pub fn hydrate_evidence_summary(task_id: &str, evidence: &AgentTaskEvidenceRef) -> Option<Value> {
