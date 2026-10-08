@@ -1227,6 +1227,63 @@ pub fn reviewer_safe_command(value: &str) -> Option<String> {
     }
 }
 
+/// Return the rejected reviewer-facing tokens and the policy each one violates.
+/// Admission callers use this to report the same policy that is enforced when
+/// constructing a reviewer-safe command.
+pub fn reviewer_unsafe_tokens(value: &str) -> Vec<(String, &'static str)> {
+    value
+        .split_whitespace()
+        .filter_map(|token| {
+            let normalized = normalize_reviewer_token(token);
+            let rule = if reviewer_credential_flag(normalized)
+                || [
+                    "token=",
+                    "secret=",
+                    "password=",
+                    "apikey=",
+                    "api_key=",
+                    "authorization=",
+                ]
+                .iter()
+                .any(|needle| normalized.to_ascii_lowercase().contains(needle))
+            {
+                Some("credential-bearing value")
+            } else if normalized.to_ascii_lowercase().contains("localhost") {
+                Some("machine-local hostname")
+            } else if normalized
+                .split([':', '/', '=', ','])
+                .any(|part| part.parse::<std::net::IpAddr>().is_ok())
+            {
+                Some("IP-literal address")
+            } else if normalized.starts_with('/')
+                || normalized.starts_with("~/")
+                || normalized.contains("=/")
+                || normalized.contains("=~/")
+                || normalized.to_ascii_lowercase().contains("/users/")
+            {
+                Some("machine-local path")
+            } else if normalized.contains("://")
+                && reqwest::Url::parse(normalized).is_ok_and(|url| {
+                    url.scheme() != "https"
+                        || url
+                            .host_str()
+                            .is_some_and(|host| host.parse::<std::net::IpAddr>().is_ok())
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                        || url.query().is_some()
+                })
+            {
+                Some("URL must be public HTTPS without credentials or query")
+            } else if operator_only_reference(normalized) {
+                Some("operator-only reference")
+            } else {
+                None
+            }?;
+            Some((token.to_string(), rule))
+        })
+        .collect()
+}
+
 fn contains_operator_only_reference(value: &str) -> bool {
     for word in value.split_whitespace() {
         let normalized = normalize_reviewer_token(word);
