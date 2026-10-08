@@ -97,6 +97,8 @@ pub enum AgentTaskCookLoopStatus {
     /// The declared gate itself was invalid or selected an inadmissible test
     /// population. This is operator remediation, never candidate-code retry.
     GateDeclarationInvalid,
+    /// Verification was stopped by its supervisor budget, without a code verdict.
+    GateBudgetExceeded,
     RetryRequested,
     RetriesExhausted,
 }
@@ -262,7 +264,21 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         classify_cook_loop_quality(&options.promotion_report, intentional_no_change.is_some());
     let failure_progression = failure_progression(&options, &failed_gates);
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
-    let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
+    // Supervisor termination is not a candidate verdict, even when an older
+    // persisted report carries a candidate-code label or a baseline delta.
+    let gate_budget_exceeded = options
+        .promotion_report
+        .deterministic_gates
+        .iter()
+        .any(|gate| {
+            matches!(
+                gate.termination,
+                crate::agent_task_gate::AgentTaskGateTermination::TimedOut
+                    | crate::agent_task_gate::AgentTaskGateTermination::NoProgress
+            )
+        });
+    let should_retry = !gate_budget_exceeded
+        && options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
         // A candidate-code label describes the candidate-side observation; it is
         // not remediation authority until immutable-base replay proves a delta.
@@ -335,7 +351,11 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         // attempt with actionable feedback, exactly like a red gate — unless the
         // retry budget is exhausted.
         (retry_budget_remaining > 0).then(|| build_review_form_follow_up_request(&options, gap))
-    } else if no_change_gap && !invalid_gate_declaration && retry_budget_remaining > 0 {
+    } else if no_change_gap
+        && !invalid_gate_declaration
+        && !gate_budget_exceeded
+        && retry_budget_remaining > 0
+    {
         Some(build_no_change_follow_up_request(&options, &failed_gates))
     } else {
         None
@@ -343,6 +363,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if gate_budget_exceeded {
+        AgentTaskCookLoopStatus::GateBudgetExceeded
     } else if invalid_gate_declaration {
         AgentTaskCookLoopStatus::GateDeclarationInvalid
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
@@ -1251,6 +1273,73 @@ mod tests {
             report.failed_gates[0].classification,
             AgentTaskGateFailureClassification::GateDeclaration
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervised_gate_budget_never_dispatches_candidate_or_no_change_repair() {
+        use crate::agent_task_gate::*;
+        use std::{sync::Arc, time::Duration};
+        let worktree = tempfile::tempdir().expect("worktree");
+        for no_progress in [true, false] {
+            let supervision = GateSupervision {
+                timeout: Duration::from_millis(if no_progress { 1000 } else { 30 }),
+                no_progress_timeout: Duration::from_millis(if no_progress { 30 } else { 1000 }),
+                heartbeat_interval: Duration::from_millis(10),
+                on_spawn: Arc::new(|_, _| Ok(())),
+                on_heartbeat: Arc::new(|_| Ok(())),
+                is_cancelled: Arc::new(|| false),
+            };
+            let gate = run_gate_command_with_supervision(
+                worktree.path(),
+                1,
+                "sleep 1",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                Some(&supervision),
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+            )
+            .expect("supervised report");
+            assert_eq!(
+                gate.failure_evidence.as_ref().unwrap().classification,
+                AgentTaskGateFailureClassification::ExecutionBudget
+            );
+            for unchanged in [false, true] {
+                // An older persisted report may have both a candidate-code label
+                // and a candidate-regression comparison. Typed termination wins.
+                let mut gate = gate.clone();
+                gate.failure_evidence.as_mut().unwrap().classification =
+                    AgentTaskGateFailureClassification::CandidateCode;
+                gate.baseline_comparison = failed_gate().baseline_comparison;
+                let mut promotion = promotion_report(
+                    if unchanged {
+                        AgentTaskPromotionStatus::NoChangesGateFailed
+                    } else {
+                        AgentTaskPromotionStatus::GateFailed
+                    },
+                    vec![gate],
+                );
+                if unchanged {
+                    promotion.changed_files.clear();
+                }
+                let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                    source_request: source_request(),
+                    promotion_report: promotion,
+                    attempt: 1,
+                    max_attempts: 3,
+                    source_run_id: None,
+                    current_diff: String::new(),
+                    require_review_form: false,
+                    review_form: None,
+                    metadata: Value::Null,
+                });
+                assert_eq!(report.status, AgentTaskCookLoopStatus::GateBudgetExceeded);
+                assert!(report.follow_up_request.is_none());
+                assert_eq!(report.retry_budget_remaining, 2);
+            }
+        }
     }
 
     #[test]
