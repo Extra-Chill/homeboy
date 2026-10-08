@@ -1441,8 +1441,9 @@ fn execute_manual_verification(
         let mut evidence = Vec::new();
         for command in commands {
             let command = command.trim();
+            let argv = homeboy::agents::agent_tasks::gate::legacy_gate_argv(command);
             let mut child = Command::new("sh")
-                .args(["-lc", command])
+                .args(&argv[1..])
                 .current_dir(&checkout_path)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1466,7 +1467,7 @@ fn execute_manual_verification(
             })?;
             let candidate_unchanged = !manual_checkout_has_tracked_changes(&checkout_path)?;
             evidence.push(serde_json::json!({
-                "command": ["sh", "-lc", homeboy::core::redaction::redact_string(command)],
+                "command": homeboy::agents::agent_tasks::gate::legacy_gate_argv(&homeboy::core::redaction::redact_string(command)),
                 "exit_code": output.status.code().unwrap_or(1),
                 "stdout": bounded_manual_gate_output(&output.stdout),
                 "stderr": bounded_manual_gate_output(&output.stderr),

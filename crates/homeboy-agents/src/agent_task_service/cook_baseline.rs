@@ -440,7 +440,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     &homeboy_core::engine::invocation::InvocationRequirements::default(),
                 )?;
                 match &invocation {
-                    AgentTaskGateInvocation::LegacyShell { command } => {
+                    AgentTaskGateInvocation::LegacyShell { command, .. } => {
                         run_gate_command_with_timeout(
                             &baseline_gate_workspace,
                             index + 1,
@@ -468,6 +468,21 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                 }
             })();
             if let Ok(baseline) = &baseline {
+                if baseline.invocation()?.identity_digest()? != invocation.identity_digest()? {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: String::new(),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay uses a different shell invocation contract than the recorded candidate; recapture candidate evidence"
+                                .to_string(),
+                        ),
+                    });
+                    baseline_run_dir.finish(true);
+                    continue;
+                }
                 if baseline.environment.package_artifacts != gate.environment.package_artifacts {
                     gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
                         base_ref: base_sha.to_string(),
@@ -1007,6 +1022,14 @@ mod tests {
                 AgentTaskGateDifferentialResult::Inconclusive,
                 false,
             ),
+            (
+                "historical-shell-contract",
+                "printf 'same\\n' >&2; exit 1",
+                "same\n",
+                std::time::Duration::from_secs(1),
+                AgentTaskGateDifferentialResult::Inconclusive,
+                false,
+            ),
         ] {
             let temp = tempfile::tempdir().expect("repository");
             git_output(temp.path(), &["init", "-b", "main"]).expect("init");
@@ -1031,7 +1054,11 @@ mod tests {
                 .expect("promotion");
             let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
                 name,
-                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                if name == "historical-shell-contract" {
+                    vec!["sh".to_string(), "-lc".to_string(), command.to_string()]
+                } else {
+                    crate::agent_task_gate::legacy_gate_argv(command)
+                },
                 1,
                 "",
                 candidate_output,
@@ -1097,7 +1124,7 @@ mod tests {
 
         let command = "cd packages/missing-component && cargo test";
         let candidate = std::process::Command::new("sh")
-            .args(["-lc", command])
+            .args(&crate::agent_task_gate::legacy_gate_argv(command)[1..])
             .current_dir(temp.path())
             .output()
             .expect("run candidate gate");
@@ -1118,7 +1145,7 @@ mod tests {
         let exit_code = candidate.status.code().unwrap_or(1);
         let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
             "monorepo-gate",
-            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+            crate::agent_task_gate::legacy_gate_argv(command),
             exit_code,
             &stdout,
             &stderr,

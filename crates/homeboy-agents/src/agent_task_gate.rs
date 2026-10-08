@@ -644,7 +644,7 @@ pub struct AgentTaskGateReport {
     pub status: AgentTaskGateStatus,
     pub command: Vec<String>,
     /// The durable execution contract. Older reports only have `command`; they
-    /// are decoded as legacy `sh -lc` invocations by `invocation()`.
+    /// are decoded from their recorded shell argv by `invocation()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation: Option<AgentTaskGateInvocation>,
     pub exit_code: i32,
@@ -950,16 +950,66 @@ pub enum AgentTaskGateTermination {
 pub enum AgentTaskGateInvocation {
     LegacyShell {
         command: String,
+        #[serde(default, skip_serializing_if = "LegacyGateShell::is_historical")]
+        shell: LegacyGateShell,
     },
     DeclaredTest {
         plan: homeboy_engine_primitives::test_execution::TestExecutionPlan,
     },
 }
 
+/// Missing mode means the historical login-shell contract, never today's default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyGateShell {
+    #[default]
+    HistoricalLogin,
+    NonInteractive,
+}
+
+impl LegacyGateShell {
+    fn is_historical(&self) -> bool {
+        *self == Self::HistoricalLogin
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::HistoricalLogin => "-lc",
+            Self::NonInteractive => "-c",
+        }
+    }
+}
+
+/// Canonical fresh legacy gate program: non-login, noninteractive POSIX sh.
+/// Preserve the environment selected by the verification kernel, including PATH.
+pub fn legacy_gate_argv(command: &str) -> Vec<String> {
+    vec![
+        "sh".to_string(),
+        LegacyGateShell::NonInteractive.flag().to_string(),
+        command.to_string(),
+    ]
+}
+
+fn recorded_legacy_gate_invocation(argv: &[String]) -> Option<AgentTaskGateInvocation> {
+    match argv {
+        [shell, flag, command] if shell == "sh" && (flag == "-lc" || flag == "-c") => {
+            Some(AgentTaskGateInvocation::LegacyShell {
+                command: command.clone(),
+                shell: if flag == "-lc" {
+                    LegacyGateShell::HistoricalLogin
+                } else {
+                    LegacyGateShell::NonInteractive
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
 impl AgentTaskGateInvocation {
     pub(crate) fn reviewer_command(&self) -> String {
         match self {
-            Self::LegacyShell { command } => command.clone(),
+            Self::LegacyShell { command, .. } => command.clone(),
             Self::DeclaredTest { plan } => homeboy_engine_primitives::shell::quote_args(
                 plan.declared_command()
                     .expect("declared test invocation was validated before persistence"),
@@ -969,12 +1019,13 @@ impl AgentTaskGateInvocation {
 
     pub(crate) fn identity_digest(&self) -> Result<String> {
         match self {
-            // Finalization receipts persisted this exact digest before typed
-            // plans existed; preserving it keeps inherited proof stable across
-            // a controller upgrade.
-            Self::LegacyShell { command } => Ok(
+            // Identity includes the actual shell mode. Missing serialized mode
+            // retains historical receipts; fresh non-login execution is new proof.
+            Self::LegacyShell { command, shell } => Ok(
                 homeboy_engine_primitives::content_hash::nul_separated_digest([
-                    "sh", "-lc", command,
+                    "sh",
+                    shell.flag(),
+                    command,
                 ]),
             ),
             Self::DeclaredTest { .. } => {
@@ -1269,19 +1320,14 @@ impl AgentTaskGateReport {
             }
             return Ok(invocation.clone());
         }
-        match self.command.as_slice() {
-            [shell, flag, command] if shell == "sh" && flag == "-lc" => {
-                Ok(AgentTaskGateInvocation::LegacyShell {
-                    command: command.clone(),
-                })
-            }
-            _ => Err(Error::validation_invalid_argument(
+        recorded_legacy_gate_invocation(&self.command).ok_or_else(|| {
+            Error::validation_invalid_argument(
                 "gate.command",
-                "historical gate reports must contain a concrete `sh -lc` invocation",
+                "legacy gate reports must contain a concrete `sh -lc` or `sh -c` invocation",
                 Some(self.id.clone()),
                 None,
-            )),
-        }
+            )
+        })
     }
 
     /// Detect the exact durable marker a portable-Lab-route command emits when
@@ -1319,14 +1365,7 @@ impl AgentTaskGateReport {
     ) -> Self {
         let id = id.into();
         let stdout = stdout.into();
-        let invocation = match command.as_slice() {
-            [shell, flag, source] if shell == "sh" && flag == "-lc" => {
-                Some(AgentTaskGateInvocation::LegacyShell {
-                    command: source.clone(),
-                })
-            }
-            _ => None,
-        };
+        let invocation = recorded_legacy_gate_invocation(&command);
         let status = if Self::gate_stdout_reports_deferred_workload(&stdout) {
             AgentTaskGateStatus::Deferred
         } else if exit_code == 0 {
@@ -1396,14 +1435,7 @@ impl AgentTaskGateReport {
         blocking_gate_id: impl Into<String>,
     ) -> Self {
         let id = id.into();
-        let invocation = match command.as_slice() {
-            [shell, flag, source] if shell == "sh" && flag == "-lc" => {
-                Some(AgentTaskGateInvocation::LegacyShell {
-                    command: source.clone(),
-                })
-            }
-            _ => None,
-        };
+        let invocation = recorded_legacy_gate_invocation(&command);
         let skip_reason = AgentTaskGateSkipReason {
             blocking_gate_id: blocking_gate_id.into(),
             reason: "ordered_fail_fast".to_string(),
@@ -1838,7 +1870,7 @@ pub fn run_gate_command_with_supervision(
     run_gate_argv_with_supervision(
         cwd,
         index,
-        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+        legacy_gate_argv(command),
         command,
         visibility,
         reveal_policy,
@@ -1851,6 +1883,7 @@ pub fn run_gate_command_with_supervision(
     .map(|mut report| {
         report.invocation = Some(AgentTaskGateInvocation::LegacyShell {
             command: command.to_string(),
+            shell: LegacyGateShell::NonInteractive,
         });
         report
     })
@@ -2283,7 +2316,7 @@ pub(crate) fn run_gate_command_with_timeout(
     run_gate_argv(
         cwd,
         index,
-        vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+        legacy_gate_argv(command),
         command,
         visibility,
         reveal_policy,
@@ -2300,6 +2333,7 @@ pub(crate) fn run_gate_command_with_timeout(
     .map(|mut report| {
         report.invocation = Some(AgentTaskGateInvocation::LegacyShell {
             command: command.to_string(),
+            shell: LegacyGateShell::NonInteractive,
         });
         report
     })
@@ -4014,7 +4048,7 @@ fn gate_failure_evidence(
                 format!("declared npm gate is missing script `{script}`: {command}")
             }
             (None, Some(line)) => {
-                format!("gate shell `sh -lc` rejected the gate program itself: {line}")
+                format!("gate shell `sh -c` rejected the gate program itself: {line}")
             }
             (None, None) if capability_preflight => format!(
                 "gate environment cannot run `{command}`: Homeboy capability preflight failed before checking the candidate"
@@ -4046,7 +4080,7 @@ fn gate_failure_evidence(
                 "The declared gate is invalid, not candidate-code feedback. Add `scripts.{script}` to the relevant package.json or change/remove `{command}` before rerunning Cook."
             ),
             (None, Some(line)) => format!(
-                "The declared gate is invalid, not candidate-code feedback. Gates run under POSIX `sh -lc`, which rejected the gate program before it checked anything (`{line}`). Rewrite it for POSIX sh (for example drop `set -o pipefail` and other bash-only syntax) or invoke bash explicitly, e.g. `bash ./verify.sh`, before rerunning Cook."
+                "The declared gate is invalid, not candidate-code feedback. Gates run under POSIX `sh -c`, which rejected the gate program before it checked anything (`{line}`). Rewrite it for POSIX sh (for example drop `set -o pipefail` and other bash-only syntax) or invoke bash explicitly, e.g. `bash ./verify.sh`, before rerunning Cook."
             ),
             (None, None) if capability_preflight => format!(
                 "The gate environment is broken, not candidate-code feedback. `{command}` failed Homeboy's capability preflight (for example an extension manifest could not be read in the gate environment) before it checked the candidate. Repair the component or extension on the executing runner, or declare a gate that runs there, then resume Cook. Do not change repository code to satisfy this gate."
@@ -4082,7 +4116,7 @@ fn homeboy_capability_preflight_failure(stdout: &str, stderr: &str) -> bool {
     stdout.contains(MARKER) || stderr.contains(MARKER)
 }
 
-/// Detects a gate program rejected by the `sh -lc` interpreter itself.
+/// Detects a gate program rejected by the POSIX sh interpreter itself.
 ///
 /// Gates run under POSIX `sh` (dash on Debian/Ubuntu). A program using
 /// bash-only syntax such as `set -o pipefail` dies before checking anything,
@@ -4739,7 +4773,7 @@ mod tests {
             evidence.summary
         );
         assert!(
-            evidence.agent_feedback.contains("POSIX `sh -lc`"),
+            evidence.agent_feedback.contains("POSIX `sh -c`"),
             "feedback must explain the gate shell: {}",
             evidence.agent_feedback
         );
@@ -5952,6 +5986,7 @@ mod tests {
         let command = "cargo test --locked".to_string();
         let invocation = AgentTaskGateInvocation::LegacyShell {
             command: command.clone(),
+            shell: LegacyGateShell::HistoricalLogin,
         };
         assert_eq!(
             invocation.identity_digest().unwrap(),
@@ -5960,6 +5995,412 @@ mod tests {
                 "-lc",
                 command.as_str(),
             ])
+        );
+        let historical: AgentTaskGateInvocation = serde_json::from_value(serde_json::json!({
+            "kind": "legacy_shell", "command": command
+        }))
+        .unwrap();
+        assert_eq!(historical, invocation);
+        let fresh = recorded_legacy_gate_invocation(&legacy_gate_argv(&command)).unwrap();
+        assert_ne!(
+            fresh.identity_digest().unwrap(),
+            historical.identity_digest().unwrap()
+        );
+        assert_eq!(
+            fresh.identity_digest().unwrap(),
+            homeboy_engine_primitives::content_hash::nul_separated_digest([
+                "sh",
+                "-c",
+                command.as_str(),
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_login_shell_argv_is_executed_and_recorded_verbatim() {
+        let workspace = tempfile::tempdir().unwrap();
+        for shell in ["sh", "bash"] {
+            let argv = vec![
+                shell.to_string(),
+                "-lc".to_string(),
+                "printf explicitly-declared".to_string(),
+            ];
+            let report = run_gate_argv_with_supervision(
+                workspace.path(),
+                1,
+                argv.clone(),
+                "explicit login shell",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                None,
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+                None,
+            )
+            .unwrap();
+            assert_eq!(report.command, argv);
+            assert_eq!(report.exit_code, 0);
+            assert_eq!(report.stdout, "explicitly-declared");
+            let recorded: AgentTaskGateReport =
+                serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
+            assert_eq!(recorded.command, argv);
+        }
+        // A pre-invocation report is historical evidence, not a fresh program.
+        let mut value = serde_json::to_value(AgentTaskGateReport::new(
+            "historical",
+            vec!["sh".to_string(), "-lc".to_string(), "false".to_string()],
+            1,
+            "",
+            "",
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("invocation");
+        let historical: AgentTaskGateReport = serde_json::from_value(value).unwrap();
+        assert_eq!(historical.command, ["sh", "-lc", "false"]);
+        assert_eq!(
+            historical.invocation().unwrap().identity_digest().unwrap(),
+            homeboy_engine_primitives::content_hash::nul_separated_digest(["sh", "-lc", "false"])
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "native engineering proof requires initialized Bash4+ on PATH"]
+    fn legacy_gate_preserves_initialized_bash_toolchain_and_bashpid() {
+        let initialized = Command::new("bash")
+            .args(["-c", "test -n \"$BASHPID\" && printf '%s' \"$BASH\""])
+            .output()
+            .unwrap();
+        assert!(
+            initialized.status.success(),
+            "native proof requires initialized Bash4+"
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let bin = workspace.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        std::os::unix::fs::symlink(
+            String::from_utf8(initialized.stdout).unwrap(),
+            bin.join("bash"),
+        )
+        .unwrap();
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.isolate_home = true;
+        policy.isolate_xdg = true;
+        policy.hydrate_rust_cache = false;
+        policy.variables.insert(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        );
+        preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[AgentTaskGateToolchainRequirement {
+                command: "bash".to_string(),
+                probe_arguments: vec!["-c".to_string(), "test -n \"$BASHPID\"".to_string()],
+            }],
+            &[],
+            Some(runtime.path()),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        fs::write(
+            workspace.path().join("bash-proof.sh"),
+            "test -n \"$BASHPID\" && printf '%s\\n' \"$BASH_VERSION\"\n",
+        )
+        .unwrap();
+        let command = "set -eu; command -v bash; bash ./bash-proof.sh; sh -c 'command -v bash; bash ./bash-proof.sh'";
+        let candidate = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            workspace.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(runtime.path()),
+            &policy,
+            &[],
+        )
+        .unwrap();
+        let baseline = run_gate_command_with_timeout(
+            workspace.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            runtime.path(),
+            Duration::from_secs(5),
+            &policy,
+            &[],
+        )
+        .unwrap();
+        for report in [&candidate, &baseline] {
+            assert_eq!(report.exit_code, 0, "{}", report.stderr);
+            let lines: Vec<_> = report.stdout.lines().collect();
+            assert_eq!(lines.len(), 4);
+            assert_eq!(lines[0], bin.join("bash").to_str().unwrap());
+            assert_eq!(lines[0], lines[2]);
+            assert_eq!(lines[1], lines[3]);
+            eprintln!("initialized Bash gate version: {}", lines[1]);
+        }
+        assert_eq!(candidate.stdout, baseline.stdout);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_gate_preserves_declared_path_at_readiness_candidate_and_baseline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime = tempfile::tempdir().expect("runtime");
+        let bin = workspace.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        // Shadow a system tool so login-profile PATH reordering is observable.
+        let tool = bin.join("bash");
+        fs::write(&tool, "#!/bin/sh\nset -eu\ntest -d \"$HOME\"\ntest -d \"$XDG_CONFIG_HOME\"\ntest \"$HOME\" != \"$OPERATOR_HOME\"\nif test \"${1:-}\" = readiness; then printf '%s\\n' \"$0\" > \"$READINESS_RECORD\"; else printf '%s\\n' \"$0\"; fi\n").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let readiness = workspace.path().join("readiness");
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.isolate_home = true;
+        policy.isolate_xdg = true;
+        policy.hydrate_rust_cache = false;
+        policy.variables.insert(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        );
+        policy.variables.insert(
+            "OPERATOR_HOME".to_string(),
+            std::env::var("HOME").unwrap_or_default(),
+        );
+        policy.variables.insert(
+            "READINESS_RECORD".to_string(),
+            readiness.display().to_string(),
+        );
+        preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[AgentTaskGateToolchainRequirement {
+                command: "bash".to_string(),
+                probe_arguments: vec!["readiness".to_string()],
+            }],
+            &[],
+            Some(runtime.path()),
+            Duration::from_secs(5),
+        )
+        .expect("declared readiness tool");
+        let observed = fs::read_to_string(&readiness).unwrap();
+        assert_eq!(observed.trim(), tool.to_str().unwrap());
+        let command = "set -eu; command -v bash; bash; sh -c 'command -v bash; bash'";
+        let candidate = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            workspace.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(runtime.path()),
+            &policy,
+            &[],
+        )
+        .expect("candidate execution");
+        let baseline = run_gate_command_with_timeout(
+            workspace.path(),
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            runtime.path(),
+            Duration::from_secs(5),
+            &policy,
+            &[],
+        )
+        .expect("bounded baseline execution");
+        for report in [&candidate, &baseline] {
+            assert_eq!(report.exit_code, 0, "{}", report.stderr);
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            assert_eq!(report.stdout, observed.repeat(4));
+            assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+            assert!(report
+                .environment
+                .sanitized
+                .iter()
+                .any(|variable| variable.name == "HOME"));
+            assert!(report
+                .environment
+                .sanitized
+                .iter()
+                .any(|variable| variable.name == "XDG_CONFIG_HOME"));
+        }
+        assert_eq!(
+            candidate.invocation().unwrap().identity_digest().unwrap(),
+            baseline.invocation().unwrap().identity_digest().unwrap()
+        );
+    }
+
+    /// Runs the external Action's real release-wrapper suite without editing or
+    /// copying its programs. Source and toolchain are explicit engineering inputs.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires an owned read-only Homeboy Action checkout and declared Bash4+ toolchain"]
+    fn legacy_gate_runs_unchanged_action_release_wrapper_suite() {
+        let action = fs::canonicalize(
+            std::env::var("HOMEBOY_TEST_ACTION_REFERENCE").expect("Action checkout"),
+        )
+        .unwrap();
+        let declared_path =
+            std::env::var("HOMEBOY_TEST_ACTION_TOOLCHAIN_PATH").expect("declared toolchain PATH");
+        let evidence = PathBuf::from(
+            std::env::var("HOMEBOY_TEST_ACTION_EVIDENCE_DIR").expect("owned evidence directory"),
+        );
+        fs::create_dir_all(&evidence).unwrap();
+        let source = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&action)
+            .output()
+            .unwrap();
+        assert!(source.status.success());
+        let source = String::from_utf8(source.stdout).unwrap().trim().to_string();
+        let clean = || {
+            let status = Command::new("git")
+                .args(["status", "--porcelain=v1", "--untracked-files=all"])
+                .current_dir(&action)
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+            assert!(
+                status.stdout.is_empty(),
+                "Action reference must stay unchanged"
+            );
+        };
+        clean();
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy.mode = AgentTaskGateEnvironmentMode::Replace;
+        policy.isolate_home = true;
+        policy.isolate_xdg = true;
+        policy.hydrate_rust_cache = false;
+        policy
+            .variables
+            .insert("PATH".to_string(), declared_path.clone());
+        let candidate_runtime = tempfile::tempdir_in(&evidence).unwrap();
+        let baseline_runtime = tempfile::tempdir_in(&evidence).unwrap();
+        let timeout = Duration::from_secs(120);
+        for runtime in [&candidate_runtime, &baseline_runtime] {
+            preflight_gate_toolchains(
+                &action,
+                &policy,
+                &[
+                    AgentTaskGateToolchainRequirement {
+                        command: "bash".to_string(),
+                        probe_arguments: vec!["-c".to_string(), "test -n \"$BASHPID\"".to_string()],
+                    },
+                    AgentTaskGateToolchainRequirement {
+                        command: "jq".to_string(),
+                        probe_arguments: vec!["--version".to_string()],
+                    },
+                    AgentTaskGateToolchainRequirement {
+                        command: "python3".to_string(),
+                        probe_arguments: vec!["--version".to_string()],
+                    },
+                ],
+                &[],
+                Some(runtime.path()),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        }
+        let supervision = GateSupervision {
+            timeout,
+            no_progress_timeout: timeout,
+            heartbeat_interval: Duration::from_secs(1),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(|| false),
+        };
+        let versions = run_gate_command_with_supervision(&action, 1,
+            "set -eu; command -v bash; bash --version; jq --version; python3 --version; test -d \"$HOME\"; test -d \"$XDG_CONFIG_HOME\"; sh -c 'command -v bash; bash --version'",
+            AgentTaskGateVisibility::Visible, AgentTaskGateRevealPolicy::FullEvidence,
+            Some(candidate_runtime.path()), Some(&supervision), &policy, &[]).unwrap();
+        fs::write(
+            evidence.join("toolchain-report.json"),
+            serde_json::to_vec_pretty(&versions).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(versions.exit_code, 0, "{}", versions.stderr);
+        let command = "bash scripts/release/test-run-release-wrapper.sh";
+        let candidate = run_gate_command_with_supervision(
+            &action,
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(candidate_runtime.path()),
+            Some(&supervision),
+            &policy,
+            &[],
+        )
+        .unwrap();
+        let baseline = run_gate_command_with_timeout(
+            &action,
+            1,
+            command,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            baseline_runtime.path(),
+            timeout,
+            &policy,
+            &[],
+        )
+        .unwrap();
+        fs::write(
+            evidence.join("candidate-report.json"),
+            serde_json::to_vec_pretty(&candidate).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            evidence.join("baseline-report.json"),
+            serde_json::to_vec_pretty(&baseline).unwrap(),
+        )
+        .unwrap();
+        fs::write(evidence.join("source.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "action_sha": source, "declared_path": declared_path, "command": command, "timeout_seconds": timeout.as_secs()
+        })).unwrap()).unwrap();
+        clean();
+        let mut counts = Vec::new();
+        for (owner, report) in [("candidate", &candidate), ("baseline", &baseline)] {
+            let passed = report
+                .stdout
+                .lines()
+                .filter(|line| line.starts_with("PASS:"))
+                .count();
+            let failed = report
+                .stdout
+                .lines()
+                .filter(|line| line.starts_with("FAIL:"))
+                .count();
+            eprintln!("Action {source} {owner}: exit={}, termination={:?}, PASS={passed}, FAIL={failed}\n{}\n{}", report.exit_code, report.termination, report.stdout, report.stderr);
+            assert_eq!(report.exit_code, 0, "{owner} wrapper suite failed; retained reports contain bounded failure/timeout evidence");
+            assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+            assert!(passed > 0);
+            assert_eq!(failed, 0);
+            assert!(report
+                .stdout
+                .contains("All run-release wrapper checks passed."));
+            assert!(report
+                .stdout
+                .contains("PASS: release liveness timeout cleans descendants without mutation"));
+            counts.push(passed);
+        }
+        assert_eq!(counts[0], counts[1]);
+        assert_eq!(candidate.command, legacy_gate_argv(command));
+        assert_eq!(candidate.command, baseline.command);
+        assert_eq!(
+            candidate.invocation().unwrap().identity_digest().unwrap(),
+            baseline.invocation().unwrap().identity_digest().unwrap()
         );
     }
 

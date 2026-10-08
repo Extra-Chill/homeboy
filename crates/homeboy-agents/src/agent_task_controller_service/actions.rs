@@ -1477,8 +1477,7 @@ pub(super) fn run_command_gate_check(
 
     let mut child_command = Command::new("sh");
     child_command
-        .arg("-lc")
-        .arg(command)
+        .args(&crate::agent_task_gate::legacy_gate_argv(command)[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {

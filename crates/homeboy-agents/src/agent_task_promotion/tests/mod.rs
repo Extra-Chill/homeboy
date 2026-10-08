@@ -130,7 +130,7 @@ impl FakePromotionWorkspaceProvider {
         }
         Ok(AgentTaskGateReport::new(
             format!("gate-{index}"),
-            vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+            crate::agent_task_gate::legacy_gate_argv(command),
             self.verify_exit_code,
             String::new(),
             String::new(),
