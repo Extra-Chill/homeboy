@@ -761,10 +761,13 @@ fn apply_preview_worktree_capacity(
 ) {
     let Some(capacity) = capacity else { return };
     resolved["workspace"]["capacity"] = capacity.clone();
-    if capacity["state"] != "shortfall"
-        || resolved["placement"]["selected"].as_str() == Some("lab")
-        || resolved["placement"]["requested"].as_str() == Some("lab")
-    {
+    let allocates_controller_worktree = resolved["workspace"]["kind"] == "native"
+        && resolved["workspace"]["action"] == "planned_create";
+    let provider_on_lab = resolved["placement"]["selected"].as_str() == Some("lab")
+        || resolved["placement"]["requested"].as_str() == Some("lab");
+    // Provider placement does not move a planned controller checkout onto the
+    // runner's filesystem. Its allocation retains the controller's reserve.
+    if capacity["state"] != "shortfall" || (provider_on_lab && !allocates_controller_worktree) {
         return;
     }
     let shortfall = capacity["shortfall_bytes"].as_u64().unwrap_or_default();
@@ -11172,13 +11175,69 @@ mod tests {
         apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
         assert!(resolved["placement"].get("admission").is_none());
 
-        let mut lab = serde_json::json!({ "placement": { "selected": "lab" } });
-        apply_preview_worktree_capacity(
-            &mut lab,
-            Some(&serde_json::json!({ "state": "shortfall", "shortfall_bytes": 10 })),
-            None,
-        );
-        assert!(lab["placement"].get("admission").is_none());
+        for workspace in [
+            serde_json::json!({"action": "planned_reuse", "kind": "preview_local"}),
+            serde_json::json!({"action": "materialization_required", "kind": "runner"}),
+            serde_json::json!({"action": "planned_create", "kind": "runner"}),
+        ] {
+            let mut lab = serde_json::json!({ "placement": { "selected": "lab", "requested": "lab" }, "workspace": workspace });
+            apply_preview_worktree_capacity(
+                &mut lab,
+                Some(&serde_json::json!({ "state": "shortfall", "shortfall_bytes": 10 })),
+                None,
+            );
+            assert!(lab["placement"].get("admission").is_none(), "{lab}");
+        }
+    }
+
+    #[test]
+    fn planned_controller_worktree_shortfall_blocks_lab_preview() {
+        crate::test_support::with_isolated_home(|home| {
+            let config_path = home.path().join(".config/homeboy/homeboy.json");
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("config directory");
+            std::fs::write(
+                &config_path,
+                r#"{"retention":{"reconstructable_artifact_reserve_bytes":18446744073709551615}}"#,
+            )
+            .expect("constrained reserve config");
+            homeboy::core::defaults::reset_config_cache_for_test();
+            let root = tempfile::tempdir().expect("controller filesystem");
+            let destination = root.path().join("planned-worktree");
+            let capacity =
+                homeboy::core::cleanup::reconstructable_artifact_capacity_preview(&destination);
+            assert_eq!(capacity["state"], "shortfall");
+            let mut resolved = serde_json::json!({
+                "workspace": {"action": "planned_create", "kind": "native", "path": destination},
+                "placement": {"requested": "lab", "selected": "lab", "admission": super::admissible_preview_admission()}
+            });
+            apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
+            let preview = super::cook_preview_result(
+                resolved,
+                Vec::new(),
+                super::PreviewReplayArgv {
+                    argv: Vec::new(),
+                    requires: Vec::new(),
+                },
+                None,
+                None,
+            );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "blocked"
+            );
+            assert_eq!(preview["resolved"]["workspace"]["capacity"], capacity);
+            assert!(preview["failure"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("below its configured reserve")));
+            assert!(preview["failure"]["next_action"]
+                .as_str()
+                .is_some_and(|action| action.starts_with("homeboy cleanup")));
+            assert!(
+                !destination.exists(),
+                "capacity preview must not allocate a checkout"
+            );
+        });
     }
 
     #[test]
@@ -11194,11 +11253,15 @@ mod tests {
             .expect("constrained reserve config");
             homeboy::core::defaults::reset_config_cache_for_test();
 
-            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()
-                .expect("workspace repository");
-            let destination = "homeboy@feature-preview-capacity";
+            let (_root, repository) =
+                homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::test_support::write_component_registration(
+                home.path(),
+                "fixture",
+                &repository,
+            );
+            let destination = "fixture@feature-preview-capacity";
+            let head = "feature/preview-capacity";
             let cli = Cli::try_parse_from([
                 "homeboy",
                 "agent-task",
@@ -11209,16 +11272,15 @@ mod tests {
                 "--prompt",
                 "implement the issue",
                 "--repo",
-                "homeboy",
+                "fixture",
                 "--workspace",
                 repository.to_str().expect("repository path"),
                 "--base",
-                // CI checks out the candidate by SHA without a local main ref.
-                "HEAD",
+                "main",
                 "--head",
-                "feature/preview-capacity",
+                head,
                 "--task-url",
-                "https://github.com/Extra-Chill/homeboy/issues/15150",
+                "https://example.test/issues/15150",
                 "--to-worktree",
                 destination,
                 "--placement",
@@ -11243,12 +11305,15 @@ mod tests {
             let target = repository
                 .parent()
                 .expect("worktree parent")
-                .join("homeboy@feature-preview-capacity");
+                .join(destination);
             assert!(!target.exists(), "preview must not create destination");
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["state"],
                 "blocked"
             );
+            assert!(preview["failure"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("below its configured reserve")));
         });
     }
 
