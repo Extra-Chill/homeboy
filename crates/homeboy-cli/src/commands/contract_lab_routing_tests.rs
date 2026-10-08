@@ -123,6 +123,20 @@ fn agent_task_cook_coordinator_stays_controller_local() {
     assert!(!contract.routing_policy.default_lab_offload);
 }
 
+/// #15668: the controller-owned gate wording documents that deterministic
+/// gates follow the cook's placement instead of always gating locally.
+#[test]
+fn cook_coordinator_contract_documents_gates_following_placement() {
+    let reason =
+        crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON;
+    assert!(
+        reason.contains("Deterministic gates follow that placement"),
+        "{reason}"
+    );
+    assert!(reason.contains("gates on its attempt runner"), "{reason}");
+    assert!(reason.contains("`--gate-runner`"), "{reason}");
+}
+
 #[test]
 fn agent_task_cook_no_finalize_is_still_controller_local() {
     let command = parsed_command(&[

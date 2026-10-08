@@ -221,7 +221,7 @@ homeboy_engine_primitives::provider_registry_arc! {
     provider: dyn LabGateTransport,
     noop: Unavailable,
     register: pub fn register_lab_gate_transport,
-    active: fn active_transport,
+    active: pub(crate) fn active_transport,
 }
 
 pub(super) fn dispatch(

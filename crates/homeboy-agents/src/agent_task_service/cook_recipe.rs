@@ -884,6 +884,38 @@ pub fn validate_initial_recipe_compatibility_in_store(
     Ok(())
 }
 
+/// Deterministic gates follow the cook's placement (#15668): a Lab-placed
+/// cook with no explicit gate runner gates on the same runner its provider
+/// attempts are dispatched to. An explicit `--gate-runner` (or a declared
+/// gate command that pins its own runner) always wins, and local placement
+/// is unchanged.
+fn default_gate_lab_runner_from_attempt_dispatch(
+    gates: &mut crate::agent_task_gate::VerifyGateOptions,
+    attempt_dispatch: &Value,
+) {
+    if gates.gate_environment.lab_runner.is_some()
+        || attempt_dispatch.get("kind").and_then(Value::as_str) != Some("lab")
+    {
+        return;
+    }
+    let Some(runner_id) = attempt_dispatch.get("runner_id").and_then(Value::as_str) else {
+        return;
+    };
+    for command in gates.verify.iter().chain(gates.private_verify.iter()) {
+        // A declared gate that pins its own runner keeps that placement. A
+        // declaration whose own runner cannot be resolved in this process
+        // has not pinned one; it keeps its execution-time error surface.
+        if crate::agent_task_gate::placement::declared_runner(command)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+    }
+    gates.gate_environment.lab_runner = Some(runner_id.to_string());
+}
+
 fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
     let attempt_dispatch = options
         .provider_transport
@@ -892,6 +924,8 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         .map(|dispatcher| dispatcher.durable_recipe())
         .transpose()?
         .unwrap_or_else(|| serde_json::json!({ "kind": "local" }));
+    let mut gates = options.gates.clone();
+    default_gate_lab_runner_from_attempt_dispatch(&mut gates, &attempt_dispatch);
     let recipe = AgentTaskCookRecipe {
         schema: COOK_RECIPE_SCHEMA.to_string(),
         cook_id: options.identity.cook_id.clone(),
@@ -906,7 +940,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             "provider_invocation": options.provider_transport.provider_invocation,
             "attempt_dispatch": attempt_dispatch,
         }),
-        gate_policy: serde_json::to_value(&options.gates).map_err(|error| {
+        gate_policy: serde_json::to_value(&gates).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("serialize cook gate policy".to_string()),
@@ -2953,6 +2987,13 @@ fn reconstruct_recipe_options(
         gates.gate_environment.admitted_component_id =
             super::cook::cook_repository_identity_component_id(&initial.plan);
     }
+    // Existing cooks pick up placement-following gates on continuation: a
+    // recipe persisted before the default existed reconstructs with its
+    // recorded Lab attempt runner (#15668).
+    default_gate_lab_runner_from_attempt_dispatch(
+        &mut gates,
+        &recipe.promotion_transport["attempt_dispatch"],
+    );
     let provider_command = recipe
         .promotion_transport
         .get("provider_command")
@@ -3635,6 +3676,29 @@ mod tests {
             Ok(serde_json::json!({
                 "kind": "lab",
                 "queue": "cook-lab",
+            }))
+        }
+
+        fn dispatch_attempt(
+            &self,
+            _plan: AgentTaskPlan,
+            _run_id: &str,
+            _derived_cook_baseline: Option<
+                &crate::agent_task_service::cook_baseline::DerivedCookBaselineCapability,
+            >,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct LabRunnerDispatcher;
+
+    impl AgentTaskCookAttemptDispatcher for LabRunnerDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({
+                "kind": "lab",
+                "runner_id": "lab-fixture",
             }))
         }
 
@@ -4491,6 +4555,116 @@ mod tests {
         assert_eq!(options.gates.verify, Vec::<String>::new());
         assert_eq!(options.workspace.to_worktree, "target");
         assert_eq!(options.finalization.base, "main");
+    }
+
+    /// #15668: gates follow the cook's placement. A recipe whose durable
+    /// attempt dispatch pins a Lab runner reconstructs with that runner as
+    /// the gate environment when no explicit gate runner was declared, so
+    /// existing cooks gate on their runner on continuation.
+    #[test]
+    fn lab_attempt_dispatch_defaults_gate_placement_to_its_runner() {
+        let mut lab_recipe = recipe();
+        lab_recipe.promotion_transport["attempt_dispatch"] =
+            serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
+
+        let options = reconstruct_options_with_local_placement_override(&lab_recipe)
+            .expect("lab recipe reconstructs");
+        assert_eq!(
+            options.gates.gate_environment.lab_runner.as_deref(),
+            Some("lab-fixture")
+        );
+    }
+
+    /// An explicit `--gate-runner` is the recorded gate placement and always
+    /// wins over the attempt dispatch runner.
+    #[test]
+    fn explicit_gate_runner_survives_lab_attempt_dispatch_reconstruction() {
+        let mut lab_recipe = recipe();
+        lab_recipe.promotion_transport["attempt_dispatch"] =
+            serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
+        lab_recipe.gate_policy["gate_environment"] =
+            serde_json::json!({ "lab_runner": "explicit-runner" });
+
+        let options = reconstruct_options_with_local_placement_override(&lab_recipe)
+            .expect("lab recipe reconstructs");
+        assert_eq!(
+            options.gates.gate_environment.lab_runner.as_deref(),
+            Some("explicit-runner")
+        );
+    }
+
+    /// A declared gate command that pins its own runner keeps that placement:
+    /// the attempt dispatch runner must not override it.
+    #[test]
+    fn declared_gate_runner_prevents_attempt_dispatch_default() {
+        struct PinnedDeclarationTransport {
+            previous: Arc<dyn crate::agent_task_gate::placement::LabGateTransport>,
+        }
+
+        impl crate::agent_task_gate::placement::LabGateTransport for PinnedDeclarationTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                if command.contains("--runner declared-runner") {
+                    return Ok(Some("declared-runner".to_string()));
+                }
+                self.previous.declared_runner(command)
+            }
+
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &crate::agent_task_gate::placement::LabGateRequest,
+                supervision: Option<&crate::agent_task_gate::GateSupervision>,
+            ) -> Result<crate::agent_task_gate::placement::LabGateReceipt> {
+                self.previous.execute(cwd, request, supervision)
+            }
+        }
+
+        crate::agent_task_gate::placement::register_lab_gate_transport(Arc::new(
+            PinnedDeclarationTransport {
+                previous: crate::agent_task_gate::placement::active_transport(),
+            },
+        ));
+
+        let mut pinned = recipe();
+        pinned.promotion_transport["attempt_dispatch"] =
+            serde_json::json!({ "kind": "lab", "runner_id": "lab-fixture" });
+        pinned.gate_policy["verify"] =
+            serde_json::json!(["homeboy --runner declared-runner review test --path ."]);
+
+        let options = reconstruct_options_with_local_placement_override(&pinned)
+            .expect("pinned gate recipe reconstructs");
+        assert_eq!(options.gates.gate_environment.lab_runner, None);
+    }
+
+    /// Local placement is unchanged: a local attempt dispatch reconstructs
+    /// with no gate runner.
+    #[test]
+    fn local_attempt_dispatch_keeps_gates_local() {
+        let options = reconstruct_options_with_local_placement_override(&recipe())
+            .expect("local recipe reconstructs");
+        assert_eq!(options.gates.gate_environment.lab_runner, None);
+    }
+
+    /// Cook admission persists the placement-following default into the
+    /// durable gate policy of a fresh Lab cook.
+    #[test]
+    fn admission_persists_placement_following_gate_runner_for_lab_cooks() {
+        let mut request = reconstruct_adoption_options(&recipe()).expect("reconstruct fixture");
+        request.provider_transport.attempt_dispatcher = Some(Arc::new(LabRunnerDispatcher));
+
+        let persisted = initial_recipe(&request).expect("admission recipe");
+        assert_eq!(
+            persisted.promotion_transport["attempt_dispatch"]["kind"],
+            "lab"
+        );
+        assert_eq!(
+            persisted.gate_policy["gate_environment"]["lab_runner"],
+            "lab-fixture"
+        );
+
+        request.provider_transport.attempt_dispatcher = Some(Arc::new(LabLikeDispatcher));
+        let local_default = initial_recipe(&request).expect("admission recipe");
+        assert!(local_default.gate_policy["gate_environment"]["lab_runner"].is_null());
     }
 
     #[test]
