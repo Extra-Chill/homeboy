@@ -1492,6 +1492,193 @@ fn artifacts_command_lists_copy_paste_get_commands_with_names() {
 }
 
 #[test]
+fn artifact_get_qualified_reference_copies_retained_bytes_after_producer_removal() {
+    with_isolated_home(|home| {
+        let store = test_store();
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+        let source = home.path().join("producer.patch");
+        std::fs::write(&source, b"retained producer patch").expect("source");
+        let canonical = store.record_artifact_with_metadata(&run.id, "patch", &source,
+            serde_json::json!({"agent_task": {"task_id": "producing-task", "logical_artifact_id": "patch"}})).expect("retained record");
+        std::fs::remove_file(&source).expect("remove producer");
+        let token = format!(
+            "homeboy://agent-task/run/{}/artifacts#task=producing-task&artifact=patch",
+            run.id
+        );
+        let destination = home.path().join("selected.patch");
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id.clone(),
+                artifact_id: token,
+                runner: None,
+                output: Some(destination.clone()),
+                field: vec![],
+            },
+        )
+        .expect("get selected producer bytes");
+        let RunsOutput::ArtifactGet(output) = output else {
+            panic!("artifact get");
+        };
+        assert_eq!(output.artifact_id, canonical.id);
+        assert_eq!(
+            std::fs::read(&destination).expect("bytes"),
+            b"retained producer patch"
+        );
+        assert_eq!(
+            homeboy::core::artifact_metadata::sha256_file(&destination)
+                .expect("independent digest"),
+            canonical.sha256.unwrap()
+        );
+        for token in [
+            source.display().to_string(),
+            format!("file://{}", source.display()),
+            format!(
+                "homeboy://agent-task/run/{}/artifacts#task=wrong-task&artifact=patch",
+                run.id
+            ),
+        ] {
+            assert!(artifact_get(
+                &store,
+                RunsArtifactGetArgs {
+                    run_id: run.id.clone(),
+                    artifact_id: token,
+                    runner: None,
+                    output: Some(home.path().join("unauthorized.patch")),
+                    field: vec![]
+                }
+            )
+            .is_err());
+            assert!(!home.path().join("unauthorized.patch").exists());
+        }
+    });
+}
+
+#[test]
+fn artifact_get_status_pointer_retrieves_retained_patch_after_producer_removal() {
+    with_isolated_home(|home| {
+        const RUN: &str = "status-pointer-cli-proof";
+        let lifecycle =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("rooted lifecycle");
+        let uri = format!("homeboy://agent-task/run/{RUN}/artifacts#task=producer&artifact=patch");
+        let record: homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-run/v1", "run_id": RUN, "plan_id": "status-pointer-cli-proof",
+            "state": "succeeded", "submitted_at": "2026-10-08T00:00:00Z",
+            "plan_path": home.path().join("plan.json"),
+            "artifact_refs": [{"task_id": "producer", "kind": "patch", "uri": uri}]
+        })).expect("lifecycle fixture");
+        lifecycle
+            .write_record(&record)
+            .expect("persist lifecycle through its owner");
+        homeboy::agents::orchestration::register();
+        let store = test_store();
+        let producer = home.path().join("producer.patch");
+        let bytes = b"diff --git a/source b/source\n+status pointer CLI proof\n";
+        std::fs::write(&producer, bytes).expect("producer bytes");
+        let expected_digest =
+            homeboy::core::artifact_metadata::sha256_file(&producer).expect("producer digest");
+        let canonical = store
+            .record_artifact_with_id(
+                RUN,
+                "patch",
+                &producer,
+                "controller-retained-cli-patch",
+                serde_json::json!({
+                    "agent_task": {"task_id": "producer", "logical_artifact_id": "patch"}
+                }),
+            )
+            .expect("retain patch in real store");
+        assert_eq!(canonical.sha256.as_deref(), Some(expected_digest.as_str()));
+        let run = homeboy_control_plane_contract::RunId::new(RUN).expect("run identity");
+        let status =
+            homeboy::core::control_plane::run(&run).expect("registered orchestration status");
+        let pointer = status
+            .artifacts
+            .into_iter()
+            .find(|reference| reference.uri == uri)
+            .expect("actual status pointer");
+        assert_ne!(pointer.id, canonical.id);
+        std::fs::remove_file(&producer).expect("remove producer before artifact_get");
+        assert!(!producer.exists());
+        for (index, token) in [pointer.id.clone(), format!("artifact/{}", pointer.id)]
+            .into_iter()
+            .enumerate()
+        {
+            let destination = home.path().join(format!("status-pointer-{index}.patch"));
+            // This is the existing CLI handler on both base and candidate; the
+            // baseline has no new reference-selection APIs to invoke directly.
+            let (output, exit_code) = artifact_get(&store, RunsArtifactGetArgs {
+                run_id: RUN.to_string(), artifact_id: token.clone(), runner: None,
+                output: Some(destination.clone()), field: Vec::new(),
+            }).unwrap_or_else(|error| panic!("status pointer `{token}` must retrieve retained bytes through artifact_get: {error}"));
+            assert_eq!(exit_code, 0);
+            let RunsOutput::ArtifactGet(output) = output else {
+                panic!("artifact get output");
+            };
+            assert_eq!(output.artifact_id, canonical.id);
+            assert_eq!(
+                std::fs::read(&destination).expect("retrieved destination"),
+                bytes
+            );
+            assert_eq!(
+                homeboy::core::artifact_metadata::sha256_file(&destination)
+                    .expect("independent destination digest"),
+                expected_digest
+            );
+        }
+    });
+}
+
+#[test]
+fn artifact_get_canonical_pin_outranks_older_friendly_alias() {
+    with_isolated_home(|home| {
+        let store = test_store();
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .expect("run");
+        let source = home.path().join("canonical.patch");
+        std::fs::write(&source, b"canonical patch bytes").expect("source");
+        let canonical = store
+            .record_artifact(&run.id, "patch", &source)
+            .expect("canonical");
+        let mut alias = canonical.clone();
+        alias.id = "older-alias".to_string();
+        alias.kind = canonical.id.clone();
+        alias.created_at = "2000-01-01T00:00:00Z".to_string();
+        alias.path = home.path().join("wrong.patch").display().to_string();
+        std::fs::write(&alias.path, b"wrong bytes").expect("alias bytes");
+        store.import_artifact(&alias).expect("alias record");
+        let destination = home.path().join("retrieved.patch");
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id,
+                artifact_id: canonical.id.clone(),
+                runner: None,
+                output: Some(destination.clone()),
+                field: Vec::new(),
+            },
+        )
+        .expect("canonical get");
+        let RunsOutput::ArtifactGet(output) = output else {
+            panic!("artifact get");
+        };
+        assert_eq!(output.artifact_id, canonical.id);
+        assert_eq!(
+            std::fs::read(&destination).expect("bytes"),
+            b"canonical patch bytes"
+        );
+        assert_eq!(
+            homeboy::core::artifact_metadata::sha256_file(&destination).expect("digest"),
+            canonical.sha256.expect("recorded digest")
+        );
+    });
+}
+
+#[test]
 fn artifact_get_copies_registered_file_without_raw_path_lookup() {
     with_isolated_home(|home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");

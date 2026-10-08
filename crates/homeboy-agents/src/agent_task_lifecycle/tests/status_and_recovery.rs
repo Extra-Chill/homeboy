@@ -2167,6 +2167,13 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
     std::fs::write(&patch, "patch bytes").expect("write patch");
     let plan = test_plan();
     let mut aggregate = succeeded_aggregate(&plan);
+    let task_selector =
+        homeboy_core::execution_contract::encode_uri_component(&aggregate.outcomes[0].task_id);
+    aggregate.outcomes[0].evidence_refs.push(crate::agent_task::AgentTaskEvidenceRef {
+        kind: "patch".to_string(),
+        uri: format!("homeboy://agent-task/run/projection-parity/artifacts#task={task_selector}&artifact=patch"),
+        label: None,
+    });
     aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
         schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
         id: "patch".to_string(),
@@ -2241,6 +2248,64 @@ fn terminal_executor_artifacts_are_projected_under_logical_ids() {
     .expect("resolve logical patch id");
     assert_eq!(artifact.run_id, "projection-parity");
     assert_eq!(artifact.kind, "patch");
+    let canonical_id = artifact.id.clone();
+    let digest = artifact.sha256.clone().expect("retained digest");
+    // The reference service owns pointer identities; the byte selector consumes
+    // its actual metadata rather than assuming a content-ID hashing convention.
+    use homeboy_control_plane_contract::{ControlPlaneReferenceType, ReferenceId, RunId};
+    let service = crate::orchestration::OrchestrationService::new(
+        crate::orchestration::LifecycleStoreLookup::new(lifecycle_store),
+    );
+    let run = RunId::new("projection-parity").expect("run");
+    let status = service.run(&run).expect("status resource");
+    let reference = status
+        .artifacts
+        .iter()
+        .find(|reference| {
+            reference
+                .uri
+                .starts_with("homeboy://agent-task/run/projection-parity/artifacts#")
+        })
+        .expect("status producer reference");
+    assert_ne!(reference.id, canonical_id);
+    let records = store.list_artifacts(run.as_str()).expect("inventory");
+    std::fs::remove_file(&patch).expect("remove original producer path");
+    for token in [reference.id.clone(), format!("artifact/{}", reference.id)] {
+        let selected = homeboy_core::observation::runs_service::select_artifact_record(
+            run.as_str(),
+            &token,
+            &records,
+            |id| {
+                service
+                    .reference(
+                        &run,
+                        ControlPlaneReferenceType::Artifact,
+                        &ReferenceId::new(id).expect("reference id"),
+                    )
+                    .map_err(|error| homeboy_core::Error::internal_unexpected(error.to_string()))
+            },
+        )
+        .expect("select status reference")
+        .expect("canonical bytes record");
+        assert_eq!(selected.id, canonical_id);
+        let destination = root.path().join(format!(
+            "reference-{}.patch",
+            token.starts_with("artifact/")
+        ));
+        homeboy_core::observation::runs_service::copy_local_file_artifact(
+            selected,
+            Some(destination.clone()),
+        )
+        .expect("copy retained bytes");
+        assert_eq!(
+            std::fs::read(&destination).expect("destination"),
+            b"patch bytes"
+        );
+        assert_eq!(
+            homeboy_core::artifact_metadata::sha256_file(&destination).expect("independent digest"),
+            digest
+        );
+    }
     assert_eq!(
         std::fs::read(&artifact.path).expect("projected bytes"),
         b"patch bytes"

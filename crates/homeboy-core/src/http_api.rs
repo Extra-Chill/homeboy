@@ -1636,7 +1636,14 @@ fn artifact_content(store: &ObservationStore, run_id: &str, artifact_id: &str) -
     require_run(store, run_id)?;
     crate::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
     let decoded_artifact_id = crate::execution_contract::decode_uri_component(artifact_id);
-    let Some(artifact) = store.get_artifact_for_run_token(run_id, &decoded_artifact_id)? else {
+    let records = store.list_artifacts(run_id)?;
+    let Some(artifact) = crate::observation::runs_service::select_artifact_record(
+        run_id,
+        &decoded_artifact_id,
+        &records,
+        |id| crate::observation::runs_service::lookup_artifact_reference(run_id, id),
+    )?
+    else {
         return artifact_store_content(
             &store.artifact_root()?,
             run_id,

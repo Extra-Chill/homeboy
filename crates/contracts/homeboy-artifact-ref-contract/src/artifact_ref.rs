@@ -7,6 +7,55 @@ use homeboy_engine_primitives::artifact_ref_scheme::{decode_uri_component, encod
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
 pub const EVIDENCE_REF_SCHEMA: &str = "homeboy/evidence-ref/v1";
+
+/// A producer-qualified logical artifact, never an observation-store byte ID
+/// or a filesystem locator. Unknown fragments are deliberately not retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskArtifactSelector {
+    pub run_id: String,
+    pub task_id: String,
+    pub logical_artifact_id: String,
+}
+
+impl AgentTaskArtifactSelector {
+    pub fn parse(uri: &str) -> Option<Self> {
+        use homeboy_engine_primitives::artifact_ref_scheme::decode_uri_component_strict;
+        let rest = uri.strip_prefix("homeboy://agent-task/run/")?;
+        let (path, fragment) = rest.split_once('#')?;
+        let (run, section) = path.split_once('/')?;
+        if section != "artifacts" {
+            return None;
+        }
+        let decode = |value: &str| {
+            let value = decode_uri_component_strict(value)?;
+            (!value.is_empty() && !value.contains('\0')).then_some(value)
+        };
+        let selector = |key: &str| {
+            let mut values = fragment
+                .split('&')
+                .filter(|part| part.split_once('=').map_or(*part, |(name, _)| name) == key);
+            let (_, value) = values.next()?.split_once('=')?;
+            if values.next().is_some() {
+                return None;
+            }
+            decode(value)
+        };
+        Some(Self {
+            run_id: decode(run)?,
+            task_id: selector("task")?,
+            logical_artifact_id: selector("artifact")?,
+        })
+    }
+
+    pub fn uri(&self) -> String {
+        format!(
+            "homeboy://agent-task/run/{}/artifacts#task={}&artifact={}",
+            encode_uri_component(&self.run_id),
+            encode_uri_component(&self.task_id),
+            encode_uri_component(&self.logical_artifact_id)
+        )
+    }
+}
 // The artifact-ref URI schemes live in homeboy-engine-primitives (the slim
 // shared base) so the audit engine and CLI command contract can check them
 // without depending on this module. Re-exported here to preserve existing

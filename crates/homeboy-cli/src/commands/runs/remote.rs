@@ -337,39 +337,91 @@ fn directory_publication_guidance_for_artifacts(
         .collect()
 }
 
+fn resolve_runner_artifact_record(
+    run_id: &str,
+    token: &str,
+    get: impl Fn(&str) -> homeboy::core::Result<serde_json::Value>,
+) -> homeboy::core::Result<ArtifactRecord> {
+    let data = get(&format!(
+        "/runs/{}/artifacts?full=1",
+        encode_uri_component(run_id)
+    ))?;
+    let records = parse_runner_artifacts(&data)?;
+    if data["body"]["page"].is_object() {
+        let page = &data["body"]["page"];
+        if page["offset"].as_u64() != Some(0)
+            || page["total"].as_u64() != Some(records.len() as u64)
+            || !page["next_offset"].is_null()
+        {
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                "runner artifact inventory is incomplete; byte selection remains unproven",
+                Some(token.to_string()),
+                None,
+            ));
+        }
+    }
+    let selected = homeboy::core::observation::runs_service::select_artifact_record(
+        run_id,
+        token,
+        &records,
+        |id| {
+            let data = get(&format!(
+                "/v1/control-plane/runs/{}/artifacts/{}",
+                encode_uri_component(run_id),
+                encode_uri_component(id)
+            ))?;
+            serde_json::from_value(data["body"]["resource"].clone()).map_err(|err| {
+                Error::validation_invalid_argument(
+                    "artifact_id",
+                    format!("artifact reference lookup failed: {err}"),
+                    Some(id.to_string()),
+                    None,
+                )
+            })
+        },
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact record not found in complete runner inventory",
+            Some(token.to_string()),
+            None,
+        )
+    })?;
+    if homeboy::core::observation::runs_service::classify_artifact_storage(&selected)
+        == homeboy::core::observation::runs_service::ArtifactStorage::MetadataOnly
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact bytes are unavailable: metadata-only record",
+            Some(selected.id),
+            None,
+        ));
+    }
+    Ok(selected)
+}
+
 pub(crate) fn runner_artifact_get(
     runner_id: &str,
     mut args: RunsArtifactGetArgs,
 ) -> CmdResult<RunsOutput> {
+    let selected = resolve_runner_artifact_record(&args.run_id, &args.artifact_id, |path| {
+        runner::daemon_api_get(runner_id, path)
+    })?;
+    args.artifact_id = selected.id.clone();
     let content_url = format!(
         "/runs/{}/artifacts/{}/content",
         encode_uri_component(&args.run_id),
         encode_uri_component(&args.artifact_id)
     );
-    let artifact = ArtifactRecord {
-        id: args.artifact_id.clone(),
-        run_id: args.run_id.clone(),
-        kind: "runner_artifact".to_string(),
-        artifact_type: "remote_file".to_string(),
-        path: EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
-            runner_id,
-            &args.run_id,
-            &args.artifact_id,
-        ),
-        url: None,
-        public_url: None,
-        viewer_url: None,
-        viewer_links: Vec::new(),
-        sha256: None,
-        size_bytes: None,
-        mime: None,
-        metadata_json: serde_json::json!({
-            "source": "connected_runner_daemon",
-            "runner_id": runner_id,
-            "content_url": content_url,
-        }),
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
+    let mut artifact = selected;
+    artifact.artifact_type = "remote_file".to_string();
+    artifact.path = EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
+        runner_id,
+        &args.run_id,
+        &args.artifact_id,
+    );
     let output = args.output.take();
     let (output, exit_code) = remote_artifact::get(artifact, output)?;
     let RunsOutput::ArtifactGet(mut output) = output else {
@@ -404,10 +456,92 @@ fn url_encode_component(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "remote_transport_test.rs"]
+mod remote_transport_test;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use homeboy::core::api_jobs::{ActiveRunnerJobSummary, JobClaimMetadata, JobStatus};
     use serde_json::json;
+
+    #[test]
+    fn runner_reference_byte_selection_uses_full_inventory_and_real_canonical_id() {
+        homeboy::test_support::with_isolated_home(|home| {
+            let store =
+                homeboy::core::observation::ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(crate::commands::runs::test_support::sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::Value::Null,
+                ))
+                .expect("run");
+            let producer = home.path().join("producer.patch");
+            std::fs::write(&producer, b"runner retained patch").expect("producer bytes");
+            let target = store
+                .record_artifact_with_metadata(
+                    &run.id,
+                    "patch",
+                    &producer,
+                    json!({"agent_task": {"task_id": "producer", "logical_artifact_id": "patch"}}),
+                )
+                .expect("retained artifact");
+            std::fs::remove_file(&producer).expect("remove original");
+            let mut records: Vec<_> = (0..75)
+                .map(|index| {
+                    let mut record = target.clone();
+                    record.id = format!("unrelated-{index}");
+                    record.metadata_json["agent_task"]["task_id"] = json!("other-task");
+                    record
+                })
+                .collect();
+            records.push(target.clone());
+            let reference = json!({
+                "schema": "homeboy/control-plane-reference/v1", "run": run.id,
+                "reference_type": "artifact", "reference": "artifact-status-pointer", "kind": "patch",
+                "uri": format!("homeboy://agent-task/run/{}/artifacts#task=producer&artifact=patch", run.id)
+            });
+            let fetch = |path: &str| {
+                if path == format!("/runs/{}/artifacts?full=1", run.id) {
+                    Ok(json!({"body": {"artifacts": records}}))
+                } else {
+                    assert_eq!(
+                        path,
+                        format!(
+                            "/v1/control-plane/runs/{}/artifacts/artifact-status-pointer",
+                            run.id
+                        )
+                    );
+                    Ok(json!({"body": {"ok": true, "resource": reference}}))
+                }
+            };
+            let selected =
+                resolve_runner_artifact_record(&run.id, "artifact/artifact-status-pointer", fetch)
+                    .expect("resolve pointer beyond default page");
+            assert_eq!(selected.id, target.id);
+            let destination = home.path().join("retrieved.patch");
+            homeboy::core::observation::runs_service::copy_local_file_artifact(
+                selected,
+                Some(destination.clone()),
+            )
+            .expect("existing byte copier");
+            assert_eq!(
+                std::fs::read(&destination).expect("bytes"),
+                b"runner retained patch"
+            );
+            assert_eq!(
+                homeboy::core::artifact_metadata::sha256_file(&destination)
+                    .expect("independent digest"),
+                target.sha256.unwrap()
+            );
+            let error = resolve_runner_artifact_record(&run.id, "artifact-status-pointer", |_| Ok(json!({
+                "body": {"artifacts": records[..50], "page": {"total": 76, "offset": 0, "next_offset": 50}}
+            }))).unwrap_err();
+            assert!(error.to_string().contains("inventory is incomplete"));
+        });
+    }
 
     #[test]
     fn parses_runner_artifacts_from_daemon_body() {
