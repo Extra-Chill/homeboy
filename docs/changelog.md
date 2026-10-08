@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.6] - 2026-10-08
+
+### Changed
+- declare isolated preview fixture prerequisites
+
+### Fixed
+- never persist a controller-derived PATH into runner env
+
 ## [0.417.5] - 2026-10-08
 
 ### Changed
