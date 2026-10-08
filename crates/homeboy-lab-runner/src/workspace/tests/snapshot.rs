@@ -182,13 +182,33 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
         let source = tempfile::tempdir().expect("source workspace");
         let runner_root = tempfile::tempdir().expect("runner root");
         fs::write(source.path().join("file.txt"), "committed source\n").expect("source file");
+        fs::create_dir_all(source.path().join("src/vendor")).expect("tracked vendor source");
+        fs::create_dir_all(source.path().join("vendor")).expect("ignored dependency directory");
+        fs::write(source.path().join(".gitignore"), "/vendor/\n/cache.txt\n")
+            .expect("root-relative ignore rules");
+        fs::write(
+            source.path().join("src/vendor/library.js"),
+            "tracked library\n",
+        )
+        .expect("tracked nested vendor file");
+        fs::write(
+            source.path().join("src/cache.txt"),
+            "tracked cache source\n",
+        )
+        .expect("tracked nested same-named file");
+        fs::write(
+            source.path().join("vendor/autoload.php"),
+            "ignored dependency\n",
+        )
+        .expect("ignored root dependency");
+        fs::write(source.path().join("cache.txt"), "ignored cache\n").expect("ignored root file");
         std::process::Command::new("git")
             .args(["init", "--quiet", "-b", "main"])
             .current_dir(source.path())
             .status()
             .expect("initialize source repository");
         std::process::Command::new("git")
-            .args(["add", "file.txt"])
+            .args(["add", "file.txt", ".gitignore", "src"])
             .current_dir(source.path())
             .status()
             .expect("stage source");
@@ -228,6 +248,19 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
         .expect("materialize local-only committed source");
 
         assert_eq!(synced.sync_mode, RunnerWorkspaceSyncMode::SnapshotGit);
+        let materialized = Path::new(&synced.remote_path);
+        assert_eq!(
+            fs::read_to_string(materialized.join("src/vendor/library.js"))
+                .expect("materialized tracked nested vendor source"),
+            "tracked library\n"
+        );
+        assert_eq!(
+            fs::read_to_string(materialized.join("src/cache.txt"))
+                .expect("materialized tracked same-named file"),
+            "tracked cache source\n"
+        );
+        assert!(!materialized.join("vendor").exists());
+        assert!(!materialized.join("cache.txt").exists());
         assert_eq!(
             synced
                 .materialization_plan
@@ -1094,9 +1127,9 @@ fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
         .expect("sync workspace");
 
         assert_eq!(exit_code, 0);
-        assert!(output.excludes.contains(&"target".to_string()));
-        assert!(output.excludes.contains(&"node_modules/**".to_string()));
-        assert!(output.excludes.contains(&"build.tsbuildinfo".to_string()));
+        assert!(output.excludes.contains(&"./target".to_string()));
+        assert!(output.excludes.contains(&"./node_modules/**".to_string()));
+        assert!(output.excludes.contains(&"./build.tsbuildinfo".to_string()));
         assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
         assert!(!Path::new(&output.remote_path)
             .join("target/debug/homeboy")
