@@ -456,7 +456,6 @@ fn prepare_lab_offload_workspace_stage_inner(
         let evidence_entries = materialize_agent_task_evidence_inputs_on_runner(
             runner_id,
             &offload_args,
-            source_path,
             &remote_cwd,
         )?;
         if !evidence_entries.is_empty() {
@@ -828,16 +827,12 @@ fn preflight_before_workspace_sync<T>(
 fn materialize_agent_task_evidence_inputs_on_runner(
     runner_id: &str,
     args: &[String],
-    source_path: &Path,
     remote_cwd: &str,
 ) -> Result<Vec<LabWorkspaceMappingEntry>> {
     let paths = declared_agent_task_evidence_inputs(args);
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let source = source_path
-        .canonicalize()
-        .unwrap_or_else(|_| source_path.to_path_buf());
     let transfer = lab_runner_file_transfer(runner_id)?;
     let mut entries = Vec::new();
     for (path, declared) in paths {
@@ -859,7 +854,7 @@ fn materialize_agent_task_evidence_inputs_on_runner(
             )
         })?;
         let remote =
-            runner_provider_evidence_path(&source, &canonical, remote_cwd, &declared.sha256)?;
+            runner_provider_evidence_path(remote_cwd, &declared.sha256, &declared.transport)?;
         if declared.transport
             == homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT
         {
@@ -913,18 +908,10 @@ const MAX_PROVIDER_EVIDENCE_DIRECTORY_ENTRIES: usize = 8_192;
 const MAX_PROVIDER_EVIDENCE_DIRECTORY_DEPTH: usize = 24;
 
 fn runner_provider_evidence_path(
-    source: &Path,
-    evidence: &Path,
     remote_cwd: &str,
     digest: &str,
+    transport: &str,
 ) -> Result<String> {
-    if let Ok(relative) = evidence.strip_prefix(source) {
-        return Ok(format!(
-            "{}/{}",
-            remote_cwd.trim_end_matches('/'),
-            relative.display()
-        ));
-    }
     let digest = digest.trim_start_matches("sha256:");
     if digest.is_empty() || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::validation_invalid_argument(
@@ -934,10 +921,15 @@ fn runner_provider_evidence_path(
             None,
         ));
     }
-    Ok(format!(
-        "{}-homeboy-artifacts/provider-evidence/{digest}",
-        remote_cwd.trim_end_matches('/'),
-    ))
+    let root = format!(
+        "{}-homeboy-artifacts/provider-evidence",
+        remote_cwd.trim_end_matches('/')
+    );
+    if transport == homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT {
+        Ok(format!("{root}/trees/{digest}"))
+    } else {
+        Ok(format!("{root}/files/{digest}/input"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1776,21 +1768,29 @@ mod tests {
 
     #[test]
     fn controller_owned_evidence_stages_outside_runner_candidate_by_digest() {
+        let tree_path = runner_provider_evidence_path(
+            "/runner/candidate",
+            "sha256:abc",
+            homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT,
+        )
+        .unwrap();
+        assert_eq!(
+            tree_path,
+            "/runner/candidate-homeboy-artifacts/provider-evidence/trees/abc"
+        );
         assert_eq!(
             runner_provider_evidence_path(
-                Path::new("/controller/candidate"),
-                Path::new("/controller/artifacts/provider-evidence/blobs/abc"),
                 "/runner/candidate",
                 "sha256:abc",
+                "content-addressed-blob/v1",
             )
             .expect("external controller evidence"),
-            "/runner/candidate-homeboy-artifacts/provider-evidence/abc"
+            "/runner/candidate-homeboy-artifacts/provider-evidence/files/abc/input"
         );
         assert!(runner_provider_evidence_path(
-            Path::new("/controller/candidate"),
-            Path::new("/controller/artifacts/evidence"),
             "/runner/candidate",
             "sha256:../escape",
+            "content-addressed-blob/v1",
         )
         .is_err());
     }
@@ -1828,10 +1828,9 @@ mod tests {
             entries: entries.clone(),
         };
         let remote = runner_provider_evidence_path(
-            Path::new("/controller/candidate"),
-            temp.path(),
             "/runner/candidate",
             &digest,
+            PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT,
         )
         .expect("remote directory root");
         let uploads = plan_lab_directory_evidence(temp.path(), &remote, &declared)

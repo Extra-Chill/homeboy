@@ -552,8 +552,9 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             "--cwd:git-remote:origin"
         );
 
-        let plan = super::super::run::compile_cook_plan(&args, json!({ "path": destination }))
-            .expect("compile Cook plan");
+        let plan =
+            super::super::run::compile_cook_plan(&args, json!({ "path": destination }), None)
+                .expect("compile Cook plan");
         assert_eq!(
             plan.metadata["cook_repository_identity"],
             args.repository_identity.expect("identity")
@@ -823,6 +824,7 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         let plan = super::super::run::compile_cook_plan(
             &worktree,
             json!({ "action": "existing", "path": destination }),
+            None,
         )
         .expect("compile normalized durable plan");
         assert_eq!(

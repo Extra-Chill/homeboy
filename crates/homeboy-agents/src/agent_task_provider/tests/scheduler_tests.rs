@@ -573,8 +573,7 @@ fn declared_evidence_policy_denial_is_terminal_without_provider_retry() {
         count.path().display(),
     );
     let (mut request, provider) = request("task-evidence-policy-denied", command);
-    request.executor.config =
-        json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json"}]});
+    request.executor.config = json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json","read_only":true}]});
 
     let outcome = run_provider_command(&request, &provider, None);
 
@@ -599,12 +598,38 @@ fn policy_denial_prose_without_a_declared_structured_path_is_not_reclassified() 
         script("process.stdout.write(JSON.stringify({status:'failed',summary:'permission policy denied external_directory /workspace/.homeboy/evidence/input.json'}));")
     );
     let (mut request, provider) = request("task-evidence-policy-prose", command);
-    request.executor.config =
-        json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json"}]});
+    request.executor.config = json!({"evidence_inputs":[{"path":"/workspace/.homeboy/evidence/input.json","read_only":true}]});
     let outcome = run_provider_command(&request, &provider, None);
     assert_ne!(
         outcome.failure_classification,
         Some(AgentTaskFailureClassification::PolicyDenied)
+    );
+}
+
+#[test]
+fn denied_selected_directory_member_cannot_be_reported_as_success() {
+    let command = format!(
+        "node {}",
+        script("const req=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'denied evidence input',diagnostics:[{class:'provider.permission',message:'denied',data:{kind:'permission_denied',path:'/workspace/evidence/sub/input.json'}}]}));")
+    );
+    let (mut request, provider) = request("task-evidence-member-denied", command);
+    request.executor.config = json!({"evidence_inputs":[{
+        "path":"/workspace/evidence", "read_only":true,
+        "entries":[{"path":"sub/input.json"}]
+    }]});
+    let outcome = run_provider_command(&request, &provider, None);
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Failed,
+        "{outcome:?}"
+    );
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::PolicyDenied)
+    );
+    assert_eq!(
+        outcome.metadata["control_plane_failure"]["reason"],
+        "declared_evidence_policy_denied"
     );
 }
 
