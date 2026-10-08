@@ -50,7 +50,7 @@ pub struct VerifyGateArgs {
     /// exact file bytes before submission. Relative paths use the controller's
     /// invocation directory. Example: `--verify-file quality-gate.sh` containing
     /// `for file in src/*.rs; do cargo fmt --check -- "$file"; done`. The
-    /// program runs under POSIX `sh -lc` (dash on Debian/Ubuntu) and a shebang
+    /// program runs under non-login POSIX `sh -c` (dash on Debian/Ubuntu) and a shebang
     /// is ignored, so bash-only syntax such as `set -o pipefail` fails as an
     /// invalid gate declaration; call `bash` explicitly when you need it.
     #[arg(long = "verify-file", value_name = "PATH")]

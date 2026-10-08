@@ -2564,7 +2564,7 @@ fn run_promotion_gates(
         let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
             crate::agent_task_gate::AgentTaskGateReport::skipped(
                 format!("gate-{index}"),
-                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                crate::agent_task_gate::legacy_gate_argv(command),
                 visibility,
                 reveal_policy,
                 blocking_gate_id,
@@ -3208,7 +3208,7 @@ fn run_promotion_gate(
             Ok(
                 crate::agent_task_gate::placement::gate_non_execution_report(
                     index,
-                    vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                    crate::agent_task_gate::legacy_gate_argv(command),
                     visibility,
                     reveal_policy,
                     &error,

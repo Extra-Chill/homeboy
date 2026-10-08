@@ -18904,11 +18904,11 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         assert_eq!(replacement.deterministic_gates.len(), 2);
         assert_eq!(
             replacement.deterministic_gates[0].command,
-            vec!["sh".to_string(), "-lc".to_string(), reviewer_gate]
+            crate::agent_task_gate::legacy_gate_argv(&reviewer_gate)
         );
         assert_eq!(
             replacement.deterministic_gates[1].command,
-            vec!["sh".to_string(), "-lc".to_string(), gate]
+            crate::agent_task_gate::legacy_gate_argv(&gate)
         );
         assert_eq!(
             replacement.deterministic_gates[1].visibility,
@@ -19415,11 +19415,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
         .unwrap();
         let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
             "verify-1",
-            vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                options.gates.verify[0].clone(),
-            ],
+            crate::agent_task_gate::legacy_gate_argv(&options.gates.verify[0]),
             1,
             "",
             "inherited\n",
