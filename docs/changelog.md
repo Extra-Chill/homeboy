@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.4] - 2026-10-08
+
+### Changed
+- quarantine the #15524 same-child gate recovery test
+
+### Fixed
+- preserve contained dependency symlinks and modes
+- explicit release for idle generations with unverifiable evidence
+
 ## [0.417.3] - 2026-10-07
 
 ### Fixed
