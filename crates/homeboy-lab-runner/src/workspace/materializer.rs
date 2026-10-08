@@ -1,4 +1,5 @@
 use homeboy_core::engine::shell;
+use sha2::{Digest, Sha256};
 
 use super::util::{owner_capture_shell, owner_restore_shell, parent_remote_path};
 
@@ -295,6 +296,11 @@ fn fresh_exact_git_checkout_command(
     branch: Option<&str>,
     allow_dirty: bool,
 ) -> String {
+    // Keep one bare object mirror per remote alongside the runner workspaces.
+    // Sibling jobs then reuse already-fetched objects instead of downloading
+    // the same repository history independently.
+    let mirror_key = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
+    let mirror_path = format!("$parent/.homeboy-git-mirrors/{mirror_key}");
     // Re-use branch: an existing `.git` at `$dest` is already a valid checkout,
     // so resetting/cleaning it in place is safe and cheap.
     let reuse_checkout = branch.map_or_else(
@@ -338,7 +344,8 @@ fn fresh_exact_git_checkout_command(
         head = shell::quote_arg(head),
     );
     let fresh = format!(
-        "rm -rf \"$tmp\" && git init \"$tmp\" && git -C \"$tmp\" remote add origin {remote_url} && git -C \"$tmp\" fetch --filter=blob:none origin {head} && {tmp_checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && git -C \"$tmp\" rev-parse --verify -q HEAD >/dev/null && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
+        "mkdir -p \"$parent/.homeboy-git-mirrors\" && mirror={mirror} && lock=\"$mirror.lock\" && while ! mkdir \"$lock\" 2>/dev/null; do sleep 0.1; done && trap 'rmdir \"$lock\" 2>/dev/null || true' EXIT && if [ -d \"$mirror\" ]; then git --git-dir=\"$mirror\" fetch --prune origin '+refs/heads/*:refs/heads/*' && git --git-dir=\"$mirror\" fetch origin {head}; else git clone --mirror {remote_url} \"$mirror\"; fi && rmdir \"$lock\" && trap - EXIT && rm -rf \"$tmp\" && git init \"$tmp\" && git -C \"$tmp\" remote add origin {remote_url} && git -C \"$tmp\" fetch --no-tags \"$mirror\" {head} && {tmp_checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && git -C \"$tmp\" rev-parse --verify -q HEAD >/dev/null && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
+        mirror = format!("\"{mirror_path}\""),
         remote_url = shell::quote_arg(remote_url),
         head = shell::quote_arg(head),
         tmp_checkout = tmp_checkout,
