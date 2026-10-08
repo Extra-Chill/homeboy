@@ -363,6 +363,7 @@ pub use capabilities::{
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
+pub(crate) use command_path::set_homeboy_command_selection;
 pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
@@ -535,6 +536,7 @@ pub struct Runner {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunnerSpec {
     pub workspace_root: Option<String>,
+    pub kind: RunnerKind,
     pub settings: RunnerSettings,
     pub env: HashMap<String, String>,
     pub resources: HashMap<String, Value>,
@@ -567,6 +569,7 @@ impl RunnerSpec {
     pub fn from_runner(runner: &Runner) -> Self {
         Self {
             workspace_root: runner.workspace_root.clone(),
+            kind: runner.kind.clone(),
             settings: runner.settings.clone(),
             env: runner.env.clone(),
             resources: runner.resources.clone(),
@@ -603,10 +606,19 @@ impl RunnerSpec {
 
     pub fn effective_env(&self) -> HashMap<String, String> {
         let mut env = self.env.clone();
-        normalize_runner_command_env_for_homeboy_path(
-            &mut env,
-            self.settings.homeboy_path.as_deref(),
-        );
+        if self.kind == RunnerKind::Local {
+            normalize_runner_command_env_for_homeboy_path(
+                &mut env,
+                self.settings.homeboy_path.as_deref(),
+            );
+        } else {
+            // A non-local runner executes on its own host. A controller-derived
+            // `PATH` would leak controller-home entries into every remote job
+            // and accumulate a `_homeboy_binaries` slot per refresh (#15158).
+            // The runner computes `PATH` from its own environment at dispatch
+            // time, so only the control-binary selection is effective here.
+            set_homeboy_command_selection(&mut env, self.settings.homeboy_path.as_deref());
+        }
         env
     }
 }
@@ -615,6 +627,10 @@ impl From<ServerRunner> for RunnerSpec {
     fn from(runner: ServerRunner) -> Self {
         Self {
             workspace_root: runner.workspace_root,
+            // Server-embedded runners are SSH capabilities (`runner_from_spec`
+            // materializes them as `RunnerKind::Ssh`), so their effective env
+            // must never synthesize a controller PATH.
+            kind: RunnerKind::Ssh,
             settings: runner.settings,
             env: runner.env,
             resources: runner.resources,
@@ -3094,11 +3110,62 @@ mod tests {
         assert_eq!(runner.policy.allowed_commands, vec!["test"]);
 
         let env = spec.effective_env();
+        // An SSH-shaped spec never synthesizes or prepends `PATH`: the runner
+        // computes its own PATH from its own environment (#15158).
+        assert_eq!(spec.kind, RunnerKind::Ssh);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/runner/bin"));
         assert_eq!(
-            env.get("PATH").map(String::as_str),
-            Some("/usr/local/bin:/runner/bin")
+            env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some("/usr/local/bin/homeboy")
         );
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
+    }
+
+    #[test]
+    fn local_runner_effective_env_keeps_controller_path_synthesis() {
+        let homeboy_path = "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy";
+        let spec = RunnerSpec {
+            kind: RunnerKind::Local,
+            settings: RunnerSettings {
+                homeboy_path: Some(homeboy_path.to_string()),
+                ..RunnerSettings::default()
+            },
+            env: HashMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
+            ..Default::default()
+        };
+
+        let env = spec.effective_env();
+
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
+        );
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path)
+        );
+    }
+
+    #[test]
+    fn ssh_runner_effective_env_never_adds_a_path_key() {
+        let homeboy_path = "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy";
+        let spec = RunnerSpec {
+            kind: RunnerKind::Ssh,
+            settings: RunnerSettings {
+                homeboy_path: Some(homeboy_path.to_string()),
+                ..RunnerSettings::default()
+            },
+            env: HashMap::new(),
+            ..Default::default()
+        };
+
+        let env = spec.effective_env();
+
+        assert_eq!(env.get("PATH"), None);
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path)
+        );
     }
 
     #[test]
