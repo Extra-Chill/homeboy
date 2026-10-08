@@ -1419,6 +1419,22 @@ mod tests {
             )
             .expect("dependency file");
 
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{symlink, PermissionsExt};
+                let cli = project.path().join("node_modules/@fixture/tool/bin/cli");
+                std::fs::create_dir_all(cli.parent().expect("CLI directory"))
+                    .expect("scoped package");
+                std::fs::write(&cli, "#!/bin/sh\nprintf 'hydrated-cli\\n'\n")
+                    .expect("installed CLI");
+                std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+                    .expect("CLI mode");
+                let bins = project.path().join("node_modules/.bin");
+                std::fs::create_dir(&bins).expect("npm executable links");
+                symlink("../@fixture/tool/bin/cli", bins.join("fixture-tool"))
+                    .expect("npm bin link");
+            }
+
             let remote = tempfile::tempdir().expect("restored workspace");
             let runner_root = tempfile::tempdir().expect("runner root");
             crate::create(
@@ -1463,6 +1479,23 @@ mod tests {
                     .expect("restored dependency"),
                 "module.exports = {};"
             );
+            #[cfg(unix)]
+            {
+                let restored = remote.path().join("node_modules/.bin/fixture-tool");
+                assert_eq!(
+                    std::fs::read_link(&restored).expect("restored link"),
+                    std::path::PathBuf::from("../@fixture/tool/bin/cli")
+                );
+                let output = std::process::Command::new(restored)
+                    .output()
+                    .expect("run hydrated CLI");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(output.stdout, b"hydrated-cli\n");
+            }
         });
     }
 
