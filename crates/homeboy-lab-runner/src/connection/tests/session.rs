@@ -2021,8 +2021,7 @@ fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
         session.local_url = None;
         session.local_port = None;
         write_session(&session).expect("write disconnected direct session");
-        let mut generations = crate::RollingGenerations::new("lease-stale", session);
-        generations.admit();
+        let generations = crate::RollingGenerations::new("lease-stale", session);
         crate::generation_store::write("homeboy-lab", &generations)
             .expect("persist stale generation evidence");
 

@@ -1877,12 +1877,12 @@ fn same_revision_rebuild_rotates_active_daemon_to_a_distinct_byte_generation() {
     assert_ne!(old_generation, rebuilt_generation);
 
     let mut generations = crate::RollingGenerations::new(old_generation.clone(), "old-daemon");
-    generations.admit_job("active-job");
+    assert!(generations.admit_job_for(&old_generation, "active-job"));
     assert_eq!(
         generations.begin(rebuilt_generation.clone(), "rebuilt-daemon"),
         crate::RollingStart::Start
     );
-    assert!(generations.activate(&rebuilt_generation));
+    assert!(generations.activate_preserving_drained(&rebuilt_generation));
     assert_eq!(generations.admission_owner, rebuilt_generation);
     assert_eq!(
         generations.job_owner("active-job"),

@@ -26,6 +26,13 @@ pub struct RollingGenerations<E> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RollingGeneration<E> {
     pub endpoint: E,
+    /// Write-only compatibility counter: no production path reads it, but
+    /// older pinned binaries still read it from disk to decide retirement,
+    /// so it must never be written below the generation's real live job
+    /// count. Writers refresh it with `sync_compat_active_jobs`, whose
+    /// owner-derived count retains terminal-job routes and is therefore
+    /// always at least the live count.
+    #[serde(default)]
     pub active_jobs: usize,
     #[serde(default)]
     pub observed_active_jobs: Option<usize>,
@@ -89,17 +96,9 @@ impl<E> RollingGenerations<E> {
         RollingStart::Start
     }
 
-    pub fn activate(&mut self, generation: &str) -> bool {
-        self.activate_inner(generation, true)
-    }
-
     /// Activate a generation while leaving empty draining generations available
     /// to a caller that must finish an external retirement protocol first.
     pub fn activate_preserving_drained(&mut self, generation: &str) -> bool {
-        self.activate_inner(generation, false)
-    }
-
-    fn activate_inner(&mut self, generation: &str, retire_drained: bool) -> bool {
         if !self.generations.contains_key(generation) {
             return false;
         }
@@ -114,9 +113,6 @@ impl<E> RollingGenerations<E> {
             .get_mut(generation)
             .expect("generation was checked")
             .drain_state = RollingDrainState::Admitting;
-        if retire_drained {
-            self.retire_drained();
-        }
         true
     }
 
@@ -127,38 +123,11 @@ impl<E> RollingGenerations<E> {
         self.generations.remove(generation).is_some()
     }
 
-    pub fn admit(&mut self) -> &str {
-        self.generations
-            .get_mut(&self.admission_owner)
-            .expect("admission owner is always a generation")
-            .active_jobs += 1;
-        &self.admission_owner
-    }
-
-    pub fn admit_job(&mut self, job_id: impl Into<String>) -> &str {
-        let job_id = job_id.into();
-        if self.job_owners.contains_key(&job_id) {
-            return &self.admission_owner;
-        }
-        let owner = self.admission_owner.clone();
-        let entry = self
-            .generations
-            .get_mut(&owner)
-            .expect("admission owner is always a generation");
-        entry.active_jobs += 1;
-        self.job_owners.insert(job_id, owner);
-        &self.admission_owner
-    }
-
     pub fn admit_job_for(&mut self, generation: &str, job_id: impl Into<String>) -> bool {
         let job_id = job_id.into();
         if self.job_owners.contains_key(&job_id) || !self.generations.contains_key(generation) {
             return false;
         }
-        self.generations
-            .get_mut(generation)
-            .expect("generation was checked")
-            .active_jobs += 1;
         self.job_owners.insert(job_id, generation.to_string());
         true
     }
@@ -195,30 +164,24 @@ impl<E> RollingGenerations<E> {
             .or_else(|| artifact_id.and_then(|id| self.artifact_owners.get(id).map(String::as_str)))
     }
 
-    pub fn complete_job(&mut self, job_id: &str) -> bool {
-        let Some(generation) = self.job_owners.remove(job_id) else {
-            return false;
-        };
-        self.complete(&generation)
-    }
-
-    pub fn complete(&mut self, generation: &str) -> bool {
-        let Some(entry) = self.generations.get_mut(generation) else {
-            return false;
-        };
-        entry.active_jobs = entry.active_jobs.saturating_sub(1);
-        self.retire_drained()
-    }
-
     /// External process owners retain the endpoint until stop is proven.
     pub fn complete_job_preserving_drained(&mut self, job_id: &str) -> bool {
-        let Some(generation) = self.job_owners.remove(job_id) else {
-            return false;
-        };
-        if let Some(entry) = self.generations.get_mut(&generation) {
-            entry.active_jobs = entry.active_jobs.saturating_sub(1);
+        self.job_owners.remove(job_id).is_some()
+    }
+
+    /// Rewrite each generation's write-only `active_jobs` compatibility
+    /// counter to its `job_owners` count. Registry writers call this before
+    /// persisting: `job_owners` keeps routes for terminal jobs, so the value
+    /// is always at least the generation's live job count, which is the
+    /// invariant older pinned binaries rely on when they read the field.
+    pub fn sync_compat_active_jobs(&mut self) {
+        for (generation, entry) in self.generations.iter_mut() {
+            entry.active_jobs = self
+                .job_owners
+                .values()
+                .filter(|owner| owner.as_str() == generation.as_str())
+                .count();
         }
-        true
     }
 
     pub fn retire_result_owner(&mut self, retirement: RollingResultOwnerRetirement<'_>) -> bool {
@@ -241,40 +204,6 @@ impl<E> RollingGenerations<E> {
             .retain(|id, _| retained_artifact_ids.contains(id));
         before != (self.run_owners.len(), self.artifact_owners.len())
     }
-
-    pub fn recover(&mut self) {
-        if !self.generations.contains_key(&self.admission_owner) {
-            if let Some((generation, _)) = self
-                .generations
-                .iter()
-                .find(|(_, entry)| entry.drain_state == RollingDrainState::Admitting)
-                .or_else(|| self.generations.iter().next_back())
-            {
-                self.admission_owner = generation.clone();
-            }
-        }
-        if let Some(entry) = self.generations.get_mut(&self.admission_owner) {
-            entry.drain_state = RollingDrainState::Admitting;
-        }
-        self.retire_drained();
-    }
-
-    fn retire_drained(&mut self) -> bool {
-        let before = self.generations.len();
-        let admission_owner = self.admission_owner.clone();
-        let result_owners = self
-            .run_owners
-            .values()
-            .chain(self.artifact_owners.values())
-            .collect::<BTreeSet<_>>();
-        self.generations.retain(|generation, entry| {
-            generation == &admission_owner
-                || entry.drain_state != RollingDrainState::Draining
-                || entry.active_jobs != 0
-                || result_owners.contains(generation)
-        });
-        self.generations.len() != before
-    }
 }
 
 #[cfg(test)]
@@ -284,36 +213,60 @@ mod tests {
     #[test]
     fn rotation_preserves_job_and_result_owners_until_their_lifecycle_releases_them() {
         let mut generations = RollingGenerations::new("A", "endpoint-a");
-        assert_eq!(generations.admit_job("job-a"), "A");
+        assert!(generations.admit_job_for("A", "job-a"));
         assert!(generations.record_run("job-a", "run-a"));
         assert!(generations.record_artifact("job-a", "artifact-a"));
         assert_eq!(generations.begin("B", "endpoint-b"), RollingStart::Start);
-        assert!(generations.activate("B"));
-        assert_eq!(generations.admit_job("job-b"), "B");
+        assert!(generations.activate_preserving_drained("B"));
+        assert!(generations.admit_job_for("B", "job-b"));
         assert_eq!(
             generations.endpoint_owner(Some("job-a"), None, None),
             Some("A")
         );
-        assert!(!generations.complete_job("job-a"));
-        assert!(generations.generations.contains_key("A"));
+        assert!(generations.complete_job_preserving_drained("job-a"));
+        assert!(
+            generations.generations.contains_key("A"),
+            "retained result owners keep the drained generation routable"
+        );
     }
 
     #[test]
-    fn failed_candidate_and_recovery_do_not_move_admission() {
+    fn failed_candidate_rollback_does_not_move_admission() {
         let mut generations = RollingGenerations::new("A", "endpoint-a");
-        generations.admit_job("job-a");
+        assert!(generations.admit_job_for("A", "job-a"));
         generations.begin("B", "endpoint-b");
         assert!(generations.rollback("B"));
-        generations.recover();
         assert_eq!(generations.admission_owner, "A");
         assert_eq!(generations.job_owner("job-a"), Some("A"));
     }
 
     #[test]
-    fn ordinary_activation_retires_an_empty_drained_generation() {
+    fn sync_compat_active_jobs_writes_each_generation_owner_count() {
         let mut generations = RollingGenerations::new("A", "endpoint-a");
+        assert!(generations.admit_job_for("A", "job-a"));
+        assert!(generations.admit_job_for("A", "job-a2"));
         assert_eq!(generations.begin("B", "endpoint-b"), RollingStart::Start);
-        assert!(generations.activate("B"));
-        assert!(!generations.generations.contains_key("A"));
+        assert!(generations.activate_preserving_drained("B"));
+        assert!(generations.admit_job_for("B", "job-b"));
+        assert!(generations.complete_job_preserving_drained("job-a"));
+        generations.sync_compat_active_jobs();
+        assert_eq!(generations.generations["A"].active_jobs, 1);
+        assert_eq!(generations.generations["B"].active_jobs, 1);
+    }
+
+    #[test]
+    fn a_registry_without_active_jobs_still_loads() {
+        let registry: RollingGenerations<&str> = serde_json::from_str(
+            r#"{
+                "admission_owner": "A",
+                "generations": {
+                    "A": {"endpoint": "endpoint-a", "drain_state": "admitting"}
+                },
+                "job_owners": {"job-a": "A"}
+            }"#,
+        )
+        .expect("a missing active_jobs field defaults to zero");
+        assert_eq!(registry.generations["A"].active_jobs, 0);
+        assert_eq!(registry.job_owner("job-a"), Some("A"));
     }
 }

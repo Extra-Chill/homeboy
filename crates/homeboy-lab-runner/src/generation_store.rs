@@ -552,8 +552,9 @@ pub(crate) fn write(
     runner_id: &str,
     generations: &RollingGenerations<RunnerSession>,
 ) -> Result<()> {
-    // `active_jobs` has no serde default, so older binaries still need the
-    // field on disk; it is derived from the owner ledger and never read back.
+    // `active_jobs` is a write-only compatibility field that older pinned
+    // binaries still read from disk; it is derived from the owner ledger and
+    // never read back by this binary.
     let mut persisted = generations.clone();
     let owner_counts = persisted
         .generations
@@ -4242,7 +4243,9 @@ mod tests {
             "lease-next",
             session("lease-next", "daemon-next", Some(303)),
         );
-        registry.generations.activate("lease-next");
+        registry
+            .generations
+            .activate_preserving_drained("lease-next");
         assert!(registry.generations.generations.contains_key("lease-fresh"));
         assert_eq!(
             registry.generations.job_owner("accepted-during-reconcile"),
@@ -4437,12 +4440,12 @@ mod tests {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
             let mut prior = RollingGenerations::new("lease-a", a.clone());
-            prior.admit_job("job-a");
+            assert!(prior.admit_job_for("lease-a", "job-a"));
             assert!(prior.record_run("job-a", "run-a"));
             assert!(prior.record_artifact("job-a", "artifact-a"));
             prior.begin("build-b", b.clone());
-            prior.activate("build-b");
-            prior.admit_job("job-b");
+            prior.activate_preserving_drained("build-b");
+            assert!(prior.admit_job_for("build-b", "job-b"));
             homeboy_core::engine::local_files::write_json_file(
                 &path("runner-a").expect("registry path"),
                 &prior,
@@ -4485,10 +4488,10 @@ mod tests {
         test_support::with_isolated_home(|_| {
             let current = session("lease-a", "daemon-a", Some(101));
             let mut generations = RollingGenerations::new("lease-a", current.clone());
-            generations.admit_job("job-a");
+            assert!(generations.admit_job_for("lease-a", "job-a"));
             assert!(generations.record_run("job-a", "run-a"));
             assert!(generations.record_artifact("job-a", "artifact-a"));
-            assert!(!generations.complete_job("job-a"));
+            assert!(generations.complete_job_preserving_drained("job-a"));
             write("runner-a", &generations).expect("persist retained result ownership");
 
             assert!(
@@ -5498,7 +5501,7 @@ mod tests {
                 .run_owners
                 .insert("run-a".to_string(), "lease-a".to_string());
             generations.begin("build-b", b.clone());
-            generations.activate("build-b");
+            generations.activate_preserving_drained("build-b");
             write("runner-a", &generations).expect("persist lease aliases");
 
             assert_eq!(
