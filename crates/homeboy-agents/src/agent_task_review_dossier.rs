@@ -1179,9 +1179,7 @@ fn reviewer_text(value: &str) -> String {
 }
 
 pub fn reviewer_runnable_command(value: &str) -> bool {
-    !value.trim().is_empty()
-        && reviewer_safe_command(value).is_some()
-        && !contains_operator_only_reference(&reviewer_safe_command(value).unwrap_or_default())
+    reviewer_safe_command(value).is_some()
 }
 
 /// Build a reviewer command from durable gate source without exposing local
@@ -1191,8 +1189,39 @@ pub fn reviewer_safe_command(value: &str) -> Option<String> {
     if value.trim().is_empty() {
         return None;
     }
-    let mut changed = false;
-    let command = value
+    let command = redact_inline_environment_paths(value);
+    (!contains_operator_only_reference(&command)).then_some(command)
+}
+
+/// A token that keeps a gate from producing a reviewer-safe command, and the
+/// reviewer-safety rule it violates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerUnsafeToken {
+    pub token: String,
+    pub rule: &'static str,
+}
+
+/// Every distinct token, in source order, that keeps `value` from producing a
+/// reviewer-safe command. Empty exactly when [`reviewer_safe_command`] accepts
+/// a non-empty `value`; both derive from one rule set.
+pub fn reviewer_unsafe_tokens(value: &str) -> Vec<ReviewerUnsafeToken> {
+    let command = redact_inline_environment_paths(value);
+    let mut tokens: Vec<ReviewerUnsafeToken> = Vec::new();
+    for (token, rule) in operator_only_tokens(&command) {
+        if !tokens.iter().any(|known| known.token == token) {
+            tokens.push(ReviewerUnsafeToken {
+                token: token.to_string(),
+                rule,
+            });
+        }
+    }
+    tokens
+}
+
+/// Inline `NAME=/absolute/path` assignments become `NAME="${NAME}"`, which a
+/// reviewer can set for their own environment.
+fn redact_inline_environment_paths(value: &str) -> String {
+    value
         .split_whitespace()
         .map(|token| {
             let Some((name, assigned)) = token.split_once('=') else {
@@ -1207,35 +1236,38 @@ pub fn reviewer_safe_command(value: &str) -> Option<String> {
                     .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
                 && (assigned.starts_with('/') || assigned.starts_with("~/"))
             {
-                changed = true;
                 format!("{name}=\"${{{name}}}\"")
             } else {
                 token.to_string()
             }
         })
         .collect::<Vec<_>>()
-        .join(" ");
-    if contains_operator_only_reference(&command) {
-        None
-    } else if changed || !contains_operator_only_reference(value) {
-        Some(command)
-    } else {
-        None
-    }
+        .join(" ")
 }
 
 fn contains_operator_only_reference(value: &str) -> bool {
-    for word in value.split_whitespace() {
+    operator_only_tokens(value).next().is_some()
+}
+
+/// Whitespace-separated words of `value` that are operator-only, paired with
+/// the rule each one violates. This is the single reviewer-safety rule set.
+fn operator_only_tokens(value: &str) -> impl Iterator<Item = (&str, &'static str)> {
+    value.split_whitespace().filter_map(|word| {
         let normalized = normalize_reviewer_token(word);
         if reviewer_credential_flag(normalized) {
-            return true;
+            Some((word, RULE_CREDENTIAL))
+        } else {
+            operator_only_reference_rule(normalized).map(|rule| (word, rule))
         }
-        if operator_only_reference(normalized) {
-            return true;
-        }
-    }
-    false
+    })
 }
+
+const RULE_CREDENTIAL: &str = "credential-bearing argument";
+const RULE_LOCAL_HOST: &str = "machine-local hostname";
+const RULE_LOCAL_PATH: &str = "machine-local absolute path";
+const RULE_OPERATOR_URI: &str = "operator-only URI scheme";
+const RULE_RUN_ID: &str = "internal run identifier";
+const RULE_URL: &str = "URL must be public HTTPS without credentials, query, or local/IP host";
 
 fn normalize_reviewer_token(value: &str) -> &str {
     value.trim_matches(|character: char| {
@@ -1263,6 +1295,10 @@ fn reviewer_credential_flag(value: &str) -> bool {
 }
 
 fn operator_only_reference(value: &str) -> bool {
+    operator_only_reference_rule(value).is_some()
+}
+
+fn operator_only_reference_rule(value: &str) -> Option<&'static str> {
     let lower = value.to_ascii_lowercase();
     if let Some((name, assigned_value)) = value.split_once('=') {
         let name = name
@@ -1281,45 +1317,55 @@ fn operator_only_reference(value: &str) -> bool {
             "github_token",
         ]
         .contains(&name.as_str())
-            || operator_only_reference(normalize_reviewer_token(assigned_value))
         {
-            return true;
+            return Some(RULE_CREDENTIAL);
+        }
+        if let Some(rule) = operator_only_reference_rule(normalize_reviewer_token(assigned_value)) {
+            return Some(rule);
         }
     }
-    if lower.contains("localhost")
-        || lower.starts_with("runner-artifact://")
+    if lower.contains("localhost") {
+        return Some(RULE_LOCAL_HOST);
+    }
+    if lower.starts_with("runner-artifact://")
         || lower.starts_with("artifact://")
         || lower.starts_with("homeboy://")
         || lower.starts_with("file://")
-        || lower.starts_with('/')
+    {
+        return Some(RULE_OPERATOR_URI);
+    }
+    if lower.starts_with('/')
         || lower.starts_with("~/")
         || lower.contains("/users/")
         || lower.contains("=/")
         || lower.contains("=~/")
-        || [
-            "token=",
-            "secret=",
-            "password=",
-            "apikey=",
-            "api_key=",
-            "authorization=",
-        ]
-        .iter()
-        .any(|secret| lower.contains(secret))
-        || is_internal_run_id(value)
     {
-        return true;
+        return Some(RULE_LOCAL_PATH);
+    }
+    if [
+        "token=",
+        "secret=",
+        "password=",
+        "apikey=",
+        "api_key=",
+        "authorization=",
+    ]
+    .iter()
+    .any(|secret| lower.contains(secret))
+    {
+        return Some(RULE_CREDENTIAL);
+    }
+    if is_internal_run_id(value) {
+        return Some(RULE_RUN_ID);
     }
     // `Url::parse` accepts colon-bearing CLI arguments as custom URI schemes.
     // Only hierarchical references are intended to be URLs in reviewer commands.
     if !value.contains("://") {
-        return false;
+        return None;
     }
-    let Ok(url) = reqwest::Url::parse(value) else {
-        return false;
-    };
+    let url = reqwest::Url::parse(value).ok()?;
     let host = url.host_str().unwrap_or_default();
-    url.scheme() != "https"
+    (url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -1327,7 +1373,8 @@ fn operator_only_reference(value: &str) -> bool {
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || host.ends_with(".test")
-        || host_ip_literal(host).is_some()
+        || host_ip_literal(host).is_some())
+    .then_some(RULE_URL)
 }
 
 fn is_internal_run_id(value: &str) -> bool {
@@ -2359,6 +2406,47 @@ mod tests {
             url: Some("https://example.com/evidence?token=secret".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
+    }
+
+    /// #15672: the admission report and the reviewer-safe predicate are one
+    /// rule set, so every rejected command names its tokens and every accepted
+    /// command names none.
+    #[test]
+    fn reviewer_unsafe_tokens_name_each_rejected_token_and_its_rule() {
+        let tokens = reviewer_unsafe_tokens(
+            "cargo test > /tmp/x.$$ && curl http://localhost:5432 --token t && rm /tmp/x.$$",
+        );
+        assert_eq!(
+            tokens,
+            vec![
+                ReviewerUnsafeToken {
+                    token: "/tmp/x.$$".into(),
+                    rule: RULE_LOCAL_PATH,
+                },
+                ReviewerUnsafeToken {
+                    token: "http://localhost:5432".into(),
+                    rule: RULE_LOCAL_HOST,
+                },
+                ReviewerUnsafeToken {
+                    token: "--token".into(),
+                    rule: RULE_CREDENTIAL,
+                },
+            ]
+        );
+        for value in [
+            "cargo test > /tmp/x.$$",
+            "BASE_URL=http://127.0.0.1:8080 cargo test",
+            "API_KEY=secret cargo test",
+            "cargo test",
+            "STATIC_SITE_IMPORTER_WP_ROOT=/Users/chris/wp cargo test importer",
+            "curl https://example.com/evidence",
+        ] {
+            assert_eq!(
+                reviewer_safe_command(value).is_none(),
+                !reviewer_unsafe_tokens(value).is_empty(),
+                "predicate and report disagree for {value}"
+            );
+        }
     }
 
     #[test]

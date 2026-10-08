@@ -1355,6 +1355,14 @@ fn validate_batch_gate_contracts(
     plan: &BatchCookFanoutPlan,
     workspace: Option<&std::path::Path>,
 ) -> Result<GateContractValidation> {
+    // The Cook spine enforces this per child; admit the same rule here so a
+    // wave fails before worktrees, recipes, or provider work exist (#15672).
+    for cook in &plan.cooks {
+        homeboy::agents::agent_task_service::validate_reviewer_visible_gates(
+            &cook.verify,
+            Some(&cook.cook_id),
+        )?;
+    }
     let gates = plan
         .cooks
         .iter()
@@ -9437,6 +9445,53 @@ fi
                 "issue-6454"
             ])
         );
+    }
+
+    /// Regression for #15672: a `--verify-file` gate whose only public program
+    /// names a machine-local path passed preview and admission, then every child
+    /// failed in the Cook spine after provider work. Admission now rejects it
+    /// with the same rule and names the offending token.
+    #[test]
+    fn cook_batch_rejects_reviewer_unsafe_verify_file_before_admission() {
+        with_isolated_home(|home| {
+            let gate = home.path().join("gate.sh");
+            std::fs::write(
+                &gate,
+                "set -e\ncargo test > /tmp/be-canonical-steps.$$\nrm -f /tmp/be-canonical-steps.$$\n",
+            )
+            .expect("write verification fixture");
+            let mut args = cook_batch_args();
+            args.gates.verify.clear();
+            args.gates.verify_file.push(gate.display().to_string());
+            args.gates.snapshot_file_inputs().expect("snapshot gate");
+            let plan = build_cook_batch_plan(&args).expect("plan inputs are valid");
+
+            let error = validate_batch_cook_gates(&plan, None)
+                .expect_err("unsafe public gate is rejected before admission");
+
+            assert_eq!(error.details["field"], "verification");
+            let problem = error.details["problem"].as_str().expect("problem text");
+            assert!(
+                problem.contains(
+                    "rejected tokens: `/tmp/be-canonical-steps.$$` (machine-local absolute path)."
+                ),
+                "{problem}"
+            );
+            assert!(problem.contains("--private-verify"), "{problem}");
+            assert!(error.details["id"]
+                .as_str()
+                .expect("rejected child id")
+                .ends_with("issue-6453"));
+        });
+    }
+
+    #[test]
+    fn cook_batch_allows_runtime_local_values_in_private_verify() {
+        let mut args = cook_batch_args();
+        args.gates.verify = vec!["cargo test".to_string()];
+        args.gates.private_verify = vec!["check http://localhost:5432".to_string()];
+        let plan = build_cook_batch_plan(&args).expect("plan inputs are valid");
+        validate_batch_cook_gates(&plan, None).expect("private gate is not published to reviewers");
     }
 
     #[test]

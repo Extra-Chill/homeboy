@@ -6228,6 +6228,57 @@ fn verify_replacement_command_accepts_corrected_gates_and_authorization() {
     );
 }
 
+/// Regression for #15672: Cook admission and preview apply the spine's
+/// reviewer-safe gate rule before any destination or provider work, and name
+/// each rejected token.
+#[test]
+fn cook_preflight_rejects_reviewer_unsafe_verify_file_and_names_the_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let gate = temp.path().join("gate.sh");
+    std::fs::write(
+        &gate,
+        "set -e\ncargo test > /tmp/be-canonical-steps.$$\nrm -f /tmp/be-canonical-steps.$$\n",
+    )
+    .expect("write gate");
+    let mut args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "Implement the outcome".to_string(),
+        "--to-worktree".to_string(),
+        "sample-plugin@fix-issue".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--verify-file".to_string(),
+        gate.display().to_string(),
+    ]);
+    args.gates
+        .snapshot_file_inputs()
+        .expect("snapshot gate file");
+
+    let error = validate_cook_request(&args).expect_err("unsafe public gate is rejected");
+
+    assert_eq!(error.details["field"], "verification");
+    let problem = error.details["problem"].as_str().expect("problem text");
+    assert!(
+        problem.contains(
+            "rejected tokens: `/tmp/be-canonical-steps.$$` (machine-local absolute path)."
+        ),
+        "{problem}"
+    );
+    assert!(problem.contains("--private-verify"), "{problem}");
+
+    std::fs::write(&gate, "set -e\ncargo test\n").expect("rewrite gate");
+    args.gates.verify.clear();
+    args.gates.input_sources.clear();
+    args.gates.verify_file.push(gate.display().to_string());
+    args.gates
+        .snapshot_file_inputs()
+        .expect("snapshot clean gate file");
+    validate_cook_request(&args).expect("reviewer-safe gate is admitted");
+}
+
 #[test]
 fn verify_replacement_file_gates_are_snapshotted_before_execution() {
     let temp = tempfile::tempdir().expect("tempdir");
