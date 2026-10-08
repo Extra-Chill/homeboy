@@ -2336,17 +2336,12 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = job_store.reconcile_controller_completions();
         });
-        // Generation retirement is lifecycle work, not a read-side effect. A
-        // failed lease stop leaves its identity and completed job routes durable
-        // so this existing reconciliation loop can retry on the next pass.
+        // Generation retirement is lifecycle work, not a read-side effect.
+        // Drain decisions derive each generation's active-job count from its
+        // own jobs.json, so a terminal job releases its generation without a
+        // registry sweep. A failed lease stop leaves its identity durable so
+        // this existing reconciliation loop can retry on the next pass.
         isolated_tick(|| {
-            for job in job_store
-                .list()
-                .into_iter()
-                .filter(|job| job.status.is_terminal())
-            {
-                let _ = generation_store::mark_job_terminal(&job.id.to_string());
-            }
             if lifetime::owns_global_work(&serving_lease_id) {
                 let _ = generation_store::reconcile_drained_generations(
                     &serving_lease_id,
