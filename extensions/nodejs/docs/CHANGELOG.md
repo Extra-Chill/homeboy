@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.7] - 2026-10-08
+
+### Fixed
+- inspect declared evidence read-only
+
 ## [3.7.6] - 2026-09-25
 
 ### Fixed
