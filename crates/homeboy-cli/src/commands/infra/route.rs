@@ -1231,7 +1231,6 @@ fn admit_unmaterialized_cook(
             "max_attempts": resolved.max_attempts,
             "provider_executions": resolved.dispatch.core.attempts,
             "same_provider_retries": resolved.dispatch.core.same_provider_retries,
-            "provider_rotations": resolved.dispatch.core.provider_rotations,
         },
         "publication": {
             "finalize": !resolved.no_finalize,

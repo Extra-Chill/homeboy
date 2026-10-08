@@ -44,9 +44,7 @@ pub struct EffectiveCookBudget {
     pub requested_provider_executions: u32,
     pub provider_executions: u32,
     pub same_provider_remediations: u32,
-    pub requested_provider_rotations: u32,
     pub provider_rotations: u32,
-    pub truncated_provider_rotations: u32,
 }
 
 /// Resolve Cook's retry intent into the scheduler's three execution budgets.
@@ -57,26 +55,15 @@ pub fn resolve_cook_budget(
     configured_rotations: u32,
     explicit_provider_executions: Option<u32>,
     explicit_same_provider_retries: Option<u32>,
-    explicit_provider_rotations: Option<u32>,
 ) -> Result<EffectiveCookBudget> {
     let requested_attempts = max_attempts.max(1);
-    let requested_provider_rotations = explicit_provider_rotations.unwrap_or(configured_rotations);
     let same_provider_remediations =
         explicit_same_provider_retries.unwrap_or_else(|| requested_attempts.saturating_sub(1));
-    let requested_provider_executions =
-        requested_attempts.saturating_add(requested_provider_rotations);
+    let requested_provider_executions = requested_attempts.saturating_add(configured_rotations);
     let provider_executions = explicit_provider_executions.unwrap_or(requested_provider_executions);
-    // An explicit total cap is the strongest boundary. It trims only rotations
-    // inherited from configuration; an explicit rotation remains a requested
-    // contract and must be funded in full.
-    let provider_rotations = if explicit_provider_rotations.is_some() {
-        requested_provider_rotations
-    } else {
-        requested_provider_rotations.min(provider_executions.saturating_sub(requested_attempts))
-    };
-    let truncated_provider_rotations = requested_provider_rotations - provider_rotations;
+    let provider_rotations = configured_rotations;
     let correction = format!(
-        "Start a new Cook with `--max-attempts {requested_attempts} --max-provider-executions {requested_provider_executions} --max-same-provider-retries {} --max-provider-rotations {requested_provider_rotations}`.",
+        "Start a new Cook with `--max-attempts {requested_attempts} --max-provider-executions {requested_provider_executions} --max-same-provider-retries {}`.",
         requested_attempts.saturating_sub(1),
     );
 
@@ -90,12 +77,11 @@ pub fn resolve_cook_budget(
             Some(vec![correction]),
         ));
     }
-    if explicit_provider_rotations.is_some() && provider_executions < requested_provider_executions
-    {
+    if provider_executions < requested_provider_executions {
         return Err(Error::validation_invalid_argument(
             "max-provider-executions",
             format!(
-                "Cook retry intent needs {requested_provider_executions} provider executions: {requested_attempts} attempt(s) plus {requested_provider_rotations} explicitly requested provider rotation(s), but --max-provider-executions is {provider_executions}. {correction}"
+                "Cook retry intent needs {requested_provider_executions} provider executions: {requested_attempts} attempt(s) plus {configured_rotations} configured provider rotation(s), but --max-provider-executions is {provider_executions}. {correction}"
             ),
             None,
             Some(vec![correction]),
@@ -117,9 +103,7 @@ pub fn resolve_cook_budget(
         requested_provider_executions,
         provider_executions,
         same_provider_remediations,
-        requested_provider_rotations,
         provider_rotations,
-        truncated_provider_rotations,
     })
 }
 
@@ -132,9 +116,7 @@ pub fn effective_cook_budget(
         requested_provider_executions: budget.max_provider_executions,
         provider_executions: budget.max_provider_executions,
         same_provider_remediations: budget.max_same_provider_retries,
-        requested_provider_rotations: budget.max_provider_rotations,
         provider_rotations: budget.max_provider_rotations,
-        truncated_provider_rotations: 0,
     }
 }
 
@@ -177,7 +159,7 @@ pub fn validate_effective_cook_budget(
         return Err(Error::validation_invalid_argument(
             "max-same-provider-retries",
             format!(
-                "Cook requests {} attempts but --max-same-provider-retries {} cannot fund {} same-provider remediation(s). Gate fixes and required review-form retries preserve the successful provider identity; --max-provider-rotations {} cannot replace them. Effective budget: attempts={}, provider_executions={}, same_provider_remediations={}, provider_rotations={}. {}",
+                "Cook requests {} attempts but --max-same-provider-retries {} cannot fund {} same-provider remediation(s). Gate fixes and required review-form retries preserve the successful provider identity; {} configured provider rotations cannot replace them. Effective budget: attempts={}, provider_executions={}, same_provider_remediations={}, provider_rotations={}. {}",
                 effective.requested_attempts,
                 effective.same_provider_remediations,
                 required_remediations,

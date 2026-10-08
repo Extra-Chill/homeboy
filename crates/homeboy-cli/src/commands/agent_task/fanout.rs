@@ -3940,7 +3940,6 @@ impl BatchCookFanoutPlan {
                     "model": cook.model,
                     "attempts": cook.attempts,
                     "same_provider_retries": cook.same_provider_retries,
-                    "provider_rotations": cook.provider_rotations,
                     "evidence_input_ids": cook.provider_evidence_inputs.iter().map(|input| &input.id).collect::<Vec<_>>(),
                 },
                 "placement": self.placement,
@@ -4045,8 +4044,6 @@ struct BatchCookSpec {
     attempts: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     same_provider_retries: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_rotations: Option<u32>,
     #[serde(default = "one_usize")]
     concurrency: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4231,7 +4228,6 @@ impl BatchCookSpec {
             configured_rotations,
             self.attempts,
             self.same_provider_retries,
-            self.provider_rotations,
         )?;
         let mut prompt = self.prompt.clone();
         let workspace_root = self.workspace.as_deref().or(self.cwd.as_deref());
@@ -4291,7 +4287,6 @@ impl BatchCookSpec {
                 generated_fanout_context: true,
                 attempts: Some(retry_budget.provider_executions),
                 same_provider_retries: Some(retry_budget.same_provider_remediations),
-                provider_rotations: Some(retry_budget.provider_rotations),
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: self.resolved_provider_policy.clone().map(
@@ -4403,9 +4398,7 @@ impl BatchCookSpec {
 }
 
 fn batch_cook_configured_rotations(cook: &BatchCookSpec) -> u32 {
-    // An explicitly selected route stays pinned unless the child explicitly
-    // requests rotations, matching the single-Cook command's policy.
-    if cook.backend.is_some() && cook.model.is_some() && cook.provider_rotations.is_none() {
+    if cook.model.is_some() && cook.acknowledge_model_override {
         return 0;
     }
     cook.resolved_provider_policy
@@ -4597,7 +4590,6 @@ fn build_cook_batch_plan_with_profiles(
             secret_env: args.secret_env.clone(),
             attempts: None,
             same_provider_retries: None,
-            provider_rotations: None,
             concurrency: 1,
             provider_config: args.provider_config.clone(),
             provider_evidence_inputs: args.provider_evidence_inputs.clone(),
@@ -6434,7 +6426,6 @@ mod tests {
                     cook.max_attempts = 1;
                     cook.attempts = Some(1);
                     cook.same_provider_retries = Some(0);
-                    cook.provider_rotations = Some(0);
                 }
                 let mut cache = provider::ProviderRuntimeReadinessCache::default();
                 preflight_batch_cook_recipes_with_readiness_cache(&plan, None, &mut cache)
@@ -6519,7 +6510,6 @@ mod tests {
                 cook.max_attempts = 1;
                 cook.attempts = Some(1);
                 cook.same_provider_retries = Some(0);
-                cook.provider_rotations = Some(0);
                 cook.verify = vec!["true".to_string()];
             }
 
@@ -6653,7 +6643,6 @@ mod tests {
                 assert_eq!(invocation.options.retry_policy.max_attempts, 3);
                 assert_eq!(invocation.dispatch.core.attempts, Some(5));
                 assert_eq!(invocation.dispatch.core.same_provider_retries, Some(2));
-                assert_eq!(invocation.dispatch.core.provider_rotations, Some(2));
                 assert_eq!(
                     compiled
                         .identity
@@ -6715,7 +6704,6 @@ mod tests {
                 let replay = BatchCookFanoutPlan::from_value(encoded.clone(), &args()).unwrap();
                 for cook in &replay.cooks {
                     let invocation = cook.to_cook_invocation(&replay).unwrap();
-                    assert_eq!(invocation.dispatch.core.provider_rotations, Some(2));
                     assert_eq!(invocation.dispatch.core.attempts, Some(5));
                     let mut request =
                         dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
@@ -6745,7 +6733,6 @@ mod tests {
             submitted.cooks[0].attempts = Some(1);
             submitted.cooks[0].max_attempts = 1;
             submitted.cooks[0].same_provider_retries = Some(0);
-            submitted.cooks[0].provider_rotations = Some(0);
             let encoded = serde_json::to_value(&submitted).unwrap();
             let mut config = homeboy::core::defaults::load_config();
             config.agent_task.rotation = Some(json!({
@@ -6754,7 +6741,6 @@ mod tests {
             homeboy::core::defaults::save_config(&config).unwrap();
             let replay = BatchCookFanoutPlan::from_value(encoded, &args()).unwrap();
             let invocation = replay.cooks[0].to_cook_invocation(&replay).unwrap();
-            assert_eq!(invocation.dispatch.core.provider_rotations, Some(0));
             assert_eq!(invocation.dispatch.core.attempts, Some(1));
             let mut request =
                 dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
@@ -6776,7 +6762,7 @@ mod tests {
             homeboy::core::defaults::save_config(&config).unwrap();
             let mut submitted = test_batch_plan();
             submitted.cooks[1].model = Some("pinned-model".to_string());
-            submitted.cooks[1].provider_rotations = Some(0);
+            submitted.cooks[1].acknowledge_model_override = true;
             submitted.cooks[1].resolved_provider_policy = None;
             submitted.cooks[1].resolve_provider_policy().unwrap();
             let mut input = args();
@@ -6810,24 +6796,17 @@ mod tests {
                 received.cooks[1].resolved_provider_policy,
                 submitted.cooks[1].resolved_provider_policy
             );
-            assert_eq!(
-                received.cooks[0]
-                    .to_cook_invocation(&received)
-                    .unwrap()
-                    .dispatch
-                    .core
-                    .provider_rotations,
-                Some(1)
-            );
-            assert_eq!(
-                received.cooks[1]
-                    .to_cook_invocation(&received)
-                    .unwrap()
-                    .dispatch
-                    .core
-                    .provider_rotations,
-                Some(0)
-            );
+            for (cook, rotations) in received.cooks.iter().zip([1, 0]) {
+                let invocation = cook.to_cook_invocation(&received).unwrap();
+                let mut request =
+                    dispatch_service::resolve_dispatch_request(invocation.dispatch).unwrap();
+                let compiled =
+                    dispatch_service::build_controller_dispatch_plan(&mut request).unwrap();
+                assert_eq!(
+                    compiled.options.execution_budget.max_provider_rotations,
+                    rotations
+                );
+            }
         });
     }
 
@@ -6864,7 +6843,6 @@ mod tests {
             let received = build_cook_batch_plan(&inputs).unwrap();
             for cook in &received.cooks {
                 let mut invocation = cook.to_cook_invocation(&received).unwrap();
-                assert_eq!(invocation.dispatch.core.provider_rotations, Some(1));
                 invocation.dispatch.workspace = None;
                 invocation.dispatch.cwd = Some(primary.display().to_string());
                 let mut request =

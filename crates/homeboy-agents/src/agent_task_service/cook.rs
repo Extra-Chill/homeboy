@@ -6469,7 +6469,7 @@ pub(crate) fn exhausted_budget_guidance(
         "gate or provider remediation"
     };
     format!(
-        "Cook stopped during {remediation} because {reason} was exhausted. Configured budget: --max-attempts {}, --max-provider-executions {}, --max-same-provider-retries {}, --max-provider-rotations {}. Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`; rotations cannot fund same-provider gate or review-form retries.",
+        "Cook stopped during {remediation} because {reason} was exhausted. Configured budget: --max-attempts {}, --max-provider-executions {}, --max-same-provider-retries {}, provider rotations {}. Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`; rotations cannot fund same-provider gate or review-form retries.",
         max_attempts,
         budget.max_provider_executions,
         budget.max_same_provider_retries,

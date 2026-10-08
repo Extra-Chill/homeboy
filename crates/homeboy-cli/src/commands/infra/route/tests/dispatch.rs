@@ -2839,8 +2839,6 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
                 true,
                 homeboy::agents::agent_task_service::CookProviderRouteOverride {
                     backend: Some("fixture".to_string()),
-                    allow_provider_rotation: Some(false),
-                    provider_rotations: Some(0),
                     ..Default::default()
                 },
             )
@@ -2866,13 +2864,7 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
                 "changed-model-run",
                 homeboy::agents::agent_task_service::CookProviderRouteOverride {
                     model: Some("other-model".to_string()),
-                    ..Default::default()
-                },
-            ),
-            (
-                "changed-rotation-run",
-                homeboy::agents::agent_task_service::CookProviderRouteOverride {
-                    provider_rotations: Some(1),
+                    acknowledge_model_override: true,
                     ..Default::default()
                 },
             ),

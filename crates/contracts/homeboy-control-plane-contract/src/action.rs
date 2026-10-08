@@ -243,10 +243,8 @@ pub struct ControlPlaneProviderRouteOverride {
     pub selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_provider_rotation: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_rotations: Option<u32>,
+    #[serde(default)]
+    pub acknowledge_model_override: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -61,7 +61,6 @@ pub fn controller_request_dispatch_command(
             // configured provider rotation (#11082).
             attempts: optional_u32(dispatch, "attempts")?,
             same_provider_retries: optional_u32(dispatch, "same_provider_retries")?,
-            provider_rotations: optional_u32(dispatch, "provider_rotations")?,
             queue_only: optional_bool(dispatch, "queue_only").unwrap_or(false),
             timeout_ms: optional_u64(dispatch, "timeout_ms")?,
             resolved_provider_policy: None,

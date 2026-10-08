@@ -584,16 +584,13 @@ pub struct RetryArgs {
     /// Provider-specific selector for the next Cook attempt.
     #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR")]
     pub selector: Option<String>,
-    /// Model for the next Cook attempt. A model override pins provider rotation
-    /// unless --allow-provider-rotation or a positive --provider-rotations is also supplied.
+    /// Model for the next Cook attempt. Confirm the pinned route with
+    /// --acknowledge-model-override.
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
-    /// Re-enable configured provider/model rotation for this overridden route.
-    #[arg(long)]
-    pub allow_provider_rotation: bool,
-    /// Explicit cross-provider/model rotations available after this override.
-    #[arg(long, value_name = "N")]
-    pub provider_rotations: Option<u32>,
+    /// Confirm an explicit model override that pins this retry.
+    #[arg(long, requires = "model")]
+    pub acknowledge_model_override: bool,
 }
 
 #[cfg(test)]
@@ -616,7 +613,7 @@ mod retry_tests {
             .render_long_help()
             .to_string();
         assert!(help.contains("--backend"), "{help}");
-        assert!(help.contains("--allow-provider-rotation"), "{help}");
+        assert!(help.contains("--acknowledge-model-override"), "{help}");
         assert!(help.contains("operator authority"), "{help}");
 
         let cli = Cli::try_parse_from([
@@ -626,8 +623,7 @@ mod retry_tests {
             "cook-a",
             "--model",
             "replacement-model",
-            "--provider-rotations",
-            "2",
+            "--acknowledge-model-override",
         ])
         .expect("route override parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -637,7 +633,7 @@ mod retry_tests {
             panic!("expected retry command");
         };
         assert_eq!(args.model.as_deref(), Some("replacement-model"));
-        assert_eq!(args.provider_rotations, Some(2));
+        assert!(args.acknowledge_model_override);
     }
 }
 

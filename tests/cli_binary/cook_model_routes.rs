@@ -13,11 +13,21 @@ fn cook_preview_uses_cli_ack_policy_for_configured_and_outside_models() {
     let home = tempfile::tempdir().expect("isolated Homeboy home");
     configure_rotation(&home, &[PRIMARY, ALTERNATIVE]);
 
-    let primary = run_preview(&home, PRIMARY, false);
+    let unconfirmed_primary = run_preview(&home, PRIMARY, false);
+    assert!(
+        !unconfirmed_primary.status.success(),
+        "a configured-model pin requires confirmation"
+    );
+    let primary = run_preview(&home, PRIMARY, true);
     assert_success(&primary, "configured primary");
     assert_preview_model(&primary, PRIMARY);
 
-    let alternative = run_preview(&home, ALTERNATIVE, false);
+    let unconfirmed_alternative = run_preview(&home, ALTERNATIVE, false);
+    assert!(
+        !unconfirmed_alternative.status.success(),
+        "an alternative-model pin requires confirmation"
+    );
+    let alternative = run_preview(&home, ALTERNATIVE, true);
     assert_success(&alternative, "configured alternative");
     assert_preview_model(&alternative, ALTERNATIVE);
 
@@ -328,6 +338,14 @@ fn assert_preview_model(output: &Output, model: &str) {
         "homeboy/agent-task-cook-preview/v1"
     );
     assert_eq!(preview["data"]["resolved"]["provider"]["model"], model);
+    assert_eq!(
+        preview["data"]["resolved"]["retry_budget"]["route"]["fallback"]["mode"],
+        "pinned"
+    );
+    assert_eq!(
+        preview["data"]["resolved"]["retry_budget"]["effective"]["max_provider_rotations"],
+        0
+    );
     assert_eq!(
         preview["data"]["resolved"]["provider"]["runtime_selection"]["model"],
         model

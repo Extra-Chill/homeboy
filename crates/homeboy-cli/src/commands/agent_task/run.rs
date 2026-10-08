@@ -176,42 +176,15 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     let funded = entries
         .min(budget.max_provider_rotations)
         .min(executions.saturating_sub(1));
-    let budget_facts = plan.metadata["cook_retry_policy"]
-        .get("truncated")
-        .and_then(|truncated| truncated.get("max_provider_rotations"))
-        .and_then(Value::as_u64)
-        .filter(|truncated| *truncated > 0)
-        .map(|truncated| {
-            let requested = plan.metadata["cook_retry_policy"]["requested"]
-                ["max_provider_rotations"]
-                .as_u64()
-                .unwrap_or(u64::from(budget.max_provider_rotations) + truncated);
-            format!(
-                "; requested {requested} rotation(s), effective {}, truncated {truncated}",
-                budget.max_provider_rotations
-            )
-        })
-        .unwrap_or_default();
     let route_disclosure = plan.metadata["cook_retry_policy"]["route"]["fallback"]["mode"]
         .as_str()
         .map(|mode| format!("cook: route: {mode}; "))
         .unwrap_or_default();
     if funded == 0 {
-        let unreachable = if entries > 0 {
-            format!(
-                "; {entries} configured rotation provider(s) are unreachable at this budget \
-                 (--max-provider-executions {executions}, --max-provider-rotations {})",
-                budget.max_provider_rotations
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{route_disclosure}cook: rotation: disabled ({executions} provider execution(s)){unreachable}{budget_facts}"
-        )
+        format!("{route_disclosure}cook: rotation: disabled ({executions} provider execution(s))")
     } else {
         format!(
-            "{route_disclosure}cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s){budget_facts}"
+            "{route_disclosure}cook: rotation: {funded} fallback provider(s), up to {executions} provider execution(s)"
         )
     }
 }
@@ -450,11 +423,7 @@ pub(crate) fn preview_cook(
     validate_cook_request_with_provenance(&args, provenance)?;
     let preview_request =
         dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
-    let catalog = provider::AgentTaskProviderCatalog::discover();
-    dispatch_service::require_model_override_acknowledgement_with_catalog(
-        &preview_request,
-        &catalog,
-    )?;
+    dispatch_service::require_model_override_acknowledgement(&preview_request)?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -4087,15 +4056,13 @@ fn cook_provider_route_override(
     backend: Option<String>,
     selector: Option<String>,
     model: Option<String>,
-    allow_provider_rotation: bool,
-    provider_rotations: Option<u32>,
+    acknowledge_model_override: bool,
 ) -> homeboy::agents::agent_task_service::CookProviderRouteOverride {
     homeboy::agents::agent_task_service::CookProviderRouteOverride {
         backend,
         selector,
         model,
-        allow_provider_rotation: allow_provider_rotation.then_some(true),
-        provider_rotations,
+        acknowledge_model_override,
     }
 }
 
@@ -4125,8 +4092,7 @@ where
         args.backend.clone(),
         args.selector.clone(),
         args.model.clone(),
-        args.allow_provider_rotation,
-        args.provider_rotations,
+        args.acknowledge_model_override,
     );
     if !route_override.is_empty() {
         if !args.rearm || !record.state.is_terminal() {
@@ -7128,26 +7094,30 @@ pub(crate) fn validate_cook_request_with_provenance(
     }
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
-    let configured_rotations = dispatch_service::controller_resolved_execution_policy(&request)
-        .rotation
-        .as_ref()
-        .map(|rotation| {
-            rotation
-                .max_total_attempts()
-                .min(
-                    u32::try_from(rotation.entries.len())
-                        .unwrap_or(u32::MAX)
-                        .saturating_add(1),
-                )
-                .saturating_sub(1)
-        })
-        .unwrap_or(0);
+    let configured_rotations =
+        if args.dispatch.model.is_some() && args.dispatch.core.acknowledge_model_override {
+            0
+        } else {
+            dispatch_service::controller_resolved_execution_policy(&request)
+                .rotation
+                .as_ref()
+                .map(|rotation| {
+                    rotation
+                        .max_total_attempts()
+                        .min(
+                            u32::try_from(rotation.entries.len())
+                                .unwrap_or(u32::MAX)
+                                .saturating_add(1),
+                        )
+                        .saturating_sub(1)
+                })
+                .unwrap_or(0)
+        };
     homeboy::agents::agent_task_service::resolve_cook_budget(
         args.max_attempts,
         configured_rotations,
         args.dispatch.core.attempts,
         args.dispatch.core.same_provider_retries,
-        args.dispatch.core.provider_rotations,
     )?;
     Ok(())
 }
@@ -7324,8 +7294,7 @@ pub(crate) fn require_model_override_acknowledgement_for_cook(
     }
     let dispatch = resolved_dispatch_args_for_cook(args)?;
     let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
-    let catalog = provider::AgentTaskProviderCatalog::discover();
-    dispatch_service::require_model_override_acknowledgement_with_catalog(&request, &catalog)
+    dispatch_service::require_model_override_acknowledgement(&request)
 }
 
 fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -7426,12 +7395,12 @@ mod require_model_override_acknowledgement_for_cook_tests {
     }
 
     #[test]
-    fn matching_the_configured_model_needs_no_acknowledgement() {
+    fn pinning_a_configured_model_requires_acknowledgement() {
         crate::test_support::with_isolated_home(|_| {
             configure_default_model_route();
             let args = cook_with_explicit_model("configured-model", false);
             require_model_override_acknowledgement_for_cook(&args)
-                .expect("matching the configured route needs no acknowledgement");
+                .expect_err("pinning a configured route still suppresses fallback");
         });
     }
 
@@ -7848,15 +7817,7 @@ fn resolve_cook_execution_budget(
     plan: &mut AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     let core = &args.dispatch.core;
-    // A concrete route is a caller contract, not merely a preference. Keep the
-    // configured policy in the plan for provenance, but give it no budget until
-    // the caller explicitly opts back into cross-route fallback.
-    let explicit_route = args.dispatch.model.is_some();
-    let rotation_opted_in = args.allow_provider_rotation
-        || core
-            .provider_rotations
-            .is_some_and(|rotations| rotations > 0);
-    let pinned_route = explicit_route && !rotation_opted_in;
+    let pinned_route = args.dispatch.model.is_some() && core.acknowledge_model_override;
     let configured_rotations = if pinned_route {
         0
     } else {
@@ -7867,7 +7828,6 @@ fn resolve_cook_execution_budget(
         configured_rotations,
         core.attempts,
         core.same_provider_retries,
-        core.provider_rotations,
     )?;
     plan.options.execution_budget =
         homeboy::agents::agent_task_scheduler::AgentTaskExecutionBudget::new(
@@ -7888,8 +7848,6 @@ fn resolve_cook_execution_budget(
             "max_attempts": args.max_attempts,
             "max_provider_executions": core.attempts,
             "max_same_provider_retries": core.same_provider_retries,
-            "max_provider_rotations": core.provider_rotations,
-            "allow_provider_rotation": args.allow_provider_rotation,
         },
         "route": {
             "requested": {
@@ -7901,7 +7859,7 @@ fn resolve_cook_execution_budget(
                 "mode": if pinned_route { "pinned" } else { "rotatable" },
                 "configured_rotations": plan.options.rotation.as_ref().map_or(0, |rotation| rotation.entries.len()),
                 "enabled": resolved.provider_rotations > 0,
-                "opted_in": rotation_opted_in,
+                "model_override_acknowledged": pinned_route,
             },
         },
         "resolved": {
@@ -7914,16 +7872,13 @@ fn resolve_cook_execution_budget(
             "max_attempts": resolved.requested_attempts,
             "max_provider_executions": resolved.requested_provider_executions,
             "max_same_provider_retries": resolved.same_provider_remediations,
-            "max_provider_rotations": resolved.requested_provider_rotations,
+            "max_provider_rotations": resolved.provider_rotations,
         },
         "effective": {
             "max_attempts": resolved.requested_attempts,
             "max_provider_executions": resolved.provider_executions,
             "max_same_provider_retries": resolved.same_provider_remediations,
             "max_provider_rotations": resolved.provider_rotations,
-        },
-        "truncated": {
-            "max_provider_rotations": resolved.truncated_provider_rotations,
         },
         "timeouts": {
             "provider_timeout_ms": homeboy::agents::agent_task_timeout::effective_provider_timeout_ms(
@@ -8071,34 +8026,6 @@ mod rotation_disclosure_tests {
         );
     }
 
-    /// The silence that let #11082 survive: a policy was configured, carried,
-    /// and unreachable, and nothing said so.
-    #[test]
-    fn a_configured_but_unfunded_rotation_is_named_as_unreachable() {
-        let disclosure = cook_rotation_disclosure(&plan_with(1, 0, 3));
-
-        assert!(disclosure.contains("disabled"), "{disclosure}");
-        assert!(
-            disclosure.contains("3 configured rotation provider(s) are unreachable"),
-            "{disclosure}"
-        );
-    }
-
-    #[test]
-    fn a_clamped_rotation_discloses_requested_effective_and_truncated_budgets() {
-        let mut plan = plan_with(1, 0, 2);
-        plan.metadata["cook_retry_policy"] = serde_json::json!({
-            "requested": { "max_provider_rotations": 2 },
-            "truncated": { "max_provider_rotations": 2 },
-        });
-
-        let disclosure = cook_rotation_disclosure(&plan);
-        assert!(
-            disclosure.contains("requested 2 rotation(s), effective 0, truncated 2"),
-            "{disclosure}"
-        );
-    }
-
     /// A rotation budget that outruns the execution budget can never fire.
     #[test]
     fn executions_bound_the_rotations_the_disclosure_promises() {
@@ -8130,7 +8057,7 @@ mod rotation_disclosure_tests {
     }
 
     #[test]
-    fn explicit_route_without_opt_in_is_pinned_but_keeps_same_provider_retries() {
+    fn confirmed_model_pin_keeps_same_provider_retries() {
         let args = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -8139,6 +8066,7 @@ mod rotation_disclosure_tests {
             "opencode",
             "--model",
             "openai/gpt-5.6-terra",
+            "--acknowledge-model-override",
             "--max-attempts",
             "2",
             "--no-finalize",
@@ -8172,16 +8100,13 @@ mod rotation_disclosure_tests {
     }
 
     #[test]
-    fn explicit_route_can_opt_into_configured_rotation() {
+    fn configured_rotation_is_funded_without_override_flags() {
         let args = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--backend",
             "opencode",
-            "--model",
-            "openai/gpt-5.6-terra",
-            "--allow-provider-rotation",
             "--max-attempts",
             "2",
             "--no-finalize",
@@ -8238,7 +8163,6 @@ mod prompt_input_tests {
                 client_context: None,
                 attempts: Some(1),
                 same_provider_retries: Some(0),
-                provider_rotations: Some(0),
                 queue_only: false,
                 timeout_ms: None,
                 resolved_provider_policy: None,
@@ -11034,8 +10958,7 @@ fn reserve_retry_through_action(
                         "backend": route_override.backend,
                         "selector": route_override.selector,
                         "model": route_override.model,
-                        "allow_provider_rotation": route_override.allow_provider_rotation,
-                        "provider_rotations": route_override.provider_rotations,
+                        "acknowledge_model_override": route_override.acknowledge_model_override,
                     })),
                     "timeout_ms": timeout_ms,
                 }),
@@ -11072,8 +10995,7 @@ where
         args.backend.clone(),
         args.selector.clone(),
         args.model.clone(),
-        args.allow_provider_rotation,
-        args.provider_rotations,
+        args.acknowledge_model_override,
     );
     let idempotency_key = args
         .idempotency_key
@@ -11109,8 +11031,7 @@ where
                     backend: None,
                     selector: None,
                     model: None,
-                    allow_provider_rotation: false,
-                    provider_rotations: None,
+                    acknowledge_model_override: false,
                     full: false,
                 },
                 executor,
@@ -11781,8 +11702,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
                 full: false,
             })
             .expect("preflight returns a machine-readable rejection");

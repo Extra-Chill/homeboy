@@ -255,7 +255,7 @@ fn cook_budget_preflight_rejects_unfunded_attempts_and_form_remediation() {
     assert!(
         error
             .message
-            .contains("provider-rotations 2 cannot replace"),
+            .contains("2 configured provider rotations cannot replace"),
         "{}",
         error.message
     );
@@ -273,60 +273,45 @@ fn cook_budget_preflight_rejects_unfunded_attempts_and_form_remediation() {
 
 #[test]
 fn cook_retry_intent_derives_single_provider_and_gate_remediation_budgets() {
-    let resolved = resolve_cook_budget(2, 0, None, None, None).expect("derived budget");
+    let resolved = resolve_cook_budget(2, 0, None, None).expect("derived budget");
 
     assert_eq!(resolved.requested_attempts, 2);
     assert_eq!(resolved.provider_executions, 2);
     assert_eq!(resolved.same_provider_remediations, 1);
     assert_eq!(resolved.provider_rotations, 0);
 
-    let explicit = resolve_cook_budget(2, 0, Some(2), Some(1), Some(0))
+    let explicit = resolve_cook_budget(2, 0, Some(2), Some(1))
         .expect("compatible explicit caller retains its budget");
     assert_eq!(explicit, resolved);
 }
 
 #[test]
 fn cook_retry_intent_adds_configured_rotation_allowance() {
-    let resolved = resolve_cook_budget(2, 2, None, None, None).expect("derived rotation budget");
+    let resolved = resolve_cook_budget(2, 2, None, None).expect("derived rotation budget");
 
     assert_eq!(resolved.provider_executions, 4);
     assert_eq!(resolved.same_provider_remediations, 1);
     assert_eq!(resolved.provider_rotations, 2);
-    assert_eq!(resolved.truncated_provider_rotations, 0);
 }
 
 #[test]
-fn cook_retry_intent_explicit_execution_cap_truncates_configured_rotations() {
-    let resolved = resolve_cook_budget(1, 2, Some(1), None, None)
-        .expect("an explicit execution cap bounds inherited rotations");
-
-    assert_eq!(resolved.requested_provider_executions, 3);
-    assert_eq!(resolved.provider_executions, 1);
-    assert_eq!(resolved.requested_provider_rotations, 2);
-    assert_eq!(resolved.provider_rotations, 0);
-    assert_eq!(resolved.truncated_provider_rotations, 2);
+fn cook_retry_intent_rejects_execution_caps_that_remove_configured_fallbacks() {
+    let error =
+        resolve_cook_budget(1, 2, Some(1), None).expect_err("configured fallbacks must be funded");
+    assert_eq!(error.details["field"], "max-provider-executions");
+    assert!(error.message.contains("2 configured provider rotation(s)"));
 }
 
 #[test]
-fn cook_retry_intent_preserves_explicit_zero_rotation_override() {
-    let resolved = resolve_cook_budget(2, 2, None, None, Some(0))
-        .expect("an explicit rotation disablement is a valid Cook policy");
-
-    assert_eq!(resolved.provider_executions, 2);
-    assert_eq!(resolved.same_provider_remediations, 1);
-    assert_eq!(resolved.provider_rotations, 0);
-}
-
-#[test]
-fn cook_retry_intent_rejects_contradictory_explicit_rotation_with_correction() {
-    let error = resolve_cook_budget(2, 1, Some(2), Some(1), Some(1))
+fn cook_retry_intent_rejects_underfunded_configured_rotation_with_correction() {
+    let error = resolve_cook_budget(2, 1, Some(2), Some(1))
         .expect_err("rotation requires its own provider execution allowance");
 
     assert_eq!(error.details["field"], "max-provider-executions");
     assert!(
-        error.message.contains(
-            "--max-provider-executions 3 --max-same-provider-retries 1 --max-provider-rotations 1"
-        ),
+        error
+            .message
+            .contains("--max-provider-executions 3 --max-same-provider-retries 1"),
         "{}",
         error.message
     );
@@ -334,7 +319,7 @@ fn cook_retry_intent_rejects_contradictory_explicit_rotation_with_correction() {
 
 #[test]
 fn cook_retry_intent_rejects_explicitly_disabled_gate_remediation() {
-    let error = resolve_cook_budget(2, 0, None, Some(0), None)
+    let error = resolve_cook_budget(2, 0, None, Some(0))
         .expect_err("a gate remediation slot cannot be disabled when Cook may retry");
 
     assert_eq!(error.details["field"], "max-same-provider-retries");
