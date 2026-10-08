@@ -535,7 +535,6 @@ pub(crate) fn preview_cook(
     // Preview binds evidence to the same resolved workspace, but only projects
     // its read-only paths. Cook alone performs the later secure copy.
     let mut compile_args = args.clone();
-    compile_args.provider_evidence_inputs.clear();
     let (evidence, evidence_provenance) = if !args.provider_evidence_inputs.is_empty() {
         record_preview_phase(&mut progress, "provider_evidence_projection");
         let workspace = provision["path"].as_str().ok_or_else(|| {
@@ -570,7 +569,7 @@ pub(crate) fn preview_cook(
         (None, None)
     };
     record_preview_phase(&mut progress, "plan_compilation");
-    let mut plan = compile_cook_plan(&compile_args, provision.clone())?;
+    let mut plan = compile_cook_plan(&compile_args, provision.clone(), evidence.as_deref())?;
     if let Some(evidence) = evidence {
         for task in &mut plan.tasks {
             if !task.executor.config.is_object() {
@@ -2977,8 +2976,11 @@ mod preview_tests {
         crate::test_support::with_isolated_home(|_| {
             declare_preview_fixture_capacity();
             let source = tempfile::NamedTempFile::new().expect("evidence source");
-            std::fs::write(source.path(), "Read this task evidence before editing.\n")
-                .expect("write prompt");
+            std::fs::write(
+                source.path(),
+                format!("Read {} before editing.\n", source.path().display()),
+            )
+            .expect("write prompt containing a declared path");
             let repository = tempfile::tempdir().expect("repository");
             let primary = repository.path().join("primary");
             let workspace = repository.path().join("task-worktree");
@@ -3060,8 +3062,8 @@ mod preview_tests {
             assert_eq!(exit_code, 0);
             assert_eq!(preview["resolved"]["workspace"]["action"], "planned_reuse");
             assert_eq!(
-                preview["resolved"]["placement"]["admission"]["deferred_to"],
-                "execution_placement_admission"
+                preview["resolved"]["placement"]["admission"]["revalidate_before_execution"],
+                true
             );
             let evidence_path = preview["resolved"]["provider"]["config"]["evidence_inputs"][0]
                 ["path"]
@@ -3072,6 +3074,18 @@ mod preview_tests {
                 "preview must not stage evidence inside the candidate: {evidence_path}"
             );
             assert!(!evidence_path.contains(&source.path().display().to_string()));
+            assert!(
+                validate_provider_evidence_prompt(
+                    Some(&format!("Read {evidence_path}-neighbor.")),
+                    &projected_provider_evidence_paths(
+                        preview["resolved"]["provider"]["config"]["evidence_inputs"]
+                            .as_array()
+                            .unwrap()
+                    )
+                )
+                .is_err(),
+                "a neighboring undeclared path remains rejected"
+            );
             assert!(
                 !workspace.join(".homeboy").exists(),
                 "preview must not create candidate evidence dirt"
@@ -3108,6 +3122,7 @@ mod preview_tests {
                     "action": "existing",
                     "path": workspace,
                 }),
+                None,
             )
             .expect("compile live Cook");
             assert_eq!(
@@ -3118,6 +3133,128 @@ mod preview_tests {
                 Path::new(evidence_path).is_file(),
                 "live Cook materializes its declared evidence projection"
             );
+            assert_eq!(
+                std::fs::read_dir(Path::new(evidence_path).parent().unwrap())
+                    .unwrap()
+                    .count(),
+                1,
+                "native parent-directory access must not expose neighboring blobs"
+            );
+        });
+    }
+
+    #[test]
+    fn declared_evidence_reaches_reading_provider_and_changes_harvested_patch() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy::agents::agent_task_provider::{
+                AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+            };
+            use homeboy::agents::agent_task_scheduler::AgentTaskScheduler;
+            let (_repository, workspace) = linked_preview_workspace();
+            let fixtures = tempfile::tempdir().unwrap();
+            let source = fixtures.path().join("value.txt");
+            let tree = fixtures.path().join("tree");
+            std::fs::create_dir(&tree).unwrap();
+            std::fs::write(tree.join("member.txt"), "tree-bytes").unwrap();
+            let script = fixtures.path().join("reader.cjs");
+            std::fs::write(&script, r#"
+const fs = require('fs'), path = require('path');
+const req = JSON.parse(fs.readFileSync(0, 'utf8'));
+// Discover from the instructions, exactly as a coding agent does.
+const inputs = JSON.parse(req.instructions.trim().split('\n').pop());
+if (inputs.length !== 2 || inputs.some(i => !i.read_only)) throw Error('missing read-only locations');
+if (req.instructions.includes('DO_NOT_FORWARD')) throw Error('private config leaked into instructions');
+const values = inputs.map(input => {
+  const file = fs.statSync(input.path).isDirectory() ? path.join(input.path, 'member.txt') : input.path;
+  return fs.readFileSync(file, 'utf8');
+});
+fs.writeFileSync(path.join(req.workspace.root, 'evidence-result.txt'), values.join('|'));
+const transcript = path.join(req.artifacts_path, 'transcript.txt');
+fs.writeFileSync(transcript, 'Read immutable inputs and produced an evidence-dependent result.');
+process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:values.join('|'),artifacts:[{id:'transcript',kind:'transcript',path:transcript}]}));
+"#).unwrap();
+            let provider = serde_json::from_value(serde_json::json!({
+                "id": "neutral.evidence", "backend": "neutral-evidence",
+                "argv": ["node", script], "capabilities": ["structured_outcome"]
+            }))
+            .unwrap();
+            let executor = std::sync::Arc::new(ExtensionProviderAgentTaskExecutor::from_catalog(
+                AgentTaskProviderCatalog {
+                    providers: vec![provider],
+                    ..Default::default()
+                },
+            ));
+            let mut immutable_trees = std::collections::BTreeSet::new();
+            for bytes in ["first-source", "second-source"] {
+                std::fs::write(&source, bytes).unwrap();
+                let args = cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    &format!("Inspect {} and {}.", source.display(), tree.display()),
+                    "--to-worktree",
+                    workspace.to_str().unwrap(),
+                    "--no-finalize",
+                    "--provider-evidence",
+                    &format!(r#"{{"id":"file","source":"{}"}}"#, source.display()),
+                    "--provider-evidence",
+                    &format!(r#"{{"id":"tree","source":"{}"}}"#, tree.display()),
+                ]);
+                let mut plan = compile_cook_plan(
+                    &args,
+                    serde_json::json!({"action":"existing","path":workspace}),
+                    None,
+                )
+                .unwrap();
+                immutable_trees.insert(PathBuf::from(
+                    plan.tasks[0].executor.config["evidence_inputs"][1]["path"]
+                        .as_str()
+                        .unwrap(),
+                ));
+                for task in &mut plan.tasks {
+                    task.executor.backend = "neutral-evidence".into();
+                    task.executor.selector = Some("neutral.evidence".into());
+                    task.metadata
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("resolved_runtime_identity");
+                    task.executor.config["evidence_inputs"][0]["provenance"] =
+                        serde_json::json!({"private":"DO_NOT_FORWARD"});
+                }
+                let aggregate = AgentTaskScheduler::new(executor.clone()).run(plan);
+                let outcome = &aggregate.outcomes[0];
+                assert_eq!(
+                    outcome.status,
+                    AgentTaskOutcomeStatus::Succeeded,
+                    "{outcome:?}"
+                );
+                assert_eq!(
+                    outcome.summary.as_deref(),
+                    Some(format!("{bytes}|tree-bytes").as_str())
+                );
+                let patch = outcome
+                    .artifacts
+                    .iter()
+                    .find(|artifact| artifact.kind == "patch")
+                    .expect("harvested candidate");
+                let patch = std::fs::read_to_string(patch.path.as_ref().unwrap()).unwrap();
+                assert!(patch.contains("evidence-result.txt") && patch.contains(bytes));
+                assert!(!patch.contains("member.txt") && !patch.contains("value.txt"));
+                assert_eq!(std::fs::read_to_string(&source).unwrap(), bytes);
+                assert_eq!(
+                    std::fs::read_to_string(tree.join("member.txt")).unwrap(),
+                    "tree-bytes"
+                );
+            }
+            #[cfg(unix)]
+            for tree in immutable_trees {
+                use std::os::unix::fs::PermissionsExt;
+                // Test-owner cleanup happens only after both provider runs.
+                std::fs::set_permissions(tree, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
         });
     }
 
@@ -3705,7 +3842,8 @@ mod preview_tests {
             let provision =
                 provision_cook_destination(&args).expect("execution admits planned create");
             assert_eq!(provision["action"], "lookup_pending");
-            let plan = compile_cook_plan(&args, provision.clone()).expect("compile deferred Cook");
+            let plan =
+                compile_cook_plan(&args, provision.clone(), None).expect("compile deferred Cook");
             let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
                 .as_str()
                 .expect("deferred projected evidence path");
@@ -3854,8 +3992,12 @@ mod preview_tests {
                 "--provider-evidence",
                 &evidence_arg,
             ]);
-            let plan = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
-                .expect("deferred evidence is admitted before workspace binding");
+            let plan = compile_cook_plan(
+                &args,
+                serde_json::json!({ "action": "lookup_pending" }),
+                None,
+            )
+            .expect("deferred evidence is admitted before workspace binding");
             let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
                 .as_str()
                 .expect("projected evidence path");
@@ -7560,7 +7702,7 @@ fn run_preflight_cook_execution(
         })?;
         (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let plan = compile_cook_plan(&args, provision.clone())?;
+        let plan = compile_cook_plan(&args, provision.clone(), None)?;
         (run_id, plan)
     };
     if args.attempt_plan.is_some() {
@@ -8275,6 +8417,7 @@ mod prompt_input_tests {
 pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
+    projected_evidence: Option<&[Value]>,
 ) -> homeboy::core::Result<AgentTaskPlan> {
     let pending_lookup = matches!(
         provision.get("action").and_then(Value::as_str),
@@ -8306,10 +8449,16 @@ pub(crate) fn compile_cook_plan(
     // workspace is materialized. Its content-addressed paths are independent
     // of the eventual checkout, so keep the same projection in the durable
     // plan for both existing and deferred destinations.
-    let evidence = project_admitted_provider_evidence_inputs(
-        &args.provider_evidence_inputs,
-        &admitted_evidence,
-    )?;
+    // Preview already planned and validated these immutable identities. Reuse
+    // that projection and its allowlist instead of clearing declarations and
+    // rejecting our own rewritten paths (or copying evidence during preview).
+    let evidence = match projected_evidence {
+        Some(evidence) => evidence.to_vec(),
+        None => project_admitted_provider_evidence_inputs(
+            &args.provider_evidence_inputs,
+            &admitted_evidence,
+        )?,
+    };
     let projected_paths = projected_provider_evidence_paths(&evidence);
     rewrite_provider_evidence_prompt(
         &mut dispatch.prompt,
@@ -8908,8 +9057,12 @@ fn provider_evidence_store() -> homeboy::core::Result<PathBuf> {
 
 fn provider_evidence_blob_path(store: &Path, digest: &str) -> PathBuf {
     store
-        .join("blobs")
+        // A file has its own readable directory. Native tools authorize the
+        // parent directory before reading a file; a shared blob-store parent
+        // would expose unrelated evidence through glob/grep.
+        .join("files")
         .join(digest.trim_start_matches("sha256:"))
+        .join("input")
 }
 
 fn provider_evidence_tree_path(store: &Path, digest: &str) -> PathBuf {
@@ -8974,10 +9127,17 @@ fn projected_provider_evidence_from_admitted(
             continue;
         }
         let digest = homeboy_engine_primitives::content_hash::sha256_file(source.copy_path())?;
+        let size = std::fs::metadata(source.copy_path())
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?
+            .len();
         projected.push(serde_json::json!({
             "id": input.id,
             "path": provider_evidence_blob_path(store, &digest),
             "read_only": true,
+            "sha256": format!("sha256:{digest}"),
+            "size_bytes": size,
+            "transport": "content-addressed-blob/v1",
+            "artifact": {"digest": format!("sha256:{digest}"), "size_bytes": size},
         }));
     }
     Ok(projected)
@@ -9095,29 +9255,31 @@ fn publish_provider_evidence_blob(
 ) -> homeboy::core::Result<()> {
     let publish = (|| {
         let parent = destination.parent().expect("evidence blob parent");
-        match std::fs::create_dir(parent) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-                    homeboy::core::Error::internal_io(
+        for parent in [parent.parent().expect("evidence file store"), parent] {
+            match std::fs::create_dir(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+                        homeboy::core::Error::internal_io(
+                            error.to_string(),
+                            Some(parent.display().to_string()),
+                        )
+                    })?;
+                    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                        return Err(homeboy::core::Error::validation_invalid_argument(
+                            "provider-evidence",
+                            "content-addressed provider evidence storage cannot traverse symlinks",
+                            Some(parent.display().to_string()),
+                            None,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(homeboy::core::Error::internal_io(
                         error.to_string(),
                         Some(parent.display().to_string()),
-                    )
-                })?;
-                if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "provider-evidence",
-                        "content-addressed provider evidence storage cannot traverse symlinks",
-                        Some(parent.display().to_string()),
-                        None,
                     ));
                 }
-            }
-            Err(error) => {
-                return Err(homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some(parent.display().to_string()),
-                ));
             }
         }
         match std::fs::hard_link(staging, destination) {
@@ -9649,8 +9811,8 @@ mod provider_evidence_tests {
             .expect("retry reuses staged evidence");
         assert_eq!(retry[0]["path"], projected[0]["path"]);
         assert_eq!(
-            std::fs::read_dir(store.join("blobs"))
-                .expect("blob store")
+            std::fs::read_dir(store.join("files"))
+                .expect("isolated file store")
                 .count(),
             1
         );

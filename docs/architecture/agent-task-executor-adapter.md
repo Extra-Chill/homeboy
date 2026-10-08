@@ -137,6 +137,23 @@ structures; adapters are responsible for interpreting backend-specific payloads
 and returning normalized Homeboy artifacts, diagnostics, evidence refs, and
 status values.
 
+## Read-only provider evidence
+
+`executor.config.evidence_inputs` is the canonical input list. Cook preview and
+execution use the same content-addressed locations and path allowlist; preview
+plans them without copying source bytes or dirtying the candidate. File inputs
+have a private one-file parent directory, separate from directory-tree inputs.
+Lab stages those inputs outside the writable candidate and remaps their locations.
+
+Immediately before command-provider execution, Homeboy appends the approved input
+IDs, readable locations, read-only intent, transport and byte identity to task
+instructions. Original host provenance and arbitrary config fields are omitted;
+large selected-file manifests stay in the canonical input list instead of being
+duplicated in the prompt. Runtime adapters forward those instructions and grant
+native inspection of the supplied evidence, with native edits denied. An approved
+read denied by runtime policy is a terminal environment-contract failure, including
+denials of selected directory members, not a successful or no-op coding result.
+
 ## Provider file artifacts
 
 Homeboy creates the executor artifact root before provider execution and records
