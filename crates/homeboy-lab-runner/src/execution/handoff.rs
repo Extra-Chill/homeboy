@@ -234,9 +234,16 @@ pub fn runner_job_cancel_for_session(
             Error::internal_unexpected(format!("build runner job cancel client: {err}"))
         })?;
     let data = daemon_post(&client, local_url, &format!("/jobs/{job_id}/cancel"))?;
-    parse_runner_job_cancel_body(
+    let (job, events) = parse_runner_job_cancel_body(
         canonical_daemon_body(&data, "daemon job cancel response")?.clone(),
-    )
+    )?;
+    if job.status.is_terminal() {
+        // The cancel response is the daemon's authoritative terminal snapshot,
+        // so its durable generation owner can be settled immediately instead of
+        // waiting for reconcile to observe the endpoint again.
+        super::super::generation_store::settle_observed_terminal_job(&session.runner_id, job_id)?;
+    }
+    Ok((job, events))
 }
 
 /// Cancel a controller-owned daemon job only if its durable projection still
