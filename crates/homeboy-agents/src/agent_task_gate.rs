@@ -1109,6 +1109,8 @@ pub enum AgentTaskGateFailureClassification {
     CandidateCode,
     GateDeclaration,
     ZeroTestsSelected,
+    /// A supervisor deadline or silence limit stopped the gate before a verdict.
+    ExecutionBudget,
 }
 
 pub const AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA: &str = "homeboy/gate-diagnostic-record/v1";
@@ -2217,13 +2219,29 @@ fn run_gate_argv_local(
         .flatten();
     let exit_code = effective_gate_exit_code(runner_exit_code, cargo_selection.as_ref());
     let failure_evidence = (exit_code != 0).then(|| {
-        gate_failure_evidence(
+        gate_budget_failure_evidence(
             command,
             exit_code,
             &stdout,
             &stderr,
-            cargo_selection.as_ref(),
+            termination,
+            if termination == AgentTaskGateTermination::NoProgress {
+                execution
+                    .supervision
+                    .map(|supervision| supervision.no_progress_timeout)
+            } else {
+                timeout
+            },
         )
+        .unwrap_or_else(|| {
+            gate_failure_evidence(
+                command,
+                exit_code,
+                &stdout,
+                &stderr,
+                cargo_selection.as_ref(),
+            )
+        })
     });
 
     selected_environment.finish_cargo_target(target_started.elapsed())?;
@@ -3968,6 +3986,37 @@ fn gate_report_schema() -> String {
 
 fn default_gate_step() -> PlanStep {
     PlanStep::builder("gate", "agent_task.gate", PlanStepStatus::Skipped).build()
+}
+
+fn gate_budget_failure_evidence(
+    command: &str,
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+    termination: AgentTaskGateTermination,
+    budget: Option<Duration>,
+) -> Option<AgentTaskGateFailureEvidence> {
+    let cause = match termination {
+        AgentTaskGateTermination::TimedOut => format!(
+            "wall-clock limit of {} ms exceeded; killed (timed_out)",
+            budget.unwrap_or_default().as_millis()
+        ),
+        AgentTaskGateTermination::NoProgress => format!(
+            "no output or progress for {} ms; killed (no_progress)",
+            budget.unwrap_or_default().as_millis()
+        ),
+        _ => return None,
+    };
+    Some(AgentTaskGateFailureEvidence {
+        classification: AgentTaskGateFailureClassification::ExecutionBudget,
+        summary: format!("deterministic gate supervision: {cause}: {command}"),
+        command: command.to_string(),
+        exit_code,
+        stdout_tail: text_tail(stdout, 20),
+        stderr_tail: text_tail(stderr, 20),
+        agent_feedback: "The supervisor stopped verification before a candidate verdict. Inspect the gate runtime and its declared time/progress budget, then resume verification. Do not rewrite candidate code based on this supervisor termination.".to_string(),
+        diagnostics: Vec::new(),
+    })
 }
 
 fn gate_failure_evidence(
@@ -6327,6 +6376,13 @@ mod tests {
         .expect("gate report");
         assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
         assert_eq!(report.exit_code, 125);
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
+        assert_eq!(
+            serde_json::to_value(evidence.classification).unwrap(),
+            "execution_budget"
+        );
+        assert!(evidence.summary.contains("no output or progress for 30 ms"));
+        assert!(evidence.summary.contains("no_progress"));
     }
 
     #[cfg(unix)]
@@ -6388,6 +6444,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn command_owned_budget_exit_codes_remain_candidate_failures() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        for code in [124, 125] {
+            let report = run_gate_command_with_supervision(
+                worktree.path(),
+                1,
+                &format!("exit {code}"),
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                None,
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+            )
+            .expect("command report");
+            assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+            assert_eq!(
+                report.failure_evidence.as_ref().unwrap().classification,
+                AgentTaskGateFailureClassification::CandidateCode
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn timeout_is_distinct_from_no_progress() {
@@ -6414,6 +6494,12 @@ mod tests {
         .expect("gate report");
         assert_eq!(report.termination, AgentTaskGateTermination::TimedOut);
         assert_eq!(report.exit_code, 124);
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
+        assert_eq!(
+            serde_json::to_value(evidence.classification).unwrap(),
+            "execution_budget"
+        );
+        assert!(evidence.summary.contains("wall-clock limit of 30 ms"));
     }
 
     #[test]

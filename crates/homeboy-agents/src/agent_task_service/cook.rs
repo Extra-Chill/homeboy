@@ -9494,6 +9494,21 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            AgentTaskCookLoopStatus::GateBudgetExceeded => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "timed_out",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "deterministic gate supervision exceeded its wall-clock or no-progress budget; candidate verification remains unproven. Inspect the gate runtime and budget, then resume verification"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::GateDeclarationInvalid => {
                 return Ok(cook_report(CookReportInput {
                     cook_id,
