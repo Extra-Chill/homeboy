@@ -164,7 +164,10 @@ fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
         );
         create_ssh_runner_with_path_env("lab-ssh", &workspace, &synthesized_path);
 
-        let homeboy_path = format!("{}/_homeboy_binaries/homeboy-c/homeboy", workspace.display());
+        let homeboy_path = format!(
+            "{}/_homeboy_binaries/homeboy-c/homeboy",
+            workspace.display()
+        );
         let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
 
         // The persisted PATH was homeboy-synthesized (controller-home entries
@@ -205,8 +208,10 @@ fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
         create_ssh_runner_with_path_env("lab-ssh", &workspace, &synthesized_path);
 
         for sha in ["c", "d"] {
-            let homeboy_path =
-                format!("{}/_homeboy_binaries/homeboy-{sha}/homeboy", workspace.display());
+            let homeboy_path = format!(
+                "{}/_homeboy_binaries/homeboy-{sha}/homeboy",
+                workspace.display()
+            );
             let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
             // The first refresh deletes the accumulated PATH outright; the
             // second starts from the cleaned registry and has no PATH to
@@ -240,7 +245,10 @@ fn refresh_patch_preserves_an_operator_path_without_homeboy_managed_entries() {
         let operator_path = "/opt/tools/bin:/usr/local/bin:/usr/bin:/bin";
         create_ssh_runner_with_path_env("lab-ssh", &workspace, operator_path);
 
-        let homeboy_path = format!("{}/_homeboy_binaries/homeboy-c/homeboy", workspace.display());
+        let homeboy_path = format!(
+            "{}/_homeboy_binaries/homeboy-c/homeboy",
+            workspace.display()
+        );
         let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
 
         assert_eq!(patch["env"]["PATH"], operator_path);

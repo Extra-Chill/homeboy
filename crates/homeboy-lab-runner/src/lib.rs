@@ -362,8 +362,8 @@ pub use capabilities::{
     RunnerRequiredTool, RunnerToolCapabilityRequirement, RunnerToolchainReadinessProbe,
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
-pub(crate) use command_path::set_homeboy_command_selection;
 pub use command_path::preflight_remote_argv_path_translation;
+pub(crate) use command_path::set_homeboy_command_selection;
 pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
     close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
@@ -3140,7 +3140,10 @@ mod tests {
             env.get("PATH").map(String::as_str),
             Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
         );
-        assert_eq!(env.get("HOMEBOY_COMMAND").map(String::as_str), Some(homeboy_path));
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path)
+        );
     }
 
     #[test]
@@ -3159,7 +3162,10 @@ mod tests {
         let env = spec.effective_env();
 
         assert_eq!(env.get("PATH"), None);
-        assert_eq!(env.get("HOMEBOY_COMMAND").map(String::as_str), Some(homeboy_path));
+        assert_eq!(
+            env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path)
+        );
     }
 
     #[test]
