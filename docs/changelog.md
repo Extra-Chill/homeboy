@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.7] - 2026-10-08
+
+### Changed
+- reduce controller fallback ledger to a pending-receipt queue
+
+### Fixed
+- respect controller capacity for Lab worktree creation
+
 ## [0.417.6] - 2026-10-08
 
 ### Changed
