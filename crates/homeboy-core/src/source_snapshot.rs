@@ -251,15 +251,12 @@ pub(crate) fn gitignore_sync_excludes(path: &Path) -> Vec<String> {
 }
 
 fn append_gitignore_exclude(excludes: &mut Vec<String>, raw: &str) {
-    let pattern = raw.trim_start_matches("./");
-    let pattern = if let Some(pattern) = pattern.strip_prefix('/') {
-        format!("./{pattern}")
-    } else {
-        pattern.to_string()
-    };
+    let pattern = raw.trim_start_matches("./").trim_start_matches('/');
     if pattern.is_empty() {
         return;
     }
+    // Git reports concrete repository-relative paths, not basename globs.
+    let pattern = format!("./{pattern}");
     if pattern.ends_with('/') {
         let base = pattern.trim_end_matches('/');
         append_unique(excludes, [base.to_string(), format!("{base}/**")]);
@@ -418,8 +415,8 @@ mod tests {
         assert_eq!(
             gitignore_sync_excludes(source_path),
             vec![
-                "runtime-overlays/generated".to_string(),
-                "runtime-overlays/generated/**".to_string(),
+                "./runtime-overlays/generated".to_string(),
+                "./runtime-overlays/generated/**".to_string(),
             ]
         );
     }
