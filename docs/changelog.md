@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.8] - 2026-10-08
+
+### Changed
+- derive generation active-job counts from jobs.json
+- make configured provider rotation unconditional
+
+### Fixed
+- anchor Git-discovered ignored paths to the source root
+
 ## [0.417.7] - 2026-10-08
 
 ### Changed
