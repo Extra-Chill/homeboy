@@ -2256,6 +2256,7 @@ fn cook_batch_dry_run_with_deadline(
 ) -> CmdResult<Value> {
     let mut planner = DryRunPlanner::new(&args, placement);
     planner.begin("gate_inputs");
+    args.gates.snapshot_file_inputs()?;
     if args.issues.len() > DRY_RUN_MAX_ISSUES {
         return Err(planner.defer("gate_inputs", "bounded issue list"));
     }
@@ -2287,10 +2288,7 @@ fn cook_batch_dry_run_with_deadline(
     if !static_repeatable_inputs_are_bounded(&args) {
         return Err(planner.defer("gate_inputs", "bounded repeatable static planning input"));
     }
-    if !args.gates.verify_file.is_empty()
-        || !args.gates.private_verify_file.is_empty()
-        || !args.provider_evidence_inputs.is_empty()
-    {
+    if !args.provider_evidence_inputs.is_empty() {
         return Err(planner.defer("gate_inputs", "file-backed gate or provider evidence input"));
     }
     if args
@@ -5000,7 +4998,13 @@ fn effective_batch_cook_gates(plan: &BatchCookFanoutPlan) -> Vec<Value> {
                 "selectors": verification_profile_selectors(cook),
                 "profile": cook.verification_profile,
                 "test_execution_plan": cook.test_execution_plan,
-                "verify": cook.verify,
+                "verify": cook.verify.iter().zip(&cook.input_sources).map(|(gate, source)| {
+                    if source.source_kind == "file" {
+                        format!("[file gate {}]", source.sha256)
+                    } else {
+                        gate.clone()
+                    }
+                }).chain(cook.verify.iter().skip(cook.input_sources.len()).cloned()).collect::<Vec<_>>(),
                 "private_verify": cook.private_verify.iter().map(|_| "[private]").collect::<Vec<_>>(),
                 "input_sources": cook.input_sources,
             })
@@ -5028,6 +5032,11 @@ fn verification_profile_selectors(cook: &BatchCookSpec) -> Vec<String> {
 fn public_batch_cook_plan(plan: &BatchCookFanoutPlan) -> BatchCookFanoutPlan {
     let mut public = plan.clone();
     for cook in &mut public.cooks {
+        for (gate, source) in cook.verify.iter_mut().zip(&cook.input_sources) {
+            if source.source_kind == "file" {
+                *gate = format!("[file gate {}]", source.sha256);
+            }
+        }
         cook.private_verify = vec!["[private]".to_string(); cook.private_verify.len()];
     }
     public
@@ -10996,6 +11005,39 @@ fi
                     .join(".local/share/homeboy/agent-task-recipes")
                     .exists(),
                 "blocking planning input must not create recipes"
+            );
+        });
+    }
+
+    #[test]
+    fn dry_run_snapshots_file_gates_and_projects_only_the_digest() {
+        with_isolated_home(|home| {
+            install_fanout_agent_task_providers(home.path());
+            let target = home.path().join("target");
+            std::fs::create_dir(&target).expect("target workspace");
+            std::fs::write(target.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("target manifest");
+            init_git_primary(&target);
+            write_component_registration(home.path(), "fixture", &target);
+            let gate = home.path().join("gate.sh");
+            let gate_contents = "printf 'private gate contents'";
+            std::fs::write(&gate, gate_contents).expect("write gate file");
+            let mut args = cook_batch_args();
+            args.repo = "fixture".to_string();
+            args.issues.truncate(1);
+            args.gates.verify.clear();
+            args.gates.verify_file.push(gate.display().to_string());
+
+            let (value, exit_code) = cook_batch(args).expect("preview file-backed gate");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["status"], "ready");
+            let rendered = value.to_string();
+            assert!(!rendered.contains(gate_contents));
+            assert!(rendered.contains("sha256:"));
+            assert_eq!(
+                value["preflight"]["deterministic_gates"][0]["input_sources"][0]["source_kind"],
+                "file"
             );
         });
     }
