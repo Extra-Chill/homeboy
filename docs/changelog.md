@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.9] - 2026-10-08
+
+### Changed
+- derive ledger active-job counts from job owners; settle on cancel
+
+### Fixed
+- retire proven-stopped drained generations without an observed zero
+- unblock provider diagnostics and follow-up lint gates
+- gates follow cook placement; recover verification_pending via cook-continue
+- deliver canonical read-only provider evidence
+- resolve status references before artifact byte retrieval
+- reap macOS controller death watchers
+
 ## [0.417.8] - 2026-10-08
 
 ### Changed
