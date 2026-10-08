@@ -26,9 +26,13 @@ const child = `
   import { existsSync } from 'node:fs';
   const chunks = ${JSON.stringify([
     'ordinary before\nHOMEBOY_RUNNER_PRO',
-    'GRESS {"schema":"homeboy/runner-progress/v1","phase":"import","completed":1,"total":2}\nHOMEBOY_RUNNER_PROGRESS {not-json}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"done","status":"succeeded"}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","metadata":null}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"render","current_item":"home"}\nordinary after\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"partial"}',
+    'GRESS {"schema":"homeboy/runner-progress/v1","phase":"import","completed":1,"total":2}\nHOMEBOY_RUNNER_PROGRESS {not-json}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"done","status":"succeeded"}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","metadata":null}\n',
+    'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"render","current_item":"home"}\nordinary after\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"partial"}',
   ])};
-  for (const chunk of chunks) process.stdout.write(chunk);
+  for (const chunk of chunks) {
+    process.stdout.write(chunk);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
   const wait = setInterval(() => {
     if (existsSync(process.env.RELEASE_FILE)) clearInterval(wait);
   }, 10);
@@ -50,14 +54,14 @@ CAPTURE_FILE="$CAPTURE_FILE" \
     node "$DRIVER_FILE" >"$FORWARDED_FILE" &
 DRIVER_PID=$!
 
+EXPECTED_FORWARDED=$'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"import","completed":1,"total":2}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"render","current_item":"home"}'
 for _ in $(seq 1 100); do
-    if [ -s "$FORWARDED_FILE" ]; then
+    if [ -f "$FORWARDED_FILE" ] && [ "$(<"$FORWARDED_FILE")" = "$EXPECTED_FORWARDED" ]; then
         break
     fi
     sleep 0.01
 done
 
-EXPECTED_FORWARDED=$'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"import","completed":1,"total":2}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"render","current_item":"home"}'
 if [ "$(<"$FORWARDED_FILE")" != "$EXPECTED_FORWARDED" ]; then
     echo "Expected only complete canonical progress before child exit:" >&2
     cat "$FORWARDED_FILE" >&2
@@ -68,6 +72,12 @@ fi
 
 touch "$RELEASE_FILE"
 wait "$DRIVER_PID"
+
+if [ "$(<"$FORWARDED_FILE")" != "$EXPECTED_FORWARDED" ]; then
+    echo "Forwarded progress changed after child exit:" >&2
+    cat "$FORWARDED_FILE" >&2
+    exit 1
+fi
 
 EXPECTED_CAPTURE=$'ordinary before\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"import","completed":1,"total":2}\nHOMEBOY_RUNNER_PROGRESS {not-json}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"done","status":"succeeded"}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","metadata":null}\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"render","current_item":"home"}\nordinary after\nHOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"partial"}'
 if [ "$(<"$CAPTURE_FILE")" != "$EXPECTED_CAPTURE" ]; then

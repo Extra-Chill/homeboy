@@ -548,6 +548,44 @@ assert.equal(config.agent.title.disable, true);
 	}, { env: fixtureEnv });
 	assert.equal(modelResult.status, 'succeeded', JSON.stringify(modelResult.diagnostics));
 
+	// The real native tools ask parent/* before ReadTool evaluates its relative
+	// path. A file's private parent must not grant access to neighboring blobs.
+	const fileRoot = path.join(root, 'provider-evidence', 'files', 'file-digest');
+	const treeRoot = path.join(root, 'provider-evidence', 'trees', 'tree-digest');
+	const neighborRoot = path.join(root, 'provider-evidence', 'files', 'neighbor-digest');
+	for (const directory of [fileRoot, treeRoot, neighborRoot]) fs.mkdirSync(directory, { recursive: true });
+	const evidenceFile = path.join(fileRoot, 'input');
+	const evidenceMember = path.join(treeRoot, 'member.txt');
+	fs.writeFileSync(evidenceFile, 'declared file bytes');
+	fs.writeFileSync(evidenceMember, 'declared tree bytes');
+	fs.writeFileSync(path.join(neighborRoot, 'input'), 'undeclared bytes');
+	const evidenceRequest = {
+		...request,
+		executor: { ...request.executor, config: { ...request.executor.config, workspace_root: realModelWorkspace,
+			evidence_inputs: [
+				{ id: 'file', path: evidenceFile, read_only: true },
+				{ id: 'tree', path: treeRoot, read_only: true },
+			],
+		} },
+	};
+	const evidenceConfig = JSON.parse(opencodeSpawnEnv(evidenceRequest, { env: fixtureEnv }).OPENCODE_CONFIG_CONTENT);
+	for (const filepath of [evidenceFile, evidenceMember]) {
+		assert.equal(externalDirectoryAction(evidenceConfig, 'build', path.join(path.dirname(concretePath(filepath)), '*')), 'allow');
+		assert.equal(readAction(evidenceConfig, 'build', realModelWorkspace, concretePath(filepath)), 'allow');
+		assert.equal(nativeToolAction(evidenceConfig, 'build', 'edit', path.relative(realModelWorkspace, concretePath(filepath))), 'deny');
+	}
+	assert.equal(externalDirectoryAction(evidenceConfig, 'build', path.join(concretePath(neighborRoot), '*')), 'deny');
+	assert.equal(externalDirectoryAction(evidenceConfig, 'build', path.join(concretePath(path.dirname(fileRoot)), '*')), 'deny');
+	assert.equal(nativeToolAction(evidenceConfig, 'build', 'edit', 'candidate-result.txt'), 'allow');
+	assert.equal(fs.readFileSync(evidenceFile, 'utf8'), 'declared file bytes');
+	assert.equal(fs.readFileSync(evidenceMember, 'utf8'), 'declared tree bytes');
+	fs.writeFileSync(path.join(fileRoot, 'unapproved.txt'), 'must not expose a shared parent');
+	assert.throws(() => opencodeSpawnEnv(evidenceRequest, { env: fixtureEnv }), /isolated readable directory/);
+	fs.rmSync(path.join(fileRoot, 'unapproved.txt'));
+	assert.throws(() => opencodeSpawnEnv({ ...evidenceRequest, executor: { ...evidenceRequest.executor,
+		config: { ...evidenceRequest.executor.config, evidence_inputs: [{ path: evidenceFile, read_only: false }] },
+	} }, { env: fixtureEnv }), /absolute read-only locations/);
+
 	const permissionWorkspaces = [
 		{
 			label: 'relative-long-attempt-workspace',
@@ -1422,6 +1460,34 @@ process.exit(0);
 	assert.equal(recoveredAgentResult.failure_classification, undefined);
 	assert.equal(recoveredResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
 	assert.equal(recoveredAgentResult.outputs?.opencode_run_result?.intentional_no_change, undefined);
+
+	// Replay the native rule-denial frame observed in the real Cook proof. A
+	// later final answer cannot turn a denied declared input into a successful no-op.
+	const evidenceDenialTree = path.join(root, 'evidence-denial-tree');
+	fs.mkdirSync(evidenceDenialTree);
+	const evidenceDenialMember = path.join(evidenceDenialTree, 'member.txt');
+	fs.writeFileSync(evidenceDenialMember, 'immutable evidence');
+	const evidenceDenialCli = path.join(root, 'mock-opencode-declared-evidence-denial.cjs');
+	fs.writeFileSync(evidenceDenialCli, `
+console.log(JSON.stringify({type:'tool_use',part:{type:'tool',tool:'read',state:{status:'error',input:{filePath:${JSON.stringify(evidenceDenialMember)}},error:'The user has specified a rule which prevents you from using this specific tool call.'}}}));
+console.log(JSON.stringify({type:'text',part:{type:'text',text:'I could not inspect the evidence, so I made no changes.',metadata:{openai:{phase:'final_answer'}}}}));
+`);
+	for (const input of [
+		{ path: evidenceDenialMember, read_only: true },
+		{ path: evidenceDenialTree, read_only: true, entries: [{ path: 'member.txt' }] },
+	]) {
+		const deniedEvidence = await executeOpenCodeAgentTask({
+			...request, task_id: 'declared-evidence-denial', workspace_path: deniedWorkspace,
+			artifacts_path: deniedArtifactDir, expected_artifacts: ['patch', 'transcript', 'agent_result'],
+			executor: { ...request.executor, config: { ...request.executor.config, command_args: [evidenceDenialCli], evidence_inputs: [input] } },
+		}, { env: fixtureEnv });
+		assert.equal(deniedEvidence.status, 'failed');
+		assert.equal(deniedEvidence.failure_classification, 'policy_denied');
+		const diagnostic = deniedEvidence.diagnostics.find((value) => value.class === 'opencode.policy_denied');
+		assert.equal(diagnostic.data.kind, 'permission_denied');
+		assert.equal(diagnostic.data.path, evidenceDenialMember);
+		assert.equal(deniedEvidence.retryable, false);
+	}
 
 	const deniedCliPath = path.join(root, 'mock-opencode-policy-denied.cjs');
 	fs.writeFileSync(deniedCliPath, `#!/usr/bin/env node

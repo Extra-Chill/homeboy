@@ -97,7 +97,7 @@ const OPENCODE_FATAL_LOG_PATTERNS = [
 		classification: 'provider_quota',
 	},
 ];
-const OPENCODE_PERMISSION_DENIED_PATTERN = /user rejected permission|permission policy rejected|policy denied|permission request denied/i;
+const OPENCODE_PERMISSION_DENIED_PATTERN = /user rejected permission|permission policy rejected|policy denied|permission request denied|rule which prevents you from using this specific tool call/i;
 const OPENCODE_GIT_CAPTURE_OPTIONS = {
 	encoding: 'utf8',
 	maxBuffer: 16 * 1024 * 1024,
@@ -345,8 +345,8 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '', env
 	// shadow-git snapshots add nothing. Building one indexes the whole worktree at
 	// startup, which stalls past the liveness window on very large repositories.
 	content.snapshot = false;
-	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config);
-	const workspaceReadPatterns = opencodeWorkspaceReadPatterns(request, config);
+	const evidence = opencodeEvidenceInputs(request, config);
+	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config, evidence);
 	if (externalDirectoryPatterns.length > 0) {
 		content.permission = permissionWithExternalDirectoryAllowances(content.permission, externalDirectoryPatterns);
 		content.agent[primaryAgent] = {
@@ -375,16 +375,59 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '', env
 		};
 	}
 
+	// Evidence is readable source data, never another writable workspace. Native
+	// edit/write/apply_patch all use the edit permission with worktree-relative paths.
+	for (const permission of [content.permission, content.agent[primaryAgent].permission]) {
+		const denied = evidence.flatMap((input) => {
+			const paths = [input.path, ...opencodeWorkspacePermissionRoots(request, config)
+				.map((root) => path.relative(concretePath(root), input.path))];
+			return input.directory ? paths.flatMap((value) => [value, path.join(value, '**')]) : paths;
+		});
+		const readRules = objectValue(permission.read);
+		const contentDenials = Object.fromEntries(Object.entries(readRules)
+			.filter(([pattern, action]) => action === 'deny' && !['..', '../*', '..\\*'].includes(pattern)));
+		permission.read = { ...readRules, ...Object.fromEntries(denied.map((value) => [value, 'allow'])), ...contentDenials };
+		permission.edit = { ...objectValue(permission.edit), ...Object.fromEntries(denied.map((value) => [value, 'deny'])) };
+	}
 	return JSON.stringify(applyOpenCodeRuntimeTools(content, request, env));
 }
 
-function opencodeExternalDirectoryPatterns(request = {}, config = {}) {
+function opencodeEvidenceInputs(request, config) {
+	if (config.evidence_inputs === undefined) return [];
+	if (!Array.isArray(config.evidence_inputs)) throw new Error('Provider evidence inputs must be an array.');
+	const inputs = config.evidence_inputs.map((input) => {
+		if (!isAbsolutePath(input.path) || input.read_only !== true) {
+			throw new Error('Provider evidence must declare absolute read-only locations.');
+		}
+		const location = concretePath(input.path);
+		const stat = fs.statSync(location);
+		if (!stat.isFile() && !stat.isDirectory()) throw new Error('Provider evidence must be a file or directory.');
+		return { path: location, directory: stat.isDirectory() };
+	});
+	const workspaceRoots = opencodeWorkspacePermissionRoots(request, config).map(concretePath);
+	for (const input of inputs.filter((value) => !value.directory)) {
+		const parent = path.dirname(input.path);
+		if ([...workspaceRoots, ...inputs.filter((value) => value.directory).map((value) => value.path)]
+			.some((root) => parent === root || isStrictDescendant(parent, root))) continue;
+		// OpenCode asks for parent/* even for a single file read. That parent
+		// must contain only declared inputs, not a shared controller blob store.
+		if (fs.readdirSync(parent).some((name) => !inputs.some((value) => value.path === path.join(parent, name)))) {
+			throw new Error('Provider evidence files require an isolated readable directory.');
+		}
+	}
+	return inputs;
+}
+
+function opencodeExternalDirectoryPatterns(request = {}, config = {}, evidence = []) {
 	const workspacePatterns = opencodeWorkspaceReadPatterns(request, config);
 	if (workspacePatterns.length === 0) {
 		return [];
 	}
 
-	const patterns = [...workspacePatterns];
+	const patterns = [...workspacePatterns, ...evidence.flatMap((input) => {
+		const root = input.directory ? input.path : path.dirname(input.path);
+		return [root, path.join(root, '**')];
+	})];
 	const attemptRoot = config.runtime_env?.TMPDIR;
 	if (isAbsolutePath(attemptRoot)) {
 		const concreteAttemptRoot = concretePath(attemptRoot);
@@ -788,7 +831,7 @@ function withPolicyDeniedOutcome(context = {}, terminal = {}) {
 				class: 'opencode.policy_denied',
 				classification: 'policy_denied',
 				message: deniedToolCallSummary(denial),
-				data: { denied_tool_call: denial },
+				data: { denied_tool_call: denial, ...(denial.path ? { kind: 'permission_denied', path: denial.path } : {}) },
 			},
 		],
 		metadata: {
@@ -817,7 +860,12 @@ function detectOpenCodePolicyDenial(context = {}) {
 		spawnResult.stdout,
 		spawnResult.stderr,
 	].filter(Boolean).join('\n'), context.spawnExtra?.env);
-	if (spawnResult.status === 0 && openCodeCompletedAfterPolicyDenial(text)) {
+	const inputs = arrayValue(context.request?.executor?.config?.evidence_inputs);
+	const declaredDenial = denial.path && inputs.some((input) => input.path === denial.path
+		|| arrayValue(input.entries).some((entry) => typeof entry.path === 'string'
+			&& isStrictDescendant(path.resolve(input.path, entry.path), input.path)
+			&& path.resolve(input.path, entry.path) === denial.path));
+	if (!declaredDenial && spawnResult.status === 0 && openCodeCompletedAfterPolicyDenial(text)) {
 		return null;
 	}
 	return denial;
@@ -891,6 +939,7 @@ function findDeniedToolCall(value, inherited = {}) {
 	}
 	const current = {
 		tool: stringValue(value.tool || value.name || inherited.tool),
+		path: stringValue(value.input?.filePath || value.input?.path || value.state?.input?.filePath || value.state?.input?.path || inherited.path),
 		command: stringValue(value.command || value.input?.command || inherited.command),
 		timestamp: stringValue(value.timestamp || value.time?.created || value.created || value.created_at || value.time || inherited.timestamp),
 	};
