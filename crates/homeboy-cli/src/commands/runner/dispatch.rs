@@ -215,9 +215,11 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         RunnerCommand::Reconcile {
             id,
             confirm_workload_processes_absent,
+            release_unverified_evidence,
         } => map_registry(status_mod::reconcile(
             &id,
             confirm_workload_processes_absent,
+            release_unverified_evidence,
         )),
         RunnerCommand::Disconnect { id, local_recovery } => {
             map_registry(registry::disconnect(&id, local_recovery))

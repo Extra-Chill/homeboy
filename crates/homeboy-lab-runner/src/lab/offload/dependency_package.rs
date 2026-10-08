@@ -10,7 +10,7 @@ use zip::write::FileOptions;
 
 use homeboy_core::{Error, Result};
 
-const SCHEMA: &str = "homeboy/controller-dependency-package/v1";
+const SCHEMA: &str = "homeboy/controller-dependency-package/v2";
 pub(super) const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_PACKAGE_FILES: usize = 100_000;
 
@@ -21,6 +21,18 @@ pub(super) struct DependencyPackage {
     pub sha256: String,
     pub bytes: u64,
     pub files: usize,
+}
+
+struct DependencyEntry {
+    path: PathBuf,
+    mode: u32,
+    kind: DependencyEntryKind,
+}
+
+enum DependencyEntryKind {
+    File,
+    Directory,
+    Symlink(crate::runner_staging_operation::SourcePackageSymlinkVerdict),
 }
 
 /// Seal (or reuse) a controller dependency package below an explicitly injected
@@ -55,8 +67,9 @@ pub(super) fn prepare_in_roots(
         }
     }
     let outputs = output_paths(workspace, plan)?;
+    let entries = dependency_entries(workspace, &outputs)?;
     let lockfiles = lockfile_identity(workspace)?;
-    let outputs_identity = output_identity(workspace, &outputs)?;
+    let outputs_identity = output_identity(workspace, &entries)?;
     let key = content_hash::sha256_hex(&serde_json::to_vec(&(SCHEMA, plan, lockfiles)).map_err(
         |error| {
             Error::internal_json(
@@ -66,7 +79,7 @@ pub(super) fn prepare_in_roots(
         },
     )?);
     let key = content_hash::sha256_hex(format!("{key}\0{outputs_identity}").as_bytes());
-    let root = data_root.join("cache/dependency-packages/v1");
+    let root = data_root.join("cache/dependency-packages/v2");
     let path = root.join(format!("{key}.zip"));
     if path.is_file() {
         let bytes = fs::metadata(&path)
@@ -85,7 +98,7 @@ pub(super) fn prepare_in_roots(
     }
     fs::create_dir_all(&root).map_err(io_error("create dependency package cache"))?;
     let staging = root.join(format!(".{key}.{}.tmp", std::process::id()));
-    let result = create_archive(workspace, &outputs, &staging);
+    let result = create_archive(workspace, &entries, &staging);
     if result.is_err() {
         let _ = fs::remove_file(&staging);
     }
@@ -100,44 +113,54 @@ pub(super) fn prepare_in_roots(
     }))
 }
 
-fn create_archive(workspace: &Path, outputs: &[String], path: &Path) -> Result<(u64, usize)> {
+fn create_archive(
+    workspace: &Path,
+    entries: &[DependencyEntry],
+    path: &Path,
+) -> Result<(u64, usize)> {
     let file = File::create(path).map_err(io_error("create dependency package archive"))?;
     let mut archive = zip::ZipWriter::new(file);
     let options = FileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
-        .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
-    let mut files = Vec::new();
-    for output in outputs {
-        collect_files(&workspace.join(output), workspace, &mut files)?;
-    }
-    files.sort();
-    files.dedup();
-    if files.len() > MAX_PACKAGE_FILES {
-        return Err(bound_error(
-            "file_count",
-            files.len() as u64,
-            MAX_PACKAGE_FILES as u64,
-        ));
-    }
+        .last_modified_time(zip::DateTime::default());
     let mut total = 0;
-    let file_count = files.len();
-    for source in files {
-        let metadata =
-            fs::metadata(&source).map_err(io_error("inspect dependency package file"))?;
-        total += metadata.len();
-        if total > MAX_PACKAGE_BYTES {
-            return Err(bound_error("bytes", total, MAX_PACKAGE_BYTES));
-        }
-        let name = source
+    let file_count = entries.len();
+    for entry in entries {
+        let name = entry
+            .path
             .strip_prefix(workspace)
-            .map_err(|_| Error::internal_unexpected("dependency package path escaped workspace"))?;
-        archive
-            .start_file(name.to_string_lossy(), options)
-            .map_err(zip_error("write dependency package header"))?;
-        let mut input = File::open(&source).map_err(io_error("open dependency package file"))?;
-        std::io::copy(&mut input, &mut archive)
-            .map_err(io_error("write dependency package file"))?;
+            .map_err(|_| Error::internal_unexpected("dependency package path escaped workspace"))?
+            .to_string_lossy()
+            .into_owned();
+        let options = options.unix_permissions(entry.mode);
+        match &entry.kind {
+            DependencyEntryKind::Directory => archive
+                .add_directory(name, options)
+                .map_err(zip_error("write dependency package directory"))?,
+            DependencyEntryKind::Symlink(link) => {
+                total += link.size_bytes;
+                if total > MAX_PACKAGE_BYTES {
+                    return Err(bound_error("bytes", total, MAX_PACKAGE_BYTES));
+                }
+                archive
+                    .add_symlink(name, link.target.as_str(), options)
+                    .map_err(zip_error("write dependency package symlink"))?;
+            }
+            DependencyEntryKind::File => {
+                use std::io::Read;
+                archive
+                    .start_file(name, options)
+                    .map_err(zip_error("write dependency package header"))?;
+                let input =
+                    File::open(&entry.path).map_err(io_error("open dependency package file"))?;
+                total +=
+                    std::io::copy(&mut input.take(MAX_PACKAGE_BYTES - total + 1), &mut archive)
+                        .map_err(io_error("write dependency package file"))?;
+                if total > MAX_PACKAGE_BYTES {
+                    return Err(bound_error("bytes", total, MAX_PACKAGE_BYTES));
+                }
+            }
+        }
     }
     archive
         .finish()
@@ -151,21 +174,27 @@ fn create_archive(workspace: &Path, outputs: &[String], path: &Path) -> Result<(
     Ok((bytes, file_count))
 }
 
-fn output_identity(workspace: &Path, outputs: &[String]) -> Result<String> {
-    let mut files = Vec::new();
-    for output in outputs {
-        collect_files(&workspace.join(output), workspace, &mut files)?;
-    }
-    files.sort();
+fn output_identity(workspace: &Path, entries: &[DependencyEntry]) -> Result<String> {
     let mut hasher = Sha256::new();
-    for file in files {
+    for entry in entries {
+        let name = entry
+            .path
+            .strip_prefix(workspace)
+            .map_err(|_| Error::internal_unexpected("dependency output escaped workspace"))?
+            .to_string_lossy();
+        let (kind, identity) = match &entry.kind {
+            DependencyEntryKind::File => ("file", content_hash::sha256_file(&entry.path)?),
+            DependencyEntryKind::Directory => ("directory", String::new()),
+            DependencyEntryKind::Symlink(link) => ("symlink", link.sha256.clone()),
+        };
         hasher.update(
-            file.strip_prefix(workspace)
-                .map_err(|_| Error::internal_unexpected("dependency output escaped workspace"))?
-                .to_string_lossy()
-                .as_bytes(),
+            serde_json::to_vec(&(name.as_ref(), kind, entry.mode, identity)).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize dependency output identity".to_string()),
+                )
+            })?,
         );
-        hasher.update(content_hash::sha256_file(&file)?.as_bytes());
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -192,29 +221,42 @@ fn output_paths(
     Ok(paths)
 }
 
-fn collect_files(path: &Path, workspace: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(io_error("inspect dependency package output"))?;
-    if metadata.file_type().is_symlink() {
-        return Err(Error::validation_invalid_argument(
-            "dependency_package",
-            "dependency packages cannot contain symbolic links",
-            Some(path.display().to_string()),
-            None,
+fn dependency_entries(workspace: &Path, outputs: &[String]) -> Result<Vec<DependencyEntry>> {
+    let mut entries = Vec::new();
+    for output in outputs {
+        let root = workspace.join(output);
+        collect_entries(&root, &root, &mut entries)?;
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries.dedup_by(|left, right| left.path == right.path);
+    if entries.len() > MAX_PACKAGE_FILES {
+        return Err(bound_error(
+            "file_count",
+            entries.len() as u64,
+            MAX_PACKAGE_FILES as u64,
         ));
     }
-    if metadata.is_file() {
-        files.push(path.to_path_buf());
+    Ok(entries)
+}
+
+fn collect_entries(path: &Path, root: &Path, entries: &mut Vec<DependencyEntry>) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(io_error("inspect dependency package output"))?;
+    let kind = if metadata.file_type().is_symlink() {
+        DependencyEntryKind::Symlink(dependency_symlink(path, root)?)
+    } else if metadata.is_file() {
+        DependencyEntryKind::File
     } else if metadata.is_dir() {
         for entry in fs::read_dir(path).map_err(io_error("read dependency package output"))? {
-            collect_files(
+            collect_entries(
                 &entry
                     .map_err(io_error("read dependency package entry"))?
                     .path(),
-                workspace,
-                files,
+                root,
+                entries,
             )?;
         }
+        DependencyEntryKind::Directory
     } else {
         return Err(Error::validation_invalid_argument(
             "dependency_package",
@@ -222,9 +264,75 @@ fn collect_files(path: &Path, workspace: &Path, files: &mut Vec<PathBuf>) -> Res
             Some(path.display().to_string()),
             None,
         ));
-    }
-    let _ = workspace;
+    };
+    entries.push(DependencyEntry {
+        path: path.to_path_buf(),
+        mode: file_mode(&metadata),
+        kind,
+    });
     Ok(())
+}
+
+fn dependency_symlink(
+    path: &Path,
+    root: &Path,
+) -> Result<crate::runner_staging_operation::SourcePackageSymlinkVerdict> {
+    let invalid = |reason: &str| {
+        Error::validation_invalid_argument(
+            "dependency_package",
+            reason,
+            Some(path.display().to_string()),
+            None,
+        )
+    };
+    if path == root {
+        return Err(invalid(
+            "declared dependency output roots cannot be symbolic links",
+        ));
+    }
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| invalid("dependency link escaped its output root"))?;
+    let target = fs::read_link(path).map_err(io_error("read dependency package symlink"))?;
+    let target = target
+        .to_str()
+        .ok_or_else(|| invalid("dependency link target must be valid UTF-8"))?;
+    let link = crate::runner_staging_operation::source_package_symlink_verdict(
+        &relative.to_string_lossy(),
+        target,
+    )
+    .map_err(|_| {
+        invalid(
+            "dependency link target must be relative and contained within its declared output root",
+        )
+    })?;
+    let resolved = path
+        .canonicalize()
+        .map_err(|_| invalid("dependency link target is dangling or cyclic"))?;
+    let root = root
+        .canonicalize()
+        .map_err(io_error("resolve dependency output root"))?;
+    if !resolved.starts_with(root) || (!resolved.is_file() && !resolved.is_dir()) {
+        return Err(invalid(
+            "dependency link target must resolve inside its declared output root",
+        ));
+    }
+    Ok(link)
+}
+
+#[cfg(unix)]
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    if metadata.is_dir() {
+        0o755
+    } else {
+        0o644
+    }
 }
 
 fn lockfile_identity(workspace: &Path) -> Result<Vec<(String, String)>> {
@@ -365,6 +473,121 @@ mod tests {
         assert!(prepare_in_roots(data_root.path(), root.path(), &plan)
             .unwrap()
             .is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_identity_covers_link_targets_and_executable_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let data_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let deps = root.path().join("deps");
+        fs::create_dir_all(deps.join("empty")).unwrap();
+        fs::write(deps.join("first"), "same bytes").unwrap();
+        fs::write(deps.join("second"), "same bytes").unwrap();
+        fs::set_permissions(deps.join("second"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("first", deps.join("tool")).unwrap();
+        symlink("empty", deps.join("directory-link")).unwrap();
+        let first = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        fs::remove_file(deps.join("tool")).unwrap();
+        symlink("second", deps.join("tool")).unwrap();
+        let second = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            first.key, second.key,
+            "different link topology must not reuse a cached package"
+        );
+        fs::set_permissions(deps.join("second"), fs::Permissions::from_mode(0o644)).unwrap();
+        let third = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            second.key, third.key,
+            "executable mode is part of package identity"
+        );
+
+        let restored = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("unzip")
+            .args([
+                "-oq",
+                second.path.to_str().unwrap(),
+                "-d",
+                restored.path().to_str().unwrap(),
+            ])
+            .status()
+            .expect("restore sealed dependency package");
+        assert!(status.success());
+        assert_eq!(
+            fs::read_link(restored.path().join("deps/tool")).unwrap(),
+            PathBuf::from("second")
+        );
+        assert!(
+            restored.path().join("deps/directory-link").is_dir(),
+            "empty directory target must be materialized"
+        );
+        assert_eq!(
+            fs::metadata(restored.path().join("deps/second"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        fs::remove_file(&second.path).unwrap();
+        fs::set_permissions(deps.join("second"), fs::Permissions::from_mode(0o755)).unwrap();
+        let repeated = prepare_in_roots(data_root.path(), root.path(), &plan())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.sha256, repeated.sha256,
+            "identical topology and modes seal deterministically"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_absolute_escaping_dangling_and_cyclic_dependency_links() {
+        use std::os::unix::fs::symlink;
+        for scenario in ["absolute", "escaping", "dangling", "cyclic", "root"] {
+            let data_root = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let deps = root.path().join("deps");
+            fs::create_dir(&deps).unwrap();
+            fs::write(deps.join("target"), "dependency").unwrap();
+            fs::write(root.path().join("outside"), "not admitted").unwrap();
+            match scenario {
+                "absolute" => symlink(deps.join("target"), deps.join("link")).unwrap(),
+                "escaping" => symlink("../outside", deps.join("link")).unwrap(),
+                "dangling" => symlink("missing", deps.join("link")).unwrap(),
+                "cyclic" => {
+                    symlink("other", deps.join("link")).unwrap();
+                    symlink("link", deps.join("other")).unwrap();
+                }
+                "root" => {
+                    fs::rename(&deps, root.path().join("real-deps")).unwrap();
+                    symlink("real-deps", &deps).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error =
+                prepare_in_roots(data_root.path(), root.path(), &plan()).expect_err(scenario);
+            assert_eq!(
+                error.code.as_str(),
+                "validation.invalid_argument",
+                "{scenario}"
+            );
+            assert_eq!(error.details["field"], "dependency_package", "{scenario}");
+            assert!(
+                !data_root
+                    .path()
+                    .join("cache/dependency-packages/v2")
+                    .exists(),
+                "{scenario}: invalid topology must not publish an archive"
+            );
+        }
     }
 
     #[test]

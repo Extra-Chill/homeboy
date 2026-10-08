@@ -5586,7 +5586,7 @@ pub fn preflight_cook_continuation_admission_for_observation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
-    if let Some(error) = live_owner_continuation_denial(record) {
+    if let Some(error) = cook_continuation_owner_denial(record, &options.identity.cook_id)? {
         return Err(error);
     }
     let mut options = options.clone();
@@ -5643,7 +5643,39 @@ pub fn preflight_cook_continuation_admission_for_observation(
 pub fn live_owner_continuation_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<Error> {
-    if !record.owner_process_is_running() {
+    let child_provider_owner_pid = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|execution| execution["state"] == "running")
+        .find_map(|execution| {
+            execution["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| {
+                    homeboy_core::process::process_identity_state(
+                        *pid,
+                        execution["owner_linux_starttime_ticks"].as_u64(),
+                    ) == homeboy_core::process::ProcessIdentityState::Live
+                })
+        });
+    let child_gate_owner_pid = (record.metadata["promotion_progress"]["active"] == true)
+        .then(|| {
+            record.metadata["promotion_progress"]["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+        })
+        .flatten()
+        .filter(|pid| homeboy_core::process::pid_is_running(*pid));
+    let child_owner_pid = child_provider_owner_pid.or(child_gate_owner_pid);
+    let generic_owner_is_running = record.owner_process_is_running();
+    if record.state.is_terminal() {
+        if child_owner_pid.is_none() {
+            return None;
+        }
+    } else if !generic_owner_is_running && child_owner_pid.is_none() {
         return None;
     }
     let phase = record
@@ -5674,12 +5706,53 @@ pub fn live_owner_continuation_denial(
     );
     error.details["continuation_admission"] = serde_json::json!({
         "first_authoritative_denial": "live_owner_in_progress",
-        "owner_pid": record.owner_pid(),
+        "owner_pid": child_owner_pid.or_else(|| record.owner_pid()),
         "phase": phase,
         "status_command": format!("homeboy agent-task status {}", record.run_id),
         "logs_command": format!("homeboy agent-task logs {}", record.run_id),
     });
     Some(error)
+}
+
+/// Refuse continuation while this Cook has a canonical runtime driver. The
+/// kernel lock is Cook-scoped, so unlike a lifecycle `runner_pid` it cannot
+/// confuse a live batch coordinator driving siblings with this child's owner.
+pub fn cook_continuation_owner_denial(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    cook_id: &str,
+) -> Result<Option<Error>> {
+    if let Some(error) = live_owner_continuation_denial(record) {
+        return Ok(Some(error));
+    }
+    let store = CookRecipeStore::from_current_data_root()?;
+    let Some(owner) = store.foreign_cook_driver(cook_id)? else {
+        return Ok(None);
+    };
+    let phase = record
+        .metadata
+        .pointer("/promotion_progress/phase")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/cook_progress/phase")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("cook_driver");
+    let mut error = Error::validation_invalid_argument(
+        "cook_continuation",
+        "continuation is blocked while the original local owner is still running",
+        Some(record.run_id.clone()),
+        None,
+    );
+    error.details["continuation_admission"] = serde_json::json!({
+        "first_authoritative_denial": "live_owner_in_progress",
+        "owner_pid": owner.trim().parse::<u32>().ok(),
+        "phase": phase,
+        "status_command": format!("homeboy agent-task status {}", record.run_id),
+        "logs_command": format!("homeboy agent-task logs {}", record.run_id),
+    });
+    Ok(Some(error))
 }
 
 pub fn cook_continuation_replays_provider(
@@ -11593,6 +11666,121 @@ mod cook_deadline_tests {
             }))
             .expect("record");
         assert!(live_owner_continuation_denial(&record).is_none());
+    }
+
+    #[test]
+    fn terminal_child_ignores_live_batch_coordinator_but_fences_its_own_provider() {
+        let mut record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-child",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": { "runner_pid": std::process::id() }
+            }))
+            .expect("record");
+
+        assert!(live_owner_continuation_denial(&record).is_none());
+
+        record.metadata["provider_executions"] = serde_json::json!([{
+            "state": "running",
+            "owner_pid": std::process::id()
+        }]);
+        let error =
+            live_owner_continuation_denial(&record).expect("live child provider remains fenced");
+        assert_eq!(
+            error.details["continuation_admission"]["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert_eq!(
+            error.details["continuation_admission"]["phase"],
+            "provider_execution"
+        );
+    }
+
+    #[test]
+    fn terminal_child_fences_its_live_gate_or_promotion_owner() {
+        let record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-gate",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "runner_pid": std::process::id(),
+                    "promotion_progress": {
+                        "active": true,
+                        "phase": "gate",
+                        "owner_pid": std::process::id()
+                    }
+                }
+            }))
+            .expect("record");
+
+        let error =
+            live_owner_continuation_denial(&record).expect("live child gate remains fenced");
+        assert_eq!(
+            error.details["continuation_admission"]["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert_eq!(error.details["continuation_admission"]["phase"], "gate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_child_gate_fence_reports_gate_owner_not_live_batch_parent() {
+        struct SleepChild(std::process::Child);
+        impl Drop for SleepChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let coordinator = SleepChild(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start live batch coordinator PID"),
+        );
+        let gate_owner_pid = std::process::id();
+        let mut record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-child-gate-owner",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "runner_pid": coordinator.0.id(),
+                    "promotion_progress": {
+                        "active": true,
+                        "phase": "gate",
+                        "owner_pid": gate_owner_pid
+                    }
+                }
+            }))
+            .expect("record");
+
+        let error = live_owner_continuation_denial(&record).expect("live gate owner denial");
+        assert_eq!(
+            error.details["continuation_admission"]["owner_pid"], gate_owner_pid,
+            "the batch parent PID is not the gate owner"
+        );
+        assert_eq!(error.details["continuation_admission"]["phase"], "gate");
+
+        record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
+        let error = live_owner_continuation_denial(&record)
+            .expect("live exact-child gate owner fences a dead parent");
+        assert_eq!(
+            error.details["continuation_admission"]["owner_pid"],
+            gate_owner_pid
+        );
     }
 
     /// Expiry must terminalize cleanly and inspectably: a known status, a
