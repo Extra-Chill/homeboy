@@ -187,9 +187,10 @@ pub struct RunnerApiReadinessResponse {
 }
 
 /// The implementation kind backing a runner definition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerKind {
+    #[default]
     Local,
     Ssh,
 }

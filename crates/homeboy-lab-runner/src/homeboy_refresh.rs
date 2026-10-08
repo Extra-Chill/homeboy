@@ -20,10 +20,10 @@ use super::execution::reserve_daemon_admission;
 use super::execution::{exec_with_status_snapshot, exec_with_status_snapshot_in_roots};
 use super::{
     copy_snapshot_to_directory, exec, load, load_in_roots, materialize_runner_extension_with_env,
-    merge, merge_in_roots, normalize_runner_command_env_for_homeboy_path,
-    plan_controller_snapshot_extension, RunnerCapabilityPreflight, RunnerExecOptions,
-    RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
-    RunnerFileTransfer, RunnerKind,
+    merge, merge_in_roots, set_homeboy_command_selection, plan_controller_snapshot_extension,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerExecOutput,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource, RunnerFileTransfer,
+    RunnerKind,
 };
 
 const REFRESH_SUBPHASES: &[&str] = &[
@@ -3599,13 +3599,33 @@ fn refreshed_runner_env_in_roots(
     homeboy_path: &str,
 ) -> Result<std::collections::HashMap<String, String>> {
     let runner = load_in_roots(roots, runner_id)?;
-    let mut env = runner.env;
+    let mut env = runner.env.clone();
     // A refreshed daemon must not inherit a prior generation's control-plane
     // authority. The selected binary becomes the new command authority below.
     env.remove("HOMEBOY_COMMAND");
     env.remove("HOMEBOY_DAEMON_STATE_DIR");
-    normalize_runner_command_env_for_homeboy_path(&mut env, Some(homeboy_path));
+    // A controller-synthesized `PATH` must never be persisted (#15158): it is
+    // built from the controller HOME and accumulates one `_homeboy_binaries`
+    // slot per refresh, and `runner.env` ships to every SSH client and remote
+    // job. Drop a proven homeboy-managed `PATH` and leave an operator-set one
+    // untouched; the runner computes its own `PATH` at dispatch time.
+    if persisted_path_is_homeboy_synthesized(&runner.env) {
+        env.remove("PATH");
+    }
+    set_homeboy_command_selection(&mut env, Some(homeboy_path));
     Ok(env)
+}
+
+/// Any `_homeboy_binaries` entry in the persisted `PATH` can only have come
+/// from a previous refresh: refresh is the only writer that materializes
+/// binaries into `_homeboy_binaries` slots. Its presence proves the value was
+/// homeboy-synthesized rather than operator-set, so the whole entry is a
+/// controller artifact that must not survive into the persisted registry env.
+fn persisted_path_is_homeboy_synthesized(env: &std::collections::HashMap<String, String>) -> bool {
+    env.get("PATH").is_some_and(|path| {
+        path.split(':')
+            .any(|entry| entry.contains("_homeboy_binaries"))
+    })
 }
 
 fn refreshed_runner_patch_in_roots(
@@ -3615,6 +3635,7 @@ fn refreshed_runner_patch_in_roots(
 ) -> Result<Value> {
     let runner = load_in_roots(roots, runner_id)?;
     let removed_daemon_state_dir = runner.env.contains_key("HOMEBOY_DAEMON_STATE_DIR");
+    let removed_homeboy_path = persisted_path_is_homeboy_synthesized(&runner.env);
     let env = refreshed_runner_env_in_roots(roots, runner_id, homeboy_path)?;
     let mut patch = serde_json::json!({
         "homeboy_path": homeboy_path,
@@ -3624,6 +3645,9 @@ fn refreshed_runner_patch_in_roots(
     // and a null map value is not a valid initial environment value.
     if removed_daemon_state_dir {
         patch["env"]["HOMEBOY_DAEMON_STATE_DIR"] = Value::Null;
+    }
+    if removed_homeboy_path {
+        patch["env"]["PATH"] = Value::Null;
     }
     Ok(patch)
 }

@@ -78,10 +78,9 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
         )
         .expect("refresh env");
 
-        assert_eq!(
-            env.get("PATH").map(String::as_str),
-            Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release:/usr/bin:/bin")
-        );
+        // An operator-set PATH is preserved verbatim: refresh never synthesizes
+        // or prepends PATH entries in the persisted registry env (#15158).
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("info"));
         assert_eq!(
             env.get("HOMEBOY_COMMAND").map(String::as_str),
@@ -123,6 +122,134 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
         )
         .expect("fresh refresh patch");
         assert!(fresh_patch["env"].get("HOMEBOY_DAEMON_STATE_DIR").is_none());
+    });
+}
+
+fn create_ssh_runner_with_path_env(runner_id: &str, workspace: &std::path::Path, path_env: &str) {
+    homeboy_core::server::create(
+        &format!(r#"{{"id":"{runner_id}","host":"192.168.86.63","user":"user"}}"#),
+        false,
+    )
+    .expect("create server");
+    crate::create(
+        &format!(
+            r#"{{"id":"{runner_id}","kind":"ssh","server_id":"{runner_id}","workspace_root":"{}","homeboy_path":"/old/homeboy","env":{{"PATH":{}}}}}"#,
+            workspace.display(),
+            serde_json::json!(path_env),
+        ),
+        false,
+    )
+    .expect("create ssh runner");
+}
+
+fn merge_refresh_patch(runner_id: &str, homeboy_path: &str) -> serde_json::Value {
+    let patch = refreshed_runner_patch_in_roots(&ambient_roots(), runner_id, homeboy_path)
+        .expect("refresh patch");
+    match merge(Some(runner_id), &patch.to_string(), &[]).expect("merge refresh patch") {
+        MergeOutput::Single(_) => patch,
+        MergeOutput::Bulk(_) => panic!("single-runner refresh merge"),
+    }
+}
+
+#[test]
+fn refresh_patch_deletes_a_homeboy_synthesized_path_for_ssh_runners() {
+    test_support::with_isolated_home(|_| {
+        let controller = tempfile::tempdir().expect("controller home");
+        let ctl_home = controller.path().join("ctl-home");
+        let workspace = controller.path().join("w");
+        let synthesized_path = format!(
+            "{home}/.local/bin:{home}/.opencode/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
+            home = ctl_home.display(),
+            ws = workspace.display(),
+        );
+        create_ssh_runner_with_path_env("lab-ssh", &workspace, &synthesized_path);
+
+        let homeboy_path = format!("{}/_homeboy_binaries/homeboy-c/homeboy", workspace.display());
+        let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
+
+        // The persisted PATH was homeboy-synthesized (controller-home entries
+        // plus one `_homeboy_binaries` slot per refresh), so the patch deletes
+        // it instead of shipping it to every SSH client and remote job (#15158).
+        assert!(patch["env"]["PATH"].is_null());
+        assert_eq!(patch["env"]["HOMEBOY_COMMAND"], homeboy_path.as_str());
+
+        let runner = crate::load("lab-ssh").expect("reload runner");
+        assert_eq!(runner.env.get("PATH"), None);
+        assert_eq!(
+            runner.env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path.as_str())
+        );
+
+        // Effective env for an SSH runner without a persisted PATH performs no
+        // controller PATH discovery either: no PATH key may appear.
+        let effective = crate::effective_env("lab-ssh").expect("effective env");
+        assert_eq!(effective.get("PATH"), None);
+        assert_eq!(
+            effective.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(homeboy_path.as_str())
+        );
+    });
+}
+
+#[test]
+fn consecutive_refreshes_never_accumulate_homeboy_binary_path_dirs() {
+    test_support::with_isolated_home(|_| {
+        let controller = tempfile::tempdir().expect("controller home");
+        let ctl_home = controller.path().join("ctl-home");
+        let workspace = controller.path().join("w");
+        let synthesized_path = format!(
+            "{home}/.local/bin:{ws}/_homeboy_binaries/homeboy-a:{ws}/_homeboy_binaries/homeboy-b:/usr/bin",
+            home = ctl_home.display(),
+            ws = workspace.display(),
+        );
+        create_ssh_runner_with_path_env("lab-ssh", &workspace, &synthesized_path);
+
+        for sha in ["c", "d"] {
+            let homeboy_path =
+                format!("{}/_homeboy_binaries/homeboy-{sha}/homeboy", workspace.display());
+            let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
+            // The first refresh deletes the accumulated PATH outright; the
+            // second starts from the cleaned registry and has no PATH to
+            // touch, so neither refresh may add a `_homeboy_binaries` slot.
+            assert!(patch["env"]["PATH"].is_null() || patch["env"].get("PATH").is_none());
+            assert_eq!(patch["env"]["HOMEBOY_COMMAND"], homeboy_path.as_str());
+        }
+
+        let runner = crate::load("lab-ssh").expect("reload runner");
+        assert_eq!(
+            runner.env.get("PATH"),
+            None,
+            "consecutive refreshes must never persist accumulated binary dirs"
+        );
+        assert_eq!(
+            runner.env.get("HOMEBOY_COMMAND").map(String::as_str),
+            Some(format!(
+                "{}/_homeboy_binaries/homeboy-d/homeboy",
+                workspace.display()
+            ))
+            .as_deref()
+        );
+    });
+}
+
+#[test]
+fn refresh_patch_preserves_an_operator_path_without_homeboy_managed_entries() {
+    test_support::with_isolated_home(|_| {
+        let controller = tempfile::tempdir().expect("controller home");
+        let workspace = controller.path().join("w");
+        let operator_path = "/opt/tools/bin:/usr/local/bin:/usr/bin:/bin";
+        create_ssh_runner_with_path_env("lab-ssh", &workspace, operator_path);
+
+        let homeboy_path = format!("{}/_homeboy_binaries/homeboy-c/homeboy", workspace.display());
+        let patch = merge_refresh_patch("lab-ssh", &homeboy_path);
+
+        assert_eq!(patch["env"]["PATH"], operator_path);
+
+        let runner = crate::load("lab-ssh").expect("reload runner");
+        assert_eq!(
+            runner.env.get("PATH").map(String::as_str),
+            Some(operator_path)
+        );
     });
 }
 

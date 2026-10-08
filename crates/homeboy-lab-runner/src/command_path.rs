@@ -32,6 +32,21 @@ pub(crate) fn normalize_runner_command_env_for_homeboy_path(
 ) {
     normalize_runner_command_env(env);
 
+    if let Some(parent) = absolute_homeboy_parent(homeboy_path) {
+        prepend_path_entry(env, parent);
+    }
+    set_homeboy_command_selection(env, homeboy_path);
+}
+
+/// Record the configured control binary without any controller-side `PATH`
+/// synthesis. A controller-derived `PATH` is meaningless on a remote runner
+/// (its entries live in the controller HOME and every refresh would prepend a
+/// new `_homeboy_binaries` slot); the runner computes its own `PATH` from its
+/// own environment at dispatch time (#15158).
+pub(crate) fn set_homeboy_command_selection(
+    env: &mut HashMap<String, String>,
+    homeboy_path: Option<&str>,
+) {
     let Some(homeboy_path) = homeboy_path else {
         return;
     };
@@ -39,17 +54,18 @@ pub(crate) fn normalize_runner_command_env_for_homeboy_path(
     if !homeboy_path.is_absolute() {
         return;
     }
-    let Some(parent) = homeboy_path.parent() else {
-        return;
-    };
-    let Some(parent) = parent.to_str() else {
-        return;
-    };
-    prepend_path_entry(env, parent);
     // A durable runner job can pin its command binary. Configuration selects
     // the daemon control binary only when the job did not make that selection.
     env.entry("HOMEBOY_COMMAND".to_string())
         .or_insert_with(|| homeboy_path.display().to_string());
+}
+
+fn absolute_homeboy_parent(homeboy_path: Option<&str>) -> Option<&str> {
+    let homeboy_path = Path::new(homeboy_path?);
+    if !homeboy_path.is_absolute() {
+        return None;
+    }
+    homeboy_path.parent()?.to_str()
 }
 
 fn prepend_path_entry(env: &mut HashMap<String, String>, entry: &str) {
