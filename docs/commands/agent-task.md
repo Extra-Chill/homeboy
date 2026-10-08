@@ -168,39 +168,44 @@ that loads the private gate bytes.
 ### Provider Execution Budgets
 
 Every agent-task plan serializes one `execution_budget` per task: total provider
-executions, same-provider retries, and cross-provider rotations. The total cap is
-always authoritative across both retry paths.
+executions, same-provider retries, and cross-provider rotations. Configured
+rotation is funded by default; a total cap that would remove configured
+fallbacks is rejected before dispatch.
 
 Explicit budget objects require `version: 1`. Other versions are rejected on
 plan admission and readback; reading a plan never upgrades or rewrites it.
 Omitting the budget in an authored plan uses the current schedule default.
 
 ```bash
-# Exactly one provider process: no retry and no rotation.
-homeboy agent-task cook --prompt @task.md --max-provider-executions 1
+# Use configured rotation and derive its execution allowance.
+homeboy agent-task cook --prompt @task.md
 
-# One retry on the same provider, with at most two executions total.
-homeboy agent-task cook --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
+# Allow one same-provider remediation retry in addition to rotation.
+homeboy agent-task cook --prompt @task.md --max-attempts 2
 
-# Rotate once after a provider failure, with no same-provider retry.
-homeboy agent-task cook --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
+# Explicitly select and confirm a model pin instead of configured rotation.
+homeboy agent-task cook --prompt @task.md --model openai/gpt-5.6-terra \
+  --acknowledge-model-override
 ```
 
 `--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.
-Retry and rotation ceilings remain explicit, so the alias never grants either
-category an independent budget. It cannot be combined with the canonical total
-execution flag. Plan and
-`agent-task status` output show the resolved defaults before provider execution;
+The alias cannot remove configured fallbacks. It cannot be combined with the
+canonical total execution flag. Plan and `agent-task status` output show the
+resolved defaults before provider execution;
 an exhausted run records which budget stopped further execution.
 
-When these flags are omitted entirely, the budget is derived from the configured
+The rotation allowance is derived from the configured
 `agent_task.rotation` policy: the rotation chain funds its own reachability, so
-`N` configured entries resolve to `N` rotations and `N + 1` total executions
+`N` effective fallback entries resolve to `N` rotations and `N + 1` total executions
 (bounded by the policy's own `max_attempts`). Without a configured rotation the
-derived budget is still one execution and no rotation. Same-provider retries are
-never derived — they fund gate and required review-form remediation on the same
-provider identity, which a rotation chain says nothing about. Any explicitly
-passed flag, including an explicit `0`, always wins over the derived value.
+derived budget is still one execution and no rotation. Same-provider retries
+fund gate and required review-form remediation on the same provider identity.
+Cook derives their allowance from `--max-attempts`; generic dispatches use
+`--max-same-provider-retries`. Their executions are funded in addition to
+configured rotation. An explicit model override can pin a run only after
+`--acknowledge-model-override` or interactive confirmation, including when the
+selected model already belongs to the configured chain. Backend or selector
+overrides retain configured rotation.
 Cook states the effective rotation on submission, e.g.
 `cook: rotation: 2 fallback provider(s), up to 3 provider execution(s)` or
 `cook: rotation: disabled (1 provider execution(s))`.
@@ -504,15 +509,15 @@ homeboy agent-task cook \
 For a caller-owned existing checkout, `cook` already accepts its path directly
 with `--cwd` (also `--dir`); it does not re-materialize that checkout. Use
 `--prompt @task.md` (also `--prompt-file @task.md`) to snapshot a prompt file and
-`--model` to prefer a route. An explicit model normally pins execution, so add
-`--allow-provider-rotation` to enable the configured fallback chain. The ordinary
+`--model` together with `--acknowledge-model-override` to confirm a pinned route.
+Omit the model override to use configured rotation. The ordinary
 Cook durable run is then inspectable with `agent-task status`, `watch`, and
 `logs`:
 
 ```bash
 homeboy agent-task cook --dir /path/to/existing-worktree \
   --prompt-file @task.md --model openai/gpt-5.6-terra \
-  --allow-provider-rotation --no-finalize
+  --acknowledge-model-override --no-finalize
 ```
 
 Cook snapshots the prompt once for the durable plan; provider rotations retry

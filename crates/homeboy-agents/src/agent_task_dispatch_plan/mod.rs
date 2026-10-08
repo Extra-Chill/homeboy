@@ -409,7 +409,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
     // carried, and unreachable: the scheduler gates rotation on
     // `rotation_index < max_provider_rotations`, which a zero rotation budget
     // makes false forever (#11082).
-    plan.options.execution_budget = resolve_execution_budget(&request.core, rotation.as_ref());
+    plan.options.execution_budget =
+        resolve_execution_budget(&request.core, rotation.as_ref(), request.model.as_deref())?;
     plan.options.rotation = rotation;
     if let Some(policy) = &request.core.resolved_provider_policy {
         for task in &mut plan.tasks {
@@ -428,7 +429,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "task_url": request.task_url,
         "caller_workspace": workspace_root.as_ref().map(|path| serde_json::json!({ "repository": &repo, "working_directory": path })),
         "runtime_dependency_graph": runtime_dependency_graph_evidence,
-        "model_override_confirmation": request.core.acknowledge_model_override.then(|| {
+        "model_override_confirmation": (request.model.is_some() && request.core.acknowledge_model_override).then(|| {
             serde_json::json!({
                 "schema": "homeboy/agent-task-model-override-confirmation/v1",
                 "acknowledged": true,
@@ -449,9 +450,8 @@ pub fn build_dispatch_plan_with_provider_requirements(
 
 /// The effective provider execution budget for a dispatch.
 ///
-/// An explicitly supplied value always wins. When the caller supplied nothing,
-/// a configured provider rotation funds its own reachability instead of being
-/// loaded, carried into the plan, and never used (#11082).
+/// Configured rotation funds its own reachability. Only a confirmed explicit
+/// model pins the run; an execution cap cannot silently remove fallbacks.
 ///
 /// Same-provider retries are deliberately never derived. They fund Cook gate
 /// and required review-form remediation on the *same* provider identity; a
@@ -460,15 +460,35 @@ pub fn build_dispatch_plan_with_provider_requirements(
 pub fn resolve_execution_budget(
     core: &DispatchCoreInputs,
     rotation: Option<&AgentTaskProviderRotationPolicy>,
-) -> AgentTaskExecutionBudget {
-    let (derived_executions, derived_rotations) = rotation.map_or((1, 0), derived_rotation_budget);
-    AgentTaskExecutionBudget {
+    model: Option<&str>,
+) -> Result<AgentTaskExecutionBudget> {
+    let pinned_model =
+        model.is_some_and(|model| !model.trim().is_empty()) && core.acknowledge_model_override;
+    let (derived_executions, derived_rotations) = if pinned_model {
+        (1, 0)
+    } else {
+        rotation.map_or((1, 0), derived_rotation_budget)
+    };
+    let same_provider_retries = core.same_provider_retries.unwrap_or(0);
+    let required_executions = derived_executions.saturating_add(same_provider_retries);
+    let executions = core.attempts.unwrap_or(required_executions).max(1);
+    if executions < required_executions {
+        return Err(Error::validation_invalid_argument(
+            "max-provider-executions",
+            format!(
+                "configured rotation and retries require at least {required_executions} provider executions, but the requested cap is {executions}"
+            ),
+            None,
+            Some(vec![format!("Use --max-provider-executions {required_executions} or omit the cap.")]),
+        ));
+    }
+    Ok(AgentTaskExecutionBudget {
         version: AgentTaskExecutionBudget::VERSION,
         deadline_unix_ms: None,
-        max_provider_executions: core.attempts.unwrap_or(derived_executions).max(1),
-        max_same_provider_retries: core.same_provider_retries.unwrap_or(0),
-        max_provider_rotations: core.provider_rotations.unwrap_or(derived_rotations),
-    }
+        max_provider_executions: executions,
+        max_same_provider_retries: same_provider_retries,
+        max_provider_rotations: derived_rotations,
+    })
 }
 
 /// Executions and rotations a rotation policy needs in order to be reachable.
@@ -1422,35 +1442,22 @@ mod tests {
     }
 
     #[test]
-    fn explicit_budget_flags_override_the_configured_rotation() {
+    fn execution_caps_cannot_override_configured_rotation() {
         with_isolated_home(|_| {
             let mut config = defaults::load_config();
             config.agent_task.rotation = serde_json::to_value(rotation_policy_with(3)).ok();
             defaults::save_config(&config).expect("save config");
 
-            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+            let error = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with an explicit budget.".to_string()),
                 core: DispatchCoreInputs {
                     attempts: Some(1),
-                    provider_rotations: Some(0),
                     ..DispatchCoreInputs::default()
                 },
                 ..DispatchRequestOverrides::default()
             }))
-            .expect("dispatch plan");
-
-            assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
-            assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
-            assert_eq!(
-                plan.options
-                    .rotation
-                    .as_ref()
-                    .expect("configured rotation is still carried")
-                    .entries
-                    .len(),
-                3,
-                "an explicit budget suppresses rotation without discarding the policy"
-            );
+            .expect_err("an execution cap cannot suppress configured rotation");
+            assert_eq!(error.details["field"], "max-provider-executions");
         });
     }
 
@@ -1475,7 +1482,8 @@ mod tests {
         // are actually funded so the two halves cannot disagree.
         let mut policy = rotation_policy_with(2);
         policy.max_attempts = Some(2);
-        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy));
+        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy), None)
+            .expect("configured policy budget");
 
         assert_eq!(budget.max_provider_executions, 2);
         assert_eq!(budget.max_provider_rotations, 1);
@@ -1485,7 +1493,8 @@ mod tests {
     fn a_policy_bound_above_the_chain_length_does_not_invent_executions() {
         let mut policy = rotation_policy_with(1);
         policy.max_attempts = Some(9);
-        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy));
+        let budget = resolve_execution_budget(&DispatchCoreInputs::default(), Some(&policy), None)
+            .expect("configured policy budget");
 
         assert_eq!(budget.max_provider_executions, 2);
         assert_eq!(budget.max_provider_rotations, 1);
@@ -1499,9 +1508,11 @@ mod tests {
                 ..DispatchCoreInputs::default()
             },
             Some(&rotation_policy_with(2)),
-        );
+            None,
+        )
+        .expect("configured policy budget");
 
-        assert_eq!(budget.max_provider_executions, 3);
+        assert_eq!(budget.max_provider_executions, 5);
         assert_eq!(budget.max_provider_rotations, 2);
         assert_eq!(budget.max_same_provider_retries, 2);
     }
@@ -2395,7 +2406,6 @@ mod tests {
                 generated_fanout_context: overrides.core.generated_fanout_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
-                provider_rotations: overrides.core.provider_rotations,
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,

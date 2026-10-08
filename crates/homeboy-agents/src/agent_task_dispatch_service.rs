@@ -15,8 +15,8 @@ use crate::agent_task_dispatch_plan::{
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     default_backend_for_component, preflight_plan_provider_config_with_providers,
-    preflight_provider_credentials_for_backend, preflight_provider_dispatchability_with_config,
-    resolve_provider_for_backend, AgentTaskProviderCatalog, ProviderResolution,
+    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
+    AgentTaskProviderCatalog, ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -112,9 +112,6 @@ pub struct DispatchCoreInputs {
     /// fund Cook gate and review-form remediation and are never derived from a
     /// rotation chain.
     pub same_provider_retries: Option<u32>,
-    /// Explicit cross-provider rotation budget after the initial execution.
-    /// `None` means unspecified, which resolves from the configured rotation.
-    pub provider_rotations: Option<u32>,
     /// Persist the run for a daemon/runner but do not execute immediately.
     pub queue_only: bool,
     /// Optional provider wall-clock timeout in milliseconds.
@@ -205,11 +202,7 @@ fn dispatch_with_provider_catalog(
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
     let mut readiness_cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
-    require_model_override_acknowledgement_with_catalog_and_cache(
-        &request,
-        catalog,
-        &mut readiness_cache,
-    )?;
+    require_model_override_acknowledgement(&request)?;
     let backend_selection = request.backend_selection.clone();
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
@@ -251,9 +244,17 @@ fn dispatch_with_provider_catalog(
 /// routes exist. Keep this check before provider admission so an unacknowledged
 /// override cannot probe or invoke a paid provider.
 pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest) -> Result<()> {
-    let Some(selected_model) = request.model.as_deref().filter(|model| !model.is_empty()) else {
+    let Some(selected_model) = request.model.as_deref() else {
         return Ok(());
     };
+    if selected_model.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "model",
+            "an explicit model override must be non-empty",
+            None,
+            None,
+        ));
+    }
     let mut configured_models = std::collections::BTreeSet::new();
     let configured_primary_model =
         if let Some(policy) = request.core.resolved_provider_policy.as_ref() {
@@ -326,9 +327,6 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
     if configured_models.is_empty() && !selected_policy_model_without_routes {
         return Ok(());
     }
-    if configured_models.contains(selected_model) {
-        return Ok(());
-    }
     if request.core.acknowledge_model_override {
         return Ok(());
     }
@@ -336,7 +334,7 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
     let mut error = Error::validation_invalid_argument(
         "model",
         format!(
-            "explicit model `{selected_model}` differs from configured model route(s); explicit acknowledgement is required before dispatch"
+            "explicit model `{selected_model}` pins the provider route; explicit acknowledgement is required before displacing configured rotation"
         ),
         Some(selected_model.to_string()),
         Some(vec![format!(
@@ -358,105 +356,13 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
     Err(error)
 }
 
-/// Apply the consent guard only when the configured primary route is currently
-/// dispatchable. Readiness is a provider-owned, non-inference probe; an
-/// unavailable configured route must not create confirmation friction or spend
-/// paid inference before the operator has acknowledged an override.
-///
-/// The live readiness probe only runs when [`require_model_override_acknowledgement`]
-/// has already flagged a real, unacknowledged conflict. This keeps the common
-/// no-override and already-acknowledged dispatch paths free of any additional
-/// provider round-trip, and avoids probing a route the caller's own admission
-/// is about to probe again for an unrelated request.
-///
-/// Callers that immediately perform their own provider admission afterward
-/// (dispatch, batch preflight) must thread their admission cache through
-/// [`require_model_override_acknowledgement_with_catalog_and_cache`] instead of
-/// this function, so a genuine conflict's probe is not repeated against a live
-/// (or fixture) provider for one caller-visible request.
-pub fn require_model_override_acknowledgement_with_catalog(
-    request: &AgentTaskDispatchRequest,
-    catalog: &AgentTaskProviderCatalog,
-) -> Result<()> {
-    let mut cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
-    require_model_override_acknowledgement_with_catalog_and_cache(request, catalog, &mut cache)
-}
-
-/// Cache-threading variant of [`require_model_override_acknowledgement_with_catalog`].
-/// Reuses `cache` so a caller that goes on to admit the same route via
-/// [`crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers`]
-/// observes a cache hit for this probe instead of a second live/fixture call.
-pub fn require_model_override_acknowledgement_with_catalog_and_cache(
-    request: &AgentTaskDispatchRequest,
-    catalog: &AgentTaskProviderCatalog,
-    cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
-) -> Result<()> {
-    let conflict = match require_model_override_acknowledgement(request) {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    // A real, unacknowledged conflict exists. Before surfacing it, confirm the
-    // configured primary route is actually reachable: if it is not, the
-    // operator's explicit selection cannot be displacing a spend the system
-    // would otherwise make on its own, and this probe is the first live I/O
-    // performed for this request.
-    let Some(policy) = request.core.resolved_provider_policy.clone().or_else(|| {
-        configured_rotation_policy().map(|rotation| ResolvedAgentTaskProviderPolicy {
-            backend: request.backend.clone(),
-            selector: request.selector.clone(),
-            model: None,
-            rotation: Some(rotation),
-            rotation_starts_with_first_entry: false,
-            retry: Default::default(),
-            liveness_timeout_ms: None,
-            runtime_identity: None,
-        })
-    }) else {
-        return Err(conflict);
-    };
-    let first = policy
-        .rotation
-        .as_ref()
-        .and_then(|rotation| rotation.entries.first());
-    let backend = first
-        .and_then(|entry| entry.backend.as_deref())
-        .unwrap_or(&policy.backend);
-    let selector = first
-        .and_then(|entry| entry.selector.as_deref())
-        .or(policy.selector.as_deref())
-        .or(request.selector.as_deref());
-    let model = first
-        .and_then(|entry| entry.model.as_deref())
-        .or(policy.model.as_deref())
-        .filter(|model| !model.is_empty());
-    let config = first
-        .map(|entry| entry.provider_config.clone())
-        .filter(|config| config.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
-    if crate::agent_task_provider::is_fixture_backend(backend) {
-        return Err(conflict);
-    }
-    if preflight_provider_dispatchability_with_config(
-        catalog, backend, selector, model, &config, cache,
-    )
-    .is_err()
-    {
-        return Ok(());
-    }
-    Err(conflict)
-}
-
 /// Validate the reachable provider routes needed to dispatch this request.
 pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
     let mut readiness_cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
-    require_model_override_acknowledgement_with_catalog_and_cache(
-        request,
-        catalog,
-        &mut readiness_cache,
-    )?;
+    require_model_override_acknowledgement(request)?;
     let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
@@ -980,6 +886,18 @@ fn resolve_dispatch_request_with_sources(
     available_backends: impl FnOnce() -> Vec<String>,
 ) -> Result<AgentTaskDispatchRequest> {
     let config_default = config_default();
+    if command
+        .model
+        .as_deref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "model",
+            "an explicit model override must be non-empty",
+            None,
+            None,
+        ));
+    }
     let submitted_policy = command.core.resolved_provider_policy.clone();
     let (backend, source) = match submitted_policy.as_ref() {
         Some(policy) => (policy.backend.clone(), BackendSelectionSource::Policy),
@@ -1037,10 +955,9 @@ fn resolve_dispatch_request_with_sources(
             .as_ref()
             .and_then(|policy| policy.selector.clone())
             .or(command.selector),
-        model: submitted_policy
-            .as_ref()
-            .and_then(|policy| policy.model.clone())
-            .or(command.model),
+        // The policy owns the resolved runtime model. This field records only
+        // an explicit caller choice, so inherited models cannot become pins.
+        model: command.model,
         required_capabilities: command.required_capabilities,
         secret_env: command.secret_env,
         concurrency: command.concurrency,
@@ -1214,17 +1131,156 @@ mod tests {
     }
 
     #[test]
-    fn acknowledged_or_exact_configured_model_is_admitted() {
+    fn explicit_models_require_confirmation_even_when_configured() {
         require_model_override_acknowledgement(&model_override_request("operator-model", true))
             .expect("explicit acknowledgement admits the override");
         require_model_override_acknowledgement(&model_override_request("configured-model", false))
-            .expect("matching a configured model needs no acknowledgement");
+            .expect_err("a configured-model pin still disables fallback");
     }
 
     #[test]
-    fn configured_alternative_model_does_not_require_override_acknowledgement() {
+    fn configured_alternative_model_pin_requires_confirmation() {
         require_model_override_acknowledgement(&model_override_request("fallback-model", false))
-            .expect("configured alternatives are directly selectable");
+            .expect_err("selecting an alternative must not silently disable fallback");
+    }
+
+    #[test]
+    fn inherited_policy_model_and_acknowledgement_alone_do_not_pin_rotation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut core = model_override_request("configured-model", false).core;
+            core.resolved_provider_policy.as_mut().unwrap().model =
+                Some("configured-model".to_string());
+            core.acknowledge_model_override = true;
+            let mut request = resolve_dispatch_request(AgentTaskDispatchCommand {
+                prompt: Some("use the configured policy".to_string()),
+                core,
+                ..Default::default()
+            })
+            .expect("resolve inherited model");
+            assert!(
+                request.model.is_none(),
+                "the caller did not supply a model override"
+            );
+            require_model_override_acknowledgement(&request).expect("no model pin to confirm");
+            let plan =
+                build_controller_dispatch_plan(&mut request).expect("compile configured rotation");
+            assert_eq!(
+                plan.tasks[0].executor.model.as_deref(),
+                Some("configured-model")
+            );
+            assert!(plan.options.execution_budget.max_provider_rotations > 0);
+            assert!(plan.metadata["model_override_confirmation"].is_null());
+        });
+    }
+
+    #[test]
+    fn empty_model_cannot_authorize_a_pin() {
+        for model in ["", " "] {
+            let error =
+                require_model_override_acknowledgement(&model_override_request(model, true))
+                    .expect_err("a confirmed pin still needs a concrete model");
+            assert_eq!(error.details["field"], "model");
+        }
+    }
+
+    #[test]
+    fn configured_rotation_executes_fallback_and_only_a_confirmed_model_can_pin_it() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let capture = home.path().join("provider-models.jsonl");
+            let script = home.path().join("rotation-provider.cjs");
+            std::fs::write(&script, format!(
+                "const fs=require('node:fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const model=req.executor.model;fs.appendFileSync({:?},JSON.stringify(model)+'\\n');const success=model==='fallback-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:success?'no_op':'provider_error',summary:success?'fallback completed':'primary unavailable',failure_classification:success?null:'provider'}}));",
+                capture.display().to_string()
+            )).expect("write deterministic provider process");
+            let runtime = home
+                .path()
+                .join(".config/homeboy/agent-runtimes/rotation-proof");
+            std::fs::create_dir_all(&runtime).expect("runtime directory");
+            std::fs::write(
+                runtime.join("rotation-proof.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": "homeboy/agent-runtime-manifest/v1",
+                    "id": "rotation-proof",
+                    "agent_task_executors": [{
+                        "id": "rotation-proof.executor",
+                        "backend": "rotation-proof",
+                        "command_argv": ["node", script],
+                        "capabilities": ["structured_outcome"]
+                    }]
+                }))
+                .unwrap(),
+            )
+            .expect("declare provider runtime");
+
+            let mut request = model_override_request("configured-model", false);
+            request.backend = "rotation-proof".to_string();
+            request.model = None;
+            request.core.timeout_ms = Some(10_000);
+            let policy = request.core.resolved_provider_policy.as_mut().unwrap();
+            policy.backend = "rotation-proof".to_string();
+            policy.rotation_starts_with_first_entry = true;
+            for entry in &mut policy.rotation.as_mut().unwrap().entries {
+                entry.backend = Some("rotation-proof".to_string());
+            }
+            let executor = || {
+                Arc::new(crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover())
+            };
+            let result =
+                dispatch(request.clone(), executor()).expect("execute configured rotation");
+            assert_eq!(result.exit_code, 0);
+            assert!(result.value.record.state.is_terminal());
+            let attempted = || {
+                std::fs::read_to_string(&capture)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<String>(line).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(attempted(), ["configured-model", "fallback-model"]);
+
+            let mut capped = request.clone();
+            capped.core.attempts = Some(1);
+            let error = dispatch(capped, executor())
+                .expect_err("a cap cannot suppress configured fallback");
+            assert_eq!(error.details["field"], "max-provider-executions");
+            assert_eq!(
+                attempted().len(),
+                2,
+                "invalid budget starts no provider process"
+            );
+
+            request.model = Some("configured-model".to_string());
+            let policy = request.core.resolved_provider_policy.as_mut().unwrap();
+            policy.model = request.model.clone();
+            policy.rotation_starts_with_first_entry = false;
+            let error =
+                dispatch(request.clone(), executor()).expect_err("a model pin needs confirmation");
+            assert_eq!(error.details["confirmation_required"], true);
+            assert_eq!(
+                attempted().len(),
+                2,
+                "unconfirmed pin starts no provider process"
+            );
+
+            request.core.acknowledge_model_override = true;
+            request.core.attempts = Some(1);
+            let pinned = dispatch(request, executor()).expect("execute confirmed model pin");
+            assert_ne!(
+                pinned.exit_code, 0,
+                "the unavailable pinned model cannot use fallback"
+            );
+            assert_eq!(
+                attempted(),
+                ["configured-model", "fallback-model", "configured-model"]
+            );
+            let plan = crate::agent_task_lifecycle::load_controller_plan(&pinned.value.run_id)
+                .expect("read persisted pin");
+            assert_eq!(
+                plan.metadata["model_override_confirmation"]["acknowledged"],
+                true
+            );
+            assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
+        });
     }
 
     #[test]
@@ -1281,15 +1337,6 @@ mod tests {
         .expect_err("unacknowledged override must stop before execution");
 
         assert_eq!(error.details["confirmation_required"], true);
-    }
-
-    #[test]
-    fn unavailable_configured_primary_does_not_create_override_friction() {
-        require_model_override_acknowledgement_with_catalog(
-            &model_override_request("fallback-model", false),
-            &AgentTaskProviderCatalog::default(),
-        )
-        .expect("an unavailable configured route needs no paid-route confirmation");
     }
 
     #[test]

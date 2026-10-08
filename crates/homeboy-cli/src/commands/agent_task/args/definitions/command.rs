@@ -315,16 +315,13 @@ pub struct CookContinueArgs {
     /// Provider-specific selector for a rearmed Cook retry.
     #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
     pub selector: Option<String>,
-    /// Model for a rearmed Cook retry. This pins rotation unless explicitly
-    /// paired with --allow-provider-rotation or a positive --provider-rotations.
+    /// Model for a rearmed Cook retry. Confirm the pinned route with
+    /// --acknowledge-model-override.
     #[arg(long, value_name = "MODEL", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
     pub model: Option<String>,
-    /// Re-enable configured provider/model rotation after a route override.
-    #[arg(long, requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub allow_provider_rotation: bool,
-    /// Explicit cross-provider/model rotations after a route override.
-    #[arg(long, value_name = "N", requires = "rearm", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
-    pub provider_rotations: Option<u32>,
+    /// Confirm an explicit model override that pins this retry.
+    #[arg(long, requires = "model", conflicts_with_all = ["preflight", "artifact_id", "timeout_ms", "review_form_timeout_ms"])]
+    pub acknowledge_model_override: bool,
     /// Include the complete Cook report rather than the compact lifecycle view.
     #[arg(long)]
     pub full: bool,
@@ -419,7 +416,7 @@ mod cook_continue_tests {
             "replacement-selector",
             "--model",
             "replacement-model",
-            "--allow-provider-rotation",
+            "--acknowledge-model-override",
         ])
         .expect("route override parses");
         let Commands::AgentTask(agent_task) = cli.command else {
@@ -431,7 +428,7 @@ mod cook_continue_tests {
         assert_eq!(args.backend.as_deref(), Some("replacement"));
         assert_eq!(args.selector.as_deref(), Some("replacement-selector"));
         assert_eq!(args.model.as_deref(), Some("replacement-model"));
-        assert!(args.allow_provider_rotation);
+        assert!(args.acknowledge_model_override);
         assert!(Cli::try_parse_from([
             "homeboy",
             "agent-task",

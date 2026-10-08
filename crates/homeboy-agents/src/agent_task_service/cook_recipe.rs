@@ -4951,11 +4951,10 @@ mod tests {
             "max_provider_rotations": 1,
         });
         persisted.retry_budget["policy"] = serde_json::json!({
-            "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null, "max_provider_rotations": null },
+            "operator_intent": { "max_attempts": 2, "max_provider_executions": null, "max_same_provider_retries": null },
             "resolved": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
             "requested": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
             "effective": { "max_attempts": 2, "max_provider_executions": 3, "max_same_provider_retries": 1, "max_provider_rotations": 1 },
-            "truncated": { "max_provider_rotations": 0 },
         });
         store.persist_recipe(&persisted).unwrap();
 
@@ -4988,7 +4987,7 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut persisted = recipe();
             let old_policy = serde_json::json!({
-                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null, "max_provider_rotations": null },
+                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null },
                 "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
             });
             persisted.attempts[0].plan.metadata["cook_retry_policy"] = old_policy.clone();
@@ -5003,11 +5002,10 @@ mod tests {
 
             let mut options = reconstruct_options(&persisted).expect("old recipe reconstructs");
             options.identity.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
-                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null, "max_provider_rotations": null },
+                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null },
                 "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
                 "requested": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
                 "effective": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-                "truncated": { "max_provider_rotations": 0 },
             });
 
             validate_initial_recipe_compatibility(&options)

@@ -1473,13 +1473,13 @@ fn cook_preflight_rejects_contradictory_retry_budget_with_corrected_command() {
     assert!(
         error
             .message
-            .contains("--max-attempts 2 --max-provider-executions 2 --max-same-provider-retries 1 --max-provider-rotations 0"),
+            .contains("--max-attempts 2 --max-provider-executions 2 --max-same-provider-retries 1"),
         "{error}"
     );
 }
 
 #[test]
-fn cook_preflight_allows_explicit_execution_cap_to_clamp_configured_rotations() {
+fn cook_preflight_rejects_execution_caps_that_remove_configured_rotations() {
     with_isolated_home(|_| {
         let mut config = homeboy::core::defaults::load_config();
         config.agent_task.rotation = Some(
@@ -1518,8 +1518,10 @@ fn cook_preflight_allows_explicit_execution_cap_to_clamp_configured_rotations() 
             "1".to_string(),
         ]);
 
-        validate_cook_request(&args)
-            .expect("explicit total cap truncates rotations inherited from configuration");
+        let error = validate_cook_request(&args)
+            .expect_err("an execution cap cannot remove configured fallbacks");
+        assert_eq!(error.details["field"], "max-provider-executions");
+        assert!(error.message.contains("--max-provider-executions 3"));
     });
 }
 
@@ -1819,8 +1821,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
                 full: true,
             },
             Arc::new(CapturingExecutor::default()),
@@ -1840,8 +1841,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
                 full: true,
             },
             Arc::new(CapturingExecutor::default()),
@@ -2072,8 +2072,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
                 full: true,
             },
             executor.clone(),
@@ -2204,8 +2203,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             backend: None,
             selector: None,
             model: None,
-            allow_provider_rotation: false,
-            provider_rotations: None,
+            acknowledge_model_override: false,
             full: false,
         })
         .expect("preflight reports provenance rejection");
@@ -2272,8 +2270,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
                 full: false,
             })
             .expect("live owner preflight reports denial");
@@ -2444,8 +2441,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             backend: None,
             selector: None,
             model: None,
-            allow_provider_rotation: false,
-            provider_rotations: None,
+            acknowledge_model_override: false,
             full: false,
         })
         .expect("preflight evaluates pre-execution retry");
@@ -2634,8 +2630,7 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
             },
             executor.clone(),
             |_| Ok(Some(dispatcher.clone())),
@@ -5922,8 +5917,7 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
             backend: None,
             selector: None,
             model: None,
-            allow_provider_rotation: false,
-            provider_rotations: None,
+            acknowledge_model_override: false,
         })
         .expect("retry queued");
         let acknowledgement: homeboy_control_plane_contract::ControlPlaneActionAcknowledgement =
@@ -5961,8 +5955,7 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
             backend: None,
             selector: None,
             model: None,
-            allow_provider_rotation: false,
-            provider_rotations: None,
+            acknowledge_model_override: false,
         })
         .expect("replayed retry")
         .0;
@@ -6049,8 +6042,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 backend: None,
                 selector: None,
                 model: None,
-                allow_provider_rotation: false,
-                provider_rotations: None,
+                acknowledge_model_override: false,
             },
             executor.clone(),
             |_| Ok(Some(Arc::new(RetryRunDispatcher))),
@@ -6146,8 +6138,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                             backend: None,
                             selector: None,
                             model: None,
-                            allow_provider_rotation: false,
-                            provider_rotations: None,
+                            acknowledge_model_override: false,
                             full: false,
                         },
                         Arc::new(CountingCookExecutor::default()),

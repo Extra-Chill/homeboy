@@ -1296,8 +1296,7 @@ pub struct CookProviderRouteOverride {
     pub backend: Option<String>,
     pub selector: Option<String>,
     pub model: Option<String>,
-    pub allow_provider_rotation: Option<bool>,
-    pub provider_rotations: Option<u32>,
+    pub acknowledge_model_override: bool,
 }
 
 impl CookProviderRouteOverride {
@@ -1305,8 +1304,7 @@ impl CookProviderRouteOverride {
         self.backend.is_none()
             && self.selector.is_none()
             && self.model.is_none()
-            && self.allow_provider_rotation.is_none()
-            && self.provider_rotations.is_none()
+            && !self.acknowledge_model_override
     }
 }
 
@@ -1417,6 +1415,28 @@ fn retry_with_preflight_and_timeout<F>(
 where
     F: Fn(&AgentTaskPlan) -> Result<()>,
 {
+    if let Some(route) = route_override {
+        if route
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(Error::validation_invalid_argument(
+                "model",
+                "a retry model override must be non-empty",
+                None,
+                None,
+            ));
+        }
+        if route.model.is_some() != route.acknowledge_model_override {
+            return Err(Error::validation_invalid_argument(
+                "acknowledge-model-override",
+                "a retry model override requires explicit --model and --acknowledge-model-override together",
+                None,
+                None,
+            ));
+        }
+    }
     // One lifecycle store for the whole retry. Reserving the successor,
     // proving the reservation is exact, persisting the controller plan, and
     // binding the Cook attempt are one durable lineage: a successor reserved in
@@ -1706,21 +1726,6 @@ fn validate_unmaterialized_replay_route_override(
             ));
         }
     }
-    let persisted_rotations = binding["retry"]["provider_rotations"]
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok());
-    if route_override
-        .provider_rotations
-        .is_some_and(|value| Some(value) != persisted_rotations)
-        || route_override
-            .allow_provider_rotation
-            .is_some_and(|value| Some(value) != persisted_rotations.map(|value| value > 0))
-    {
-        return Err(unmaterialized_replay_route_override_error(
-            &source.run_id,
-            "provider rotation policy",
-        ));
-    }
     Ok(())
 }
 
@@ -2004,8 +2009,7 @@ fn apply_cook_provider_route_override(
         "backend": override_.backend,
         "selector": override_.selector,
         "model": override_.model,
-        "allow_provider_rotation": override_.allow_provider_rotation,
-        "provider_rotations": override_.provider_rotations,
+        "acknowledge_model_override": override_.acknowledge_model_override,
     });
     if let Some(existing) = plan.metadata["cook_provider_route_overrides"]
         .as_array()
@@ -2068,20 +2072,9 @@ fn apply_cook_provider_route_override(
         (old_route, new_route)
     };
 
-    let rotation_opted_in = override_.allow_provider_rotation == Some(true)
-        || override_
-            .provider_rotations
-            .is_some_and(|rotations| rotations > 0);
-    let pin_route = override_.model.is_some() && !rotation_opted_in;
+    let pin_route = override_.model.is_some() && override_.acknowledge_model_override;
     if pin_route {
         plan.options.execution_budget.max_provider_rotations = 0;
-    } else if let Some(rotations) = override_.provider_rotations {
-        plan.options.execution_budget.max_provider_rotations = rotations;
-    } else if override_.allow_provider_rotation == Some(true) {
-        plan.options.execution_budget.max_provider_rotations =
-            plan.options.rotation.as_ref().map_or(0, |rotation| {
-                rotation.entries.len().try_into().unwrap_or(u32::MAX)
-            });
     }
     if plan.metadata.is_null() {
         plan.metadata = json!({});
@@ -2090,7 +2083,7 @@ fn apply_cook_provider_route_override(
     plan.metadata["cook_retry_policy"]["route"]["fallback"] = json!({
         "mode": if plan.options.execution_budget.max_provider_rotations == 0 { "pinned" } else { "rotatable" },
         "enabled": plan.options.execution_budget.max_provider_rotations > 0,
-        "opted_in": rotation_opted_in,
+        "model_override_acknowledged": pin_route,
     });
     plan.metadata
         .as_object_mut()
@@ -2106,7 +2099,7 @@ fn apply_cook_provider_route_override(
             "old_route": old_route,
             "new_route": new_route,
             "rotation": {
-                "allow_provider_rotation": override_.allow_provider_rotation,
+                "model_override_acknowledged": pin_route,
                 "max_provider_rotations": plan.options.execution_budget.max_provider_rotations,
             },
             "authority": "operator provider-route override",

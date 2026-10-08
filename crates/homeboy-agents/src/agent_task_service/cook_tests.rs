@@ -9790,9 +9790,20 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
             backend: Some("replacement-backend".to_string()),
             selector: Some("replacement-selector".to_string()),
             model: Some("replacement-model".to_string()),
-            allow_provider_rotation: None,
-            provider_rotations: None,
+            acknowledge_model_override: true,
         };
+        let mut unconfirmed = override_.clone();
+        unconfirmed.acknowledge_model_override = false;
+        let error = crate::agent_task_service::retry_with_provider_route_override(
+            &options.identity.initial_run_id,
+            Some("unconfirmed-model-retry"),
+            false,
+            false,
+            unconfirmed,
+        )
+        .expect_err("model overrides require confirmation before reserving a retry");
+        assert_eq!(error.details["field"], "acknowledge-model-override");
+        assert!(agent_task_lifecycle::exact_record("unconfirmed-model-retry").is_err());
         let retry = crate::agent_task_service::retry_with_provider_route_override(
             &options.identity.initial_run_id,
             None,
@@ -9844,8 +9855,7 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
                     "backend": "replacement-backend",
                     "selector": "replacement-selector",
                     "model": "replacement-model",
-                    "allow_provider_rotation": null,
-                    "provider_rotations": null,
+                    "acknowledge_model_override": true,
                 },
                 "old_route": {
                     "backend": "fixture",
@@ -9858,7 +9868,7 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
                     "model": "replacement-model",
                 },
                 "rotation": {
-                    "allow_provider_rotation": null,
+                    "model_override_acknowledged": true,
                     "max_provider_rotations": 0,
                 },
                 "authority": "operator provider-route override",

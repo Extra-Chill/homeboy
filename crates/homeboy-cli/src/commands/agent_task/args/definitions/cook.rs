@@ -875,23 +875,18 @@ mod tests {
     }
 
     #[test]
-    fn cook_help_documents_explicit_execution_cap_precedence_over_configured_rotations() {
+    fn cook_help_documents_funding_configured_rotation() {
         let help = rendered_cook_help();
         assert!(
-            help.contains("--max-attempts 1 --max-provider-executions 1"),
-            "{help}"
-        );
-        assert!(
-            help.contains("explicit `--max-provider-rotations`"),
+            help.contains("A cap that cannot fund configured rotation is rejected"),
             "{help}"
         );
     }
 
     #[test]
-    fn cook_help_and_parser_expose_explicit_route_rotation_opt_in() {
+    fn cook_help_and_parser_expose_confirmed_model_pin() {
         let help = rendered_cook_help();
-        assert!(help.contains("--allow-provider-rotation"), "{help}");
-        assert!(help.contains("same-provider remediation"), "{help}");
+        assert!(help.contains("--acknowledge-model-override"), "{help}");
 
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
@@ -901,25 +896,25 @@ mod tests {
             "opencode",
             "--model",
             "openai/gpt-5.6-terra",
-            "--allow-provider-rotation",
+            "--acknowledge-model-override",
             "--no-finalize",
             "--prompt",
             "test",
             "--to-worktree",
             "repo@branch",
         ])
-        .expect("parse explicit rotation opt-in");
+        .expect("parse confirmed model pin");
         let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
             panic!("agent-task command");
         };
         let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
             panic!("Cook command");
         };
-        assert!(cook.allow_provider_rotation);
+        assert!(cook.dispatch.core.acknowledge_model_override);
     }
 
     #[test]
-    fn cook_parses_existing_checkout_and_prompt_file_shortcuts_with_rotation() {
+    fn cook_parses_existing_checkout_and_prompt_file_shortcuts_with_model_pin() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -930,7 +925,7 @@ mod tests {
             "@task.md",
             "--model",
             "preferred/model",
-            "--allow-provider-rotation",
+            "--acknowledge-model-override",
             "--no-finalize",
         ])
         .expect("existing-worktree Cook parses");
@@ -943,7 +938,7 @@ mod tests {
         assert_eq!(cook.dispatch.cwd.as_deref(), Some("/tmp/existing-worktree"));
         assert_eq!(cook.dispatch.prompt.as_deref(), Some("@task.md"));
         assert_eq!(cook.dispatch.model.as_deref(), Some("preferred/model"));
-        assert!(cook.allow_provider_rotation);
+        assert!(cook.dispatch.core.acknowledge_model_override);
     }
 
     #[test]
@@ -972,7 +967,6 @@ mod tests {
 
         assert_eq!(cook.max_attempts, 1);
         assert_eq!(cook.dispatch.core.attempts, Some(1));
-        assert_eq!(cook.dispatch.core.provider_rotations, None);
     }
 
     #[test]
@@ -1011,7 +1005,8 @@ mod tests {
         let core: homeboy::agents::agent_task_dispatch_service::DispatchCoreInputs =
             cook.dispatch.core.clone().into();
         let budget =
-            homeboy::agents::agent_task_dispatch_plan::resolve_execution_budget(&core, None);
+            homeboy::agents::agent_task_dispatch_plan::resolve_execution_budget(&core, None, None)
+                .expect("single-provider budget");
         assert_eq!(budget.max_provider_executions, 1);
         assert_eq!(budget.max_provider_rotations, 0);
 
@@ -1187,7 +1182,7 @@ pub struct AgentTaskCookArgs {
     /// and gates; a later attempt can recover from a transient failure. This
     /// derives provider execution and same-provider remediation budgets. An
     /// explicit --model pins the provider route; use
-    /// --allow-provider-rotation to opt it into configured fallbacks (default 3).
+    /// --acknowledge-model-override to confirm pinning it (default 3).
     #[arg(
         long = "max-attempts",
         default_value_t = 3,
@@ -1195,12 +1190,6 @@ pub struct AgentTaskCookArgs {
         value_name = "N"
     )]
     pub max_attempts: u32,
-    /// Permit configured cross-provider/model fallbacks after explicitly
-    /// selecting a model. This is distinct from
-    /// same-provider remediation, which retries the selected route for gate
-    /// and required review-form fixes.
-    #[arg(long = "allow-provider-rotation")]
-    pub allow_provider_rotation: bool,
     /// Stop after the work is verified but before opening the pull request,
     /// leaving the committed change on the worktree branch for manual review or
     /// a later `agent-task review`/finalize.

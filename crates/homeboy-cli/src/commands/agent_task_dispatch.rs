@@ -28,14 +28,10 @@ pub struct DispatchCoreArgs {
 
     /// Maximum total provider executions per task, including same-provider
     /// retries and provider rotations. For Cook, this must be at least
-    /// --max-attempts; use --max-same-provider-retries for gate and review-form
-    /// remediation. `--attempts 1` runs exactly once. An explicit total cap
-    /// bounds rotations inherited from configuration: for example,
-    /// `--max-attempts 1 --max-provider-executions 1` runs once even when a
-    /// rotation is configured, and reports those rotations as unreachable. An
-    /// explicit `--max-provider-rotations` must fit within this total. When
-    /// omitted, defaults to the total attempts the configured provider rotation
-    /// needs, or 1 when no rotation is configured.
+    /// --max-attempts plus the configured rotation allowance; use
+    /// --max-same-provider-retries for gate and review-form remediation.
+    /// A cap that cannot fund configured rotation is rejected. When omitted,
+    /// defaults to the total executions required by the configured policy.
     #[arg(long = "max-provider-executions", alias = "attempts", value_name = "N")]
     pub attempts: Option<u32>,
 
@@ -49,20 +45,6 @@ pub struct DispatchCoreArgs {
         value_name = "N"
     )]
     pub same_provider_retries: Option<u32>,
-
-    /// Cross-provider rotations allowed after the first provider execution.
-    /// Rotations are distinct from same-provider Cook remediation and do not
-    /// satisfy its required review-form retry budget. When omitted, defaults to
-    /// the number of entries in the configured provider rotation, or 0 when no
-    /// rotation is configured. When supplied with an explicit total execution
-    /// cap, this request must fit within that cap; only inherited rotations are
-    /// truncated automatically.
-    #[arg(
-        long = "max-provider-rotations",
-        alias = "provider-rotations",
-        value_name = "N"
-    )]
-    pub provider_rotations: Option<u32>,
 
     /// Persist the run for a daemon/runner but do not execute immediately.
     #[arg(long)]
@@ -105,9 +87,9 @@ pub struct DispatchCoreArgs {
     #[arg(long = "command-policy-reason", value_name = "TEXT")]
     pub command_policy_reason: Option<String>,
 
-    /// Explicitly acknowledge that an explicit model may displace configured
-    /// model routes. The refusal includes this flag as a replay instruction.
-    #[arg(long = "acknowledge-model-override")]
+    /// Confirm an explicit model override that pins the run instead of using
+    /// configured rotation.
+    #[arg(long = "acknowledge-model-override", requires = "model")]
     pub acknowledge_model_override: bool,
 
     #[arg(
@@ -136,7 +118,6 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             generated_fanout_context: false,
             attempts: args.attempts,
             same_provider_retries: args.same_provider_retries,
-            provider_rotations: args.provider_rotations,
             queue_only: args.queue_only,
             timeout_ms: args.timeout_ms,
             resolved_provider_policy: args.resolved_provider_policy,
@@ -364,7 +345,6 @@ mod tests {
                     client_context: None,
                     attempts: Some(1),
                     same_provider_retries: Some(0),
-                    provider_rotations: Some(0),
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -406,7 +386,6 @@ mod tests {
                     client_context: None,
                     attempts: Some(1),
                     same_provider_retries: Some(0),
-                    provider_rotations: Some(0),
                     queue_only: false,
                     timeout_ms: None,
                     resolved_provider_policy: None,
@@ -511,7 +490,6 @@ mod tests {
                 client_context: overrides.core.client_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
-                provider_rotations: overrides.core.provider_rotations,
                 queue_only: overrides.core.queue_only,
                 timeout_ms: overrides.core.timeout_ms,
                 resolved_provider_policy: overrides.core.resolved_provider_policy,

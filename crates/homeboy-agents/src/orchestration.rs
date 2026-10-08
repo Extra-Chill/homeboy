@@ -5387,8 +5387,7 @@ fn default_retry(
             backend: route.backend.clone(),
             selector: route.selector.clone(),
             model: route.model.clone(),
-            allow_provider_rotation: route.allow_provider_rotation,
-            provider_rotations: route.provider_rotations,
+            acknowledge_model_override: route.acknowledge_model_override,
         }
     });
     // The action reserves the successor; dispatching it is the caller's own
