@@ -1053,6 +1053,107 @@ fn structured_runtime_progress_keeps_provider_alive_until_completion() {
     );
 }
 
+#[cfg(target_os = "linux")]
+fn quiet_descendant_command(work: &str) -> String {
+    format!(
+        "node {}",
+        script(&format!(
+            "let fs=require('fs'); let cp=require('child_process'); \
+             let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+             let child=cp.spawn(process.execPath,['-e',{}],{{stdio:'ignore'}}); \
+             child.on('exit',()=>process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'quiet tool completed'}})));",
+            serde_json::to_string(work).expect("child script JSON")
+        ))
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn quiet_cpu_descendant_survives_provider_liveness_window() {
+    let command = quiet_descendant_command("let end=Date.now()+3000; while(Date.now()<end){}");
+    let (mut request, provider) = request("task-liveness-descendant-cpu", command);
+    request.limits.timeout_ms = Some(10_000);
+    request.limits.liveness_timeout_ms = Some(1_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+    assert_eq!(outcome.summary.as_deref(), Some("quiet tool completed"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn quiet_io_descendant_outside_workspace_survives_provider_liveness_window() {
+    let temp = tempfile::tempdir().expect("external evidence directory");
+    let evidence = temp.path().join("tool.log");
+    let command = quiet_descendant_command(&format!(
+        "let fs=require('fs'); let log={}; let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),100); setTimeout(()=>{{clearInterval(timer);}},3000);",
+        serde_json::to_string(&evidence).expect("external path JSON")
+    ));
+    let (mut request, provider) = request("task-liveness-descendant-io", command);
+    request.limits.timeout_ms = Some(10_000);
+    request.limits.liveness_timeout_ms = Some(1_000);
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+    assert!(fs::metadata(evidence).expect("tool evidence").len() >= 100);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn quiet_idle_descendant_still_hits_provider_liveness_deadline() {
+    let command = quiet_descendant_command("setTimeout(()=>{},10000);");
+    let (mut request, provider) = request("task-liveness-descendant-idle", command);
+    request.limits.timeout_ms = Some(20_000);
+    request.limits.liveness_timeout_ms = Some(1_000);
+
+    let started = std::time::Instant::now();
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::Stalled)
+    );
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.provider_liveness_timeout"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "idle tool must not survive to completion"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn quiet_active_descendant_still_hits_absolute_execution_deadline() {
+    let command = quiet_descendant_command("while(true){}");
+    let (mut request, provider) = request("task-liveness-descendant-wall", command);
+    request.limits.timeout_ms = Some(10_000);
+    request.limits.liveness_timeout_ms = Some(1_000);
+    request.limits.execution_deadline_unix_ms =
+        Some(crate::agent_task_timeout::now_unix_ms() + 3_000);
+
+    let started = std::time::Instant::now();
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Timeout,
+        "{outcome:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(8));
+}
+
 /// A runtime that streams telemetry into an artifact whose name does not
 /// contain `progress` is still working, and must not be killed as stalled.
 ///
