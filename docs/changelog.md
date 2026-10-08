@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.5] - 2026-10-08
+
+### Changed
+- derive lifecycle from the owning run instead of mirroring it
+
+### Fixed
+- recognize owned tool activity in provider liveness
+- retain controller custody during promotion recovery
+
 ## [0.417.4] - 2026-10-08
 
 ### Changed
