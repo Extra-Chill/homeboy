@@ -361,3 +361,31 @@ Self-review found no additional production changes in this follow-up. The
 unchanged actual wrapper-suite requirement is now verified. **Action527's
 mandatory live release proof remains separate and is not satisfied or waived
 by this mocked wrapper-suite run.**
+
+## CI-discovered persistence fixture correction
+
+CI run `37852937480` for candidate `2cd0ee31475de5a8329e90905cd3a72ec79bc83a`
+reported seven raw candidate-suite failures. Its final differential gate isolated
+one persistent candidate-only failure after two retries:
+`baseline_comparison_is_persisted_before_feedback_finalization`.
+The daemon-chaos candidate-only failure passed isolated retry and was classified flaky.
+
+Both persistence retry logs showed `shell: HistoricalLogin` in the handcrafted
+candidate report and the diagnostic "baseline replay uses a different shell
+invocation contract than the recorded candidate; recapture candidate evidence".
+That guard was correct; the fixture intended to represent a fresh current Cook
+candidate, but manually supplied `sh -lc`. The follow-up changes only that
+fixture to `legacy_gate_argv`, preserving the test's assertions that inherited
+baseline evidence is durably recorded before finalization, and preserving the
+separate historical-contract inconclusive proof.
+
+Native macOS verification from the owned worktree, using
+`RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
+CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0` and a sequential task-owned target:
+
+- `cargo test -p homeboy-agents baseline_comparison_is_persisted_before_feedback_finalization -- --nocapture`: **1 passed**.
+- `cargo test -p homeboy-agents agent_task_service::cook_baseline::tests -- --test-threads=1`: **5 passed**, including historical-contract inconclusive behavior and direct declared-plan replay.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+
+This follow-up changes a test fixture and this evidence record; production
+execution, historical invocation identity and baseline acceptance are unchanged.
