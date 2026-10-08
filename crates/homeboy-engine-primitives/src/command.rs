@@ -520,6 +520,8 @@ pub struct ControllerChildGuard {
     root_identity: Mutex<Option<(u32, u32)>>,
     #[cfg(all(unix, not(target_os = "linux")))]
     owned_processes: Mutex<Vec<UnixProcessIdentity>>,
+    #[cfg(all(unix, not(target_os = "linux")))]
+    death_watcher: Option<thread::JoinHandle<io::Result<libc::pid_t>>>,
     #[cfg(windows)]
     job: Mutex<windows_sys::Win32::Foundation::HANDLE>,
 }
@@ -604,12 +606,13 @@ impl ControllerChildGuard {
                 // process-group leader but before it can execute workload code.
                 // That lets the already-running guard cover spawn-to-attach.
                 configure_isolated_process_tree(command, registration_fds[1], -1);
-                let guard = Self {
+                let mut guard = Self {
                     controller_liveness_read_fd: fds[0],
                     controller_liveness_fd: fds[1],
                     child_registration_read_fd: registration_fds[0],
                     child_registration_fd: registration_fds[1],
                     owned_processes: Mutex::new(Vec::new()),
+                    death_watcher: None,
                 };
                 match unsafe { libc::fork() } {
                     -1 => Err(io::Error::last_os_error()),
@@ -619,7 +622,25 @@ impl ControllerChildGuard {
                         guard.child_registration_read_fd,
                         guard.child_registration_fd,
                     ),
-                    _guard_pid => Ok(guard),
+                    guard_pid => {
+                        match thread::Builder::new()
+                            .name("homeboy-child-guard-reaper".into())
+                            .spawn(move || wait_for_death_watcher(guard_pid))
+                        {
+                            Ok(reaper) => {
+                                guard.death_watcher = Some(reaper);
+                                Ok(guard)
+                            }
+                            Err(error) => {
+                                // No workload has spawned yet. If we cannot own the
+                                // watcher's wait, fail preparation and reap this exact
+                                // child rather than leaking it on the error path.
+                                unsafe { libc::kill(guard_pid, libc::SIGKILL) };
+                                let _ = wait_for_death_watcher(guard_pid);
+                                Err(error)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -977,6 +998,11 @@ impl Drop for ControllerChildGuard {
         }
         #[cfg(target_os = "linux")]
         self.close_protocol_write();
+        // Closing the pipes above lets the watcher finish its existing cleanup.
+        // Its exact-PID waiter keeps running after this handle is dropped: never
+        // block controller shutdown or consume a concurrent workload's status.
+        #[cfg(all(unix, not(target_os = "linux")))]
+        drop(self.death_watcher.take());
         #[cfg(windows)]
         if let Ok(mut job) = self.job.lock() {
             if !job.is_null() {
@@ -985,6 +1011,20 @@ impl Drop for ControllerChildGuard {
                 }
                 *job = std::ptr::null_mut();
             }
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn wait_for_death_watcher(pid: libc::pid_t) -> io::Result<libc::pid_t> {
+    loop {
+        let waited = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+        if waited == pid {
+            return Ok(pid);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(error);
         }
     }
 }
@@ -3127,6 +3167,92 @@ fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> 
         thread::sleep(PROCESS_TREE_POLL_INTERVAL);
     }
     true
+}
+
+#[cfg(all(test, unix, not(target_os = "linux")))]
+mod death_watcher_reaping_tests {
+    use super::*;
+
+    fn assert_reaped(reaper: thread::JoinHandle<io::Result<libc::pid_t>>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !reaper.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "controller death watcher did not exit and reap"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let pid = reaper
+            .join()
+            .expect("watcher waiter must not panic")
+            .expect("exact watcher wait must succeed");
+        // Probe the OS, not just the waiter's return value. A watcher that is
+        // merely exited still has a waitable status and a process-table entry.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "watcher {pid} still exists"
+        );
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn repeated_completed_commands_reap_watchers_without_stealing_sibling_status() {
+        let mut sibling = Command::new("sh")
+            .args(["-c", "exit 42"])
+            .spawn()
+            .expect("spawn unrelated sibling");
+        let mut reapers = Vec::new();
+        for _ in 0..16 {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owned command");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = owner.try_wait().expect("wait owned command") {
+                    break status;
+                }
+                assert!(std::time::Instant::now() < deadline, "command did not exit");
+                thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(status.code(), Some(7));
+            reapers.push(
+                owner
+                    .guard
+                    .death_watcher
+                    .take()
+                    .expect("owned watcher waiter"),
+            );
+            drop(owner);
+        }
+        for reaper in reapers {
+            assert_reaped(reaper);
+        }
+        assert_eq!(
+            sibling.wait().expect("wait unrelated sibling").code(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn failed_spawn_reaps_prepared_watcher_without_blocking_drop() {
+        let mut command = Command::new("/homeboy-missing-child-12728");
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare watcher");
+        let reaper = guard.death_watcher.take().expect("owned watcher waiter");
+        assert_eq!(command.spawn().unwrap_err().kind(), io::ErrorKind::NotFound);
+        let started = std::time::Instant::now();
+        drop(guard);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_reaped(reaper);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
