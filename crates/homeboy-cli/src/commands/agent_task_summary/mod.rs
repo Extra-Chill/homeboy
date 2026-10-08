@@ -922,9 +922,11 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     {
         return format!("homeboy agent-task status {run_id} --watch");
     }
-    if string_value(payload, &["blocker", "code"]) == Some("controller_failure")
-        && string_value(payload, &["candidate", "state"]) == Some("verification_pending")
-    {
+    // A verification-pending candidate holds a promoted but unverified
+    // change. Resume re-reads terminal evidence and cannot verify it; the
+    // cook continuation owns that recovery regardless of which blocker
+    // stalled the gates (#15668).
+    if string_value(payload, &["candidate", "state"]) == Some("verification_pending") {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
     }
@@ -2556,6 +2558,40 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(
             summary.contains("Next: homeboy agent-task cook-continue cook-14357\n"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("Next: homeboy agent-task review"),
+            "{summary}"
+        );
+    }
+
+    /// #15668: any verification-pending candidate is recoverable through the
+    /// cook continuation, not only one stalled by a controller failure.
+    #[test]
+    fn status_summary_routes_every_verification_pending_candidate_to_continuation() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "mission": "cook-15668",
+            "run": "cook-15668-attempt-1",
+            "state": "candidate_recoverable",
+            "candidate": { "state": "verification_pending" },
+            "blocker": {
+                "code": "gate_transport.unavailable",
+                "message": "gates never ran"
+            },
+            "artifacts": [],
+            "action_eligibility": {
+                "actions": [{
+                    "action": "review",
+                    "availability": "available"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(
+            summary.contains("Next: homeboy agent-task cook-continue cook-15668\n"),
             "{summary}"
         );
         assert!(

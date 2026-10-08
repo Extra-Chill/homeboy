@@ -3770,6 +3770,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         && record.state.is_terminal()
                         && record.runner_id().is_some()
                         && record.runner_job_id().is_some();
+                    // A terminal runner-backed CandidateRecoverable record
+                    // holds an unpromoted candidate. Re-reading its terminal
+                    // evidence cannot verify or promote anything: the cook
+                    // continuation owns that recovery. Name the cause instead
+                    // of exiting 1 silently (#15668).
+                    let candidate_recoverable_continuation = terminal_projection_recovery
+                        && record.state == AgentTaskRunState::CandidateRecoverable;
                     let resumed = (|| -> homeboy_core::Result<_> {
                         if terminal_projection_recovery {
                             crate::agent_task_service::reconcile_terminal_artifact_projection(
@@ -3799,6 +3806,20 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         Ok((result, current))
                     })();
                     match resumed {
+                        Ok((_, current)) if candidate_recoverable_continuation => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(
+                                &format!(
+                                    "run is candidate_recoverable holding an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: continue the cook with `homeboy agent-task cook-continue {}`",
+                                    record.metadata["cook_id"]
+                                        .as_str()
+                                        .unwrap_or(record.run_id.as_str())
+                                ),
+                                MESSAGE_BOUND,
+                            )),
+                        ),
                         Ok((result, current)) => (
                             if record.state.is_terminal() {
                                 ControlPlaneActionOutcome::AlreadySatisfied
@@ -11031,6 +11052,72 @@ mod tests {
             assert_eq!(first.result.schema, CONTROL_PLANE_RESUME_RESULT_SCHEMA);
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
+        });
+    }
+
+    /// #15668: resume on a terminal runner-backed candidate_recoverable cook
+    /// attempt cannot verify or promote anything. It names the cook
+    /// continuation as the recovery instead of exiting 1 without a cause.
+    #[test]
+    fn resume_on_candidate_recoverable_names_the_cook_continue_recovery() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let mut stranded = record(AGENT_TASK_RUN);
+            stranded.state = AgentTaskRunState::CandidateRecoverable;
+            stranded.artifact_refs.clear();
+            stranded.provider_handles.clear();
+            stranded.metadata = json!({
+                "cook_id": "cook-15668",
+                "runner_id": "homeboy-lab",
+                "runner_job_id": "job-1",
+            });
+            store.write_record(&stranded).expect("record");
+            store
+                .write_controller_plan(AGENT_TASK_RUN, &AgentTaskPlan::new("plan", Vec::new()))
+                .expect("controller plan");
+            let aggregate = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan",
+                "status": "candidate_recoverable",
+                "totals": { "skipped": 0, "succeeded": 0, "failed": 0 },
+                "outcomes": [],
+            }))
+            .expect("aggregate");
+            store
+                .write_aggregate(AGENT_TASK_RUN, &aggregate)
+                .expect("aggregate evidence");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:resume-candidate-recoverable".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "resume-candidate-recoverable".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+
+            let acknowledgement = service
+                .execute_action_with_delegates(
+                    &run,
+                    &request,
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
+                )
+                .expect("candidate_recoverable resume names its cause");
+
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Failed,
+                "{acknowledgement:?}"
+            );
+            let message = acknowledgement.message.expect("named failure cause");
+            assert!(message.contains("candidate_recoverable"), "{message}");
+            assert!(message.contains("cook-continue"), "{message}");
+            assert!(message.contains("cook-15668"), "{message}");
         });
     }
 
