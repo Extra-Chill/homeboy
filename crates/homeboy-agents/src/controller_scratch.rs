@@ -649,7 +649,7 @@ pub struct ControllerScratchCleanupOptions {
     /// clean, terminal scratch converge immediately once finalized — this is the
     /// disk-pressure path exposed by `--older-than-days`. The override ONLY
     /// affects the retention time-window comparison; it never bypasses the
-    /// still-active-run, running-owner, not-finalized, orphaned-transition, or
+    /// still-active-run, running-owner, not-finalized, orphaned-retention, or
     /// dirty/unpushed guards, which continue to protect in-use resources.
     pub retention_override_seconds: Option<i64>,
 }
@@ -1022,7 +1022,7 @@ fn cleanup_unlocked(
     let mut stranded: Vec<usize> = Vec::new();
     let mut registered_worktree_count = 0;
     for (_, position) in ordered.into_iter().take(options.limit) {
-        let resource = &mut index.resources[position];
+        let resource = &index.resources[position];
         let path = PathBuf::from(&resource.path);
         if !path.exists() {
             // Only a finalized lease is a converged one. An unfinalized row
@@ -1043,8 +1043,6 @@ fn cleanup_unlocked(
                 stranded.push(position);
             }
         }
-        let lifecycle_state = resource.lifecycle_state.clone();
-        let interrupted_at = resource.interrupted_at.clone();
         let reason = cleanup_block_reason_with_observation(
             observation,
             resource,
@@ -1052,8 +1050,6 @@ fn cleanup_unlocked(
             now,
             options.retention_override_seconds,
         )?;
-        reconciled |= resource.lifecycle_state != lifecycle_state
-            || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
             // Keep every row for an explicit `--full` inspection. The default
             // response admits rows directly to its item/byte budget so a large
@@ -1079,7 +1075,8 @@ fn cleanup_unlocked(
         // override)? The override only relaxes the retention time window, and
         // every other guard has already passed, so default-eligibility reduces
         // to the default retention window still being expired.
-        if resource_retention_window_expired(resource, &path, now) {
+        let owning_run = observation.get_run(&resource.run_id)?;
+        if resource_retention_window_expired(resource, owning_run.as_ref(), &path, now) {
             default_policy_eligible_bytes += size_bytes;
         }
         eligible.push(ControllerScratchCandidate {
@@ -1405,9 +1402,50 @@ fn summarize_retention(
         .collect()
 }
 
+/// The lifecycle a lease is effectively in at inspection time, derived from
+/// owner-side records and external evidence instead of persisted. Release and
+/// run finalization remain the only writers of the durable row; cleanup only
+/// reads it.
+///
+/// * A recorded finalization wins: the lease is in the state its owner wrote,
+///   aged from that finalization. One exception: a lease that never left
+///   `active` was never claimed by an owner-side writer, so it is orphaned
+///   even when a finalization timestamp exists.
+/// * Without a recorded finalization, a terminal observation run is
+///   authoritative evidence that the lease was interrupted even when a crash
+///   prevented the owner-side finalization callback; its effective
+///   finalization time is the run's own finish time, so an inspection cannot
+///   restart retention from the repair.
+/// * With neither record, an `active` lease under a terminal or missing run
+///   whose owner is dead is orphaned, aged from the lease path's own mtime
+///   (the `None` finalization falls through to the mtime comparison in
+///   [`retention_expired`]); any other state simply is not finalized yet.
+fn effective_lifecycle<'a>(
+    resource: &'a ControllerScratchResource,
+    owning_run: Option<&'a homeboy_core::observation::RunRecord>,
+) -> (&'a str, Option<&'a str>) {
+    let Some(finalized_at) = resource.finalized_at.as_deref() else {
+        return match owning_run {
+            Some(run) => ("interrupted", run.finished_at.as_deref()),
+            None => (
+                if resource.lifecycle_state == "active" {
+                    "orphaned"
+                } else {
+                    resource.lifecycle_state.as_str()
+                },
+                None,
+            ),
+        };
+    };
+    if resource.lifecycle_state == "active" {
+        return ("orphaned", Some(finalized_at));
+    }
+    (resource.lifecycle_state.as_str(), Some(finalized_at))
+}
+
 fn cleanup_block_reason_with_observation(
     observation: &ObservationStore,
-    resource: &mut ControllerScratchResource,
+    resource: &ControllerScratchResource,
     path: &Path,
     now: chrono::DateTime<chrono::Utc>,
     retention_override_seconds: Option<i64>,
@@ -1440,57 +1478,34 @@ fn cleanup_block_reason_with_observation(
     if homeboy_core::process::pid_is_running(resource.owner_pid) {
         return Ok(Some("owner process is still running".to_string()));
     }
-    // A terminal observation is authoritative lifecycle evidence even when a
-    // crash interrupted the normal finalization callback. Preserve its age so
-    // cleanup does not restart retention from the repair attempt itself.
-    if resource.finalized_at.is_none() {
-        if let Some(run) = owning_run.as_ref() {
-            resource.lifecycle_state = "interrupted".to_string();
-            resource.finalized_at =
-                Some(run.finished_at.clone().unwrap_or_else(|| now.to_rfc3339()));
-            resource.interrupted_at = resource.finalized_at.clone();
-            resource.terminal_reason = Some("owning_run_terminalized".to_string());
-            resource.terminal_evidence = Some(serde_json::json!({
-                "run_id": resource.run_id,
-                "status": run.status,
-                "reconciled_by": "controller_scratch_cleanup",
-            }));
-        }
-    }
-    if resource.lifecycle_state == "active" {
-        resource.lifecycle_state = "orphaned".to_string();
-        resource.finalized_at = Some(now.to_rfc3339());
-        resource.interrupted_at = Some(now.to_rfc3339());
-        resource.terminal_reason = Some("terminal_run_or_missing_lease_owner".to_string());
-        resource.terminal_evidence = Some(serde_json::json!({
-            "owner_pid": resource.owner_pid,
-            "stale_retention": INTERRUPTED_RETENTION,
-        }));
-        return Ok(Some(
-            "terminal or missing run has a dead active lease owner; orphaned retention has started"
-                .to_string(),
-        ));
-    }
-    if resource.finalized_at.is_none() {
+    // Derive the effective lifecycle instead of reconciling the row: an
+    // inspection is read-only and must never restart retention or rewrite a
+    // lifecycle its owner did not record.
+    let (lifecycle_state, finalized_at) = effective_lifecycle(resource, owning_run.as_ref());
+    if lifecycle_state != "orphaned" && finalized_at.is_none() {
         return Ok(Some(
             "resource has not been finalized by its owning run".to_string(),
         ));
     }
-    let interrupted_owner_dead = resource.lifecycle_state == "interrupted"
+    let interrupted_owner_dead = lifecycle_state == "interrupted"
         && !homeboy_core::process::pid_is_running(resource.owner_pid)
         && recovery_evidence_is_current(resource);
     // Only the time-window comparison honors the override. All the guards above
-    // (still-active run, running owner, active→orphaned transition, not yet
-    // finalized) have already returned, and the dirty/unpushed guard below still
-    // applies — so an aggressive override can only converge released, clean,
-    // finalized, terminal scratch, never in-use resources.
+    // (still-active run, running owner, not yet finalized) have already returned,
+    // and the dirty/unpushed guard below still applies — so an aggressive
+    // override can only converge released, clean, finalized, terminal scratch,
+    // never in-use resources.
     let override_retention = retention_override_seconds.map(|seconds| format!("{seconds}s"));
-    let default_retention = default_retention_window(resource);
-    let retention = override_retention.as_deref().unwrap_or(default_retention);
-    if !interrupted_owner_dead
-        && !retention_expired(resource.finalized_at.as_deref(), retention, path, now)
-    {
-        return Ok(Some("retention has not expired".to_string()));
+    let retention = override_retention
+        .as_deref()
+        .unwrap_or(default_retention_window(resource, lifecycle_state));
+    if !interrupted_owner_dead && !retention_expired(finalized_at, retention, path, now) {
+        return Ok(Some(if lifecycle_state == "orphaned" {
+            "terminal or missing run has a dead active lease owner; orphaned retention has started"
+                .to_string()
+        } else {
+            "retention has not expired".to_string()
+        }));
     }
     if !resource.ephemeral {
         match git_safety_path(resource, path) {
@@ -1514,12 +1529,13 @@ fn cleanup_block_reason_with_observation(
 
 /// The retention window a resource is subject to under the DEFAULT policy (no
 /// `--older-than-days` override): the shorter orphaned/interrupted window when
-/// applicable, otherwise the resource's own configured retention.
-fn default_retention_window(resource: &ControllerScratchResource) -> &str {
-    if matches!(
-        resource.lifecycle_state.as_str(),
-        "interrupted" | "orphaned"
-    ) {
+/// the effective lifecycle is interrupted or orphaned, otherwise the
+/// resource's own configured retention.
+fn default_retention_window<'a>(
+    resource: &'a ControllerScratchResource,
+    lifecycle_state: &str,
+) -> &'a str {
+    if matches!(lifecycle_state, "interrupted" | "orphaned") {
         INTERRUPTED_RETENTION
     } else {
         &resource.retention
@@ -1532,12 +1548,14 @@ fn default_retention_window(resource: &ControllerScratchResource) -> &str {
 /// guards; it evaluates the time window alone.
 fn resource_retention_window_expired(
     resource: &ControllerScratchResource,
+    owning_run: Option<&homeboy_core::observation::RunRecord>,
     path: &Path,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
+    let (lifecycle_state, finalized_at) = effective_lifecycle(resource, owning_run);
     retention_expired(
-        resource.finalized_at.as_deref(),
-        default_retention_window(resource),
+        finalized_at,
+        default_retention_window(resource, lifecycle_state),
         path,
         now,
     )
@@ -1624,7 +1642,7 @@ fn remove_candidate_from_index(
     if !path.exists()
         || cleanup_block_reason_with_observation(
             observation,
-            &mut index.resources[position],
+            &index.resources[position],
             &path,
             now,
             retention_override_seconds,
@@ -2551,7 +2569,7 @@ mod tests {
 
     fn cleanup_reason(
         observation: &ObservationStore,
-        resource: &mut ControllerScratchResource,
+        resource: &ControllerScratchResource,
         path: &Path,
         retention_override_seconds: Option<i64>,
     ) -> Option<String> {
@@ -2614,7 +2632,7 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             Some("owner process is still running".to_string())
         );
     }
@@ -2635,7 +2653,7 @@ mod tests {
         }));
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             None
         );
     }
@@ -2655,7 +2673,7 @@ mod tests {
         }));
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None).as_deref(),
+            cleanup_reason(&observation, &resource, &scratch, None).as_deref(),
             Some("owner process is still running")
         );
     }
@@ -2674,28 +2692,30 @@ mod tests {
         resource.finalized_at = None;
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             Some("owning run is still active".to_string())
         );
-        assert_eq!(resource.lifecycle_state, "active");
-        assert!(resource.finalized_at.is_none());
     }
 
     #[test]
-    fn terminal_or_missing_run_with_dead_active_lease_becomes_orphaned_and_waits_retention() {
+    fn terminal_or_missing_run_with_dead_active_lease_is_derived_orphaned_without_a_write() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
         let root = tempfile::tempdir().expect("root");
         let scratch = root.path().join("scratch");
         fs::create_dir(&scratch).expect("scratch");
+        let mut fixture = resource(&scratch, root.path());
+        fixture.finalized_at = Some(chrono::Utc::now().to_rfc3339());
         write_index_at(
             data_root.path(),
             &ControllerScratchIndex {
                 schema: schema(),
-                resources: vec![resource(&scratch, root.path())],
+                resources: vec![fixture],
             },
         );
 
+        // Inside the orphaned window: skipped, and the durable row stays
+        // exactly as its owner wrote it — derivation persists nothing.
         let output = cleanup_at(
             data_root.path(),
             &observation,
@@ -2716,35 +2736,29 @@ mod tests {
                 .reason,
             "terminal or missing run has a dead active lease owner; orphaned retention has started"
         );
-        let resource = read_index_at(data_root.path())
+        let stored = read_index_at(data_root.path())
             .resources
             .into_iter()
             .next()
             .expect("resource");
-        assert_eq!(resource.lifecycle_state, "orphaned");
-        assert_eq!(
-            resource.terminal_reason.as_deref(),
-            Some("terminal_run_or_missing_lease_owner")
-        );
-        assert_eq!(
-            resource.interrupted_at.as_deref(),
-            resource.finalized_at.as_deref()
-        );
-        let interrupted_at = resource.finalized_at.as_deref().expect("finalized");
-        let interrupted_at = chrono::DateTime::parse_from_rfc3339(interrupted_at)
+        assert_eq!(stored.lifecycle_state, "active");
+        assert_eq!(stored.terminal_reason, None);
+        assert!(stored.interrupted_at.is_none());
+        let finalized_at = stored.finalized_at.as_deref().expect("finalized");
+        let finalized = chrono::DateTime::parse_from_rfc3339(finalized_at)
             .expect("timestamp")
             .with_timezone(&chrono::Utc);
         assert!(!retention_expired(
-            resource.finalized_at.as_deref(),
+            stored.finalized_at.as_deref(),
             INTERRUPTED_RETENTION,
             &scratch,
-            interrupted_at
+            finalized
         ));
         assert!(retention_expired(
-            resource.finalized_at.as_deref(),
+            stored.finalized_at.as_deref(),
             INTERRUPTED_RETENTION,
             &scratch,
-            interrupted_at + chrono::Duration::days(1)
+            finalized + chrono::Duration::days(1)
         ));
         assert_eq!(output.retention_reasons.len(), 1);
         assert_eq!(
@@ -2756,6 +2770,135 @@ mod tests {
             output.retention_reasons[0].owners[0].run_id,
             "missing-terminal-run"
         );
+
+        // Aged past the orphaned window (measured from the recorded
+        // finalization): eligible on the very first pass, with no persisted
+        // transition required.
+        let mut aged = resource(&scratch, root.path());
+        aged.finalized_at = Some((chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339());
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![aged],
+            },
+        );
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                full: false,
+                retention_override_seconds: None,
+            },
+        );
+        assert_eq!(output.candidate_count, 1);
+    }
+
+    /// The derivation contract: an owner-side record wins as written, a
+    /// terminal observation proves an interruption aged from the run's own
+    /// finish time, and an `active` lease no owner ever claimed is orphaned.
+    #[test]
+    fn effective_lifecycle_is_derived_without_writes() {
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let finished_at = "2026-01-01T00:00:00+00:00";
+        let terminal_run = homeboy_core::observation::RunRecord {
+            finished_at: Some(finished_at.to_string()),
+            status: "pass".to_string(),
+            ..Default::default()
+        };
+
+        let mut released = resource(&scratch, root.path());
+        released.lifecycle_state = "released".to_string();
+        assert_eq!(
+            effective_lifecycle(&released, None),
+            ("released", released.finalized_at.as_deref())
+        );
+
+        let mut interrupted = resource(&scratch, root.path());
+        interrupted.lifecycle_state = "interrupted".to_string();
+        assert_eq!(
+            effective_lifecycle(&interrupted, Some(&terminal_run)),
+            ("interrupted", interrupted.finalized_at.as_deref())
+        );
+
+        let mut unclaimed = resource(&scratch, root.path());
+        unclaimed.lifecycle_state = "active".to_string();
+        let unclaimed_finalized_at = unclaimed.finalized_at.clone();
+        unclaimed.finalized_at = None;
+        assert_eq!(effective_lifecycle(&unclaimed, None), ("orphaned", None));
+        assert_eq!(
+            effective_lifecycle(&unclaimed, Some(&terminal_run)),
+            ("interrupted", Some(finished_at))
+        );
+
+        let mut stale_active = resource(&scratch, root.path());
+        stale_active.finalized_at = unclaimed_finalized_at;
+        assert_eq!(
+            effective_lifecycle(&stale_active, None),
+            ("orphaned", stale_active.finalized_at.as_deref())
+        );
+
+        let mut unfinished = resource(&scratch, root.path());
+        unfinished.lifecycle_state = "released".to_string();
+        unfinished.finalized_at = None;
+        assert_eq!(effective_lifecycle(&unfinished, None), ("released", None));
+    }
+
+    /// Retention for a derived interruption ages from the owning run's finish
+    /// time, not from the inspection: a lease whose run finished past the
+    /// interrupted window is eligible on the first pass, with nothing written.
+    #[test]
+    fn derived_interrupted_retention_ages_from_the_owning_run_finish_time() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        observation
+            .upsert_imported_run(&homeboy_core::observation::RunRecord {
+                id: "aged-terminal-run".to_string(),
+                kind: "test".to_string(),
+                started_at: "2026-01-01T00:00:00+00:00".to_string(),
+                finished_at: Some((chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339()),
+                status: "pass".to_string(),
+                metadata_json: serde_json::json!({}),
+                ..Default::default()
+            })
+            .expect("backdated terminal run");
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut orphan = resource(&scratch, root.path());
+        orphan.run_id = "aged-terminal-run".to_string();
+        orphan.finalized_at = None;
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![orphan],
+            },
+        );
+
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                full: false,
+                retention_override_seconds: None,
+            },
+        );
+
+        assert_eq!(output.candidate_count, 1);
+        let stored = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .next()
+            .expect("resource");
+        assert_eq!(stored.lifecycle_state, "active");
+        assert!(stored.finalized_at.is_none());
     }
 
     #[test]
@@ -2836,7 +2979,7 @@ mod tests {
                 retention_override_seconds: Some(0),
             },
         );
-        assert_eq!(first.candidate_count, 0);
+        assert_eq!(first.candidate_count, 1);
 
         let second = cleanup_at(
             data_root.path(),
@@ -3023,7 +3166,7 @@ mod tests {
         resource.retention = "P7D".to_string();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             Some("retention has not expired".to_string())
         );
     }
@@ -3042,13 +3185,13 @@ mod tests {
 
         // Default: still within the 7-day window, so it is retained.
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             Some("retention has not expired".to_string())
         );
 
         // Pressure override (expire-immediately): now eligible (no block).
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            cleanup_reason(&observation, &resource, &scratch, Some(0)),
             None
         );
     }
@@ -3068,7 +3211,7 @@ mod tests {
         resource.lifecycle_state = "released".to_string();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            cleanup_reason(&observation, &resource, &scratch, Some(0)),
             Some("git checkout has dirty or unpushed state".to_string())
         );
         assert!(scratch.exists());
@@ -3088,7 +3231,7 @@ mod tests {
         resource.lifecycle_state = "released".to_string();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            cleanup_reason(&observation, &resource, &scratch, Some(0)),
             None
         );
     }
@@ -3107,7 +3250,7 @@ mod tests {
         resource.lifecycle_state = "released".to_string();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            cleanup_reason(&observation, &resource, &scratch, Some(0)),
             Some("git checkout has dirty or unpushed state".to_string())
         );
     }
@@ -3459,7 +3602,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_reconciles_an_unfinalized_terminal_run() {
+    fn cleanup_derives_an_unfinalized_terminal_run_lifecycle_without_persisting_it() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
         let run = observation
@@ -3471,6 +3614,32 @@ mod tests {
         let allocation = allocate_at(data_root.path(), &run.id, "plan", "task", 1);
         abandon_attempt_for_test(&allocation).expect("dead owner");
 
+        // Inside the interrupted window (aged from the run's own finish time):
+        // skipped, with no lifecycle written back.
+        let preview = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                full: false,
+                retention_override_seconds: None,
+            },
+        );
+        assert_eq!(preview.candidate_count, 0);
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("registered lease");
+        assert_eq!(resource.lifecycle_state, "active");
+        assert!(resource.finalized_at.is_none());
+        assert!(resource.interrupted_at.is_none());
+        assert!(resource.terminal_reason.is_none());
+        assert!(resource.terminal_evidence.is_none());
+
+        // The pressure override converges it in the same pass that derived the
+        // interruption — still without persisting any lifecycle.
         let output = cleanup_at(
             data_root.path(),
             &observation,
@@ -3490,11 +3659,9 @@ mod tests {
             .into_iter()
             .find(|resource| resource.lease_id == allocation.lease_id)
             .expect("terminal evidence");
-        assert_eq!(resource.lifecycle_state, "interrupted");
-        assert_eq!(
-            resource.terminal_reason.as_deref(),
-            Some("owning_run_terminalized")
-        );
+        assert_eq!(resource.lifecycle_state, "active");
+        assert!(resource.finalized_at.is_none());
+        assert!(resource.terminal_reason.is_none());
     }
 
     #[test]
@@ -3510,7 +3677,7 @@ mod tests {
         resource.owner_pid = std::process::id();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, Some(0)),
+            cleanup_reason(&observation, &resource, &scratch, Some(0)),
             Some("owner process is still running".to_string())
         );
     }
@@ -3760,7 +3927,7 @@ mod tests {
         resource.lifecycle_state = "released".to_string();
 
         assert_eq!(
-            cleanup_reason(&observation, &mut resource, &scratch, None),
+            cleanup_reason(&observation, &resource, &scratch, None),
             Some("git checkout has dirty or unpushed state".to_string())
         );
         assert!(scratch.exists());
