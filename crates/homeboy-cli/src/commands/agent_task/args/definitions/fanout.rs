@@ -37,7 +37,7 @@ pub enum AgentTaskFanoutCommand {
     /// --private-verify inputs or --verification-profiles. A child that cannot
     /// verify its work cannot promote it (#9838).
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to --repo. For independent repositories, create a multi-repository batch-cook manifest with one cook cell per repository, then run:\n  homeboy agent-task fanout run-plan --input @multi-repo-plan.json\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute every child.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo OWNER/REPO --verify 'homeboy review test REPO' ISSUE_URL... --preview\n  homeboy agent-task fanout cook-batch --verify 'homeboy review test REPO' ISSUE_URL... --preview\n\nOne repository per batch: every issue in a cook-batch must belong to the same repository. For independent repositories, create a multi-repository batch-cook manifest with one cook cell per repository, then run:\n  homeboy agent-task fanout run-plan --input @multi-repo-plan.json\n\nTwo phases: without --run-plan, cook-batch validates and materializes the batch, then returns a fanout run-plan command. Add --run-plan only after reviewing that plan to execute the wave.\n\nVerification is required: every child needs a shared --verify/--private-verify gate or an assignment in --verification-profiles; a child that cannot verify cannot promote.\n\nPlacement: run the batch on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo OWNER/REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nPer-child verification profiles:\n  homeboy agent-task fanout cook-batch --repo OWNER/REPO --verification-profiles @profiles.json ISSUE_URL... --preview\n\nUse --help-full for provider, gate, resource, environment, artifact, runner, and scheduling controls."
     )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
     /// Normalize and inspect a batch-cook plan without submitting or running it.
@@ -88,11 +88,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// issues; every URL must be unique and resolve through the tracker.
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
-    /// Registered repository/component slug or exact registered primary checkout path.
+    /// GitHub owner/repo, registered repository/component slug, or checkout path.
     ///
     /// Component identities and aliases resolve to their canonical owning
     /// repository before child planning and worktree handoff.
-    #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
+    #[arg(long = "repo", value_name = "REPO_OR_PATH", default_value = "")]
     pub repo: String,
     /// Controller-resolved component selector retained across replay.
     #[arg(long = "component", value_name = "COMPONENT_ID", hide = true)]
@@ -303,12 +303,11 @@ pub struct AgentTaskFanoutPlanArgs {
     /// Explicitly acknowledge that the model may displace configured routes.
     #[arg(long = "acknowledge-model-override")]
     pub acknowledge_model_override: bool,
-    /// Registered repository slug or exact registered primary checkout path to
-    /// plan children for. Required with (and only with) issue URLs.
+    /// GitHub owner/repo, registered repository slug, or checkout path to plan
+    /// children for. When omitted, infer it from issue URLs in one repository.
     #[arg(
         long = "repo",
         value_name = "REPO_SLUG_OR_PRIMARY_PATH",
-        requires = "issues",
         conflicts_with = "input"
     )]
     pub repo: Option<String>,
@@ -316,7 +315,7 @@ pub struct AgentTaskFanoutPlanArgs {
     /// child still requires a deterministic gate: pass shared --verify /
     /// --private-verify inputs or --verification-profiles, exactly as
     /// `fanout cook-batch --preview` requires.
-    #[arg(value_name = "ISSUE_URL", requires = "repo")]
+    #[arg(value_name = "ISSUE_URL")]
     pub issues: Vec<String>,
     /// Source ref the planned child worktrees would be created from. When
     /// omitted, this is inferred from the repository default branch.
