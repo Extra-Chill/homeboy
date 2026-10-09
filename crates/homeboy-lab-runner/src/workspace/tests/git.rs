@@ -617,6 +617,151 @@ fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
 }
 
 #[test]
+fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Extra-Chill/homeboy.git",
+            ],
+        );
+        let commit = |name: &str| {
+            fs::write(source.path().join(name), format!("{name}\n")).expect("write file");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", name]);
+            git_output(source.path(), &["rev-parse", "HEAD"]).unwrap()
+        };
+        let first = commit("first.txt");
+
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-thin-bundle","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let runner = crate::load("lab-thin-bundle").expect("load runner");
+        let control = crate::workspace::WorkspaceControl::default();
+        let materialize_with = |destination: &str, head: &str, git_fetch_refs: &[String]| {
+            crate::workspace::git::materialize_git_bundle_controlled(
+                &runner,
+                crate::workspace::git::ControllerGitBundleMaterializationRequest {
+                    local_path: source.path(),
+                    remote_path: destination,
+                    head,
+                    branch: Some("main"),
+                    remote_url: "https://github.com/Extra-Chill/homeboy.git",
+                    changed_since_base: None,
+                    git_fetch_refs,
+                    allow_dirty_lab_workspace: false,
+                },
+                &control,
+            )
+            .expect("materialize bundle")
+        };
+        let materialize = |destination: &str, head: &str| materialize_with(destination, head, &[]);
+        let workspace = |name: &str| runner_root.path().join(name).display().to_string();
+
+        // An empty runner cache receives the complete closure.
+        let cold = materialize(&workspace("cold"), &first);
+        assert!(cold.prerequisites.is_empty());
+
+        // A later head carries only what the runner lacks.
+        let second = commit("second.txt");
+        let warm = materialize(&workspace("warm"), &second);
+        assert_eq!(warm.prerequisites, vec![first.clone()]);
+        let warm_workspace = workspace("warm");
+        let warm_path = Path::new(&warm_workspace);
+        assert_eq!(
+            git_output(warm_path, &["rev-parse", "HEAD"]).unwrap(),
+            second
+        );
+        assert_eq!(
+            fs::read_to_string(warm_path.join("first.txt")).unwrap(),
+            "first.txt\n"
+        );
+        // The workspace owns its objects instead of borrowing the cache.
+        assert!(!warm_path.join(".git/objects/info/alternates").exists());
+        git(warm_path, &["fsck", "--connectivity-only"]);
+
+        // Re-staging a head the cache already contains still transfers it.
+        let again = materialize(&workspace("again"), &second);
+        assert_eq!(again.prerequisites, vec![first.clone()]);
+        assert_eq!(
+            git_output(Path::new(&workspace("again")), &["rev-parse", "HEAD"]).unwrap(),
+            second
+        );
+
+        // A pinned commit that only the cache holds is copied into the
+        // workspace, although the thin bundle carries no ref for it.
+        git(source.path(), &["checkout", "-q", "-b", "side", &first]);
+        let side = commit("side.txt");
+        materialize(&workspace("side"), &side);
+        git(source.path(), &["checkout", "-q", "main"]);
+        let pinned = materialize_with(&workspace("pinned"), &second, &[side.clone()]);
+        assert!(pinned.prerequisites.contains(&side));
+        let pinned_workspace = workspace("pinned");
+        let pinned_path = Path::new(&pinned_workspace);
+        assert_eq!(
+            git_output(pinned_path, &["rev-parse", "HEAD"]).unwrap(),
+            second
+        );
+        assert_eq!(
+            git_output(
+                pinned_path,
+                &["rev-parse", "--verify", &format!("{side}^{{commit}}")]
+            )
+            .unwrap(),
+            side
+        );
+        assert!(!pinned_path.join(".git/objects/info/alternates").exists());
+        assert_eq!(
+            git_output(pinned_path, &["for-each-ref", "refs/homeboy-retain/"]).unwrap(),
+            ""
+        );
+
+        // A cache that advertises a commit but lost its closure cannot install
+        // a thin bundle; materialization falls back to the complete closure.
+        let cache = std::path::PathBuf::from(crate::workspace::git::git_object_cache_path(
+            &workspace("lost"),
+            "https://github.com/Extra-Chill/homeboy.git",
+        ));
+        let third = commit("third.txt");
+        fs::remove_dir_all(&cache).expect("drop runner cache");
+        git(
+            cache.parent().unwrap(),
+            &["init", "-q", "--bare", cache.to_str().unwrap()],
+        );
+        let loose = |sha: &str| Path::new("objects").join(&sha[..2]).join(&sha[2..]);
+        fs::create_dir_all(cache.join(loose(&second)).parent().unwrap()).unwrap();
+        fs::copy(
+            source.path().join(".git").join(loose(&second)),
+            cache.join(loose(&second)),
+        )
+        .expect("keep only the advertised commit object");
+        git(
+            &cache,
+            &["update-ref", &format!("refs/homeboy/{second}"), &second],
+        );
+        let fallback = materialize(&workspace("lost"), &third);
+        assert!(fallback.prerequisites.is_empty());
+        assert_eq!(
+            git_output(Path::new(&workspace("lost")), &["rev-parse", "HEAD"]).unwrap(),
+            third
+        );
+    });
+}
+
+#[test]
 fn controller_routed_git_sync_rejects_shallow_source_checkout() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
@@ -820,6 +965,9 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         Some("def456"),
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
+        "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
+        &[],
+        &[],
     );
 
     assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
@@ -840,10 +988,14 @@ fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
         None,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
+        "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
+        &[],
+        &[],
     );
     let mut child = Command::new("sh")
         .args(["-c", &command])
         .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("start bundle materialization");
     child
@@ -853,9 +1005,15 @@ fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
         .write_all(b"not a bundle")
         .expect("write malformed bundle");
 
+    let output = child.wait_with_output().expect("wait for materialization");
     assert!(
-        !child.wait().expect("wait for materialization").success(),
+        !output.status.success(),
         "a digest mismatch must fail before Git can clone the transfer"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("bundle file"),
+        "Git must never read a transfer whose digest did not verify: {stderr}"
     );
     assert!(!root.path().join("workspace.bundle").exists());
 }
@@ -917,6 +1075,61 @@ fn git_materialization_fetches_extra_refs_before_changed_since_sha() {
         .expect("verifies changed-since commit");
 
     assert!(extra_ref_index < changed_since_index);
+}
+
+#[test]
+fn git_bundle_materialization_failure_before_install_leaves_destination_absent() {
+    // Every step before the atomic install must gate it. The dirty guard sits
+    // inside the `&&` chain, so its own `;` must not let a step that fails
+    // after the clone fall through to `mv "$tmp" "$dest"`.
+    let source = tempfile::tempdir().expect("source");
+    let root = tempfile::tempdir().expect("runner root");
+    git(source.path(), &["init", "-q", "-b", "main"]);
+    git(source.path(), &["config", "user.email", "test@example.com"]);
+    git(source.path(), &["config", "user.name", "Test User"]);
+    fs::write(source.path().join("file.txt"), "file\n").unwrap();
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "-q", "-m", "file"]);
+    let bundle = root.path().join("source.bundle");
+    git(
+        source.path(),
+        &["bundle", "create", bundle.to_str().unwrap(), "HEAD"],
+    );
+    let bytes = fs::read(&bundle).unwrap();
+    let destination = root.path().join("workspace");
+    for allow_dirty in [false, true] {
+        let command = git_bundle_install_command(
+            &destination.display().to_string(),
+            // Absent from the bundle: the clone succeeds, the checkout fails.
+            "0000000000000000000000000000000000000001",
+            Some("main"),
+            "https://github.example.invalid/example-org/private-source.git",
+            None,
+            &homeboy_engine_primitives::content_hash::sha256_hex(&bytes),
+            allow_dirty,
+            &root.path().join("cache.git").display().to_string(),
+            &[],
+            &[],
+        );
+        let mut child = Command::new("sh")
+            .args(["-c", &command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start bundle materialization");
+        child
+            .stdin
+            .take()
+            .expect("bundle stdin")
+            .write_all(&bytes)
+            .expect("write bundle");
+        assert!(!child.wait().expect("wait").success());
+        assert!(
+            !destination.exists(),
+            "a failed checkout must never install the workspace (allow_dirty={allow_dirty})"
+        );
+    }
 }
 
 #[test]

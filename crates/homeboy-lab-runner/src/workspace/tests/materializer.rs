@@ -26,7 +26,7 @@ fn workspace_materializer_builds_snapshot_atomic_replace_command() {
 #[test]
 fn workspace_materializer_builds_git_bundle_checkout_command() {
     let command = WorkspaceMaterializer::new("/srv/homeboy/_lab_workspaces/homeboy-abc")
-        .with_bundle_file()
+        .with_bundle_file("/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git")
         .capture_owner()
         .op(WorkspaceMaterializationOperation::EnsureParent)
         .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
@@ -34,7 +34,16 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
             "\"$bundle\"".to_string(),
         ]))
         .op(WorkspaceMaterializationOperation::WriteStdinToBundle)
-        .op(WorkspaceMaterializationOperation::CloneBundleToTemp)
+        .op(
+            WorkspaceMaterializationOperation::RecordBundleInObjectCache {
+                head: "abc123".to_string(),
+                ref_limit: 64,
+            },
+        )
+        .op(WorkspaceMaterializationOperation::CloneBundleToTemp {
+            borrow_cache: true,
+            retain: vec!["def456".to_string()],
+        })
         .op(WorkspaceMaterializationOperation::SetGitOrigin(
             "https://github.com/Extra-Chill/homeboy.git".to_string(),
         ))
@@ -57,7 +66,14 @@ fn workspace_materializer_builds_git_bundle_checkout_command() {
 
     assert!(command.contains("bundle=\"${dest}.bundle.$$\""));
     assert!(command.contains("cat > \"$bundle\""));
-    assert!(command.contains("git clone \"$bundle\" \"$tmp\""));
+    assert!(command.contains("; cache="));
+    assert!(
+        command.contains("/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git")
+    );
+    assert!(command.contains("+HEAD:refs/homeboy/"));
+    assert!(command.contains("git clone --reference-if-able \"$cache\" \"$bundle\" \"$tmp\""));
+    assert!(command.contains("repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\""));
+    assert!(command.contains("update-ref refs/homeboy-retain/0 def456"));
     assert!(command.contains("remote set-url origin https://github.com/Extra-Chill/homeboy.git"));
     assert!(command.contains("checkout -B main abc123"));
     assert!(!command.contains("config branch.main.remote origin"));
