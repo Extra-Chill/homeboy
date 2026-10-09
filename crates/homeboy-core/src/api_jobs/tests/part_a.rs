@@ -537,7 +537,12 @@ fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
     );
 
     first
-        .append_event(job.id, JobEventKind::Stdout, Some("three".to_string()), None)
+        .append_event(
+            job.id,
+            JobEventKind::Stdout,
+            Some("three".to_string()),
+            None,
+        )
         .expect("first writer appends after reloading");
     let messages = JobStore::open(&path)
         .expect("store reopens")
