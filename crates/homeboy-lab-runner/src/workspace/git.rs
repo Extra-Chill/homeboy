@@ -379,11 +379,13 @@ fn transfer_git_bundle(
         request.branch,
         request.remote_url,
         request.changed_since_base,
-        &sha256,
         request.allow_dirty_lab_workspace,
-        object_cache,
-        prerequisites,
-        &retain,
+        BundleTransfer {
+            sha256: &sha256,
+            object_cache,
+            prerequisites,
+            retain: &retain,
+        },
     );
     match runner.kind {
         RunnerKind::Local => materialize_git_bundle_piped_controlled(
@@ -1015,20 +1017,30 @@ fn materialize_git_bundle_piped_controlled(
     control.shell(&command, action)
 }
 
+/// How one bundle relates to the runner's object cache.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BundleTransfer<'a> {
+    /// Digest the runner verifies before Git reads the transfer.
+    pub sha256: &'a str,
+    pub object_cache: &'a str,
+    /// Cached commits excluded from the bundle; empty for a complete closure.
+    pub prerequisites: &'a [String],
+    /// Bundled non-`HEAD` commits the workspace must keep after it stops
+    /// borrowing from the cache.
+    pub retain: &'a [String],
+}
+
 pub(crate) fn git_bundle_install_command(
     remote_path: &str,
     head: &str,
     branch: Option<&str>,
     remote_url: &str,
     changed_since_base: Option<&str>,
-    expected_sha256: &str,
     allow_dirty_lab_workspace: bool,
-    object_cache: &str,
-    prerequisites: &[String],
-    retain: &[String],
+    transfer: BundleTransfer<'_>,
 ) -> String {
     WorkspaceMaterializer::new(remote_path)
-        .with_bundle_file(object_cache)
+        .with_bundle_file(transfer.object_cache)
         .capture_owner()
         .op(WorkspaceMaterializationOperation::EnsureParent)
         .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
@@ -1037,7 +1049,7 @@ pub(crate) fn git_bundle_install_command(
         ]))
         .op(WorkspaceMaterializationOperation::WriteStdinToBundle)
         .op(WorkspaceMaterializationOperation::VerifyBundleDigest(
-            expected_sha256.to_string(),
+            transfer.sha256.to_string(),
         ))
         .op(
             WorkspaceMaterializationOperation::RecordBundleInObjectCache {
@@ -1046,8 +1058,8 @@ pub(crate) fn git_bundle_install_command(
             },
         )
         .op(WorkspaceMaterializationOperation::CloneBundleToTemp {
-            borrow_cache: !prerequisites.is_empty(),
-            retain: retain.to_vec(),
+            borrow_cache: !transfer.prerequisites.is_empty(),
+            retain: transfer.retain.to_vec(),
         })
         .op(WorkspaceMaterializationOperation::SetGitOrigin(
             remote_url.to_string(),

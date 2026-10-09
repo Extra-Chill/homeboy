@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use super::git;
 use crate::workspace::git::{
     git_bundle_install_command, git_snapshot, hydrate_controller_bundle_objects,
-    materialize_git_command, ref_has_missing_objects,
+    materialize_git_command, ref_has_missing_objects, BundleTransfer,
 };
 use crate::workspace::sync::{list_workspaces, sync_workspace};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
@@ -707,7 +707,7 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
         let side = commit("side.txt");
         materialize(&workspace("side"), &side);
         git(source.path(), &["checkout", "-q", "main"]);
-        let pinned = materialize_with(&workspace("pinned"), &second, &[side.clone()]);
+        let pinned = materialize_with(&workspace("pinned"), &second, std::slice::from_ref(&side));
         assert!(pinned.prerequisites.contains(&side));
         let pinned_workspace = workspace("pinned");
         let pinned_path = Path::new(&pinned_workspace);
@@ -963,11 +963,13 @@ fn git_bundle_materialization_disables_lazy_fetches() {
         None,
         "https://github.example.invalid/example-org/private-source.git",
         Some("def456"),
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
-        "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
-        &[],
-        &[],
+        BundleTransfer {
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            object_cache: "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
+            prerequisites: &[],
+            retain: &[],
+        },
     );
 
     assert!(command.contains("export GIT_NO_LAZY_FETCH=1"));
@@ -986,11 +988,13 @@ fn git_bundle_materialization_rejects_digest_mismatch_before_clone() {
         None,
         "https://github.example.invalid/example-org/private-source.git",
         None,
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         false,
-        "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
-        &[],
-        &[],
+        BundleTransfer {
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            object_cache: "/srv/homeboy/_lab_workspaces/.homeboy-git-cache/0123456789abcdef.git",
+            prerequisites: &[],
+            retain: &[],
+        },
     );
     let mut child = Command::new("sh")
         .args(["-c", &command])
@@ -1105,11 +1109,13 @@ fn git_bundle_materialization_failure_before_install_leaves_destination_absent()
             Some("main"),
             "https://github.example.invalid/example-org/private-source.git",
             None,
-            &homeboy_engine_primitives::content_hash::sha256_hex(&bytes),
             allow_dirty,
-            &root.path().join("cache.git").display().to_string(),
-            &[],
-            &[],
+            BundleTransfer {
+                sha256: &homeboy_engine_primitives::content_hash::sha256_hex(&bytes),
+                object_cache: &root.path().join("cache.git").display().to_string(),
+                prerequisites: &[],
+                retain: &[],
+            },
         );
         let mut child = Command::new("sh")
             .args(["-c", &command])
