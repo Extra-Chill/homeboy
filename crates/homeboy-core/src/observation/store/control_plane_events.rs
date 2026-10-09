@@ -15,7 +15,11 @@ pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 /// `durable_event_json` column at insert, which the per-run pruning never
 /// touches. The bounded stream (`event_json`) and its retention cursor are
 /// unchanged, so pagination never sees a gap.
-pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 1] = ["run.cancelled"];
+///
+/// `run.transitioned` is the audit record a compare-and-swap terminal
+/// transition appends in its commit (#15718). A run has a handful at most, so
+/// keeping them does not unbound storage the way progress events would.
+pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 2] = ["run.cancelled", "run.transitioned"];
 
 pub fn is_durable_control_plane_event_kind(kind: &str) -> bool {
     DURABLE_CONTROL_PLANE_EVENT_KINDS.contains(&kind)
@@ -449,7 +453,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(durable, 1, "only run.cancelled is exempt from pruning");
+        assert_eq!(durable, 1, "only durable kinds are exempt from pruning");
         // Idempotent replay of the pruned receipt returns the durable payload.
         assert_eq!(
             store
@@ -906,6 +910,100 @@ mod tests {
             Some("mission-1")
         );
         assert!(store.get_mission("mission-stale").unwrap().is_none());
+    }
+
+    #[test]
+    fn metadata_revision_bumps_atomically_and_refuses_a_stale_compare_and_swap() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("observations.sqlite"))
+                .unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let path = "$.typed.revision";
+        let revised = |status: &str, marker: &str| {
+            let mut record = run_record("run-1", status);
+            record.metadata_json = serde_json::json!({"typed": {"marker": marker}});
+            record
+        };
+        let stored_revision = |store: &ObservationStore| {
+            store.get_run("run-1").unwrap().unwrap().metadata_json["typed"]["revision"].as_u64()
+        };
+        // A legacy row without a revision reads as 0 and bumps to 1.
+        store
+            .upsert_imported_run_with_events(&revised("running", "legacy"), false, None, None, &[])
+            .unwrap();
+        assert_eq!(stored_revision(&store), None);
+        let unconditional = RunMetadataRevision {
+            path,
+            expected: None,
+            increment: true,
+        };
+        assert!(store
+            .upsert_imported_run_with_events_intents_and_revision(
+                &revised("running", "bumped"),
+                true,
+                None,
+                None,
+                &[],
+                &[],
+                Some(unconditional),
+            )
+            .unwrap());
+        assert_eq!(stored_revision(&store), Some(1));
+
+        // A compare-and-swap against a stale revision commits nothing at all.
+        let stale = RunMetadataRevision {
+            path,
+            expected: Some(0),
+            increment: true,
+        };
+        assert!(!store
+            .upsert_imported_run_with_events_intents_and_revision(
+                &revised("fail", "stale"),
+                true,
+                Some("mission-stale"),
+                None,
+                &[prepared(
+                    &run,
+                    "key-stale",
+                    "run.transitioned",
+                    &"b".repeat(64)
+                )],
+                &[],
+                Some(stale),
+            )
+            .unwrap());
+        let row = store.get_run("run-1").unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.metadata_json["typed"]["marker"], "bumped");
+        assert!(store.get_mission("mission-stale").unwrap().is_none());
+        assert!(store
+            .control_plane_event_stream(&run)
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+
+        // The current revision commits and bumps once more.
+        let current = RunMetadataRevision {
+            path,
+            expected: Some(1),
+            increment: true,
+        };
+        assert!(store
+            .upsert_imported_run_with_events_intents_and_revision(
+                &revised("fail", "terminal"),
+                true,
+                None,
+                None,
+                &[],
+                &[],
+                Some(current),
+            )
+            .unwrap());
+        let row = store.get_run("run-1").unwrap().unwrap();
+        assert_eq!(row.status, "fail");
+        assert_eq!(row.metadata_json["typed"]["marker"], "terminal");
+        assert_eq!(stored_revision(&store), Some(2));
     }
 
     #[test]

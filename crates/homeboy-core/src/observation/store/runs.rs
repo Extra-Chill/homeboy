@@ -64,6 +64,25 @@ fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> Run
     }
 }
 
+/// A monotonic revision a domain adapter keeps inside `runs.metadata_json`.
+///
+/// An upsert that carries one with `increment` set writes the stored value
+/// plus one in the same statement that replaces the row, so the bump cannot
+/// race the write. When `expected` is set the update additionally commits only
+/// while the stored value still equals it: a compare-and-swap. A missing stored
+/// value reads as `0`, which is what a row written before the revision existed
+/// (or by an older writer that drops the field) presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunMetadataRevision<'a> {
+    /// SQLite JSON path of the revision inside `metadata_json`.
+    pub path: &'a str,
+    /// Commit only while the stored revision equals this value.
+    pub expected: Option<u64>,
+    /// Replace the revision with the stored one plus one. Without it the
+    /// incoming metadata's revision is written as-is.
+    pub increment: bool,
+}
+
 fn apply_imported_run_in_tx(
     transaction: &rusqlite::Transaction<'_>,
     run: &RunRecord,
@@ -71,12 +90,50 @@ fn apply_imported_run_in_tx(
     preserve_terminal: bool,
     mission_id: Option<&str>,
     resource_projection: Option<&ControlPlaneResourceProjection>,
+    revision: Option<RunMetadataRevision<'_>>,
 ) -> rusqlite::Result<bool> {
-    let terminal_guard = if preserve_terminal {
-        " WHERE runs.status = 'running' OR ?6 != 'running'"
-    } else {
-        ""
+    let mut conditions = Vec::new();
+    if preserve_terminal {
+        conditions.push("(runs.status = 'running' OR ?6 != 'running')");
+    }
+    let metadata_update = match revision {
+        Some(revision) if revision.increment => "json_set(excluded.metadata_json, ?13, COALESCE(json_extract(runs.metadata_json, ?13), 0) + 1)",
+        _ => "excluded.metadata_json",
     };
+    let expected = revision
+        .and_then(|revision| revision.expected)
+        .map(|expected| i64::try_from(expected).unwrap_or(i64::MAX));
+    if expected.is_some() {
+        conditions.push("COALESCE(json_extract(runs.metadata_json, ?13), 0) = ?14");
+    }
+    let guard = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    let path = revision
+        .filter(|revision| revision.increment || revision.expected.is_some())
+        .map(|revision| revision.path);
+    let mut values: Vec<&dyn ToSql> = vec![
+        &run.id,
+        &run.kind,
+        &run.component_id,
+        &run.started_at,
+        &run.finished_at,
+        &run.status,
+        &run.command,
+        &run.cwd,
+        &run.homeboy_version,
+        &run.git_sha,
+        &run.rig_id,
+        &metadata_json,
+    ];
+    if let Some(path) = path.as_ref() {
+        values.push(path);
+    }
+    if let Some(expected) = expected.as_ref() {
+        values.push(expected);
+    }
     transaction.execute(
         &format!(
             r#"
@@ -105,24 +162,11 @@ fn apply_imported_run_in_tx(
                     homeboy_version = excluded.homeboy_version,
                     git_sha = excluded.git_sha,
                     rig_id = excluded.rig_id,
-                    metadata_json = excluded.metadata_json
-                {terminal_guard}
+                    metadata_json = {metadata_update}
+                {guard}
                 "#
         ),
-        params![
-            run.id,
-            run.kind,
-            run.component_id,
-            run.started_at,
-            run.finished_at,
-            run.status,
-            run.command,
-            run.cwd,
-            run.homeboy_version,
-            run.git_sha,
-            run.rig_id,
-            metadata_json,
-        ],
+        params_from_iter(values),
     )?;
     let run_applied = transaction.changes() > 0;
     if !run_applied {
@@ -2013,6 +2057,35 @@ impl ObservationStore {
         events: &[PreparedControlPlaneEventAppend],
         intents: &[WorkIntent],
     ) -> Result<()> {
+        self.upsert_imported_run_with_events_intents_and_revision(
+            run,
+            preserve_terminal,
+            mission_id,
+            resource_projection,
+            events,
+            intents,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// [`Self::upsert_imported_run_with_events_and_intents`] that also bumps,
+    /// and optionally compares-and-swaps, a [`RunMetadataRevision`] inside the
+    /// same statement as the row replacement.
+    ///
+    /// Returns whether the run row was applied. A refused update (terminal
+    /// guard or revision mismatch) commits nothing: no row, events, or intents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_imported_run_with_events_intents_and_revision(
+        &self,
+        run: &RunRecord,
+        preserve_terminal: bool,
+        mission_id: Option<&str>,
+        resource_projection: Option<&ControlPlaneResourceProjection>,
+        events: &[PreparedControlPlaneEventAppend],
+        intents: &[WorkIntent],
+        revision: Option<RunMetadataRevision<'_>>,
+    ) -> Result<bool> {
         validate_required("run.id", &run.id)?;
         for intent in intents {
             intent.validate(&run.id)?;
@@ -2042,8 +2115,10 @@ impl ObservationStore {
             })?)
         };
         let mut captured = None;
+        let mut applied = false;
         execute_with_retry("upsert imported run with canonical events", || {
             captured = None;
+            applied = false;
             let transaction = self.connection.unchecked_transaction()?;
             let run_applied = apply_imported_run_in_tx(
                 &transaction,
@@ -2052,7 +2127,9 @@ impl ObservationStore {
                 preserve_terminal,
                 mission_id,
                 resource_projection,
+                revision,
             )?;
+            applied = run_applied;
             if run_applied {
                 if let Some(bound_run) = bound_run.as_ref() {
                     for prepared in events {
@@ -2089,7 +2166,7 @@ impl ObservationStore {
         })?;
         match captured {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(applied),
         }
     }
 

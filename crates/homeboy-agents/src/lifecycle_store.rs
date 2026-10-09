@@ -8,9 +8,11 @@ use std::cell::Cell;
 
 use serde_json::{json, Value};
 
+use super::terminal_transition::TRANSITION_RETRY_ATTEMPTS;
 use super::{
     sanitize_run_id, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
     AgentTaskCookLatestSubstantiveCandidate, AgentTaskRunRecord, AgentTaskRunState,
+    AgentTaskTransition, AgentTaskTransitionConflict, AgentTaskTransitionError,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
@@ -18,7 +20,7 @@ use homeboy_core::engine::local_files::{
 };
 use homeboy_core::observation::{
     ControlPlaneResourceProjection, ObservationStore, RunCursor as ObservationRunCursor,
-    RunListFilter, RunRecord, RunStatus,
+    RunListFilter, RunMetadataRevision, RunRecord, RunStatus,
 };
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
@@ -1219,6 +1221,22 @@ impl AgentTaskLifecycleStore {
             record,
             read_mirrored_aggregate_in_store(self, &record.run_id)?,
         )
+        .map(|_| ())
+    }
+
+    /// [`Self::write_record`] for a caller that keeps using `record` as the
+    /// committed state: advance its [`AgentTaskRunRecord::revision`] to the
+    /// one the store committed, so the copy is not one write behind (#15718).
+    ///
+    /// Only the revision is synced. The rest of the copy is exactly what the
+    /// caller wrote, as it was before revisions existed.
+    pub fn write_record_in_place(&self, record: &mut AgentTaskRunRecord) -> Result<()> {
+        let committed = self.write_record_with_aggregate(
+            record,
+            read_mirrored_aggregate_in_store(self, &record.run_id)?,
+        )?;
+        record.revision = committed.revision;
+        Ok(())
     }
 
     pub(crate) fn write_record_without_events(&self, record: &AgentTaskRunRecord) -> Result<()> {
@@ -1469,6 +1487,178 @@ impl AgentTaskLifecycleStore {
             .map(Some)
     }
 
+    /// Commit a typed terminal transition only while the stored run revision
+    /// still equals `expected_revision` (#15718).
+    ///
+    /// The check runs in the same SQL statement as the row replacement, the
+    /// committed revision is the stored one plus one, and a `run.transitioned`
+    /// event is appended in that transaction. A stale `expected_revision`
+    /// returns [`AgentTaskTransitionError::Conflict`] and writes nothing.
+    ///
+    /// Which source states a transition may leave is the caller's decision:
+    /// this API guarantees only that the decision was made from the record it
+    /// replaces.
+    pub fn transition(
+        &self,
+        run_id: &str,
+        expected_revision: u64,
+        transition: AgentTaskTransition,
+    ) -> std::result::Result<AgentTaskRunRecord, AgentTaskTransitionError> {
+        let run_id = sanitize_run_id(run_id);
+        let committed = self.with_config_lock(|| {
+            self.transition_locked_without_terminal_projection(
+                &run_id,
+                expected_revision,
+                transition,
+            )
+        })?;
+        let committed = committed.map_err(AgentTaskTransitionError::Conflict)?;
+        self.project_terminal_record_after_unlock(&committed.run_id)?;
+        Ok(committed)
+    }
+
+    /// Decide a terminal transition from the current record and commit it at
+    /// that record's revision, all under the config lock.
+    ///
+    /// `decide` returning `None` is a successful no-op. A conflict re-reads and
+    /// re-decides, which is safe because the decision is re-evaluated against
+    /// the fresh record; after [`TRANSITION_RETRY_ATTEMPTS`] the conflict is
+    /// surfaced.
+    pub(crate) fn transition_when(
+        &self,
+        run_id: &str,
+        mut decide: impl FnMut(&AgentTaskRunRecord) -> Option<AgentTaskTransition>,
+    ) -> Result<Option<AgentTaskRunRecord>> {
+        let run_id = sanitize_run_id(run_id);
+        let committed = self.with_config_lock(|| {
+            let mut attempts = 0;
+            loop {
+                let current = self.read_record_without_historical_import(&run_id)?;
+                let Some(transition) = decide(&current) else {
+                    return Ok(None);
+                };
+                match self.transition_locked_without_terminal_projection(
+                    &run_id,
+                    current.revision,
+                    transition,
+                )? {
+                    Ok(committed) => return Ok(Some(committed)),
+                    Err(conflict) => {
+                        attempts += 1;
+                        if attempts >= TRANSITION_RETRY_ATTEMPTS {
+                            return Err(AgentTaskTransitionError::Conflict(conflict).into());
+                        }
+                    }
+                }
+            }
+        })?;
+        if let Some(record) = committed.as_ref() {
+            self.project_terminal_record_after_unlock(&record.run_id)?;
+        }
+        Ok(committed)
+    }
+
+    /// Commit a terminal aggregate projection prepared from a caller-held
+    /// snapshot, at that snapshot's revision.
+    ///
+    /// On conflict the projection is rebased onto the stored revision only
+    /// while that cannot replace a terminal decision the caller did not see:
+    /// the stored run is still live, it is in the terminal state the caller
+    /// decided from (a re-projection of later evidence), or it is already in
+    /// the state this projection commits (an idempotent retry). A rebase keeps
+    /// today's last-writer semantics for the non-terminal fields written in
+    /// between. Any other conflict is surfaced and nothing is written.
+    pub(crate) fn project_terminal_aggregate(
+        &self,
+        prepared: &AgentTaskRunRecord,
+        decided_from: AgentTaskRunState,
+        aggregate: &AgentTaskAggregate,
+    ) -> Result<AgentTaskRunRecord> {
+        let committed = self.with_config_lock(|| {
+            let mut expected = prepared.revision;
+            let mut attempts = 0;
+            loop {
+                let transition = AgentTaskTransition::ProjectAggregate {
+                    prepared: Box::new(prepared.clone()),
+                    aggregate: Box::new(aggregate.clone()),
+                };
+                match self.transition_locked_without_terminal_projection(
+                    &prepared.run_id,
+                    expected,
+                    transition,
+                )? {
+                    Ok(committed) => return Ok(committed),
+                    Err(conflict) => {
+                        attempts += 1;
+                        let rebase = match conflict.actual_state {
+                            Some(state) if state.is_terminal() => {
+                                state == decided_from || state == prepared.state
+                            }
+                            _ => true,
+                        };
+                        if !rebase || attempts >= TRANSITION_RETRY_ATTEMPTS {
+                            return Err(AgentTaskTransitionError::Conflict(conflict).into());
+                        }
+                        expected = conflict.actual_revision;
+                    }
+                }
+            }
+        })?;
+        self.project_terminal_record_after_unlock(&committed.run_id)?;
+        Ok(committed)
+    }
+
+    /// The locked body of [`Self::transition`]. Terminal authority is
+    /// projected by the caller only after the lock is released.
+    pub(crate) fn transition_locked_without_terminal_projection(
+        &self,
+        run_id: &str,
+        expected_revision: u64,
+        transition: AgentTaskTransition,
+    ) -> Result<std::result::Result<AgentTaskRunRecord, AgentTaskTransitionConflict>> {
+        let name = transition.name();
+        let stored = self.read_record_without_historical_import(run_id)?;
+        let conflict = |actual_revision, actual_state| AgentTaskTransitionConflict {
+            run_id: run_id.to_string(),
+            expected_revision,
+            actual_revision,
+            actual_state,
+            transition: name,
+        };
+        if stored.revision != expected_revision {
+            return Ok(Err(conflict(stored.revision, Some(stored.state))));
+        }
+        let from = stored.state;
+        let stored_aggregate = read_mirrored_aggregate_in_store(self, run_id)?;
+        let (next, aggregate, write_cache) = transition.apply(stored, stored_aggregate)?;
+        let guard = RecordWriteGuard {
+            expected_revision,
+            from,
+            transition: name,
+        };
+        match write_record_guarded(self, &next, aggregate.clone(), true, true, Some(&guard))? {
+            GuardedRecordWrite::Conflict {
+                actual_revision,
+                actual_state,
+            } => Ok(Err(conflict(actual_revision, actual_state))),
+            GuardedRecordWrite::Committed(committed) => {
+                if write_cache {
+                    #[cfg(test)]
+                    if INTERRUPT_AFTER_TERMINAL_COMMIT.replace(false) {
+                        return Err(Error::internal_io(
+                            "injected interruption after terminal lifecycle commit",
+                            Some(run_id.to_string()),
+                        ));
+                    }
+                    if let Some(aggregate) = aggregate.as_ref() {
+                        self.write_aggregate(run_id, aggregate)?;
+                    }
+                }
+                Ok(Ok(committed))
+            }
+        }
+    }
+
     /// Complete terminal projection after the record lock has been released:
     /// receipt first, then the workspace owner lease.
     pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
@@ -1502,7 +1692,7 @@ impl AgentTaskLifecycleStore {
         &self,
         record: &AgentTaskRunRecord,
         aggregate: Option<AgentTaskAggregate>,
-    ) -> Result<()> {
+    ) -> Result<AgentTaskRunRecord> {
         let mut record = record.clone();
         super::workspace_claims::renew_record_workspace_owner_in_store(
             &super::workspace_claims::workspace_claim_store_at(self.data_root()),
@@ -1511,7 +1701,8 @@ impl AgentTaskLifecycleStore {
         let committed = self.with_config_lock(|| {
             write_record_with_aggregate_without_workspace_authority(self, &record, aggregate)
         })?;
-        self.project_terminal_record_after_unlock(&committed.run_id)
+        self.project_terminal_record_after_unlock(&committed.run_id)?;
+        Ok(committed)
     }
 }
 
@@ -1728,16 +1919,6 @@ pub(super) fn mutate_record(
     default_store()?.mutate_record(run_id, mutate)
 }
 
-/// Commit the controller projection and child aggregate in one observation row.
-/// The JSON aggregate is a post-commit cache: readers use the committed row, so
-/// interruption before or after cache persistence exposes a complete state.
-pub(super) fn write_aggregate_and_record(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<PathBuf> {
-    default_store()?.write_aggregate_and_record(record, aggregate)
-}
-
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn fail_next_record_write_for_test() {
     FAIL_NEXT_RECORD_WRITE.set(true);
@@ -1779,6 +1960,36 @@ fn write_record_with_aggregate_without_workspace_authority(
     )
 }
 
+/// SQLite JSON path of [`AgentTaskRunRecord::revision`] inside the run row.
+const RUN_REVISION_JSON_PATH: &str = "$.agent_task_run.revision";
+
+/// The compare-and-swap half of a typed transition write (#15718).
+pub(super) struct RecordWriteGuard {
+    /// Commit only while the stored revision still equals this value.
+    pub expected_revision: u64,
+    /// Run state the transition was decided from, recorded on its event.
+    pub from: AgentTaskRunState,
+    /// Stable name of the transition, recorded on its event.
+    pub transition: &'static str,
+}
+
+/// Outcome of a guarded record write.
+pub(super) enum GuardedRecordWrite {
+    Committed(AgentTaskRunRecord),
+    /// The stored revision moved; nothing was written.
+    Conflict {
+        actual_revision: u64,
+        actual_state: Option<AgentTaskRunState>,
+    },
+}
+
+fn stored_run_revision(metadata_json: &Value) -> u64 {
+    metadata_json
+        .pointer("/agent_task_run/revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 fn write_record_with_aggregate_without_workspace_authority_mode(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
@@ -1786,6 +1997,34 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     preserve_terminal: bool,
     emit_events: bool,
 ) -> Result<AgentTaskRunRecord> {
+    match write_record_guarded(
+        lifecycle_store,
+        record,
+        aggregate,
+        preserve_terminal,
+        emit_events,
+        None,
+    )? {
+        GuardedRecordWrite::Committed(committed) => Ok(committed),
+        GuardedRecordWrite::Conflict { .. } => Err(Error::internal_unexpected(format!(
+            "unguarded agent-task record write reported a revision conflict: {}",
+            record.run_id
+        ))),
+    }
+}
+
+/// The single lifecycle write path. Every write bumps the run-level revision
+/// in the same statement as the row replacement; a `guard` additionally makes
+/// it a compare-and-swap that appends a `run.transitioned` event in the same
+/// transaction (#15718).
+pub(super) fn write_record_guarded(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<AgentTaskAggregate>,
+    preserve_terminal: bool,
+    emit_events: bool,
+    guard: Option<&RecordWriteGuard>,
+) -> Result<GuardedRecordWrite> {
     #[cfg(any(test, feature = "test-support"))]
     if FAIL_NEXT_RECORD_WRITE.replace(false) {
         return Err(Error::internal_io(
@@ -1806,7 +2045,22 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     let existing_metadata = existing
         .map(|run| run.metadata_json)
         .unwrap_or_else(|| json!({}));
+    let stored_revision = stored_run_revision(&existing_metadata);
+    if let Some(guard) = guard {
+        if guard.expected_revision != stored_revision {
+            return Ok(GuardedRecordWrite::Conflict {
+                actual_revision: stored_revision,
+                actual_state: existing_metadata
+                    .pointer("/agent_task_run/state")
+                    .cloned()
+                    .and_then(|state| serde_json::from_value(state).ok()),
+            });
+        }
+    }
     let mut record = record.clone();
+    // The store owns the revision: whatever the caller carried, the committed
+    // row is one past the stored one. SQL repeats the bump atomically.
+    record.revision = stored_revision + 1;
     if let Some(owner) =
         existing_metadata.pointer("/agent_task_run/metadata/client_context/caller_context")
     {
@@ -1863,7 +2117,15 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             &record, &store, &receipts, &ledger,
         )?);
     }
+    if let Some(guard) = guard {
+        events.push(super::durable_progress::prepared_transition_event(
+            &record,
+            guard.from,
+            guard.transition,
+        )?);
+    }
     super::durable_progress::stamp_durable_event_history(&mut record);
+    let stored_snapshot = guard.is_none().then(|| existing_metadata.clone());
     let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);
     if !preserve_terminal {
@@ -1887,6 +2149,27 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     {
         metadata_json["parent_run_id"] = json!(cook_id);
     }
+    // The revision versions the run snapshot. A rewrite that leaves it
+    // identical (an idempotent replay, or a write that only refreshes the
+    // mirrored aggregate or row projection) cannot invalidate a decision made
+    // from that snapshot, so it keeps the stored revision.
+    let mut increment = true;
+    if let Some(stored_snapshot) = stored_snapshot {
+        let mut candidate = metadata_json["agent_task_run"].clone();
+        match stored_snapshot.pointer("/agent_task_run/revision") {
+            Some(revision) => candidate["revision"] = revision.clone(),
+            None => {
+                if let Some(run) = candidate.as_object_mut() {
+                    run.remove("revision");
+                }
+            }
+        }
+        if stored_snapshot.get("agent_task_run") == Some(&candidate) {
+            metadata_json["agent_task_run"] = candidate;
+            record.revision = stored_revision;
+            increment = false;
+        }
+    }
     let projected = RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
@@ -1905,13 +2188,24 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
     let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
     let intents = work_intents_for_record(&record)?;
-    store.upsert_imported_run_with_events_and_intents(
+    let applied = store.upsert_imported_run_with_events_intents_and_revision(
         &projected,
         preserve_terminal,
         mission.as_ref().map(|mission| mission.as_str()),
         Some(&resource_projection),
         &events,
         &intents,
+        Some(RunMetadataRevision {
+            path: RUN_REVISION_JSON_PATH,
+            // An unchanged rewrite must not regress a revision a writer
+            // outside the lock committed in between; it is skipped instead.
+            expected: match guard {
+                Some(guard) => Some(guard.expected_revision),
+                None if !increment => Some(stored_revision),
+                None => None,
+            },
+            increment,
+        }),
     )?;
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -1919,7 +2213,18 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             record.run_id
         ))
     })?;
-    record_from_run(&store, &committed)
+    if !applied && guard.is_some() {
+        // Another writer committed between our read and the statement.
+        return Ok(GuardedRecordWrite::Conflict {
+            actual_revision: stored_run_revision(&committed.metadata_json),
+            actual_state: committed
+                .metadata_json
+                .pointer("/agent_task_run/state")
+                .cloned()
+                .and_then(|state| serde_json::from_value(state).ok()),
+        });
+    }
+    record_from_run(&store, &committed).map(GuardedRecordWrite::Committed)
 }
 
 fn work_intents_for_record(

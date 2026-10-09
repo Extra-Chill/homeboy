@@ -220,8 +220,9 @@ pub(crate) fn reconcile_deferred_candidate_in_store(
         .aggregate_path(&run_id)
         .display()
         .to_string();
+    let decided_from = record.state;
     apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
-    lifecycle_store.write_aggregate_and_record(&record, &aggregate)?;
+    record = lifecycle_store.project_terminal_aggregate(&record, decided_from, &aggregate)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
     Ok(true)
 }
@@ -410,7 +411,8 @@ pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
         .display()
         .to_string();
     apply_aggregate_to_record(&mut recovered_record, &plan, &aggregate, aggregate_path);
-    lifecycle_store.write_aggregate_and_record(&recovered_record, &aggregate)
+    lifecycle_store.project_terminal_aggregate(&recovered_record, record.state, &aggregate)?;
+    Ok(lifecycle_store.aggregate_path(&record.run_id))
 }
 
 pub fn submit_plan(
@@ -1400,15 +1402,15 @@ pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
             )
         })?
         .to_string();
-    let failed = store.mutate_record(&cook_id, |record| {
+    let failed = store.transition_when(&cook_id, |record| {
         if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
-            return false;
+            return None;
         }
         let reserved_child_published = record.metadata["detached_cook_handoff"]
             ["materializing_attempt_run_id"]
             .as_str()
             .is_some_and(|run_id| store.read_record(run_id).is_ok());
-        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        let mut admission = record.metadata["unmaterialized_cook_admission"].clone();
         if reserved_child_published
             || !matches!(
                 admission["lease"]["state"].as_str(),
@@ -1417,7 +1419,7 @@ pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
             || admission["lease"]["fence"].as_u64() != Some(fence)
             || admission["lease"]["token"].as_str() != Some(token.as_str())
         {
-            return false;
+            return None;
         }
         admission["state"] = json!("failed");
         admission["reason"] = json!(reason);
@@ -1430,13 +1432,13 @@ pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
             .as_object_mut()
             .expect("unmaterialized admission object")
             .remove("lease");
-        record.metadata["cook_controller_failure"] = diagnostic.clone();
-        record.metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
-        record.metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
-        record.metadata["detached_cook_handoff"]["reason"] = json!(reason);
-        set_run_state(record, AgentTaskRunState::Failed);
-        record.updated_at = Some(now_timestamp());
-        true
+        let mut metadata = detached_cook_handoff_failure_metadata(record, &reason);
+        metadata.insert("unmaterialized_cook_admission".to_string(), admission);
+        metadata.insert("cook_controller_failure".to_string(), diagnostic.clone());
+        Some(AgentTaskTransition::Terminate {
+            outcome: AgentTaskTerminalOutcome::Failed,
+            metadata,
+        })
     })?;
     Ok(failed.is_some())
 }
@@ -2069,7 +2071,7 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+    let record = lifecycle_store.transition_when(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.state.is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
@@ -2078,23 +2080,11 @@ pub fn fail_detached_cook_handoff_parent_in_store(
                 .as_str()
                 .is_some_and(|run_id| lifecycle_store.read_record(run_id).is_ok())
         {
-            return false;
+            return None;
         }
-        let cancelled = record.state == AgentTaskRunState::Cancelled;
-        let metadata = record.ensure_metadata_object();
-        metadata["detached_cook_handoff"]["state"] = json!(if cancelled {
-            "cancelled"
-        } else {
-            "exited_before_handoff"
-        });
-        metadata["detached_cook_handoff"]["admission_state"] =
-            json!(if cancelled { "cancelled" } else { "failed" });
-        metadata["detached_cook_handoff"]["reason"] = json!(reason);
-        if !record.state.is_terminal() {
-            set_run_state(record, AgentTaskRunState::Failed);
-        }
-        record.updated_at = Some(now_timestamp());
-        true
+        // The guard above admits only a live parent, so this is always the
+        // pre-handoff failure; a cancelled parent is already terminal.
+        Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
     // A protected parent is a successful no-op: it is the authoritative result
     // of materialization or a prior terminal transition, not a missing parent.
@@ -2110,7 +2100,7 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+    let record = lifecycle_store.transition_when(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
         if handoff["cook_id"] != cook_id
             || handoff["launcher_id"] != launcher_id
@@ -2118,15 +2108,9 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
         {
-            return false;
+            return None;
         }
-        let metadata = record.ensure_metadata_object();
-        metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
-        metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
-        metadata["detached_cook_handoff"]["reason"] = json!(reason);
-        set_run_state(record, AgentTaskRunState::Failed);
-        record.updated_at = Some(now_timestamp());
-        true
+        Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
@@ -2143,7 +2127,7 @@ pub fn fail_supervised_detached_cook_handoff_parent_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
     let child_start_identity = json!(child_start_identity);
-    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+    let record = lifecycle_store.transition_when(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
         if handoff["cook_id"] != cook_id
             || handoff["launcher_id"] != launcher_id
@@ -2154,17 +2138,35 @@ pub fn fail_supervised_detached_cook_handoff_parent_in_store(
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "supervising"
         {
-            return false;
+            return None;
         }
-        let metadata = record.ensure_metadata_object();
-        metadata["detached_cook_handoff"]["state"] = json!("exited_before_handoff");
-        metadata["detached_cook_handoff"]["admission_state"] = json!("failed");
-        metadata["detached_cook_handoff"]["reason"] = json!(reason);
-        set_run_state(record, AgentTaskRunState::Failed);
-        record.updated_at = Some(now_timestamp());
-        true
+        Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+/// Fail a live detached-Cook parent whose launcher exited before handoff.
+fn fail_detached_cook_handoff_transition(
+    record: &AgentTaskRunRecord,
+    reason: &str,
+) -> AgentTaskTransition {
+    AgentTaskTransition::Terminate {
+        outcome: AgentTaskTerminalOutcome::Failed,
+        metadata: detached_cook_handoff_failure_metadata(record, reason),
+    }
+}
+
+fn detached_cook_handoff_failure_metadata(
+    record: &AgentTaskRunRecord,
+    reason: &str,
+) -> serde_json::Map<String, Value> {
+    let mut handoff = record.metadata["detached_cook_handoff"].clone();
+    handoff["state"] = json!("exited_before_handoff");
+    handoff["admission_state"] = json!("failed");
+    handoff["reason"] = json!(reason);
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("detached_cook_handoff".to_string(), handoff);
+    metadata
 }
 
 fn complete_detached_cook_handoff_parent_in_store(
@@ -2591,7 +2593,7 @@ pub fn normalize_local_execution_placement_in_store(
         "execution_placement_normalization".to_string(),
         json!({ "source": "controller_plan", "reason": "legacy_or_null_record_decision" }),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -3335,6 +3337,7 @@ where
         run_id: run_id.clone(),
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Queued,
+        revision: 0,
         submitted_at: now_timestamp(),
         updated_at: None,
         plan_path: plan_path.display().to_string(),
@@ -5037,7 +5040,7 @@ where
 {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     rewrite(&mut record);
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -6101,10 +6104,10 @@ pub fn reconcile_status_in_store(
         &record.run_id,
     ) {
         record.metadata["controller_admission"] = admission;
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     if reconcile_candidate_adoption(&mut record) {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &resolved_run_id)? {
         record = lifecycle_store.read_record(&resolved_run_id)?;
@@ -6128,7 +6131,7 @@ pub fn reconcile_status_in_store(
         lifecycle_store,
         &mut record,
     )? {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     if !record.state.is_terminal() {
         let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
@@ -6138,7 +6141,7 @@ pub fn reconcile_status_in_store(
             .to_string();
         if record.plan_path != controller_plan_path {
             record.plan_path = controller_plan_path;
-            lifecycle_store.write_record(&record)?;
+            lifecycle_store.write_record_in_place(&mut record)?;
         }
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             let aggregate_path = lifecycle_store
@@ -6155,7 +6158,7 @@ pub fn reconcile_status_in_store(
             );
 
             if reconciled != record {
-                if let Err(error) = lifecycle_store.write_record(&reconciled) {
+                if let Err(error) = lifecycle_store.write_record_in_place(&mut reconciled) {
                     reconciled
                         .ensure_metadata_object()
                         .insert("finalization_error".to_string(), json!(error.message));
@@ -6166,7 +6169,7 @@ pub fn reconcile_status_in_store(
         }
     }
     if reconcile_local_provider_ownership(lifecycle_store, &mut record)? {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     // The only genuinely-remote step in this read. Skipping it for a
     // controller-local record is what makes `agent-task status` answerable while
@@ -6178,15 +6181,15 @@ pub fn reconcile_status_in_store(
     }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     if reconcile_candidate_adoption_terminal_state_in_store(lifecycle_store, &mut record)? {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.write_record_in_place(&mut record)?;
     }
     if record.state.is_terminal() {
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             if reconcile_terminal_provider_models(&mut record, &aggregate) {
-                lifecycle_store.write_record(&record)?;
+                lifecycle_store.write_record_in_place(&mut record)?;
             }
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
                 lifecycle_store,
@@ -6284,7 +6287,7 @@ pub fn reconcile_status_in_store(
                                     "repair_command": repair_command,
                                 }),
                             );
-                            lifecycle_store.write_record(&record)?;
+                            lifecycle_store.write_record_in_place(&mut record)?;
                             return Ok(AgentTaskStatusOutcome {
                                 record,
                                 runner_probe,
@@ -6347,7 +6350,7 @@ pub fn reconcile_status_in_store(
                                         "message": error.message,
                                     }),
                                 );
-                                lifecycle_store.write_record(&record)?;
+                                lifecycle_store.write_record_in_place(&mut record)?;
                             }
                         }
                     }
@@ -6360,7 +6363,7 @@ pub fn reconcile_status_in_store(
                                 "message": error.message,
                             }),
                         );
-                        lifecycle_store.write_record(&record)?;
+                        lifecycle_store.write_record_in_place(&mut record)?;
                     }
                 }
             }
@@ -6374,7 +6377,7 @@ pub fn reconcile_status_in_store(
                         "message": error.message,
                     }),
                 );
-                lifecycle_store.write_record(&record)?;
+                lifecycle_store.write_record_in_place(&mut record)?;
             }
         }
     }
@@ -9080,23 +9083,29 @@ pub(crate) fn record_manual_finalization_receipt(
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = store::mutate_record(&run_id, |record| {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.transition_when(&run_id, |record| {
         let intent_digest = record.metadata["manual_finalization_intent_digest"].clone();
         let receipt_matches = record.metadata.get("cook_finalization") == Some(&receipt);
         let already_succeeded = record.state == AgentTaskRunState::Succeeded;
         let retry_cleared = record.metadata.get("manual_finalization_retry").is_none();
         let failure_cleared = record.metadata.get("manual_finalization_failure").is_none();
         if receipt_matches && already_succeeded && retry_cleared && failure_cleared {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
-        set_run_state(record, AgentTaskRunState::Succeeded);
-        let metadata = record.ensure_metadata_object();
+        let mut metadata = serde_json::Map::new();
         metadata.insert("cook_finalization".to_string(), receipt.clone());
-        metadata.remove("manual_finalization_failure");
-        metadata.remove("manual_finalization_retry");
-        if let Some(candidate) = metadata.remove("manual_finalization_retry_candidate") {
-            metadata.insert("manual_finalization_retry_origin".to_string(), candidate);
+        metadata.insert("manual_finalization_failure".to_string(), Value::Null);
+        metadata.insert("manual_finalization_retry".to_string(), Value::Null);
+        if let Some(candidate) = record.metadata.get("manual_finalization_retry_candidate") {
+            metadata.insert(
+                "manual_finalization_retry_candidate".to_string(),
+                Value::Null,
+            );
+            metadata.insert(
+                "manual_finalization_retry_origin".to_string(),
+                candidate.clone(),
+            );
         }
         metadata.insert(
             "manual_finalization_receipt_digest".to_string(),
@@ -9106,11 +9115,14 @@ pub(crate) fn record_manual_finalization_receipt(
             "manual_finalization_receipt_intent_digest".to_string(),
             intent_digest,
         );
-        true
+        Some(AgentTaskTransition::Terminate {
+            outcome: AgentTaskTerminalOutcome::Succeeded,
+            metadata,
+        })
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 
@@ -9133,22 +9145,23 @@ pub fn record_manual_finalization_failure(
             "details": policy.redact_json(&error.details),
         },
     });
-    let record = store::mutate_record(&run_id, |record| {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.transition_when(&run_id, |record| {
         if record.metadata.get("manual_finalization_failure") == Some(&failure)
             && record.state == AgentTaskRunState::Failed
         {
-            return false;
+            return None;
         }
-        record.updated_at = Some(now_timestamp());
-        set_run_state(record, AgentTaskRunState::Failed);
-        record
-            .ensure_metadata_object()
-            .insert("manual_finalization_failure".to_string(), failure.clone());
-        true
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("manual_finalization_failure".to_string(), failure.clone());
+        Some(AgentTaskTransition::Terminate {
+            outcome: AgentTaskTerminalOutcome::Failed,
+            metadata,
+        })
     })?;
     match record {
         Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+        None => lifecycle_store.read_record(&run_id),
     }
 }
 

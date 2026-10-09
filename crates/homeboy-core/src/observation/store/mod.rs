@@ -40,7 +40,9 @@ pub use control_plane_actions::{
 pub use control_plane_events::{
     PreparedControlPlaneEventAppend, CONTROL_PLANE_EVENT_RETENTION_LIMIT,
 };
-pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
+pub use runs::{
+    RunMetadataRevision, DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT,
+};
 pub use work_intents::WorkIntent;
 
 pub(crate) use helpers::*;

@@ -340,7 +340,7 @@ pub fn record_local_lab_identity_fallback_in_store(
             "transport_retry_attempts": 0,
         }),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -379,7 +379,7 @@ pub fn record_lab_offload_phase_executions_in_store(
         "materialization_resume".to_string(),
         json!("resume reuses the controller proxy and recorded completed staging"),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -415,7 +415,7 @@ pub fn record_lab_staging_controller_job_in_store(
         json!(runner_id),
     );
     metadata.insert("materialization_owner".to_string(), json!("controller_job"));
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -458,7 +458,7 @@ pub fn record_lab_admission_reservation_in_store(
             "cancel_command": format!("homeboy agent-task cancel {record_run_id}"),
         }),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -490,7 +490,7 @@ pub fn record_lab_staging_controller_failure_in_store(
         }),
     );
     record.updated_at = Some(now_timestamp());
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -848,7 +848,7 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 

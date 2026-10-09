@@ -1640,7 +1640,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
                         },
                     }),
                 );
-                return lifecycle_store.write_record(record);
+                return lifecycle_store.write_record_in_place(record);
             }
         }
     }
@@ -1671,7 +1671,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
             );
         }
     }
-    lifecycle_store.write_record(record)
+    lifecycle_store.write_record_in_place(record)
 }
 
 /// Replace runner-local file references with controller-resolvable aggregate

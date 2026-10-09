@@ -4096,6 +4096,10 @@ mod tests {
                 expected["metadata"][key] = actual["metadata"][key].clone();
             }
             expected["updated_at"] = actual["updated_at"].clone();
+            // The store-owned write revision advances on the rebind commit, like
+            // `updated_at`; it is write bookkeeping, not runtime provenance (#15718).
+            assert!(rebound.revision > before.revision);
+            expected["revision"] = actual["revision"].clone();
             assert_eq!(
                 actual, expected,
                 "only runtime provenance changes: workspace, tracker, budget and claims survive"

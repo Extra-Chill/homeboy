@@ -414,3 +414,4 @@ mod runner_exec;
 mod status_and_recovery;
 mod submit_and_persist;
 mod terminal_and_reconcile;
+mod terminal_transitions;
