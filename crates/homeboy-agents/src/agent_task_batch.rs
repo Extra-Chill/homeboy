@@ -766,7 +766,7 @@ where
         }
         return Ok(AgentTaskBatchStatusReport {
             schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
-            status: AgentTaskBatchState::Queued.outcome_status().to_string(),
+            status: "blocked".to_string(),
             observation_fresh: true,
             totals: totals_for_children(&batch.child_runs),
             admission: AgentTaskBatchAdmission {
@@ -3282,8 +3282,10 @@ mod tests {
         let blocked = store
             .status("repair-wave")
             .expect("preflight blocker remains observable");
+        // The durable child roster stays queued for retry, but status is
+        // terminally blocked until that retry is explicitly resumed.
         assert_eq!(blocked.batch.state, AgentTaskBatchState::Queued);
-        assert_eq!(blocked.status, "queued");
+        assert_eq!(blocked.status, "blocked");
         assert_eq!(blocked.totals.queued, 1);
         assert_eq!(blocked.admission.admitted, 0);
         assert_eq!(blocked.admission.absent, 1);
@@ -3435,6 +3437,7 @@ mod tests {
             .expect("terminalize stalled admission"));
         let status = store.status("stuck-wave").expect("read blocked batch");
 
+        assert_eq!(status.status, "blocked");
         assert_eq!(status.batch.state, AgentTaskBatchState::Queued);
         assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Queued);
         assert!(status.resumable);

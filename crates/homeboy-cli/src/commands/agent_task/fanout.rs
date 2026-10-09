@@ -8245,7 +8245,7 @@ fi
                 .expect("record terminal coordinator fixture");
                 let blocked =
                     batch::status(&decoded.fanout_id).expect("blocked fanout placement status");
-                assert_eq!(blocked.status, "queued");
+                assert_eq!(blocked.status, "blocked");
                 assert!(blocked.resumable);
             }
         });
@@ -11866,7 +11866,9 @@ fi
                 batch_id,
                 &claim_id,
                 "worktree_preflight",
-                json!({ "message": "fixture failure before first child" }),
+                json!({ "worktrees": [
+                    { "handle": "child", "failure": { "code": "validation.invalid_argument", "message": "Component not found: repo" } }
+                ] }),
             )
             .expect("persist coordinator admission blocker");
 
@@ -11880,7 +11882,7 @@ fi
             .expect("reading a blocked batch must still return its projection");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(value["batch"]["status"], "queued");
+            assert_eq!(value["batch"]["status"], "blocked");
             assert_eq!(value["batch"]["batch"]["state"], "queued");
             assert_eq!(value["batch"]["admission"]["admitted"], 0);
             assert_eq!(value["batch"]["admission"]["absent"], 1);
