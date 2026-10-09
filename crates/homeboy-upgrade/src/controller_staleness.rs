@@ -133,6 +133,19 @@ impl ControllerStaleness {
     pub fn warning_line(&self) -> Option<String> {
         self.stale.then(|| self.detail.clone())
     }
+
+    /// Concise release-gap guidance suitable for appending to a command failure.
+    pub fn failure_hint(&self) -> Option<String> {
+        if !self.stale {
+            return None;
+        }
+        let latest = self.latest_version.as_deref()?;
+        let releases_behind = self.minor_releases_behind.unwrap_or(1);
+        Some(format!(
+            "Controller v{} is {releases_behind} minor release(s) behind latest v{latest}; run `{REMEDIATION_COMMAND}`.",
+            normalize_version(&self.running_version)
+        ))
+    }
 }
 
 /// Staleness of the controller running this command, from the daily
@@ -418,6 +431,16 @@ mod tests {
         assert_eq!(staleness.minor_releases_behind, Some(0));
         assert!(staleness.remediation.is_none());
         assert!(staleness.warning_line().is_none());
+    }
+
+    #[test]
+    fn stale_controller_failure_hint_names_versions_gap_and_upgrade() {
+        let staleness = assess(&identity("0.416.0", None), Some("v0.417.9"), None, 0);
+
+        assert_eq!(
+            staleness.failure_hint().as_deref(),
+            Some("Controller v0.416.0 is 1 minor release(s) behind latest v0.417.9; run `homeboy upgrade`.")
+        );
     }
 
     /// A `v` prefix on the published tag is the shape GitHub returns; it must

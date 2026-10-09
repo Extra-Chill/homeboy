@@ -369,6 +369,10 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 impl CommandResultEnvelope<()> {
     fn from_error(identity: &CommandIdentity, err: &Error, exit_code: i32) -> Self {
         let next_actions = actions_for_error(err);
+        let summary = homeboy_upgrade::controller_staleness::current()
+            .failure_hint()
+            .map(|hint| format!("{} {hint}", err.message))
+            .unwrap_or_else(|| err.message.clone());
         Self {
             schema: COMMAND_RESULT_SCHEMA,
             command: identity.command.clone(),
@@ -379,7 +383,7 @@ impl CommandResultEnvelope<()> {
             subject_state: None,
             run: None,
             refs: CommandResultRefs::default(),
-            summary: Some(err.message.clone()),
+            summary: Some(summary),
             next_actions,
             artifacts: Vec::new(),
             evidence: Vec::new(),
