@@ -222,6 +222,8 @@ pub struct ExtensionUpgradeSkip {
     pub extension_id: String,
     /// The error message for why the extension was skipped.
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
 }
 
 /// A symlinked extension in the invoking user's config dir that a privileged
@@ -374,6 +376,7 @@ mod tests {
             extension_skips: vec![ExtensionUpgradeSkip {
                 extension_id: "wordpress".to_string(),
                 reason: "Linked extension source repo has uncommitted changes".to_string(),
+                recovery_commands: Vec::new(),
             }],
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),

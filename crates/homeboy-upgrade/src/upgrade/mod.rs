@@ -7,6 +7,7 @@ mod helpers;
 mod operation;
 mod planning;
 pub mod release_catalog;
+mod runner_admission_provider;
 mod runner_upgrade_provider;
 mod services;
 mod types;
@@ -32,6 +33,10 @@ pub use operation::{
 pub use planning::resolve_binary_on_path;
 pub use release_catalog::{
     running_target_triple, InstallableSelection, ReleaseRef, SelectedRelease,
+};
+pub use runner_admission_provider::{
+    register_runner_direct_active_jobs_provider, runner_direct_active_job_count,
+    RunnerDirectActiveJobsProvider,
 };
 pub(crate) use runner_upgrade_provider::with_runner_upgrade;
 pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};

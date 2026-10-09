@@ -20,6 +20,13 @@ Runner sync uses this contract:
 - Report configured `homeboy_path` versus bare `homeboy` version drift when both can be observed.
 - Report a stale connected runner daemon when the daemon session version no longer matches the configured runner executable version.
 
+Before a controller version upgrade, stale runner-backed ownership does not
+block replacement when a fresh direct daemon observation reports zero active
+jobs. A nonzero or unavailable active-job observation remains a blocker. A
+linked extension with a missing target is instead reported as a warning with
+`extension relink` and `extension uninstall` actions; it does not prevent the
+controller upgrade.
+
 ## Options
 
 - `status [ID]`: Inspect a persisted upgrade operation. Reports whether binary promotion and optional extension/runner refresh completed. Omit `ID` to read the latest upgrade run. Also available as `homeboy runs show <id>`.

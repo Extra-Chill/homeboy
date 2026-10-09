@@ -38,6 +38,17 @@ use homeboy_upgrade::upgrade::{
 /// upgrade orchestration. Registered with core at startup.
 pub struct RunnerUpgrade;
 
+struct RunnerDirectActiveJobs;
+
+impl homeboy_upgrade::upgrade::RunnerDirectActiveJobsProvider for RunnerDirectActiveJobs {
+    fn direct_active_job_count(&self, runner_id: &str) -> Option<usize> {
+        crate::runner_admission_snapshot(runner_id)
+            .ok()?
+            .summary
+            .live_daemon_job_count
+    }
+}
+
 impl RunnerUpgradeProvider for RunnerUpgrade {
     fn preflight_configured_runners_for_upgrade(
         &self,
@@ -88,6 +99,9 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
 /// startup.
 pub fn register() {
     homeboy_upgrade::upgrade::register_runner_upgrade_provider(Box::new(RunnerUpgrade));
+    homeboy_upgrade::upgrade::register_runner_direct_active_jobs_provider(Box::new(
+        RunnerDirectActiveJobs,
+    ));
 }
 
 #[cfg(test)]

@@ -158,6 +158,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     // warning and its exact remediation command, instead of burying the drift in
     // the JSON payload (only ever rediscovered via `homeboy self status`).
     warn_degraded_runners(&result);
+    warn_dangling_extensions(&result);
 
     Ok((json, upgrade_exit_code(&result, args.runner_only)))
 }
@@ -219,6 +220,29 @@ fn degraded_runner_warning_lines(result: &upgrade::UpgradeResult) -> Vec<String>
 /// Emit the post-upgrade degraded-runner warning to the upgrade status channel.
 fn warn_degraded_runners(result: &upgrade::UpgradeResult) {
     for line in degraded_runner_warning_lines(result) {
+        homeboy::log_status!("upgrade", "{}", line);
+    }
+}
+
+fn extension_warning_lines(result: &upgrade::UpgradeResult) -> Vec<String> {
+    result
+        .extension_skips
+        .iter()
+        .filter(|skip| skip.reason.starts_with("WARNING:"))
+        .flat_map(|skip| {
+            let mut lines = vec![format!("{}: {}", skip.extension_id, skip.reason)];
+            lines.extend(
+                skip.recovery_commands
+                    .iter()
+                    .map(|command| format!("  action: {command}")),
+            );
+            lines
+        })
+        .collect()
+}
+
+fn warn_dangling_extensions(result: &upgrade::UpgradeResult) {
+    for line in extension_warning_lines(result) {
         homeboy::log_status!("upgrade", "{}", line);
     }
 }
@@ -389,6 +413,26 @@ mod tests {
         });
 
         assert!(degraded_runner_warning_lines(&result).is_empty());
+    }
+
+    #[test]
+    fn dangling_extension_warning_emits_relink_and_uninstall_actions() {
+        let mut result = base_upgrade_result();
+        result.extension_skips.push(upgrade::ExtensionUpgradeSkip {
+            extension_id: "discord".to_string(),
+            reason: "WARNING: linked target is missing; relink or uninstall this extension"
+                .to_string(),
+            recovery_commands: vec![
+                "homeboy extension relink discord <path>".to_string(),
+                "homeboy extension uninstall discord".to_string(),
+            ],
+        });
+
+        let lines = extension_warning_lines(&result);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("discord"));
+        assert!(lines[1].contains("extension relink discord"));
+        assert!(lines[2].contains("extension uninstall discord"));
     }
 
     fn base_upgrade_result() -> upgrade::UpgradeResult {

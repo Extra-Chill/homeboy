@@ -678,6 +678,11 @@ fn run_controller_upgrade_with_operation(
                 services_pending_restart: Vec::new(),
                 operation_id: None,
             };
+            if !completion.superseded {
+                result
+                    .extension_skips
+                    .extend(target_missing_extension_warnings());
+            }
             converge_resident_daemon_after_controller_reconciliation(&completion)?;
             if completion.superseded {
                 invalidate_superseded_evidence(&mut result);
@@ -1086,6 +1091,11 @@ fn run_controller_upgrade_with_operation(
         services_pending_restart,
         operation_id: None,
     };
+    if !completion_superseded {
+        result
+            .extension_skips
+            .extend(target_missing_extension_warnings());
+    }
     if completion_superseded {
         invalidate_superseded_evidence(&mut result);
     }
@@ -1252,6 +1262,9 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
         .filter_map(|discovered| match discovered {
             DiscoveredExtension::Invalid(failure) => {
                 let extension_id = failure.id;
+                if failure.category == "target_missing" {
+                    return None;
+                }
                 Some(ExtensionPreflightBlocker {
                     extension_id: extension_id.clone(),
                     classification: failure.category.to_string(),
@@ -1299,6 +1312,27 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
                     }),
                 }
             }
+        })
+        .collect()
+}
+
+fn target_missing_extension_warnings() -> Vec<ExtensionUpgradeSkip> {
+    discover_extensions()
+        .into_iter()
+        .filter_map(|discovered| match discovered {
+            DiscoveredExtension::Invalid(failure) if failure.category == "target_missing" => {
+                let extension_id = failure.id;
+                Some(ExtensionUpgradeSkip {
+                    reason: "WARNING: linked target is missing; relink or uninstall this extension"
+                        .to_string(),
+                    recovery_commands: vec![
+                        format!("homeboy extension relink {extension_id} <path>"),
+                        format!("homeboy extension uninstall {extension_id}"),
+                    ],
+                    extension_id,
+                })
+            }
+            _ => None,
         })
         .collect()
 }
@@ -2763,6 +2797,7 @@ fn update_all_extensions(
                 skipped.push(ExtensionUpgradeSkip {
                     extension_id: id.clone(),
                     reason: e.message,
+                    recovery_commands: Vec::new(),
                 });
             }
         }
@@ -3923,6 +3958,33 @@ mod runner_source_upgrade_tests {
 
     #[cfg(unix)]
     #[test]
+    fn missing_extension_target_is_a_warning_with_recovery_actions() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions = home.path().join(".config/homeboy/extensions");
+            std::fs::create_dir_all(&extensions).expect("extensions directory");
+            std::os::unix::fs::symlink(
+                home.path().join("removed-extension-worktree"),
+                extensions.join("discord"),
+            )
+            .expect("dangling extension link");
+
+            assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
+            let warnings = target_missing_extension_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].extension_id, "discord");
+            assert!(warnings[0].reason.contains("WARNING"));
+            assert_eq!(
+                warnings[0].recovery_commands,
+                vec![
+                    "homeboy extension relink discord <path>",
+                    "homeboy extension uninstall discord"
+                ]
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn extension_preflight_dry_run_does_not_mutate_registered_source() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let source = home
@@ -4706,6 +4768,7 @@ mod convergence_tests {
         let stale_skip = ExtensionUpgradeSkip {
             extension_id: "woocommerce".to_string(),
             reason: "stale generation failure".to_string(),
+            recovery_commands: Vec::new(),
         };
         let mut result = UpgradeResult {
             command: "upgrade".to_string(),
@@ -4901,10 +4964,12 @@ mod convergence_tests {
             ExtensionUpgradeSkip {
                 extension_id: "wordpress".to_string(),
                 reason: "Linked extension source repo has uncommitted changes for wordpress: src/plugin.php. Use --force to proceed, which applies the update over the listed changes.".to_string(),
+                recovery_commands: Vec::new(),
             },
             ExtensionUpgradeSkip {
                 extension_id: "woocommerce".to_string(),
                 reason: "Linked extension source repo has uncommitted changes for woocommerce: src/plugin.php. Use --force to proceed, which applies the update over the listed changes.".to_string(),
+                recovery_commands: Vec::new(),
             },
         ];
         let status = extension_component_status(true, false, &[], &skips);
@@ -4933,6 +4998,7 @@ mod convergence_tests {
         let skips = vec![ExtensionUpgradeSkip {
             extension_id: "wordpress".to_string(),
             reason: "extension source is unreachable".to_string(),
+            recovery_commands: Vec::new(),
         }];
         let status = extension_component_status(true, false, &[], &skips);
         assert_eq!(status.status, "partial");
@@ -4947,6 +5013,7 @@ mod convergence_tests {
         let skips = vec![ExtensionUpgradeSkip {
             extension_id: "wordpress".to_string(),
             reason: "extension source is unreachable".to_string(),
+            recovery_commands: Vec::new(),
         }];
         let status = extension_component_status(true, false, &[], &skips);
         let message = upgrade_message(

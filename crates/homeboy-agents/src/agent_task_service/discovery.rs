@@ -1026,11 +1026,11 @@ struct AgentTaskControllerUpgradeAdmissionProvider;
 impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionProvider {
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission> {
         let (records, health) = agent_task_lifecycle::read_records_with_health()?;
-        Ok(controller_upgrade_admission_for_records(
-            &records,
-            health,
-            chrono::Utc::now(),
-        ))
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+        Ok(filter_idle_runner_stale_blockers(admission, |runner_id| {
+            homeboy_upgrade::upgrade::runner_direct_active_job_count(runner_id)
+        }))
     }
 
     fn recover_controller_upgrade_admission_for_verified_target(
@@ -1047,6 +1047,39 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
         }
         self.controller_upgrade_admission()
     }
+}
+
+pub(super) fn filter_idle_runner_stale_blockers(
+    mut admission: ControllerUpgradeAdmission,
+    mut direct_active_job_count: impl FnMut(&str) -> Option<usize>,
+) -> ControllerUpgradeAdmission {
+    // Replacing the controller binary does not rotate runner generations or
+    // alter retained evidence. Only stale runner ownership can be waived, and
+    // only after a direct observation proves the daemon has no active jobs.
+    admission.blockers.retain(|blocker| {
+        if blocker.owner != "runner_generations" || blocker.liveness != "stale" {
+            return true;
+        }
+        let Some(runner_id) = blocker
+            .scope
+            .strip_prefix("runner `")
+            .and_then(|scope| scope.split_once('`'))
+            .map(|(runner, _)| runner)
+        else {
+            return true;
+        };
+        !stale_runner_blocker_has_idle_daemon(blocker, direct_active_job_count(runner_id))
+    });
+    admission
+}
+
+pub(super) fn stale_runner_blocker_has_idle_daemon(
+    blocker: &ControllerUpgradeBlocker,
+    direct_active_job_count: Option<usize>,
+) -> bool {
+    blocker.owner == "runner_generations"
+        && blocker.liveness == "stale"
+        && direct_active_job_count == Some(0)
 }
 
 pub fn register_controller_upgrade_admission_provider() {
