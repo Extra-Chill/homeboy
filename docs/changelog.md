@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.11] - 2026-10-09
+
+### Changed
+- model the retained generation job as a job owner, not a stored counter
+
 ## [0.417.10] - 2026-10-09
 
 ### Changed
