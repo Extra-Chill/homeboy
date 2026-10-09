@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.14] - 2026-10-09
+
+### Changed
+- derive cancellation from the retained run.cancelled event
+
 ## [0.417.13] - 2026-10-09
 
 ### Fixed
