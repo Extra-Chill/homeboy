@@ -3377,6 +3377,10 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
             serde_json::to_vec_pretty(&serde_json::json!({
                 "runner_id": runner_id,
                 "admission_owner": "lease-new",
+                // The retained job is what leaves the draining generation
+                // unresolved: the ledger derives its active count from job
+                // owners, not from the write-only `active_jobs` field (#15685).
+                "job_owners": { "job-retained": "lease-old" },
                 "generations": {
                     "lease-old": {
                         "endpoint": endpoint("lease-old"),
