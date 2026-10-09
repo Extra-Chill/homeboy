@@ -505,6 +505,52 @@ fn background_runner_captures_errors_as_failed_jobs() {
 }
 
 #[test]
+fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let first = JobStore::open(&path).expect("first store opens");
+    let second = JobStore::open(&path).expect("second store opens");
+    let job = first.create("bench");
+
+    first
+        .append_event(job.id, JobEventKind::Stdout, Some("one".to_string()), None)
+        .expect("first writer appends");
+    let committed = super::store::StoreFileIdentity::of(&path).expect("store exists");
+    let synced = |store: &JobStore| {
+        *store
+            .persistence
+            .as_ref()
+            .expect("durable store")
+            .synced
+            .lock()
+            .unwrap()
+    };
+    assert_eq!(synced(&first), Some(committed));
+
+    second
+        .append_event(job.id, JobEventKind::Stdout, Some("two".to_string()), None)
+        .expect("second writer reloads the first writer's job and appends");
+    assert_ne!(
+        super::store::StoreFileIdentity::of(&path),
+        Some(committed),
+        "every commit replaces the store file"
+    );
+
+    first
+        .append_event(job.id, JobEventKind::Stdout, Some("three".to_string()), None)
+        .expect("first writer appends after reloading");
+    let messages = JobStore::open(&path)
+        .expect("store reopens")
+        .events(job.id)
+        .expect("events persist")
+        .into_iter()
+        .filter(|event| event.kind == JobEventKind::Stdout)
+        .filter_map(|event| event.message)
+        .collect::<Vec<_>>();
+    assert_eq!(messages, ["one", "two", "three"]);
+}
+
+#[test]
 fn test_open() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
