@@ -2447,9 +2447,8 @@ fn retryable_cook_attempt(
     {
         // This function runs under resource-projection building (eligibility is
         // projected with every record read), so every durable read here must be
-        // non-initializing. An initializing open re-enters historical Cook
-        // index import, which is what started this projection, and recurses
-        // until the stack overflows (#14914).
+        // non-initializing. An initializing read backfills that same
+        // projection and recurses until the stack overflows (#14914).
         if !agent_task_lifecycle::run_record_exists_readonly_in_store(
             lifecycle_store,
             &recipe_attempt.run_id,
@@ -2732,9 +2731,8 @@ pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjec
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     // Eligibility is part of resource projection. Every durable read below must
     // stay non-initializing: reading through an ordinary lifecycle accessor can
-    // backfill that same projection — or re-enter historical Cook index import,
-    // which is the migration running while this projection is built — and
-    // recurse here until the stack overflows (#14914).
+    // backfill that same projection and recurse here until the stack
+    // overflows (#14914).
     let source = lifecycle_store.read_record_bounded(run_id)?;
     if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;

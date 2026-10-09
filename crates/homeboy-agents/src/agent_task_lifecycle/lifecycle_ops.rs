@@ -503,9 +503,7 @@ pub fn record_detached_cook_handoff_parent_in_store(
             None,
         ));
     }
-    // This existence check only needs `cook_id`'s own row; a brand-new
-    // submission does not depend on historical Cook index import to see it,
-    // so it never has to run on this hot path (#14962).
+    // This existence check only needs `cook_id`'s own row.
     if let Ok(record) = lifecycle_store.read_record_bounded(&cook_id) {
         if record.metadata["detached_cook_handoff"]["cook_id"] == cook_id {
             return Ok(record);
@@ -554,8 +552,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     // detached child — claims again with that same owner id. Refusing because
     // admission has advanced is a self-collision: the owner is asking for the
     // handoff it already holds (#14768). Identity match here is not a second
-    // owner; it is idempotent re-entry. Bounded because this read never needs
-    // historical Cook index import for `cook_id`'s own row (#14962).
+    // owner; it is idempotent re-entry.
     if let Ok(existing) = lifecycle_store.read_record_bounded(&cook_id) {
         let handoff = &existing.metadata["detached_cook_handoff"];
         if handoff["cook_id"] == cook_id
@@ -3360,8 +3357,7 @@ where
     let mut pre_execution_runtime_recovery = false;
     // A submission only needs `run_id`'s own row to merge forward, whether
     // it is brand new or a resubmission of a record this same write path
-    // already committed to SQLite; historical Cook index import never
-    // affects that lookup, so it must not run on this hot path (#14962).
+    // already committed to SQLite.
     if let Ok(existing) = lifecycle_store.read_record_bounded(&run_id) {
         // A resubmission for this exact run id always rebuilds `record` fresh
         // above, defaulting `state` to `Queued`. That discards a `Running`
@@ -8200,11 +8196,10 @@ fn substantive_candidate_in_store(
     if !std::path::Path::new(&aggregate_path).exists() {
         return None;
     }
-    // Candidate substantiveness is projection-time eligibility input reached
-    // from historical Cook index import (#14914): an initializing aggregate
-    // read here re-enters that import mid-projection and recurses until the
-    // stack overflows. `read_aggregate_bounded` never opens an initializing
-    // observation store, matching the bounded record read above.
+    // Candidate substantiveness is projection-time eligibility input
+    // (#14914): an initializing aggregate read here re-enters projection and
+    // recurses until the stack overflows. `read_aggregate_bounded` never opens
+    // an initializing observation store, matching the bounded record read above.
     let aggregate = match lifecycle_store {
         Some(store) => store.read_aggregate_bounded(run_id),
         None => store::read_aggregate_bounded(run_id),
@@ -8272,9 +8267,9 @@ pub fn exact_record_in_store(
 /// backfilling resource projections.
 ///
 /// Projection-time callers — resource-projection and eligibility building —
-/// must use this rather than [`exact_record_in_store`]: an initializing open
-/// re-enters the historical Cook index import that started the projection and
-/// recurses until the stack overflows (#14914).
+/// must use this rather than [`exact_record_in_store`]: an initializing read
+/// backfills the projection being built and recurses until the stack
+/// overflows (#14914).
 pub fn exact_record_bounded_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

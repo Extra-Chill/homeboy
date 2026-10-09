@@ -99,31 +99,27 @@ fn lifecycle_store_rejects_metadata_only_lab_acceptance() {
 }
 
 #[test]
-fn canonical_run_polls_do_not_reimport_unrelated_historical_cook_indexes() {
+fn derived_cook_index_files_never_gate_store_opens_or_reads() {
+    // SQLite is the only lifecycle authority. A corrupt or unrelated Cook
+    // index file is a derived projection and must not be scanned, parsed, or
+    // validated when the store opens: every Cook opens it many times.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     store
         .write_record(&record(&store, "active-provider", "canonical"))
         .expect("commit canonical run and projection");
-    let historical = store.cook_index_path("unrelated-history");
-    std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
-    std::fs::write(&historical, b"invalid unrelated historical index").unwrap();
-    crate::agent_task_lifecycle::reset_historical_cook_index_import_invocations_for_test();
-    for _ in 0..32 {
-        let current = store
-            .read_record("active-provider")
-            .expect("poll exact provider run");
-        assert_eq!(current.metadata["store_marker"], "canonical");
-        assert_eq!(current.state, AgentTaskRunState::Queued);
-    }
-    assert_eq!(
-        crate::agent_task_lifecycle::historical_cook_index_import_invocations_for_test(),
-        0
-    );
-    assert!(
-        store.open_observation_initialized().is_err(),
-        "explicit historical migration still validates its input"
-    );
+    let unrelated = store.cook_index_path("unrelated-history");
+    std::fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    std::fs::write(&unrelated, b"invalid unrelated index").unwrap();
+
+    store
+        .open_observation_initialized()
+        .expect("an unrelated derived index never gates opening the store");
+    let current = store
+        .read_record("active-provider")
+        .expect("read the canonical run");
+    assert_eq!(current.metadata["store_marker"], "canonical");
+    assert_eq!(current.state, AgentTaskRunState::Queued);
 }
 
 #[test]
@@ -462,143 +458,4 @@ fn cook_index_projection_reconciles_after_its_filesystem_write_fails() {
         index,
         "a restarted reader converges on the same durable index"
     );
-}
-
-#[test]
-fn orphaned_historical_cook_index_does_not_block_canonical_lifecycle_records() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "canonical-run";
-    let cook_id = "canonical-cook";
-
-    let mut run = record(&store, run_id, "canonical");
-    run.metadata["cook_id"] = json!(cook_id);
-    store.write_record(&run).expect("write canonical run");
-    store
-        .write_cook_index_attempt(cook_id, 1, run_id, "canonical".to_string(), None)
-        .expect("write canonical index");
-
-    let orphan_path = store.cook_index_path("orphaned-cook");
-    std::fs::create_dir_all(orphan_path.parent().expect("orphan parent"))
-        .expect("create orphan parent");
-    homeboy_core::engine::local_files::write_json_file(
-        &orphan_path,
-        &crate::agent_task_lifecycle::AgentTaskCookIndex {
-            schema: crate::agent_task_lifecycle::records::schemas::COOK_INDEX.to_string(),
-            cook_id: "orphaned-cook".to_string(),
-            latest_run_id: "missing-run".to_string(),
-            latest_substantive_candidate: None,
-            cancellation_fence: None,
-            attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
-                attempt: 1,
-                run_id: "missing-run".to_string(),
-                recorded_at: "orphaned".to_string(),
-            }],
-        },
-    )
-    .expect("write orphaned historical index");
-
-    let observation = store
-        .open_observation_initialized()
-        .expect("orphaned derived index must not block lifecycle store");
-    assert!(observation
-        .control_plane_resource_projection("agent_task_run", cook_id)
-        .expect("read canonical projection")
-        .is_some());
-    assert!(observation
-        .control_plane_resource_projection("agent_task_run", "orphaned-cook")
-        .expect("read orphan projection")
-        .is_none());
-}
-
-/// Importing a historical Cook index projects retry eligibility for the run it
-/// names. For a terminal cook-owned attempt with a recipe successor, that
-/// projection consults the durable retry lineage, and every read on that path
-/// must be non-initializing: an initializing open re-enters this very import
-/// and recurses until the stack overflows (#14914).
-#[test]
-fn historical_cook_index_import_survives_retry_projection_for_a_failed_attempt() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        // Retry eligibility resolves its own store from the ambient
-        // environment, so the fixture must live in the isolated home the
-        // projection will resolve.
-        let store =
-            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
-        let data_root = store.data_root();
-        let cook_id = "retry-projection-cook";
-        let failed_run = format!("{cook_id}-attempt-2-failed");
-        let pending_successor_run = format!("{cook_id}-attempt-3-pending");
-
-        let mut failed = record(&store, &failed_run, "retry-projection");
-        failed.state = AgentTaskRunState::Failed;
-        failed.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Failed);
-        failed.metadata["cook_id"] = json!(cook_id);
-        failed.metadata["cook_attempt"] = json!(2);
-        store.write_record(&failed).expect("write failed attempt");
-
-        let plan = test_plan();
-        let recipe = crate::agent_task_service::AgentTaskCookRecipe {
-            schema: crate::agent_task_service::COOK_RECIPE_SCHEMA.to_string(),
-            cook_id: cook_id.to_string(),
-            attempts: vec![
-                crate::agent_task_service::AgentTaskCookRecipeAttempt {
-                    lineage: None,
-                    attempt: 2,
-                    run_id: failed_run.clone(),
-                    plan: plan.clone(),
-                },
-                crate::agent_task_service::AgentTaskCookRecipeAttempt {
-                    lineage: None,
-                    attempt: 3,
-                    run_id: pending_successor_run,
-                    plan,
-                },
-            ],
-            promotion_transport: json!({}),
-            gate_policy: json!({}),
-            retry_budget: json!({ "max_attempts": 3 }),
-            finalization: json!({}),
-            source_refs: Vec::new(),
-            runtime_generation: "test-runtime".to_string(),
-            sensitive_mappings: Vec::new(),
-            harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
-        };
-        crate::agent_task_service::CookRecipeStore::from_data_root(data_root.clone())
-            .persist_recipe(&recipe)
-            .expect("write durable recipe");
-
-        let index_path = data_root
-            .join("agent-task-cooks")
-            .join(cook_id)
-            .join("index.json");
-        std::fs::create_dir_all(index_path.parent().expect("index parent"))
-            .expect("create historical index parent");
-        homeboy_core::engine::local_files::write_json_file(
-            &index_path,
-            &crate::agent_task_lifecycle::AgentTaskCookIndex {
-                schema: crate::agent_task_lifecycle::records::schemas::COOK_INDEX.to_string(),
-                cook_id: cook_id.to_string(),
-                latest_run_id: failed_run.clone(),
-                latest_substantive_candidate: None,
-                cancellation_fence: None,
-                attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
-                    attempt: 2,
-                    run_id: failed_run.clone(),
-                    recorded_at: "retry-projection".to_string(),
-                }],
-            },
-        )
-        .expect("write historical index");
-
-        let observation = store
-            .open_observation_initialized()
-            .expect("import must terminate without re-entering itself");
-        assert!(observation
-            .control_plane_resource_projection("agent_task_run", cook_id)
-            .expect("read imported projection")
-            .is_some());
-        store
-            .read_record(&failed_run)
-            .expect("failed attempt stays readable after import");
-    });
 }

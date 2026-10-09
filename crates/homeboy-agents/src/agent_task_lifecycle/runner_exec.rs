@@ -118,9 +118,7 @@ fn hydration_cook_parent(
     if attempt_id.is_empty() {
         return None;
     }
-    let attempt = lifecycle_store
-        .read_record_without_historical_import(attempt_id)
-        .ok()?;
+    let attempt = lifecycle_store.read_record(attempt_id).ok()?;
     attempt
         .metadata
         .get("cook_id")
