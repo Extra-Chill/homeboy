@@ -956,6 +956,77 @@ fn git_materialization_fetches_changed_since_base_before_checkout() {
 }
 
 #[test]
+fn repeated_git_syncs_reuse_runner_repository_object_mirror() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        fs::write(source.path().join("file.txt"), "mirror-backed\n").expect("write source");
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-m", "source"]);
+        let head = git_output(source.path(), &["rev-parse", "HEAD"]).expect("head");
+        let remote_url = format!("file://{}", origin.path().display());
+        git(source.path(), &["remote", "add", "origin", &remote_url]);
+        git(source.path(), &["push", "origin", "main"]);
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-mirror-reuse","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let sync = |token: &str| {
+            sync_workspace(
+                "lab-local-mirror-reuse",
+                RunnerWorkspaceSyncOptions {
+                    path: source.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::Git,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
+                    run_isolation_token: Some(token.to_string()),
+                },
+            )
+            .expect("sync from runner repository mirror")
+            .0
+        };
+        let first = sync("first-child");
+        let second = sync("second-child");
+        assert_ne!(first.remote_path, second.remote_path);
+        for output in [first, second] {
+            let workspace = Path::new(&output.remote_path);
+            assert_eq!(git_output(workspace, &["rev-parse", "HEAD"]).unwrap(), head);
+            assert_eq!(
+                fs::read_to_string(workspace.join("file.txt")).unwrap(),
+                "mirror-backed\n"
+            );
+        }
+        let mirror_root = runner_root
+            .path()
+            .join("_lab_workspaces/.homeboy-git-mirrors");
+        let mirrors = fs::read_dir(mirror_root)
+            .expect("runner mirror root")
+            .map(|entry| entry.expect("mirror entry").path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(mirrors.len(), 1, "same origin shares one bare mirror");
+        assert_eq!(
+            git_output(&mirrors[0], &["rev-parse", head.as_str()]).unwrap(),
+            head
+        );
+    });
+}
+
+#[test]
 fn git_bundle_materialization_disables_lazy_fetches() {
     let command = git_bundle_install_command(
         "/srv/homeboy/_lab_workspaces/homeboy-abc",
