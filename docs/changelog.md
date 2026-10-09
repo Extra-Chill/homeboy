@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.10] - 2026-10-09
+
+### Changed
+- drop the RollingGeneration job counter; keep active_jobs as write-only compat
+
+### Fixed
+- surface stale controller on failures
+- preserve prepared environment in verification shells
+- keep supervisor budgets out of candidate repair
+
 ## [0.417.9] - 2026-10-08
 
 ### Changed
