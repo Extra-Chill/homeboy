@@ -375,6 +375,16 @@ fn extension_suggestions_from_manifests(
     suggestions
 }
 
+/// Whether `local_path` is a project root this extension describes. An
+/// extension that declares no discovery markers applies everywhere.
+pub(crate) fn extension_applies_to(manifest: &ExtensionManifest, local_path: &Path) -> bool {
+    let markers = manifest.discovery_markers();
+    markers.is_empty()
+        || markers
+            .iter()
+            .any(|rule| discovery_marker_matches(local_path, rule))
+}
+
 fn discovery_marker_matches(local_path: &Path, rule: &DiscoveryMarkerConfig) -> bool {
     if rule.all.is_empty() && rule.any.is_empty() {
         return false;

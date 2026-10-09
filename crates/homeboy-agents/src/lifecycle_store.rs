@@ -1028,6 +1028,23 @@ impl AgentTaskLifecycleStore {
         })?)
     }
 
+    /// Non-terminal agent-task records. Queued and running states persist as
+    /// a `running` run, so the indexed status query replaces decoding the
+    /// whole historical registry to find the few live records.
+    pub fn read_active_records(&self) -> Result<Vec<AgentTaskRunRecord>> {
+        let store = self.open_observation_readonly()?;
+        let active = store
+            .list_active_runs()?
+            .into_iter()
+            .filter(|run| run.kind == "agent-task")
+            .collect();
+        Ok(records_with_health(active)?
+            .0
+            .into_iter()
+            .filter(|record| !record.state.is_terminal())
+            .collect())
+    }
+
     /// Read one immutable-keyset page of typed agent-task records without
     /// loading the full historical registry.
     pub(crate) fn read_record_page(

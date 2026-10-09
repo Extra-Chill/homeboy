@@ -32,10 +32,19 @@ pub fn missing_dependency_tools(
     component_id: Option<&str>,
 ) -> Vec<MissingDependencyTool> {
     let mut missing = Vec::new();
+    // A pinned component is the same for every candidate root, so resolve it
+    // once instead of re-running component discovery per root. Without a pin,
+    // a direct child may be its own registered component.
+    let pinned = component_id.and_then(|id| {
+        component::resolve_effective(Some(id), Some(&checkout.display().to_string()), None).ok()
+    });
     for (root, relative) in candidate_roots(checkout) {
         let path_arg = root.display().to_string();
-        let Ok(mut component) = component::resolve_effective(component_id, Some(&path_arg), None)
-        else {
+        let resolved = match &pinned {
+            Some(component) => Some(component.clone()),
+            None => component::resolve_effective(component_id, Some(&path_arg), None).ok(),
+        };
+        let Some(mut component) = resolved else {
             continue;
         };
         component.local_path = path_arg;

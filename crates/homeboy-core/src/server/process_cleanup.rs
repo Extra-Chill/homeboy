@@ -206,7 +206,12 @@ fn cleanup_process_group_fallback(pgid: libc::pid_t) {
     unsafe {
         libc::kill(-pgid, libc::SIGTERM);
     }
-    std::thread::sleep(Duration::from_millis(200));
+    // Give the group up to the grace period to exit, but return as soon as it
+    // has: a command that already finished must not pay the whole grace.
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while crate::process::process_group_is_running(pgid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     if crate::process::process_group_is_running(pgid) {
         unsafe {
             libc::kill(-pgid, libc::SIGKILL);
@@ -220,6 +225,43 @@ fn cleanup_process_group_fallback(pgid: libc::pid_t) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_of_an_already_exited_group_does_not_wait_out_the_grace() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("sh")
+            .args(["-c", "true"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn group leader");
+        let pgid = child.id() as libc::pid_t;
+        child.wait().expect("leader exits");
+
+        let started = std::time::Instant::now();
+        cleanup_process_group_fallback(pgid);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a finished command paid {:?} of cleanup grace",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_still_terminates_a_running_group() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn group leader");
+        let pgid = child.id() as libc::pid_t;
+
+        cleanup_process_group_fallback(pgid);
+        let status = child.wait().expect("leader is reaped");
+        assert!(!status.success(), "the running group was terminated");
+    }
 
     #[test]
     fn interrupted_command_output_records_signal() {

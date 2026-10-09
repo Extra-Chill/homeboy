@@ -127,6 +127,33 @@ fn canonical_run_polls_do_not_reimport_unrelated_historical_cook_indexes() {
 }
 
 #[test]
+fn active_records_are_exactly_the_non_terminal_agent_task_runs() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut queued = record(&store, "queued-run", "live");
+    queued.state = AgentTaskRunState::Queued;
+    let mut running = record(&store, "running-run", "live");
+    running.state = AgentTaskRunState::Running;
+    running.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Running);
+    let mut finished = record(&store, "finished-run", "done");
+    finished.state = AgentTaskRunState::Succeeded;
+    let mut cancelled = record(&store, "cancelled-run", "done");
+    cancelled.state = AgentTaskRunState::Cancelled;
+    for record in [&queued, &running, &finished, &cancelled] {
+        store.write_record(record).expect("commit record");
+    }
+
+    let mut active = store
+        .read_active_records()
+        .expect("read active records")
+        .into_iter()
+        .map(|record| record.run_id)
+        .collect::<Vec<_>>();
+    active.sort();
+    assert_eq!(active, ["queued-run", "running-run"]);
+}
+
+#[test]
 fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();

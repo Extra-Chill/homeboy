@@ -299,9 +299,18 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
             component,
             ExtensionCapability::Deps,
         )? {
-            providers.push(DependencyProvider::Extension(Box::new(
-                ExtensionDependencyProvider { context },
-            )));
+            // An extension's deps script describes the project roots its
+            // discovery markers identify. Directories it does not describe
+            // (a checkout's `src/` or `docs/`) have nothing for it to hydrate,
+            // so its script is not run there.
+            let applies = crate::extension::catalog::load_extension(&context.extension_id)
+                .map(|manifest| crate::context::extension_applies_to(&manifest, path))
+                .unwrap_or(true);
+            if applies {
+                providers.push(DependencyProvider::Extension(Box::new(
+                    ExtensionDependencyProvider { context },
+                )));
+            }
         }
     }
 
@@ -1910,6 +1919,63 @@ esac
                 kind: DependencyInstallOutputKind::Directory,
             }]
         );
+    }
+
+    #[test]
+    fn extension_deps_provider_applies_only_where_its_discovery_markers_match() {
+        crate::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/marked-deps");
+            fs::create_dir_all(&extension_dir).unwrap();
+            fs::write(
+                extension_dir.join("marked-deps.json"),
+                r#"{
+                    "name": "Marked Deps",
+                    "version": "1.0.0",
+                    "deps": { "extension_script": "deps.sh" },
+                    "provides": { "discovery_markers": [{ "all": ["package.json"] }] }
+                }"#,
+            )
+            .unwrap();
+            let checkout = tempdir().unwrap();
+            fs::write(checkout.path().join("package.json"), "{}").unwrap();
+            let docs = checkout.path().join("docs");
+            fs::create_dir_all(&docs).unwrap();
+            let component = Component {
+                id: "consumer".to_string(),
+                local_path: checkout.path().display().to_string(),
+                extensions: Some(
+                    [(
+                        "marked-deps".to_string(),
+                        crate::component::ScopedExtensionConfig::default(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            };
+            let control = CooperativeControl::unbounded();
+            let is_extension = |providers: &[DependencyProvider]| {
+                providers
+                    .iter()
+                    .any(|provider| matches!(provider, DependencyProvider::Extension(_)))
+            };
+
+            let root = resolve_dependency_providers_optional_with_control(
+                &component,
+                checkout.path(),
+                &control,
+            )
+            .unwrap();
+            assert!(is_extension(&root), "the marked project root is hydrated");
+
+            let child =
+                resolve_dependency_providers_optional_with_control(&component, &docs, &control)
+                    .unwrap();
+            assert!(
+                !is_extension(&child),
+                "a directory the extension does not describe never runs its deps script"
+            );
+        });
     }
 
     #[test]
