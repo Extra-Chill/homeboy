@@ -133,11 +133,72 @@ pub fn select_artifact_record(
         [] if qualified => Err(selection_error(token, "artifact reference has no persisted byte record for the selected run/task/logical artifact; retrieval remains unproven")),
         [] => Ok(None),
         _ => {
+            if let Some(record) = authoritative_equivalent_projection(&candidates) {
+                return Ok(Some(record.clone()));
+            }
             let mut ids: Vec<_> = candidates.iter().map(|record| record.id.as_str()).collect();
             ids.sort_unstable();
             Err(selection_error(token, format!("artifact selection is ambiguous; pin a canonical artifact ID: {}", ids.join(", "))))
         }
     }
+}
+
+/// Declared authority of an agent-task controller projection; lower wins.
+///
+/// Terminal artifact projection intentionally persists more than one record
+/// for a single logical artifact: the canonical `runner-artifact://` reference
+/// beside its verified controller mirror, or a preserved direct import beside
+/// the controller-local copy derived from it. Only the controller-side copy
+/// declares a projection. `None` means the record makes no projection claim.
+pub fn agent_task_projection_authority(record: &ArtifactRecord) -> Option<u8> {
+    match record
+        .metadata_json
+        .pointer("/agent_task/projection")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("controller_finalized") => Some(0),
+        Some("controller_local") => Some(1),
+        Some("runner_mirrored") => Some(2),
+        _ => None,
+    }
+}
+
+/// Collapse candidates that are provably one logical artifact to its single
+/// authoritative controller projection.
+///
+/// Every candidate must carry the same agent-task lineage (task and logical
+/// artifact id) and the same content identity (SHA-256 and size), and exactly
+/// one of them must hold the strongest declared projection authority. Any
+/// other shape — different content, missing lineage, or two records claiming
+/// the same authority — stays ambiguous and the caller must pin an ID.
+fn authoritative_equivalent_projection<'a>(
+    candidates: &[&'a ArtifactRecord],
+) -> Option<&'a ArtifactRecord> {
+    let identity = |record: &ArtifactRecord| {
+        let lineage = &record.metadata_json["agent_task"];
+        Some((
+            lineage["task_id"].as_str()?.to_string(),
+            lineage["logical_artifact_id"].as_str()?.to_string(),
+            record.sha256.clone()?,
+            record.size_bytes?,
+        ))
+    };
+    let first = identity(candidates.first()?)?;
+    if candidates
+        .iter()
+        .any(|record| identity(record).as_ref() != Some(&first))
+    {
+        return None;
+    }
+    let strongest = candidates
+        .iter()
+        .filter_map(|record| agent_task_projection_authority(record))
+        .min()?;
+    let mut authoritative = candidates
+        .iter()
+        .filter(|record| agent_task_projection_authority(record) == Some(strongest));
+    let selected = authoritative.next()?;
+    authoritative.next().is_none().then_some(*selected)
 }
 
 fn artifact_matches_friendly_token(record: &ArtifactRecord, token: &str) -> bool {
@@ -302,6 +363,78 @@ mod reference_byte_selection_tests {
             .unwrap_err()
             .to_string()
             .contains("missing or unreadable"));
+    }
+
+    /// Terminal projection keeps the runner reference (or a preserved direct
+    /// import) beside its controller copy. Friendly and producer-qualified
+    /// selection resolve that pair to the declared controller projection, and
+    /// stay ambiguous for every shape that is not provably one artifact
+    /// (Extra-Chill/homeboy#15712).
+    #[test]
+    fn reference_byte_selection_prefers_declared_projection_of_one_logical_artifact() {
+        let uri = "homeboy://agent-task/run/run-a/artifacts#task=first&artifact=patch";
+        let mut runner_ref = record("runner-ref", "first");
+        runner_ref.artifact_type = "remote_file".to_string();
+        runner_ref.path = "runner-artifact://lab/run-a/runner-ref".to_string();
+        let mut evidence = record("direct-import", "first");
+        evidence.path = "/producer/imported.patch".to_string();
+        let mut mirror = record("controller-mirror", "first");
+        mirror.metadata_json["agent_task"]["projection"] = serde_json::json!("runner_mirrored");
+        let mut local = record("controller-local", "first");
+        local.metadata_json["agent_task"]["projection"] = serde_json::json!("controller_local");
+
+        for (records, expected) in [
+            (
+                vec![runner_ref.clone(), mirror.clone()],
+                "controller-mirror",
+            ),
+            (vec![evidence.clone(), local.clone()], "controller-local"),
+            (
+                vec![runner_ref.clone(), mirror.clone(), local.clone()],
+                "controller-local",
+            ),
+        ] {
+            for token in ["patch", uri] {
+                let selected = select_artifact_record("run-a", token, &records, |_| unreachable!())
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(selected.id, expected, "{token}");
+            }
+            assert_eq!(
+                select_artifact_record("run-a", "runner-ref", &records, |_| unreachable!())
+                    .unwrap()
+                    .map(|record| record.id),
+                records
+                    .iter()
+                    .any(|record| record.id == "runner-ref")
+                    .then(|| "runner-ref".to_string()),
+                "an exact pin still reaches the non-authoritative record"
+            );
+        }
+
+        let mut other_content = mirror.clone();
+        other_content.sha256 = Some("different-content".to_string());
+        let mut other_size = mirror.clone();
+        other_size.size_bytes = Some(12);
+        let mut other_task = record("controller-mirror", "second");
+        other_task.metadata_json["agent_task"]["projection"] = serde_json::json!("runner_mirrored");
+        let mut no_lineage = evidence.clone();
+        no_lineage.metadata_json = serde_json::json!({ "name": "patch" });
+        let mut same_authority = local.clone();
+        same_authority.id = "controller-local-copy".to_string();
+        for records in [
+            vec![runner_ref.clone(), other_content],
+            vec![runner_ref.clone(), other_size],
+            vec![runner_ref.clone(), other_task],
+            vec![no_lineage, local.clone()],
+            vec![local, same_authority],
+            vec![runner_ref, evidence],
+        ] {
+            let error = select_artifact_record("run-a", "patch", &records, |_| unreachable!())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("ambiguous"), "{error}");
+        }
     }
 
     #[test]
