@@ -11440,11 +11440,10 @@ fn record_active_cook_worktree_warning(
     let target = std::fs::canonicalize(source).map_err(|error| {
         Error::internal_io(error.to_string(), Some(source.display().to_string()))
     })?;
-    let mut active = agent_task_lifecycle::list_records_in_store(lifecycle_store)?
+    let mut active = lifecycle_store
+        .read_active_records()?
         .into_iter()
-        .filter(|record| {
-            record.run_id != options.identity.initial_run_id && !record.state.is_terminal()
-        })
+        .filter(|record| record.run_id != options.identity.initial_run_id)
         .filter(|record| record.metadata.get("cook_id").is_some())
         .filter_map(|record| {
             let plan = agent_task_lifecycle::load_plan_for_execution_in_store(
