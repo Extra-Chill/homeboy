@@ -2254,6 +2254,10 @@ fn cook_batch_dry_run_with_deadline(
     mut args: AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> CmdResult<Value> {
+    // Preview and execution consume the same immutable gate snapshot. This is
+    // local file IO only; retaining the bytes and digest avoids a preview/run
+    // split for --verify-file while never hydrating a repository or worktree.
+    args.gates.snapshot_file_inputs()?;
     let mut planner = DryRunPlanner::new(&args, placement);
     planner.begin("gate_inputs");
     if args.issues.len() > DRY_RUN_MAX_ISSUES {
@@ -2287,11 +2291,8 @@ fn cook_batch_dry_run_with_deadline(
     if !static_repeatable_inputs_are_bounded(&args) {
         return Err(planner.defer("gate_inputs", "bounded repeatable static planning input"));
     }
-    if !args.gates.verify_file.is_empty()
-        || !args.gates.private_verify_file.is_empty()
-        || !args.provider_evidence_inputs.is_empty()
-    {
-        return Err(planner.defer("gate_inputs", "file-backed gate or provider evidence input"));
+    if !args.provider_evidence_inputs.is_empty() {
+        return Err(planner.defer("gate_inputs", "provider evidence input"));
     }
     if args
         .verification_profiles
@@ -2362,7 +2363,7 @@ fn cook_batch_dry_run_with_deadline(
         move || validate_batch_cook_gates(&gate_plan, workspace),
     )?;
     let worktrees = planner.run("worktrees", "static worktree projection", || {
-        Ok(static_worktrees_dry_run(&args, &plan))
+        static_worktrees_dry_run(&args, &plan)
     })?;
     let plan_has_private_gates =
         planner.run("recipe_declarations", "immutable cook declarations", || {
@@ -2371,6 +2372,11 @@ fn cook_batch_dry_run_with_deadline(
                 .iter()
                 .any(|cook| !cook.private_verify.is_empty()))
         })?;
+    let blocked = worktrees
+        .rows
+        .iter()
+        .filter(|row| row.status != worktree::WorktreeQueueCreateStatus::WouldCreate)
+        .count();
     // Live readiness is terminal admission. Static projections must not resume
     // after it because their deadline is intentionally independent of the
     // provider-owned Cook deadline.
@@ -2392,10 +2398,10 @@ fn cook_batch_dry_run_with_deadline(
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch/v1",
             "fanout_id": plan.fanout_id,
-            "status": "ready",
+            "status": if blocked == 0 { "ready" } else { "blocked" },
             "dry_run": true,
             "progress": planner.progress(),
-            "summary": { "issues": plan.cooks.len(), "worktrees_total": worktrees.rows.len(), "worktrees_blocked": 0 },
+            "summary": { "issues": plan.cooks.len(), "worktrees_total": worktrees.rows.len(), "worktrees_blocked": blocked },
             "preflight": {
                 "default_branch": args.base_resolution.clone(),
                 "provider_readiness_command": provider_readiness_command(&args),
@@ -2412,7 +2418,7 @@ fn cook_batch_dry_run_with_deadline(
             "commands": cook_batch_commands_with_placement(&replay_args, placement, plan_has_private_gates, None),
             "next_actions": cook_batch_next_actions_with_placement(&replay_args, placement, &plan.fanout_id, "ready", false, false, &worktrees, plan_has_private_gates, None),
         }),
-        0,
+        cook_batch_outer_exit_code(blocked, &None),
     ))
 }
 
@@ -2690,7 +2696,7 @@ fn cook_batch_argv_with_placement(
         "fanout".to_string(),
         "cook-batch".to_string(),
         "--repo".to_string(),
-        args.repo.clone(),
+        args.component.clone().unwrap_or_else(|| args.repo.clone()),
         "--branch-prefix".to_string(),
         args.branch_prefix.clone(),
         "--private-gate-reveal".to_string(),
@@ -2941,7 +2947,7 @@ fn queue_or_reuse_worktrees_with_terminal_paths(
     };
 
     if args.preview {
-        let worktrees = static_worktrees_dry_run(args, plan);
+        let worktrees = static_worktrees_dry_run(args, plan)?;
         let states = worktrees
             .rows
             .iter()
@@ -3161,30 +3167,40 @@ fn durable_terminal_worktree_paths(plan: &BatchCookFanoutPlan) -> Result<BTreeMa
 fn static_worktrees_dry_run(
     args: &AgentTaskFanoutCookBatchArgs,
     plan: &BatchCookFanoutPlan,
-) -> worktree::WorktreeQueueCreateOutput {
+) -> Result<worktree::WorktreeQueueCreateOutput> {
     #[cfg(test)]
     STATIC_WORKTREE_PROJECTIONS.with(|count| count.set(count.get() + 1));
-    worktree::WorktreeQueueCreateOutput {
-        schema: "homeboy/worktree-queue-create/v1",
-        repo: args.repo.clone(),
-        base_ref: cook_batch_from(args).to_string(),
-        dry_run: true,
-        rows: plan
+    let mut output = worktree::queue_create(worktree::WorktreeQueueCreateOptions {
+        // This is the same selector `worktree create` resolves. Resolving the
+        // canonical repository alone can be ambiguous when nested checkouts
+        // declare the same component id.
+        repo: args.component.clone().unwrap_or_else(|| args.repo.clone()),
+        requests: plan
             .cooks
             .iter()
-            .map(|cook| worktree::WorktreeQueueCreateRow {
+            .map(|cook| worktree::WorktreeQueueCreateRequest {
                 branch: cook.head.clone().expect("generated cooks have heads"),
-                handle: cook.to_worktree.clone(),
-                status: worktree::WorktreeQueueCreateStatus::WouldCreate,
-                command: worktree_create_command(args, cook.head.as_deref().expect("head exists")),
-                retry_after_seconds: None,
-                active_lock_holder: None,
-                path: None,
-                error: None,
-                failure: None,
+                task_url: cook.task_url.clone(),
+                task_ref: cook.task_url.clone(),
+                run_id: Some(cook.run_id()),
+                provider_lifecycle: None,
             })
             .collect(),
+        from: cook_batch_from(args).to_string(),
+        dry_run: true,
+        retry_after_seconds: 30,
+    })?;
+    for row in &mut output.rows {
+        if let Some(cook) = plan
+            .cooks
+            .iter()
+            .find(|cook| cook.head.as_deref() == Some(row.branch.as_str()))
+        {
+            row.handle.clone_from(&cook.to_worktree);
+        }
     }
+    output.repo.clone_from(&args.repo);
+    Ok(output)
 }
 
 fn active_registered_worktree_path(handle: &str) -> Option<String> {
@@ -5358,7 +5374,7 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
     vec![
         "worktree".to_string(),
         "create".to_string(),
-        args.repo.clone(),
+        args.component.clone().unwrap_or_else(|| args.repo.clone()),
         "--branch".to_string(),
         branch.to_string(),
         "--from".to_string(),
@@ -10727,10 +10743,8 @@ fi
             );
             for row in value["worktrees"]["rows"].as_array().expect("rows") {
                 assert_eq!(row["status"], "would_create");
-                assert!(
-                    row["path"].is_null(),
-                    "static planning does not probe paths"
-                );
+                let path = row["path"].as_str().expect("resolved future path");
+                assert!(!std::path::Path::new(path).exists());
             }
             assert!(value["plan"]["cooks"]
                 .as_array()
@@ -10942,38 +10956,28 @@ fi
     }
 
     #[test]
-    fn dry_run_rejects_a_blocking_gate_file_without_opening_it() {
+    fn dry_run_snapshots_verify_file_bytes_and_preserves_provenance() {
         with_isolated_home(|home| {
-            let fifo = home.path().join("blocking-gate-input");
-            assert!(Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .expect("create blocking fixture")
-                .success());
+            let gate = home.path().join("gate.sh");
+            let bytes = b"#!/bin/sh\nexit 0\n";
+            std::fs::write(&gate, bytes).expect("write verification fixture");
             let mut args = cook_batch_args();
-            args.gates.verify_file.push(fifo.display().to_string());
+            args.gates.verify_file.push(gate.display().to_string());
 
-            let started = Instant::now();
-            let error = cook_batch(args).expect_err("static dry-run rejects file-backed gates");
-            assert!(
-                started.elapsed() < Duration::from_secs(1),
-                "dry-run must return before opening the FIFO: {error}"
-            );
-            assert_eq!(error.details["reason"], "static_input_required");
+            args.gates.snapshot_file_inputs().expect("snapshot gate");
             assert_eq!(
-                error.details["unresolved_dependency"],
-                "file-backed gate or provider evidence input"
+                args.gates.verify.last().unwrap(),
+                &String::from_utf8(bytes.to_vec()).unwrap()
             );
-            assert!(error.details["replay_command"]
-                .as_str()
-                .expect("replay command")
-                .contains("--preview"));
+            let source = args.gates.input_sources.last().unwrap();
+            assert_eq!(source.size_bytes, bytes.len() as u64);
+            assert_eq!(source.path.as_deref(), Some(gate.to_str().unwrap()));
             assert!(
                 !home
                     .path()
                     .join(".local/share/homeboy/agent-task-recipes")
                     .exists(),
-                "blocking planning input must not create recipes"
+                "snapshotting must not create recipes"
             );
         });
     }
