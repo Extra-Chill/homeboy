@@ -5149,11 +5149,12 @@ mod tests {
                 ["max_provider_rotations"],
             1
         );
-        assert_eq!(
-            store.load_recipe("cook").unwrap().retry_budget["policy"]["truncated"]
-                ["max_provider_rotations"],
-            0
-        );
+        // #15681 made configured provider rotation unconditional: rotations
+        // are never clamped, so the persisted policy no longer carries a
+        // `truncated` budget.
+        assert!(store.load_recipe("cook").unwrap().retry_budget["policy"]
+            .get("truncated")
+            .is_none());
     }
 
     #[test]
