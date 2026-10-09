@@ -10,7 +10,20 @@ pub(super) enum WorkspaceMaterializationOperation {
     ExtractTarStdinToTemp,
     WriteStdinToBundle,
     VerifyBundleDigest(String),
-    CloneBundleToTemp,
+    RecordBundleInObjectCache {
+        head: String,
+        ref_limit: usize,
+    },
+    /// Clone the transfer. A thin transfer borrows its prerequisites from the
+    /// object cache, then
+    /// copy every object reachable from `HEAD` and `retain` into the workspace
+    /// so it no longer depends on the cache. Bundled refs that are not branches
+    /// (a pinned base, an extra fetch ref) are not refs in the clone, so they
+    /// are retained by commit for the copy.
+    CloneBundleToTemp {
+        borrow_cache: bool,
+        retain: Vec<String>,
+    },
     SetGitOrigin(String),
     CheckoutGitRef {
         head: String,
@@ -41,7 +54,7 @@ pub(super) enum WorkspaceMaterializationOperation {
 #[derive(Debug, Clone)]
 pub(super) struct WorkspaceMaterializer {
     remote_path: String,
-    bundle: bool,
+    bundle: Option<String>,
     capture_owner: bool,
     restore_owner: bool,
     operations: Vec<WorkspaceMaterializationOperation>,
@@ -51,15 +64,17 @@ impl WorkspaceMaterializer {
     pub(super) fn new(remote_path: impl Into<String>) -> Self {
         Self {
             remote_path: remote_path.into(),
-            bundle: false,
+            bundle: None,
             capture_owner: false,
             restore_owner: false,
             operations: Vec::new(),
         }
     }
 
-    pub(super) fn with_bundle_file(mut self) -> Self {
-        self.bundle = true;
+    /// Stage the transfer in `$bundle`, with `$cache` naming the runner's
+    /// object cache for this source remote.
+    pub(super) fn with_bundle_file(mut self, object_cache: &str) -> Self {
+        self.bundle = Some(object_cache.to_string());
         self
     }
 
@@ -85,8 +100,9 @@ impl WorkspaceMaterializer {
             parent = shell::quote_arg(parent.as_str()),
             dest = shell::quote_arg(&self.remote_path),
         );
-        if self.bundle {
+        if let Some(object_cache) = &self.bundle {
             prefix.push_str("; bundle=\"${dest}.bundle.$$\"");
+            prefix.push_str(&format!("; cache={}", shell::quote_arg(object_cache)));
             // Bundles are controller-complete transfers. A runner must not
             // lazily recover a missing object from the source remote.
             prefix.push_str("; export GIT_NO_LAZY_FETCH=1");
@@ -132,7 +148,42 @@ impl WorkspaceMaterializationOperation {
                 "test \"$(shasum -a 256 \"$bundle\" | awk '{{print $1}}')\" = {expected}",
                 expected = shell::quote_arg(expected)
             ),
-            Self::CloneBundleToTemp => "git clone \"$bundle\" \"$tmp\"".to_string(),
+            // Record the verified transfer for later thin bundles. The cache is an
+            // optimization: failing to update it never fails materialization.
+            // The outer group scopes `|| true` so it cannot rescue an earlier
+            // failed step of the surrounding `&&` chain.
+            // Each head gets its own ref, so concurrent installs never contend
+            // for one ref lock; only the newest `ref_limit` refs are retained.
+            Self::RecordBundleInObjectCache { head, ref_limit } => format!(
+                "{{ {{ mkdir -p \"$(dirname \"$cache\")\" && {{ [ -d \"$cache\" ] || git init -q --bare \"$cache\"; }} && git -C \"$cache\" fetch -q --no-tags \"$bundle\" {refspec} && git -C \"$cache\" for-each-ref --sort=-committerdate --format='%(refname)' refs/homeboy/ | tail -n +{first_evicted} | while IFS= read -r ref; do git -C \"$cache\" update-ref -d \"$ref\"; done; }} >/dev/null 2>&1 || true; }}",
+                refspec = shell::quote_arg(&format!("+HEAD:refs/homeboy/{head}")),
+                first_evicted = ref_limit + 1,
+            ),
+            // The copied closure is walked before the workspace is installed,
+            // so a damaged cache fails here and never replaces `$dest`.
+            // Retained commits are pinned by temporary refs only for the copy;
+            // a bundle clone leaves them unreferenced, so the copy does too.
+            // A complete transfer never borrows: it must succeed even when the
+            // cache is damaged, which is exactly when it is the fallback.
+            Self::CloneBundleToTemp {
+                borrow_cache: false,
+                ..
+            } => "git clone \"$bundle\" \"$tmp\"".to_string(),
+            Self::CloneBundleToTemp { retain, .. } => {
+                let pins = retain
+                    .iter()
+                    .enumerate()
+                    .map(|(index, commit)| {
+                        format!(
+                            " && git -C \"$tmp\" update-ref refs/homeboy-retain/{index} {commit}",
+                            commit = shell::quote_arg(commit)
+                        )
+                    })
+                    .collect::<String>();
+                format!(
+                    "git clone --reference-if-able \"$cache\" \"$bundle\" \"$tmp\" && if [ -f \"$tmp/.git/objects/info/alternates\" ]; then true{pins} && git -C \"$tmp\" repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\" && git -C \"$tmp\" rev-list --objects --all >/dev/null && {{ git -C \"$tmp\" for-each-ref --format='%(refname)' refs/homeboy-retain/ | while IFS= read -r ref; do git -C \"$tmp\" update-ref -d \"$ref\"; done; }}; fi"
+                )
+            }
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
                 remote_url = shell::quote_arg(remote_url)
@@ -221,14 +272,16 @@ pub(super) fn dirty_git_workspace_guard(dest: &str, allow_dirty: bool) -> String
         "git -C {dest} status --porcelain=v1 2>/dev/null | while IFS= read -r line; do path=${{line#???}}; if [ \"$path\" = .homeboy ] || [ \"${{path#.homeboy/}}\" != \"$path\" ]; then :; else printf '%s\\n' \"$line\"; fi; done || true",
         dest = dest,
     );
+    // Grouped so the guard composes inside an `&&` chain: its internal `;`
+    // would otherwise let an earlier failed step fall through to the install.
     if allow_dirty {
         format!(
-            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi",
+            "{{ dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab warning: --allow-dirty-lab-workspace is overwriting uncommitted runner workspace changes.' >&2; printf '%s\\n' \"$dirty\" >&2; fi; }}",
             status = status,
         )
     } else {
         format!(
-            "dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi",
+            "{{ dirty=$({status}); if [ -n \"$dirty\" ]; then printf '%s\\n' 'Homeboy Lab refused to overwrite a dirty runner workspace.' >&2; printf '%s\\n' \"$dirty\" >&2; printf '%s\\n' 'Commit, stash, clean, or remove the runner workspace before retrying. Pass --allow-dirty-lab-workspace only for noisy investigation that may discard runner-side changes.' >&2; exit 97; fi; }}",
             status = status,
         )
     }

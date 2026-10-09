@@ -174,12 +174,192 @@ pub(super) fn materialize_git_bundle_controlled(
     let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
     hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control)?;
 
+    // Commits the runner's object cache already holds need not cross the wire.
+    // A thin transfer that cannot be installed (the cache lost objects between
+    // the query and the install) falls back to the complete closure, which
+    // never depends on runner state.
+    let object_cache = git_object_cache_path(request.remote_path, request.remote_url);
+    let prerequisites = bundle_prerequisites(
+        runner,
+        request.local_path,
+        request.head,
+        &object_cache,
+        control,
+    )?;
+    if !prerequisites.is_empty() {
+        match transfer_git_bundle(
+            runner,
+            &request,
+            &bundle_path,
+            &refs,
+            &prerequisites,
+            &object_cache,
+            control,
+        ) {
+            Ok(sha256) => {
+                return Ok(controller_bundle_provenance(
+                    &request,
+                    refs,
+                    prerequisites,
+                    sha256,
+                ))
+            }
+            Err(error) if control.checkpoint().is_err() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    let sha256 = transfer_git_bundle(
+        runner,
+        &request,
+        &bundle_path,
+        &refs,
+        &[],
+        &object_cache,
+        control,
+    )?;
+    Ok(controller_bundle_provenance(
+        &request,
+        refs,
+        Vec::new(),
+        sha256,
+    ))
+}
+
+fn controller_bundle_provenance(
+    request: &ControllerGitBundleMaterializationRequest<'_>,
+    refs: Vec<String>,
+    prerequisites: Vec<String>,
+    sha256: String,
+) -> ControllerGitBundleProvenance {
+    ControllerGitBundleProvenance {
+        provenance: "controller_git_bundle",
+        source_sha: request.head.to_string(),
+        source_refs: refs,
+        prerequisites,
+        sha256,
+        cleanup_owner: "controller",
+        // The controller tempdir is removed as soon as the transfer finishes.
+        cleanup_ttl: "PT0S",
+    }
+}
+
+/// Runner-side bare repository that accumulates every transferred closure for
+/// one source remote. It lives beside the workspaces it seeds, so a later
+/// transfer of the same repository only carries commits the runner lacks.
+pub(crate) fn git_object_cache_path(remote_path: &str, remote_url: &str) -> String {
+    let key = homeboy_engine_primitives::content_hash::sha256_hex(remote_url.as_bytes());
+    format!(
+        "{}/{GIT_OBJECT_CACHE_DIR}/{}.git",
+        super::util::parent_remote_path(remote_path),
+        &key[..16]
+    )
+}
+
+const GIT_OBJECT_CACHE_DIR: &str = ".homeboy-git-cache";
+/// Bounds both the controller query and the runner-side cache refs.
+const GIT_OBJECT_CACHE_REF_LIMIT: usize = 64;
+
+/// Commits in the runner cache that the controller can exclude from a bundle.
+///
+/// An exclusion must exist locally, and must not already contain `HEAD`:
+/// excluding a descendant would leave nothing to bundle. Every other cached
+/// commit is safe to exclude, ancestor or not, because Git bundles only the
+/// objects unreachable from the exclusions and records the boundary commits as
+/// prerequisites the cache is known to hold. An unreachable or empty cache
+/// yields no exclusions and a complete transfer.
+fn bundle_prerequisites(
+    runner: &Runner,
+    local_path: &Path,
+    head: &str,
+    object_cache: &str,
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
+    let list = format!(
+        "git -C {cache} for-each-ref --sort=-committerdate --count={GIT_OBJECT_CACHE_REF_LIMIT} --format='%(objectname)' refs/homeboy/ 2>/dev/null || true",
+        cache = shell::quote_arg(object_cache),
+    );
+    let output = control.output(
+        Command::new("sh").args(["-c", &super::util::shell_command_for_runner(runner, &list)?]),
+        "list runner git object cache",
+    )?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let mut prerequisites = Vec::new();
+    for commit in String::from_utf8_lossy(&output.stdout).lines() {
+        let commit = commit.trim();
+        if commit.len() < 40
+            || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || prerequisites.iter().any(|known| known == commit)
+        {
+            continue;
+        }
+        let present = control.output(
+            Command::new("git")
+                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .current_dir(local_path),
+            "probe cached git commit",
+        )?;
+        if !present.status.success() {
+            continue;
+        }
+        let contains_head = control.output(
+            Command::new("git")
+                .args(["merge-base", "--is-ancestor", head, commit])
+                .current_dir(local_path),
+            "probe cached git commit ancestry",
+        )?;
+        if !contains_head.status.success() {
+            prerequisites.push(commit.to_string());
+        }
+    }
+    Ok(prerequisites)
+}
+
+/// Commits named by the bundle's non-`HEAD` refs, which the runner workspace
+/// must still contain once it stops borrowing from the object cache.
+fn bundled_ref_commits(
+    local_path: &Path,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
+    let mut commits = Vec::new();
+    for git_ref in refs.iter().filter(|git_ref| git_ref.as_str() != "HEAD") {
+        let commit = control.git(
+            local_path,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("{git_ref}^{{commit}}"),
+            ],
+        )?;
+        if !commits.contains(&commit) {
+            commits.push(commit);
+        }
+    }
+    Ok(commits)
+}
+
+/// Create one bundle, excluding `prerequisites`, and install it on the runner.
+/// Returns the transferred bundle digest.
+fn transfer_git_bundle(
+    runner: &Runner,
+    request: &ControllerGitBundleMaterializationRequest<'_>,
+    bundle_path: &Path,
+    refs: &[String],
+    prerequisites: &[String],
+    object_cache: &str,
+    control: &WorkspaceControl,
+) -> Result<String> {
     let output = control.output(
         Command::new("git")
             .arg("bundle")
             .arg("create")
-            .arg(&bundle_path)
-            .args(&refs)
+            .arg(bundle_path)
+            .args(refs)
+            .args(prerequisites.iter().map(|commit| format!("^{commit}")))
             .env("GIT_NO_LAZY_FETCH", "1")
             .current_dir(request.local_path),
         "create git bundle",
@@ -190,7 +370,8 @@ pub(super) fn materialize_git_bundle_controlled(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let sha256 = super::snapshot::snapshot_file_sha256(&bundle_path, control)?;
+    let sha256 = super::snapshot::snapshot_file_sha256(bundle_path, control)?;
+    let retain = bundled_ref_commits(request.local_path, refs, control)?;
 
     let install_command = git_bundle_install_command(
         request.remote_path,
@@ -198,12 +379,17 @@ pub(super) fn materialize_git_bundle_controlled(
         request.branch,
         request.remote_url,
         request.changed_since_base,
-        &sha256,
         request.allow_dirty_lab_workspace,
+        BundleTransfer {
+            sha256: &sha256,
+            object_cache,
+            prerequisites,
+            retain: &retain,
+        },
     );
-    let result = match runner.kind {
+    match runner.kind {
         RunnerKind::Local => materialize_git_bundle_piped_controlled(
-            &bundle_path,
+            bundle_path,
             &format!("sh -c {}", shell::quote_arg(&install_command)),
             "materialize local git bundle workspace",
             control,
@@ -212,7 +398,7 @@ pub(super) fn materialize_git_bundle_controlled(
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
                 materialize_git_bundle_piped_controlled(
-                    &bundle_path,
+                    bundle_path,
                     &format!("sh -c {}", shell::quote_arg(&install_command)),
                     "materialize local git bundle workspace",
                     control,
@@ -226,25 +412,15 @@ pub(super) fn materialize_git_bundle_controlled(
                     remote_command = shell::quote_arg(&install_command),
                 );
                 materialize_git_bundle_piped_controlled(
-                    &bundle_path,
+                    bundle_path,
                     &target,
                     "materialize SSH git bundle workspace",
                     control,
                 )
             }
         }
-    };
-
-    result?;
-    Ok(ControllerGitBundleProvenance {
-        provenance: "controller_git_bundle",
-        source_sha: request.head.to_string(),
-        source_refs: refs,
-        sha256,
-        cleanup_owner: "controller",
-        // The controller tempdir is removed as soon as the transfer finishes.
-        cleanup_ttl: "PT0S",
-    })
+    }?;
+    Ok(sha256)
 }
 
 /// Materialize a controller Git workspace as its exact captured commit, then
@@ -841,17 +1017,30 @@ fn materialize_git_bundle_piped_controlled(
     control.shell(&command, action)
 }
 
+/// How one bundle relates to the runner's object cache.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BundleTransfer<'a> {
+    /// Digest the runner verifies before Git reads the transfer.
+    pub sha256: &'a str,
+    pub object_cache: &'a str,
+    /// Cached commits excluded from the bundle; empty for a complete closure.
+    pub prerequisites: &'a [String],
+    /// Bundled non-`HEAD` commits the workspace must keep after it stops
+    /// borrowing from the cache.
+    pub retain: &'a [String],
+}
+
 pub(crate) fn git_bundle_install_command(
     remote_path: &str,
     head: &str,
     branch: Option<&str>,
     remote_url: &str,
     changed_since_base: Option<&str>,
-    expected_sha256: &str,
     allow_dirty_lab_workspace: bool,
+    transfer: BundleTransfer<'_>,
 ) -> String {
     WorkspaceMaterializer::new(remote_path)
-        .with_bundle_file()
+        .with_bundle_file(transfer.object_cache)
         .capture_owner()
         .op(WorkspaceMaterializationOperation::EnsureParent)
         .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
@@ -860,9 +1049,18 @@ pub(crate) fn git_bundle_install_command(
         ]))
         .op(WorkspaceMaterializationOperation::WriteStdinToBundle)
         .op(WorkspaceMaterializationOperation::VerifyBundleDigest(
-            expected_sha256.to_string(),
+            transfer.sha256.to_string(),
         ))
-        .op(WorkspaceMaterializationOperation::CloneBundleToTemp)
+        .op(
+            WorkspaceMaterializationOperation::RecordBundleInObjectCache {
+                head: head.to_string(),
+                ref_limit: GIT_OBJECT_CACHE_REF_LIMIT,
+            },
+        )
+        .op(WorkspaceMaterializationOperation::CloneBundleToTemp {
+            borrow_cache: !transfer.prerequisites.is_empty(),
+            retain: transfer.retain.to_vec(),
+        })
         .op(WorkspaceMaterializationOperation::SetGitOrigin(
             remote_url.to_string(),
         ))

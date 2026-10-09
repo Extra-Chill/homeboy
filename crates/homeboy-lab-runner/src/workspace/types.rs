@@ -198,6 +198,10 @@ pub struct ControllerGitBundleProvenance {
     pub provenance: &'static str,
     pub source_sha: String,
     pub source_refs: Vec<String>,
+    /// Commits the runner's object cache already held, excluded from the
+    /// transferred bundle. Empty when the complete closure was transferred.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<String>,
     pub sha256: String,
     pub cleanup_owner: &'static str,
     pub cleanup_ttl: &'static str,
