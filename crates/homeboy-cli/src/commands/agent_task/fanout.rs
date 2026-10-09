@@ -8173,7 +8173,7 @@ fi
                 .expect("record terminal coordinator fixture");
                 let blocked =
                     batch::status(&decoded.fanout_id).expect("blocked fanout placement status");
-                assert_eq!(blocked.status, "queued");
+                assert_eq!(blocked.status, "blocked");
                 assert!(blocked.resumable);
             }
         });

@@ -3282,8 +3282,10 @@ mod tests {
         let blocked = store
             .status("repair-wave")
             .expect("preflight blocker remains observable");
+        // The durable child roster stays queued for retry, but status is
+        // terminally blocked until that retry is explicitly resumed.
         assert_eq!(blocked.batch.state, AgentTaskBatchState::Queued);
-        assert_eq!(blocked.status, "queued");
+        assert_eq!(blocked.status, "blocked");
         assert_eq!(blocked.totals.queued, 1);
         assert_eq!(blocked.admission.admitted, 0);
         assert_eq!(blocked.admission.absent, 1);
