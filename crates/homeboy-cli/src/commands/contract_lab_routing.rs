@@ -87,8 +87,6 @@ pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Only its provider attempt is portable, and that attempt is dispatched to the selected Lab runner: `--placement lab` selects the runner for the attempt (never offloading the coordinator), and `--runner <runner-id>` pins a specific one. Deterministic gates follow that placement: a Lab-placed cook gates on its attempt runner unless `--gate-runner` (or the declared gate command's own `--placement lab`/`--runner`) pins a different one; local cooks keep local gates.";
 pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
     "agent-task promote with a durable run reference or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
-const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
-    "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task fanout coordination is controller-owned so durable batch state, worktree ownership, and recovery remain available; `--placement lab` (or `--runner <runner-id>`) selects the Lab runner each child provider attempt is dispatched to, and never offloads the coordinator itself";
 
@@ -207,7 +205,7 @@ impl Commands {
                     }),
             }) if args.preview => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-                AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON,
+                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
