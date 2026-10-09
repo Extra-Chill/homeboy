@@ -1038,12 +1038,12 @@ impl AgentTaskLifecycleStore {
     /// whole historical registry to find the few live records.
     pub fn read_active_records(&self) -> Result<Vec<AgentTaskRunRecord>> {
         let store = self.open_observation_readonly()?;
-        let active = store
+        let active: Vec<RunRecord> = store
             .list_active_runs()?
             .into_iter()
             .filter(|run| run.kind == "agent-task")
             .collect();
-        Ok(records_with_health(active)?
+        Ok(records_with_health(self, active)?
             .0
             .into_iter()
             .filter(|record| !record.state.is_terminal())
