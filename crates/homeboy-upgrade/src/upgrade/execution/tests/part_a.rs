@@ -97,7 +97,7 @@ fn candidate_admission_cause_survives_process_exit_and_durable_status() {
             "#!/bin/sh\n",
             "printf 'candidate diagnostic notice\\n' >&2\n",
             "printf '%s\\n' '{\"schema\":\"homeboy/command-result/v3\",\"success\":false,",
-            "\"diagnostics\":{\"message\":\"replacement blocked by unresolved runner ownership\",",
+            "\"diagnostics\":{\"code\":\"validation.invalid_argument\",\"message\":\"replacement blocked by unresolved runner ownership\",",
             "\"details\":{\"tried\":[\"homeboy runner reconcile fixture\"]}}}'\n",
             "exit 2\n"
         ),
@@ -111,6 +111,7 @@ fn candidate_admission_cause_survives_process_exit_and_durable_status() {
             error.message,
             "replacement blocked by unresolved runner ownership"
         );
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert!(error.details["error"]
             .as_str()
             .unwrap()
@@ -143,7 +144,7 @@ fn candidate_admission_cause_survives_process_exit_and_durable_status() {
 
 #[test]
 fn unstructured_upgrade_cause_is_bounded_without_losing_full_evidence() {
-    let detail = format!("installer failed: {}", "é".repeat(1200));
+    let detail = format!("installer failed: {}", "é".repeat(5000));
     let error = upgrade_failure_error(InstallMethod::Binary, &detail, None);
     assert!(error
         .message

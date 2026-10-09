@@ -915,10 +915,22 @@ fn run_verified_target_admission(
     if let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
         if envelope["schema"] == "homeboy/command-result/v3" && envelope["success"] == false {
             if let Some(message) = envelope["diagnostics"]["message"].as_str() {
-                error.message = bounded_upgrade_cause(message);
+                // Candidate admission names the durable blocker and its owning
+                // recovery action. Preserve that typed summary intact across
+                // the process boundary instead of applying the generic prose
+                // truncation limit.
+                error.message = message.to_string();
                 error.details["cause"] = serde_json::json!(error.message);
             }
             error.details["candidate_diagnostics"] = envelope["diagnostics"].clone();
+            if envelope["diagnostics"]["code"] == "validation.invalid_argument" {
+                error.code = homeboy_core::error::ErrorCode::ValidationInvalidArgument;
+            }
+            if let Some(details) = envelope["diagnostics"]["details"].as_object() {
+                for (key, value) in details {
+                    error.details[key] = value.clone();
+                }
+            }
             let recovery = envelope["diagnostics"]["details"]["tried"]
                 .as_array()
                 .into_iter()
@@ -934,7 +946,7 @@ fn run_verified_target_admission(
 }
 
 pub(super) fn bounded_upgrade_cause(detail: &str) -> String {
-    const MAX_CHARS: usize = 1000;
+    const MAX_CHARS: usize = 4000;
     let mut chars = detail.chars();
     let mut result: String = chars.by_ref().take(MAX_CHARS).collect();
     if chars.next().is_some() {

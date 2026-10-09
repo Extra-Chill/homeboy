@@ -3388,6 +3388,41 @@ fn controller_upgrade_admission_uses_liveness_and_bounded_record_health() {
 }
 
 #[test]
+fn stale_runner_blocker_clears_only_with_direct_zero_job_evidence() {
+    let blocker = homeboy_upgrade::upgrade::ControllerUpgradeBlocker {
+        run_id: "stale-run".to_string(),
+        owner: "runner_generations".to_string(),
+        scope: "runner `lab` and its persisted daemon generations".to_string(),
+        postcondition: "idle".to_string(),
+        liveness: "stale",
+        reason: "runner_job_unverified_after_daemon_restart".to_string(),
+        action: "homeboy runner reconcile lab".to_string(),
+        recovery_command: "homeboy runner reconcile lab".to_string(),
+    };
+
+    let admission = homeboy_upgrade::upgrade::ControllerUpgradeAdmission {
+        schema: "homeboy/controller-upgrade-admission/v1",
+        active: 0,
+        stale: 1,
+        suspect: 0,
+        unreconciled: 0,
+        reconcilable: 0,
+        record_health: serde_json::Value::Null,
+        blockers: vec![blocker],
+    };
+
+    let idle = super::discovery::filter_idle_runner_stale_blockers(admission.clone(), |_| Some(0));
+    assert!(
+        idle.blockers.is_empty(),
+        "direct zero proves no active owner"
+    );
+    let busy = super::discovery::filter_idle_runner_stale_blockers(admission.clone(), |_| Some(1));
+    assert_eq!(busy.blockers.len(), 1, "active work still blocks");
+    let unknown = super::discovery::filter_idle_runner_stale_blockers(admission, |_| None);
+    assert_eq!(unknown.blockers.len(), 1, "unverified work still blocks");
+}
+
+#[test]
 fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() {
     with_isolated_home(|_| {
         let run_id = "lagging-heartbeat-advancing-provider";
