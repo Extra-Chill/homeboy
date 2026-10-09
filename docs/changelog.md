@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.12] - 2026-10-09
+
+### Changed
+- drop the removed truncated-rotation budget from the continuation assertion
+
+### Fixed
+- report blocked admission cause
+- resolve terminal projection pairs to the declared controller record instead of refusing them as ambiguous
+- validate cook-batch previews
+
 ## [0.417.11] - 2026-10-09
 
 ### Changed
