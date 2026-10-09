@@ -766,7 +766,7 @@ where
         }
         return Ok(AgentTaskBatchStatusReport {
             schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
-            status: AgentTaskBatchState::Queued.outcome_status().to_string(),
+            status: "blocked".to_string(),
             observation_fresh: true,
             totals: totals_for_children(&batch.child_runs),
             admission: AgentTaskBatchAdmission {
@@ -3435,6 +3435,7 @@ mod tests {
             .expect("terminalize stalled admission"));
         let status = store.status("stuck-wave").expect("read blocked batch");
 
+        assert_eq!(status.status, "blocked");
         assert_eq!(status.batch.state, AgentTaskBatchState::Queued);
         assert_eq!(status.batch.child_runs[0].state, AgentTaskRunState::Queued);
         assert!(status.resumable);

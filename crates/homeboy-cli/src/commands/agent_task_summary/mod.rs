@@ -90,11 +90,7 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
             .get("stage")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let cause = blocker
-            .pointer("/failure/message")
-            .and_then(Value::as_str)
-            .or_else(|| blocker.pointer("/failure/code").and_then(Value::as_str))
-            .unwrap_or("no reported cause");
+        let cause = fanout_admission_blocker_cause(blocker);
         lines.push(format!("Blocked before admission in {stage}: {cause}"));
     }
     lines.extend(fanout_child_placement_lines(payload));
@@ -108,6 +104,49 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
         }
     }
     Some(lines.join("\n"))
+}
+
+fn fanout_admission_blocker_cause(blocker: &Value) -> String {
+    let failure = &blocker["failure"];
+    let rows = failure["worktrees"].as_array().or_else(|| {
+        failure
+            .pointer("/resolution/rows")
+            .and_then(Value::as_array)
+    });
+    if let Some(rows) = rows {
+        let failures = rows
+            .iter()
+            .filter_map(|row| {
+                let row_failure = &row["failure"];
+                let message = row_failure["message"]
+                    .as_str()
+                    .or_else(|| row_failure["code"].as_str())
+                    .or_else(|| row["reason"].as_str())
+                    .or_else(|| row["error"].as_str())?;
+                let handle = row["handle"]
+                    .as_str()
+                    .or_else(|| row["task_id"].as_str())
+                    .unwrap_or("unknown handle");
+                Some((handle, message))
+            })
+            .collect::<Vec<_>>();
+        if let Some((handle, message)) = failures.first() {
+            let matching = failures
+                .iter()
+                .filter(|(_, candidate)| *candidate == *message)
+                .count();
+            return if matching > 1 {
+                format!("{handle}: {message} ({matching} rows)")
+            } else {
+                format!("{handle}: {message}")
+            };
+        }
+    }
+    failure["message"]
+        .as_str()
+        .or_else(|| failure["code"].as_str())
+        .unwrap_or("no reported cause")
+        .to_string()
 }
 
 /// Per-child runner id and remote workspace path for every child dispatched
@@ -2830,6 +2869,31 @@ mod tests {
         assert!(summary.contains(
             "Blocked before admission in worktree_preflight: fixture failure before first child"
         ));
+    }
+
+    #[test]
+    fn fanout_status_summary_names_worktree_row_blocker_cause_and_count() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": {
+                "status": "blocked",
+                "batch": { "batch_id": "blocked-wave", "state": "queued", "task_count": 3 },
+                "admission_blocker": {
+                    "stage": "worktree_preflight",
+                    "failure": { "worktrees": [
+                        { "handle": "issue-1", "failure": { "code": "validation.invalid_argument", "message": "Component not found: repo" } },
+                        { "handle": "issue-2", "failure": { "code": "validation.invalid_argument", "message": "Component not found: repo" } },
+                        { "handle": "issue-3", "failure": { "message": "different" } }
+                    ] }
+                }
+            }
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::FanoutStatus, &payload).unwrap();
+
+        assert!(summary.contains("Fanout batch blocked-wave: blocked"));
+        assert!(summary.contains("Blocked before admission in worktree_preflight: issue-1: Component not found: repo (2 rows)"));
     }
 
     /// #14683: a lab-dispatched child's runner id and remote workspace path
