@@ -19,8 +19,11 @@ pub(super) const DEFAULT_EVENT_RETENTION_LIMIT: usize = 1000;
 /// the daemon's append-only store grow with every historical execution.
 pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_LIMIT: usize = 1000;
 /// Bound terminal history independently of active jobs, whose recovery records
-/// must remain durable until they reach a terminal state.
-pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_BYTES: usize = 4 * 1024 * 1024;
+/// must remain durable until they reach a terminal state. Every durable
+/// transaction (including each appended job event) serializes and fsyncs the
+/// whole store, so retained history directly multiplies per-event cost.
+/// Compacted jobs keep exactly-once replay evidence in the tombstone index.
+pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_BYTES: usize = 1024 * 1024;
 
 /// A compacted key is permanent exactly-once evidence. It intentionally carries
 /// no request or event payload. Controller tombstones retain only their existing

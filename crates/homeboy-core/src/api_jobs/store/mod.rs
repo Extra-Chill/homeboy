@@ -182,12 +182,74 @@ fn terminal_controller_job_ids_in(
     Ok(ids)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct JobStorePersistence {
     pub(super) path: PathBuf,
     pub(super) event_retention_limit: usize,
     pub(super) terminal_job_retention_limit: usize,
     pub(super) terminal_job_retention_bytes: usize,
+    /// Identity of the durable file this process last read or wrote while
+    /// holding the transaction lock. When the file still has that identity,
+    /// the in-memory snapshot is already authoritative and the reload is
+    /// skipped, so a transaction no longer re-parses the whole store.
+    pub(super) synced: Mutex<Option<StoreFileIdentity>>,
+}
+
+/// Every commit replaces the store by atomic rename, so a new inode, size and
+/// modification time identify each committed snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StoreFileIdentity {
+    len: u64,
+    modified_ns: Option<u128>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl StoreFileIdentity {
+    pub(super) fn of(path: &Path) -> Option<Self> {
+        let metadata = fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Some(Self {
+            len: metadata.len(),
+            modified_ns: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos()),
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        })
+    }
+}
+
+impl JobStorePersistence {
+    pub(super) fn new(
+        path: PathBuf,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+        terminal_job_retention_bytes: usize,
+    ) -> Self {
+        Self {
+            path,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            terminal_job_retention_bytes,
+            synced: Mutex::new(None),
+        }
+    }
+
+    fn synced_identity(&self) -> Option<StoreFileIdentity> {
+        *self.synced.lock().expect("store identity mutex poisoned")
+    }
+
+    fn record_synced_identity(&self, identity: Option<StoreFileIdentity>) {
+        *self.synced.lock().expect("store identity mutex poisoned") = identity;
+    }
 }
 
 /// The advisory lock held for one authoritative durable-store transaction.
@@ -435,7 +497,31 @@ impl JobStore {
         path: &std::path::Path,
         inner: &mut JobStoreInner,
     ) -> Result<()> {
-        let durable = read_durable_store(path)?;
+        let persistence = self
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.path == path);
+        let current = StoreFileIdentity::of(path);
+        if let (Some(persistence), Some(current)) = (persistence, current) {
+            if persistence.synced_identity() == Some(current) {
+                return Ok(());
+            }
+        }
+        let durable = match read_durable_store(path) {
+            Ok(durable) => durable,
+            Err(error) => {
+                if let Some(persistence) = persistence {
+                    persistence.record_synced_identity(None);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(persistence) = persistence {
+            // The caller holds the transaction lock, so no writer can replace
+            // the file between the identity read above and this parse. A
+            // quarantined (renamed) store no longer matches and reloads.
+            persistence.record_synced_identity(current.filter(|_| path.exists()));
+        }
         let next_sequence = durable
             .jobs
             .iter()
@@ -528,7 +614,11 @@ impl JobStore {
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
         );
-        write_durable_store_with_tombstones(&persistence.path, &mut durable)?;
+        if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable) {
+            persistence.record_synced_identity(None);
+            return Err(error);
+        }
+        persistence.record_synced_identity(StoreFileIdentity::of(&persistence.path));
         inner.jobs = durable
             .jobs
             .into_iter()
@@ -704,12 +794,12 @@ impl JobStore {
                 compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
-            persistence: Some(Arc::new(JobStorePersistence {
+            persistence: Some(Arc::new(JobStorePersistence::new(
                 path,
                 event_retention_limit,
                 terminal_job_retention_limit,
                 terminal_job_retention_bytes,
-            })),
+            ))),
             daemon_lease_id: None,
             credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
@@ -866,12 +956,12 @@ impl JobStore {
                 compaction: durable.compaction,
             })),
             next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
-            persistence: Some(Arc::new(JobStorePersistence {
+            persistence: Some(Arc::new(JobStorePersistence::new(
                 path,
                 event_retention_limit,
                 terminal_job_retention_limit,
                 terminal_job_retention_bytes,
-            })),
+            ))),
             daemon_lease_id: None,
             credential_deliveries: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
