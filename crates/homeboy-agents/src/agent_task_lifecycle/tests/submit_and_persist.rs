@@ -5459,6 +5459,7 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
     sha2::Digest::update(&mut hash, [0]);
     sha2::Digest::update(&mut hash, b"patch");
     let artifact_id = format!("agent-task-{:x}", hash.finalize());
+    let imported_id = artifact_id.clone();
     let store = lifecycle_store
         .open_observation_maintained()
         .expect("store");
@@ -5496,6 +5497,22 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
         "patch",
     )
     .expect("actionable imported patch");
+    // The friendly name resolves to the controller-owned copy, not the
+    // preserved import whose producer path may later disappear (#15712).
+    assert_eq!(
+        artifact.metadata_json["agent_task"]["projection"],
+        "controller_local"
+    );
+    let imported = store
+        .get_artifact(&imported_id)
+        .expect("read preserved import")
+        .expect("preserved import");
+    assert_eq!(imported.path, source.display().to_string());
+    assert_eq!(imported.metadata_json["agent_task"]["task_id"], "task-a");
+    assert_eq!(
+        imported.metadata_json["agent_task"]["logical_artifact_id"],
+        "patch"
+    );
     let output = context.root().join("recovered.patch");
     homeboy_core::observation::runs_service::copy_local_file_artifact(
         artifact,

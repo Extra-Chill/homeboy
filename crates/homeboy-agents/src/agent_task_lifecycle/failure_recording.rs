@@ -2549,6 +2549,14 @@ fn reusable_terminal_artifact(
         // evidence even when its original path was outside the artifact root.
         // Preserve that record and derive a separate controller-local copy
         // before allowing terminal recovery to use its verified bytes.
+        //
+        // Both records then describe one logical artifact, so each must say
+        // so: the preserved import gains its lifecycle lineage, and the copy
+        // declares itself the controller-local projection. Without those
+        // declarations the pair is indistinguishable from two unrelated
+        // artifacts and friendly `runs artifact <run> <name>` selection must
+        // refuse it as ambiguous (Extra-Chill/homeboy#15712).
+        stamp_legacy_artifact_provenance(store, run_id, task_id, artifact, artifact_id)?;
         let path = controller_projected_local_artifact_path(
             store,
             run_id,
@@ -2559,6 +2567,8 @@ fn reusable_terminal_artifact(
             expected_sha256,
         )?;
         let controller_artifact_id = controller_projection_artifact_id(artifact_id);
+        let mut metadata = metadata.clone();
+        metadata["agent_task"]["projection"] = json!("controller_local");
         store.record_verified_artifact_with_id(
             run_id,
             &artifact.kind,
@@ -2566,7 +2576,7 @@ fn reusable_terminal_artifact(
             &controller_artifact_id,
             expected_size,
             Some(expected_sha256),
-            metadata.clone(),
+            metadata,
         )?;
         return Ok(true);
     }
@@ -2590,16 +2600,10 @@ fn reusable_terminal_artifact(
 fn controller_projection_precedence(
     record: &homeboy_core::observation::ArtifactRecord,
 ) -> (u8, &str) {
-    let rank = match record
-        .metadata_json
-        .pointer("/agent_task/projection")
-        .and_then(Value::as_str)
-    {
-        Some("controller_finalized") => 0,
-        Some("controller_local") => 1,
-        Some("runner_mirrored") => 2,
-        _ => 3,
-    };
+    // One authority ranking for lifecycle consumers and `runs artifact`
+    // friendly selection, so both pick the same record.
+    let rank = homeboy_core::observation::runs_service::agent_task_projection_authority(record)
+        .unwrap_or(u8::MAX);
     (rank, record.id.as_str())
 }
 
