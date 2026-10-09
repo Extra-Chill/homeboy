@@ -64,9 +64,9 @@ pub use store::{
     directory_tree_sha256, ArtifactListFilter, ArtifactListPage, ArtifactPublication,
     ArtifactPublicationType, BoundedArtifactProjection, ControlPlaneActionClaim,
     ControlPlaneResourceProjection, ObservationDbStatus, ObservationStore,
-    PreparedControlPlaneEventAppend, WorkIntent, CURRENT_SCHEMA_VERSION, DEFAULT_RUN_PAGE_LIMIT,
-    LAB_OFFLOAD_METADATA_ENV, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT, PREVIEW_METADATA_ENV,
-    PREVIEW_PUBLIC_URL_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
+    PreparedControlPlaneEventAppend, RunMetadataRevision, WorkIntent, CURRENT_SCHEMA_VERSION,
+    DEFAULT_RUN_PAGE_LIMIT, LAB_OFFLOAD_METADATA_ENV, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT,
+    PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
 };
 pub use test_findings::{
     finding_records_from_failure_clusters, finding_records_from_test_analysis_input,

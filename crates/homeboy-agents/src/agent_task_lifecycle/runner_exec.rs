@@ -39,7 +39,7 @@ pub fn record_runner_job_identity_in_store(
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_id".to_string(), json!(runner_id));
     metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -1275,7 +1275,7 @@ pub fn record_lab_offload_submission_intent_in_store(
         "phase_activity".to_string(),
         json!("durable broker submission intent recorded; waiting for runner capacity"),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -1319,7 +1319,7 @@ pub fn record_lab_offload_submission_request(
             "replay_request": replay_request,
         }),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }
 
@@ -1364,6 +1364,6 @@ pub fn record_lab_offload_submission_envelope(
             "replay_envelope_request": request,
         }),
     );
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
 }

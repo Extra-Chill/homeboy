@@ -15,6 +15,7 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
         run_id: run_id.to_string(),
         plan_id: plan.plan_id,
         state: AgentTaskRunState::Queued,
+        revision: 0,
         submitted_at: "2026-08-13T00:00:00Z".to_string(),
         updated_at: None,
         plan_path: store.controller_plan_path(run_id).display().to_string(),

@@ -602,6 +602,42 @@ fn prepare_request(
         .map_err(map_append_error)
 }
 
+/// The `run.transitioned` event a typed transition appends in the same
+/// transaction as its compare-and-swap write. Its identity is the committed
+/// revision, so each transition is recorded exactly once (#15718).
+pub(crate) fn prepared_transition_event(
+    record: &AgentTaskRunRecord,
+    from: AgentTaskRunState,
+    transition: &str,
+) -> Result<PreparedControlPlaneEventAppend> {
+    let run = RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    prepare_request(
+        &run,
+        record,
+        progress_request(
+            &format!("transition\0{}\0{}", record.run_id, record.revision),
+            "run.transitioned",
+            "agent-task",
+            None,
+            None,
+            json!({
+                "transition": transition,
+                "from": from,
+                "to": record.state,
+                "revision": record.revision,
+                "message": format!("run transitioned to {:?}", record.state),
+            }),
+        )?,
+    )
+}
+
 fn prepare_provenance_event(
     run: &RunId,
     record: &AgentTaskRunRecord,

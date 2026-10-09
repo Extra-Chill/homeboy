@@ -106,6 +106,17 @@ pub struct AgentTaskRunRecord {
     pub run_id: String,
     pub plan_id: String,
     pub state: AgentTaskRunState,
+    /// Monotonic run-level write revision, owned by the lifecycle store.
+    ///
+    /// Every committed write sets it to the stored revision plus one, whatever
+    /// the caller supplied, and [`AgentTaskLifecycleStore::transition`] commits
+    /// only while the stored revision still equals the caller's expected one.
+    /// Snapshots written before the field existed, or by an older binary that
+    /// drops it, read as `0` (#15718).
+    ///
+    /// [`AgentTaskLifecycleStore::transition`]: super::AgentTaskLifecycleStore::transition
+    #[serde(default, skip_serializing_if = "is_zero_revision")]
+    pub revision: u64,
     pub submitted_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
@@ -451,6 +462,10 @@ pub struct AgentTaskCookIndexAttempt {
     pub attempt: u32,
     pub run_id: String,
     pub recorded_at: String,
+}
+
+fn is_zero_revision(revision: &u64) -> bool {
+    *revision == 0
 }
 
 fn cook_index_schema() -> String {

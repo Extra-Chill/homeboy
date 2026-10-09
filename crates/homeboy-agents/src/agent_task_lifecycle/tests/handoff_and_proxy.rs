@@ -2409,6 +2409,7 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
         run_id: "detached-run".to_string(),
         plan_id: plan.plan_id.clone(),
         state: AgentTaskRunState::Running,
+        revision: 0,
         submitted_at: now_timestamp(),
         updated_at: None,
         plan_path: "plan.json".to_string(),

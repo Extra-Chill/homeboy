@@ -76,8 +76,13 @@ pub fn materialize_recovered_patch_artifact(
     if changed {
         let aggregate_path = store::aggregate_path(&record.run_id)?.display().to_string();
         let plan = super::load_plan(&record.run_id)?;
+        let decided_from = record.state;
         apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
-        store::write_aggregate_and_record(&record, &aggregate)?;
+        super::AgentTaskLifecycleStore::from_current_environment()?.project_terminal_aggregate(
+            &record,
+            decided_from,
+            &aggregate,
+        )?;
     }
     Ok(changed)
 }

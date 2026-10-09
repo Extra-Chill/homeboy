@@ -280,6 +280,7 @@ fn reconstruct_record_in_store(
         run_id: run.id.clone(),
         plan_id: plan.plan_id,
         state,
+        revision: 0,
         submitted_at: run.started_at.clone(),
         updated_at: timestamp,
         plan_path: lifecycle_store

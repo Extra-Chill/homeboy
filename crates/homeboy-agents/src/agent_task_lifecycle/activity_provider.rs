@@ -505,7 +505,8 @@ mod tests {
                 let mut attempt = store.read_record(&other).unwrap();
                 attempt.state = state;
                 attempt.metadata["runner_pid"] = serde_json::json!(std::process::id());
-                store.write_record(&attempt).unwrap();
+                // The store owns the revision; keep the written copy in step.
+                store.write_record_in_place(&mut attempt).unwrap();
                 let events = agent_task_lifecycle::logs(&other).unwrap();
                 let item = AgentTaskActivityProvider
                     .probe_by_id(&direct)
