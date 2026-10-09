@@ -59,14 +59,13 @@ fn already_terminal_error(record: &AgentTaskRunRecord) -> Error {
     )
 }
 
-/// The event ledger can outlive a runner's record projection. Reuse the first
-/// immutable cancellation payload when an operator later terminalizes that run;
-/// writing a different payload under the same event key would roll back the
-/// record mutation with an idempotency collision.
-fn canonical_cancellation_provenance_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
+/// The run's retained `run.cancelled` receipt. Its payload is exempt from the
+/// bounded event-payload pruning, so it is found however many newer events the
+/// run has accumulated (#15718).
+pub(super) fn retained_cancellation_receipt(
+    observation: &homeboy_core::observation::ObservationStore,
     run_id: &str,
-) -> Result<Option<Value>> {
+) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEvent>> {
     let run = homeboy_control_plane_contract::RunId::new(run_id).map_err(|error| {
         Error::validation_invalid_argument(
             "run_id",
@@ -75,13 +74,56 @@ fn canonical_cancellation_provenance_in_store(
             None,
         )
     })?;
-    let events = lifecycle_store
-        .open_observation_readonly()?
-        .control_plane_event_stream(&run)?
-        .unwrap_or_default();
-    events
-        .into_iter()
-        .find(|event| event.kind == "run.cancelled")
+    observation.durable_control_plane_event(&run, "run.cancelled")
+}
+
+/// Project the cancellation a retained receipt proves onto a non-terminal
+/// snapshot: run and live tasks cancelled, running provider executions
+/// terminalized, and the receipt's immutable provenance restored. Existing
+/// terminal results are left intact. Pure; the caller decides whether the
+/// projection is ever persisted.
+pub(super) fn project_retained_cancellation(
+    record: &mut AgentTaskRunRecord,
+    receipt: &homeboy_control_plane_contract::ControlPlaneEvent,
+) -> bool {
+    if record.state.is_terminal() {
+        return false;
+    }
+    let Some(provenance) = receipt
+        .data
+        .get("provenance")
+        .filter(|provenance| provenance.is_object())
+        .cloned()
+    else {
+        return false;
+    };
+    let cancelled_at = provenance["timestamp"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| receipt.occurred_at.clone())
+        .unwrap_or_else(now_timestamp);
+    set_run_state(record, AgentTaskRunState::Cancelled);
+    for task in &mut record.tasks {
+        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+            task.state = AgentTaskState::Cancelled;
+        }
+    }
+    let metadata = record.ensure_metadata_object();
+    terminalize_running_provider_executions(metadata, &cancelled_at);
+    metadata.insert("cancellation_provenance".to_string(), provenance);
+    metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+    true
+}
+
+/// The event ledger can outlive a runner's record projection. Reuse the first
+/// immutable cancellation payload when an operator later terminalizes that run;
+/// writing a different payload under the same event key would roll back the
+/// record mutation with an idempotency collision.
+fn canonical_cancellation_provenance_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    retained_cancellation_receipt(&lifecycle_store.open_observation_readonly()?, run_id)?
         .map(|event| {
             event
                 .data
@@ -248,46 +290,6 @@ pub fn cancel_claimed_detached_cook_in_store(
 // The ambient `cancel_exact_run()` shim that used to sit here is gone; its one
 // remaining caller was a cancellation test, which now cancels inside the store
 // it resolves (#7505).
-
-/// Restore a nonterminal projection from its immutable cancellation receipt.
-/// The receipt belongs to this exact run, so a pruned runner job does not require
-/// another transport cancellation. Existing terminal results are left intact.
-pub fn reconcile_canonical_cancellation_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let record = lifecycle_store.read_record(run_id)?;
-    if record.state.is_terminal() {
-        return Ok(false);
-    }
-    let Some(provenance) = canonical_cancellation_provenance_in_store(lifecycle_store, run_id)?
-    else {
-        return Ok(false);
-    };
-    let mut changed = false;
-    lifecycle_store.mutate_record(run_id, |record| {
-        if record.state.is_terminal() {
-            return false;
-        }
-        let cancelled_at = provenance["timestamp"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(now_timestamp);
-        set_run_state(record, AgentTaskRunState::Cancelled);
-        for task in &mut record.tasks {
-            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-                task.state = AgentTaskState::Cancelled;
-            }
-        }
-        let metadata = record.ensure_metadata_object();
-        terminalize_running_provider_executions(metadata, &cancelled_at);
-        metadata.insert("cancellation_provenance".to_string(), provenance.clone());
-        metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-        changed = true;
-        true
-    })?;
-    Ok(changed)
-}
 
 /// Cancel one literal run through an explicitly selected lifecycle store.
 ///

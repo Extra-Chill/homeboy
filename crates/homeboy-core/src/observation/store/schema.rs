@@ -491,6 +491,15 @@ const MIGRATIONS: &[Migration] = &[
                OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text');
         "#,
     },
+    Migration {
+        // `run.cancelled` is a lifecycle authority, not telemetry (#15718).
+        // Its payload is copied into a column the per-run payload pruning never
+        // touches, so a cancellation outlives the bounded progress window.
+        // Additive and nullable: older binaries keep inserting and pruning
+        // `event_json` exactly as before and never read this column.
+        version: 28,
+        sql: "",
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.
@@ -1060,6 +1069,37 @@ fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result
         return Ok(());
     }
 
+    if migration.version == 28 {
+        if !column_exists(
+            connection,
+            "control_plane_event_appends",
+            "durable_event_json",
+        )? {
+            connection
+                .execute_batch(
+                    "ALTER TABLE control_plane_event_appends ADD COLUMN durable_event_json TEXT;",
+                )
+                .map_err(sqlite_error("apply migration 28"))?;
+        }
+        // Receipts still inside the bounded window become durable now; a
+        // payload already pruned before this migration cannot be recovered.
+        connection
+            .execute_batch(
+                r#"
+                UPDATE control_plane_event_appends
+                    SET durable_event_json = event_json
+                    WHERE durable_event_json IS NULL
+                      AND event_json IS NOT NULL
+                      AND json_extract(event_json, '$.kind') = 'run.cancelled';
+                CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_durable
+                    ON control_plane_event_appends(run_id, sequence)
+                    WHERE durable_event_json IS NOT NULL;
+                "#,
+            )
+            .map_err(sqlite_error("apply migration 28"))?;
+        return Ok(());
+    }
+
     if migration.version == 13 {
         // Some historical stores recorded later migration markers despite never
         // creating optional child tables. Reap only tables that exist so the
@@ -1513,6 +1553,44 @@ mod tests {
             connection
                 .query_row(
                     "SELECT COUNT(*) FROM schema_migrations WHERE version = 22",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_28_backfills_retained_cancellation_receipts_idempotently() {
+        let connection = schema_through_migration(27);
+        connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run', 'test', 'now', 'running')", []).unwrap();
+        for (sequence, kind, payload) in [
+            (1, "run.cancelled", true),
+            (2, "runner.progress", true),
+            (3, "run.cancelled", false),
+        ] {
+            let json = payload.then(|| format!(r#"{{"kind":"{kind}","sequence":{sequence}}}"#));
+            connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES ('run', ?1, ?2, ?3, ?4, ?5, 'now')", rusqlite::params![format!("{sequence:064x}"), "b".repeat(64), format!("run:event:{sequence}"), sequence, json]).unwrap();
+        }
+        apply_migrations(&connection).unwrap();
+        apply_migrations(&connection).unwrap();
+        let durable: Vec<i64> = connection
+            .prepare("SELECT sequence FROM control_plane_event_appends WHERE durable_event_json IS NOT NULL ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            durable,
+            vec![1],
+            "only a retained run.cancelled payload is backfilled"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 28",
                     [],
                     |row| row.get::<_, i64>(0)
                 )

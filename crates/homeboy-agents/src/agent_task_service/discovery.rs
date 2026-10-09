@@ -1037,14 +1037,8 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
         &self,
     ) -> Result<ControllerUpgradeAdmission> {
         agent_task_lifecycle::quarantine_verified_fixture_runner_records()?;
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        let (records, _) = agent_task_lifecycle::read_records_with_health()?;
-        for record in records.iter().filter(|record| !record.state.is_terminal()) {
-            agent_task_lifecycle::reconcile_canonical_cancellation_in_store(
-                &store,
-                &record.run_id,
-            )?;
-        }
+        // A run cancelled by its retained `run.cancelled` receipt already reads
+        // as terminal, so upgrade admission no longer needs a repair pass.
         self.controller_upgrade_admission()
     }
 }

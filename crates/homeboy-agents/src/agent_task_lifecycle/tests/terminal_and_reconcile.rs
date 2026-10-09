@@ -4718,19 +4718,19 @@ fn operator_cancellation_preserves_existing_runner_event_provenance() {
         .expect("runner cancellation event")
         .clone();
     assert_eq!(original.data["provenance"], provenance);
+    // The runner's receipt is the cancellation authority: the run reads as
+    // cancelled before any operator acts (#15718).
     assert_eq!(
         lifecycle_store.read_record(run_id).expect("record").state,
-        AgentTaskRunState::Running
+        AgentTaskRunState::Cancelled
     );
 
+    // An operator cancellation of the already-cancelled run converges
+    // idempotently on the runner's immutable provenance.
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
         .expect("operator cancellation converges");
     assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
     assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
-    assert_eq!(
-        cancelled.metadata["cancel_reason"],
-        "operator requested stop"
-    );
     assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
     assert_eq!(
         lifecycle_store
@@ -4798,21 +4798,15 @@ fn operator_cancellation_recovers_provenance_missing_from_running_record() {
     lifecycle_store
         .write_record(&record)
         .expect("stale record persisted");
-    assert!(lifecycle_store
-        .read_record(run_id)
-        .expect("record")
-        .metadata
-        .get("cancellation_provenance")
-        .is_none());
+    // The read projection restores the receipt's provenance (#15718).
+    let read = lifecycle_store.read_record(run_id).expect("record");
+    assert_eq!(read.state, AgentTaskRunState::Cancelled);
+    assert_eq!(read.metadata["cancellation_provenance"], provenance);
 
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
         .expect("operator cancellation restores immutable event provenance");
     assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
     assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
-    assert_eq!(
-        cancelled.metadata["cancel_reason"],
-        "operator requested stop"
-    );
     let events = logs_in_store(&lifecycle_store, run_id)
         .expect("events")
         .events;
@@ -4829,8 +4823,10 @@ fn operator_cancellation_recovers_provenance_missing_from_running_record() {
     );
 }
 
+/// A retained receipt is projected by every read, without writing. Moved from
+/// the deleted `reconcile_canonical_cancellation_in_store` test (#15276).
 #[test]
-fn canonical_cancellation_replays_without_pruned_runner_job_and_preserves_receipt() {
+fn canonical_cancellation_projects_without_pruned_runner_job_and_preserves_receipt() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let run_id = "run-15276-pruned-runner-cancellation";
@@ -4838,13 +4834,11 @@ fn canonical_cancellation_replays_without_pruned_runner_job_and_preserves_receip
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submit exact run");
     let mut record = store.read_record(run_id).unwrap();
-    record.state = AgentTaskRunState::Running;
+    // Through the real setter, so registry health accepts the snapshot.
+    set_run_state(&mut record, AgentTaskRunState::Running);
     record.tasks[0].state = AgentTaskState::Running;
     store.write_record(&record).unwrap();
-    assert!(
-        !super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
-            .unwrap()
-    );
+    // Behaviour without a receipt is unchanged.
     assert_eq!(
         store.read_record(run_id).unwrap().state,
         AgentTaskRunState::Running
@@ -4871,18 +4865,50 @@ fn canonical_cancellation_replays_without_pruned_runner_job_and_preserves_receip
     record.metadata["runner_id"] = json!("missing-runner");
     record.metadata["runner_job_id"] = json!("pruned-job");
     store.write_record(&record).unwrap();
-    assert!(
-        super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
+
+    let stored_snapshot = || {
+        store
+            .open_observation_readonly()
             .unwrap()
-    );
-    let cancelled = store.read_record(run_id).unwrap();
-    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
-    assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
-    assert!(
-        !super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
+            .get_run(run_id)
             .unwrap()
+            .unwrap()
+            .metadata_json["agent_task_run"]
+            .clone()
+    };
+    let before = stored_snapshot();
+    assert_eq!(before["state"], "running");
+
+    for _ in 0..2 {
+        let cancelled = store.read_record(run_id).unwrap();
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+        assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
+        assert_eq!(
+            cancelled.metadata["cancelled_at"],
+            "2026-09-29T11:34:49+00:00"
+        );
+        assert_eq!(
+            cancelled.lifecycle.execution.state,
+            RunExecutionState::from(AgentTaskRunState::Cancelled)
+        );
+        assert_eq!(
+            store.read_record_bounded(run_id).unwrap().state,
+            AgentTaskRunState::Cancelled
+        );
+    }
+    let (listed, _) = store.read_records_with_health().unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|listed| listed.run_id == run_id)
+            .map(|listed| listed.state),
+        Some(AgentTaskRunState::Cancelled),
+        "registry listings use the same projection"
     );
+    // Reads never write: the stored snapshot is untouched and no new receipt
+    // was appended.
+    assert_eq!(stored_snapshot()["state"], before["state"]);
     let receipts = logs_in_store(&store, run_id)
         .unwrap()
         .events
@@ -4890,6 +4916,129 @@ fn canonical_cancellation_replays_without_pruned_runner_job_and_preserves_receip
         .filter(|event| event.kind == "run.cancelled")
         .collect::<Vec<_>>();
     assert_eq!(receipts, vec![receipt]);
+    // `agent-task status` (not yet read-only, #15718 step 3) agrees.
+    assert_eq!(status_state(&store, run_id), AgentTaskRunState::Cancelled);
+}
+
+/// Append `count` runner job events for `run_id` through the production
+/// runner-projection path: the events ride on `metadata.runner_job_events` of
+/// the record the controller writes, and the single write path derives one
+/// canonical `runner.progress` event per entry.
+fn append_runner_progress_events(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    count: u64,
+) {
+    let mut record = record.clone();
+    record.metadata["runner_job_events"] = json!((1..=count)
+        .map(|sequence| json!({
+            "job_id": "job-15718",
+            "sequence": sequence,
+            "kind": "progress",
+            "message": format!("runner tick {sequence}"),
+            "timestamp_ms": 1_790_000_000_000_i64 + sequence as i64,
+        }))
+        .collect::<Vec<_>>());
+    store
+        .write_record(&record)
+        .expect("runner progress events appended");
+}
+
+fn status_state(store: &AgentTaskLifecycleStore, run_id: &str) -> AgentTaskRunState {
+    reconcile_status_in_store(store, run_id, AgentTaskStatusOptions::default(), true)
+        .expect("status")
+        .record
+        .state
+}
+
+/// #15718 gate: a cancelled run followed by 150 runner events and a stale
+/// pre-cancellation `write_record` still reports `Cancelled`.
+#[test]
+fn cancellation_survives_150_runner_events_and_a_stale_running_write() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "run-15718-cancel-then-stale-write";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit exact run");
+    let mut stale = store.read_record(run_id).unwrap();
+    stale.state = AgentTaskRunState::Running;
+    stale.tasks[0].state = AgentTaskState::Running;
+    store.write_record(&stale).unwrap();
+    let stale = store.read_record(run_id).unwrap();
+    assert_eq!(stale.state, AgentTaskRunState::Running);
+
+    let cancelled = cancel_run_in_store(&store, run_id, Some("operator requested stop"))
+        .expect("cancel through the real cancellation path");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+
+    append_runner_progress_events(&store, &store.read_record(run_id).unwrap(), 150);
+    store
+        .write_record(&stale)
+        .expect("stale pre-cancellation snapshot written");
+
+    let read = store.read_record(run_id).unwrap();
+    assert_eq!(read.state, AgentTaskRunState::Cancelled);
+    assert_eq!(read.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(status_state(&store, run_id), AgentTaskRunState::Cancelled);
+}
+
+/// #15718 latent bug: a runner-observed `run.cancelled` receipt is the only
+/// cancellation authority once a stale snapshot erased the provenance. After
+/// more than 100 newer events its payload used to be pruned, the reconciler's
+/// `.find("run.cancelled")` missed it, and the run reported `Running` forever.
+#[test]
+fn runner_cancellation_receipt_survives_payload_pruning_and_a_stale_write() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "run-15718-receipt-outlives-pruning";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit exact run");
+    let mut stale = store.read_record(run_id).unwrap();
+    stale.state = AgentTaskRunState::Running;
+    stale.tasks[0].state = AgentTaskState::Running;
+    store.write_record(&stale).unwrap();
+    let stale = store.read_record(run_id).unwrap();
+
+    // The runner projection observes the cancellation and emits the receipt.
+    let provenance = json!({
+        "actor": "runner", "cause": "runner_job_cancelled",
+        "reason": "runner job was cancelled", "timestamp": "2026-10-09T11:00:00+00:00",
+        "recovery_action": "inspect retained runner cancellation evidence"
+    });
+    let mut observed = stale.clone();
+    observed.metadata["cancellation_provenance"] = provenance.clone();
+    store.write_record(&observed).unwrap();
+    let receipt = logs_in_store(&store, run_id)
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.kind == "run.cancelled")
+        .expect("canonical cancellation receipt");
+
+    append_runner_progress_events(&store, &observed, 150);
+    assert!(
+        logs_in_store(&store, run_id)
+            .unwrap()
+            .events
+            .iter()
+            .all(|event| event.kind != "run.cancelled"),
+        "the bounded progress stream no longer carries the receipt"
+    );
+    store
+        .write_record(&stale)
+        .expect("stale pre-cancellation snapshot written");
+
+    assert_eq!(status_state(&store, run_id), AgentTaskRunState::Cancelled);
+    let read = store.read_record(run_id).unwrap();
+    assert_eq!(read.state, AgentTaskRunState::Cancelled);
+    assert_eq!(read.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(read.metadata["cancellation_provenance"], provenance);
+    assert_eq!(
+        read.metadata["cancelled_at"],
+        receipt.data["provenance"]["timestamp"]
+    );
 }
 
 #[test]
