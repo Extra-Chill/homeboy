@@ -8,6 +8,19 @@ use super::*;
 
 pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 
+/// Canonical event kinds whose payload outlives the bounded progress window.
+///
+/// `run.cancelled` is an authority, not telemetry: lifecycle reads project a
+/// run's cancellation from it (#15718). Its payload is copied into the
+/// `durable_event_json` column at insert, which the per-run pruning never
+/// touches. The bounded stream (`event_json`) and its retention cursor are
+/// unchanged, so pagination never sees a gap.
+pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 1] = ["run.cancelled"];
+
+pub fn is_durable_control_plane_event_kind(kind: &str) -> bool {
+    DURABLE_CONTROL_PLANE_EVENT_KINDS.contains(&kind)
+}
+
 /// Caller-validated event input for a store transaction. The store assigns
 /// identity and sequence; idempotency uses these exact digests.
 #[derive(Debug, Clone)]
@@ -109,6 +122,47 @@ impl ObservationStore {
         Ok(Some(events))
     }
 
+    /// The first event of `kind` for this run whose payload is still durable.
+    ///
+    /// Durable kinds are read from `durable_event_json`, which survives payload
+    /// pruning. Rows written before that column existed, or by an older binary
+    /// that does not populate it, are still found while their bounded
+    /// `event_json` payload is retained. Read-only; tolerates stores that have
+    /// not yet applied the durable-payload migration.
+    pub fn durable_control_plane_event(
+        &self,
+        run: &RunId,
+        kind: &str,
+    ) -> Result<Option<ControlPlaneEvent>> {
+        let has_ledger: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'control_plane_event_appends')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect control-plane event ledger", error))?;
+        if !has_ledger {
+            return Ok(None);
+        }
+        let has_durable_column: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('control_plane_event_appends') WHERE name = 'durable_event_json')", [], |row| row.get(0)).map_err(|error| self.read_error("inspect control-plane durable event payloads", error))?;
+        let payload = if has_durable_column {
+            "COALESCE(durable_event_json, event_json)"
+        } else {
+            "event_json"
+        };
+        let found: Option<(String, u64, String)> = self
+            .connection
+            .query_row(
+                &format!("SELECT event_id, sequence, {payload} FROM control_plane_event_appends WHERE run_id = ?1 AND {payload} IS NOT NULL AND json_extract({payload}, '$.kind') = ?2 ORDER BY sequence LIMIT 1"),
+                params![run.as_str(), kind],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| self.read_error("read durable control-plane event", error))?;
+        found
+            .map(|(event_id, sequence, json)| {
+                let event = serde_json::from_str::<ControlPlaneEvent>(&json)
+                    .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+                validate_stored_event(run, &event_id, sequence, &event)?;
+                Ok(event)
+            })
+            .transpose()
+    }
+
     pub fn control_plane_event_retention(
         &self,
         run: &RunId,
@@ -157,7 +211,7 @@ pub(crate) fn append_control_plane_event_on(
             None,
         ));
     }
-    let existing: Option<(String, String, u64, Option<String>)> = connection.query_row("SELECT request_digest, event_id, sequence, event_json FROM control_plane_event_appends WHERE run_id = ?1 AND idempotency_digest = ?2", params![run.as_str(), idempotency_digest], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(sqlite_error("read control-plane event receipt"))?;
+    let existing: Option<(String, String, u64, Option<String>)> = connection.query_row("SELECT request_digest, event_id, sequence, COALESCE(event_json, durable_event_json) FROM control_plane_event_appends WHERE run_id = ?1 AND idempotency_digest = ?2", params![run.as_str(), idempotency_digest], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(sqlite_error("read control-plane event receipt"))?;
     if let Some((stored_digest, event_id, sequence, event_json)) = existing {
         if stored_digest != request_digest {
             return Err(Error::validation_invalid_argument(
@@ -212,7 +266,8 @@ pub(crate) fn append_control_plane_event_on(
     };
     let json = serde_json::to_string(&event)
         .map_err(|error| Error::internal_unexpected(error.to_string()))?;
-    connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![run.as_str(), idempotency_digest, request_digest, event.event.as_str(), sequence, json, chrono::Utc::now().to_rfc3339()]).map_err(sqlite_error("persist control-plane event"))?;
+    let durable_json = is_durable_control_plane_event_kind(&event.kind).then_some(json.as_str());
+    connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, durable_event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![run.as_str(), idempotency_digest, request_digest, event.event.as_str(), sequence, json, durable_json, chrono::Utc::now().to_rfc3339()]).map_err(sqlite_error("persist control-plane event"))?;
     connection.execute("UPDATE control_plane_event_appends SET event_json = NULL WHERE run_id = ?1 AND event_json IS NOT NULL AND sequence <= (SELECT MAX(sequence) - ?2 FROM control_plane_event_appends WHERE run_id = ?1)", params![run.as_str(), CONTROL_PLANE_EVENT_RETENTION_LIMIT]).map_err(sqlite_error("prune control-plane event payloads"))?;
     Ok(event)
 }
@@ -337,6 +392,109 @@ mod tests {
         assert!(store
             .append_control_plane_event(&run, &first, &"a".repeat(64), &"b".repeat(64))
             .is_err());
+    }
+
+    #[test]
+    fn run_cancelled_payload_outlives_pruning_without_changing_the_bounded_stream() {
+        let (_directory, store, run) = fixture();
+        let digest = |n: u64| format!("{n:064x}");
+        let cancelled = store
+            .append_control_plane_event(
+                &run,
+                &request("cancel", "run.cancelled"),
+                &digest(1),
+                &digest(10_001),
+            )
+            .unwrap();
+        for sequence in 2..=151 {
+            store
+                .append_control_plane_event(
+                    &run,
+                    &request(&format!("key-{sequence}"), "runner.progress"),
+                    &digest(sequence),
+                    &digest(sequence + 10_000),
+                )
+                .unwrap();
+        }
+
+        // The bounded stream and its retention bounds are unchanged.
+        let events = store.control_plane_event_stream(&run).unwrap().unwrap();
+        assert_eq!(events.len(), 100);
+        assert_eq!(events[0].sequence, 52);
+        assert!(events.iter().all(|event| event.kind != "run.cancelled"));
+        let retention = store.control_plane_event_retention(&run).unwrap().unwrap();
+        assert_eq!(retention.earliest_sequence, Some(52));
+        assert_eq!(retention.latest_sequence, Some(151));
+
+        // The durable payload is retained and is the exact original event.
+        assert_eq!(
+            store
+                .durable_control_plane_event(&run, "run.cancelled")
+                .unwrap(),
+            Some(cancelled.clone())
+        );
+        assert_eq!(
+            store
+                .durable_control_plane_event(&run, "runner.progress")
+                .unwrap()
+                .map(|event| event.sequence),
+            Some(52),
+            "a non-durable kind is found only inside the bounded window"
+        );
+        let durable: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = 'run-1' AND durable_event_json IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(durable, 1, "only run.cancelled is exempt from pruning");
+        // Idempotent replay of the pruned receipt returns the durable payload.
+        assert_eq!(
+            store
+                .append_control_plane_event(
+                    &run,
+                    &request("cancel", "run.cancelled"),
+                    &digest(1),
+                    &digest(10_001),
+                )
+                .unwrap(),
+            cancelled
+        );
+    }
+
+    #[test]
+    fn durable_lookup_finds_a_receipt_an_older_binary_wrote_without_the_column() {
+        let (_directory, store, run) = fixture();
+        let cancelled = store
+            .append_control_plane_event(
+                &run,
+                &request("cancel", "run.cancelled"),
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .unwrap();
+        // An older binary inserts without populating the durable column.
+        store
+            .connection
+            .execute(
+                "UPDATE control_plane_event_appends SET durable_event_json = NULL",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .durable_control_plane_event(&run, "run.cancelled")
+                .unwrap(),
+            Some(cancelled)
+        );
+        assert_eq!(
+            store
+                .durable_control_plane_event(&run, "run.quarantined")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

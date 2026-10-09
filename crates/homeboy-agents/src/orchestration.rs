@@ -3911,9 +3911,10 @@ fn agent_task_admission_fence(
     action: ControlPlaneAction,
 ) -> homeboy_core::Result<ControlPlaneActionFence> {
     let reason = match run {
-        Some(run) => {
-            action_unavailability(&crate::agent_task_lifecycle::record_from_run(run)?, action)
-        }
+        Some(run) => action_unavailability(
+            &crate::agent_task_lifecycle::snapshot_from_run(run)?,
+            action,
+        ),
         None => Some("canonical control-plane resource not found".to_string()),
     };
     Ok(ControlPlaneActionFence {
