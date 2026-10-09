@@ -8649,7 +8649,119 @@ pub(crate) fn current_binary_sha256() -> Result<Option<String>> {
             Some("resolve current executable for daemon lease".to_string()),
         )
     })?;
-    sha256_file_optional(&exe)
+    sha256_file_optional_cached(&exe)
+}
+
+/// File identity that changes whenever the bytes at a path can have changed:
+/// replacing the file (a new inode) or writing it in place (size or mtime).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device_inode: (u64, u64),
+}
+
+impl FileIdentity {
+    fn of(path: &Path) -> std::io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device_inode: {
+                use std::os::unix::fs::MetadataExt;
+                (metadata.dev(), metadata.ino())
+            },
+        })
+    }
+}
+
+/// [`sha256_file_optional`], reusing the previous digest while the file's
+/// identity is unchanged. Lease validation runs on every daemon request and
+/// hashed the whole executable each time, which dominated request latency.
+fn sha256_file_optional_cached(path: &Path) -> Result<Option<String>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, (FileIdentity, String)>>> =
+        OnceLock::new();
+    let identity = match FileIdentity::of(path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return sha256_file_optional(path),
+    };
+    let cache = CACHE.get_or_init(Default::default);
+    let lock = || {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some((cached, digest)) = lock().get(path) {
+        if *cached == identity {
+            return Ok(Some(digest.clone()));
+        }
+    }
+    #[cfg(test)]
+    BINARY_DIGEST_COMPUTATIONS.with(|count| count.set(count.get() + 1));
+    let digest = sha256_file_optional(path)?;
+    // Only cache a digest whose file did not change while it was being read.
+    if let Some(digest) = &digest {
+        if FileIdentity::of(path).is_ok_and(|after| after == identity) {
+            lock().insert(path.to_path_buf(), (identity, digest.clone()));
+        }
+    }
+    Ok(digest)
+}
+
+#[cfg(test)]
+thread_local! {
+    static BINARY_DIGEST_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod cached_digest_tests {
+    use super::*;
+
+    fn computations() -> usize {
+        BINARY_DIGEST_COMPUTATIONS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn unchanged_file_is_hashed_once_and_any_change_is_rehashed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("homeboy");
+        fs::write(&path, b"first binary").unwrap();
+        let first = sha256_file_optional(&path).unwrap();
+
+        let before = computations();
+        for _ in 0..5 {
+            assert_eq!(sha256_file_optional_cached(&path).unwrap(), first);
+        }
+        assert_eq!(
+            computations() - before,
+            1,
+            "an unchanged binary is hashed once"
+        );
+
+        // An in-place rewrite of a different size invalidates the digest.
+        fs::write(&path, b"second binary, longer").unwrap();
+        assert_eq!(
+            sha256_file_optional_cached(&path).unwrap(),
+            sha256_file_optional(&path).unwrap()
+        );
+        assert_ne!(sha256_file_optional_cached(&path).unwrap(), first);
+
+        // Replacing the file with same-size bytes (an upgrade by rename)
+        // changes its identity and is rehashed too.
+        let replacement = dir.path().join("replacement");
+        fs::write(&replacement, b"third binary, longer!").unwrap();
+        let expected = sha256_file_optional(&replacement).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(sha256_file_optional_cached(&path).unwrap(), expected);
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(sha256_file_optional_cached(&path).unwrap(), None);
+    }
 }
 
 /// Hash a file, treating "does not exist" as absence rather than failure.

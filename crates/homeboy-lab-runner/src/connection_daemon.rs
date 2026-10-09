@@ -503,42 +503,13 @@ pub(super) fn daemon_lab_handoff_capabilities_from_body(
     })
 }
 
-pub(super) fn daemon_http_runtime_stale_paths_with_timeout(
+/// One `/version` observation. Version, identity, and runtime paths all come
+/// from the same body, so callers parse it once instead of re-requesting it.
+pub(super) fn daemon_http_version_body_with_timeout(
     local_url: &str,
     timeout: Duration,
-) -> std::result::Result<Vec<RunnerStaleRuntimePath>, String> {
-    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
-    Ok(daemon_runtime_stale_paths_from_body(&response.body))
-}
-
-pub(super) fn daemon_http_runtime_loaded_paths_with_timeout(
-    local_url: &str,
-    timeout: Duration,
-) -> std::result::Result<BTreeMap<String, String>, String> {
-    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
-    Ok(daemon_runtime_loaded_paths_from_body(&response.body))
-}
-
-pub(super) fn daemon_http_version_with_timeout(
-    local_url: &str,
-    timeout: Duration,
-) -> std::result::Result<String, String> {
-    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
-    daemon_version_from_body(&response.body)
-        .map(str::to_string)
-        .ok_or_else(|| "remote daemon version response did not include a version".to_string())
-}
-
-pub(super) fn daemon_http_identity_with_timeout(
-    local_url: &str,
-    timeout: Duration,
-) -> std::result::Result<String, String> {
-    let response = daemon_http_body_at_with_timeout(local_url, "version", timeout)?;
-    daemon_identity_from_body(&response.body)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            "remote daemon version response did not include a build identity".to_string()
-        })
+) -> std::result::Result<Value, String> {
+    daemon_http_body_at_with_timeout(local_url, "version", timeout).map(|response| response.body)
 }
 
 pub(super) fn daemon_http_freshness(
