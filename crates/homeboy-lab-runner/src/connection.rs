@@ -119,8 +119,9 @@ use connection_daemon::{
 };
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{
-    daemon_http_identity_with_timeout, daemon_http_runtime_loaded_paths_with_timeout,
-    daemon_http_runtime_stale_paths_with_timeout, daemon_http_version_with_timeout,
+    daemon_http_version_body_with_timeout, daemon_identity_from_body,
+    daemon_runtime_loaded_paths_from_body, daemon_runtime_stale_paths_from_body,
+    daemon_version_from_body,
 };
 
 #[path = "connection_stop_transport_recovery.rs"]
@@ -4276,44 +4277,32 @@ fn stale_daemon_warning_until(
     let current_version = current_identity.version.clone();
     let configured_job_binary_build_identity = current_identity.build_identity.clone();
     let controller_identity = crate::controller_identity::compatibility_controller_identity();
-    let observed_session_version = session
-        .local_url
-        .as_deref()
-        .and_then(|local_url| {
-            remaining_observation_budget(deadline)
-                .and_then(|timeout| daemon_http_version_with_timeout(local_url, timeout).ok())
-        })
+    let daemon_body = session.local_url.as_deref().and_then(|local_url| {
+        remaining_observation_budget(deadline)
+            .and_then(|timeout| daemon_http_version_body_with_timeout(local_url, timeout).ok())
+    });
+    let observed_session_version = daemon_body
+        .as_ref()
+        .and_then(daemon_version_from_body)
+        .map(str::to_string)
         .unwrap_or_else(|| session.homeboy_version.clone());
-    let daemon_identity = session
-        .local_url
-        .as_deref()
-        .and_then(|local_url| {
-            remaining_observation_budget(deadline)
-                .and_then(|timeout| daemon_http_identity_with_timeout(local_url, timeout).ok())
-        })
-        .filter(|identity| !identity.trim().is_empty());
+    let daemon_identity = daemon_body
+        .as_ref()
+        .and_then(daemon_identity_from_body)
+        .filter(|identity| !identity.trim().is_empty())
+        .map(str::to_string);
     let session_identity = daemon_identity.or_else(|| session.homeboy_build_identity.clone());
     let identity_comparison = compare_identities(
         session_identity.as_deref(),
         current_identity.build_identity.as_deref(),
     );
-    let stale_runtime_paths = session
-        .local_url
-        .as_deref()
-        .and_then(|local_url| {
-            remaining_observation_budget(deadline).and_then(|timeout| {
-                daemon_http_runtime_stale_paths_with_timeout(local_url, timeout).ok()
-            })
-        })
+    let stale_runtime_paths = daemon_body
+        .as_ref()
+        .map(daemon_runtime_stale_paths_from_body)
         .unwrap_or_default();
-    let changed_runtime_paths = session
-        .local_url
-        .as_deref()
-        .and_then(|local_url| {
-            remaining_observation_budget(deadline).and_then(|timeout| {
-                daemon_http_runtime_loaded_paths_with_timeout(local_url, timeout).ok()
-            })
-        })
+    let changed_runtime_paths = daemon_body
+        .as_ref()
+        .map(daemon_runtime_loaded_paths_from_body)
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
     let daemon_matches_configured = daemon_runtime_is_current(
