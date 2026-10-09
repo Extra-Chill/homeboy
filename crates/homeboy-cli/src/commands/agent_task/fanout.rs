@@ -2696,7 +2696,7 @@ fn cook_batch_argv_with_placement(
         "fanout".to_string(),
         "cook-batch".to_string(),
         "--repo".to_string(),
-        args.component.clone().unwrap_or_else(|| args.repo.clone()),
+        args.repo.clone(),
         "--branch-prefix".to_string(),
         args.branch_prefix.clone(),
         "--private-gate-reveal".to_string(),
@@ -3170,13 +3170,44 @@ fn static_worktrees_dry_run(
 ) -> Result<worktree::WorktreeQueueCreateOutput> {
     #[cfg(test)]
     STATIC_WORKTREE_PROJECTIONS.with(|count| count.set(count.get() + 1));
+    // Execution reuses a valid registered child destination before asking the
+    // native creator to plan a new one. Keep that same branch in preview so an
+    // already-owned worktree is not mislabeled as a creation collision.
+    let mut rows_by_branch = BTreeMap::new();
+    let missing = plan
+        .cooks
+        .iter()
+        .filter(|cook| {
+            if let Some(path) = active_registered_worktree_path(&cook.to_worktree) {
+                rows_by_branch.insert(
+                    cook.head.clone().expect("generated cooks have heads"),
+                    worktree::WorktreeQueueCreateRow {
+                        branch: cook.head.clone().expect("generated cooks have heads"),
+                        handle: cook.to_worktree.clone(),
+                        status: worktree::WorktreeQueueCreateStatus::WouldCreate,
+                        command: worktree_create_command(
+                            args,
+                            cook.head.as_deref().expect("head exists"),
+                        ),
+                        retry_after_seconds: None,
+                        active_lock_holder: None,
+                        path: Some(path),
+                        error: None,
+                        failure: None,
+                    },
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
     let mut output = worktree::queue_create(worktree::WorktreeQueueCreateOptions {
         // This is the same selector `worktree create` resolves. Resolving the
         // canonical repository alone can be ambiguous when nested checkouts
         // declare the same component id.
-        repo: args.component.clone().unwrap_or_else(|| args.repo.clone()),
-        requests: plan
-            .cooks
+        repo: args.repo.clone(),
+        requests: missing
             .iter()
             .map(|cook| worktree::WorktreeQueueCreateRequest {
                 branch: cook.head.clone().expect("generated cooks have heads"),
@@ -3190,7 +3221,7 @@ fn static_worktrees_dry_run(
         dry_run: true,
         retry_after_seconds: 30,
     })?;
-    for row in &mut output.rows {
+    for mut row in output.rows.drain(..) {
         if let Some(cook) = plan
             .cooks
             .iter()
@@ -3198,7 +3229,17 @@ fn static_worktrees_dry_run(
         {
             row.handle.clone_from(&cook.to_worktree);
         }
+        rows_by_branch.insert(row.branch.clone(), row);
     }
+    output.rows = plan
+        .cooks
+        .iter()
+        .filter_map(|cook| {
+            cook.head
+                .as_ref()
+                .and_then(|branch| rows_by_branch.remove(branch))
+        })
+        .collect();
     output.repo.clone_from(&args.repo);
     Ok(output)
 }
@@ -5374,7 +5415,7 @@ fn worktree_create_command(args: &AgentTaskFanoutCookBatchArgs, branch: &str) ->
     vec![
         "worktree".to_string(),
         "create".to_string(),
-        args.component.clone().unwrap_or_else(|| args.repo.clone()),
+        args.repo.clone(),
         "--branch".to_string(),
         branch.to_string(),
         "--from".to_string(),
@@ -7933,6 +7974,21 @@ fi
                 .cooks
                 .iter()
                 .all(|cook| cook.to_worktree.starts_with("blocks-engine@")));
+
+            let worktrees = static_worktrees_dry_run(&batch_args, &plan)
+                .expect("preview resolves native child worktree inputs");
+            assert!(
+                worktrees.rows.iter().all(|row| {
+                    row.status == worktree::WorktreeQueueCreateStatus::Failed
+                        && row
+                            .failure
+                            .as_ref()
+                            .is_some_and(|failure| failure.phase == "worktree_preflight")
+                        && row.error.as_deref() == Some("Component not found")
+                }),
+                "{:#?}",
+                worktrees.rows
+            );
 
             let replayed = BatchCookFanoutPlan::from_value(
                 serde_json::to_value(&plan).expect("serialize fanout plan"),
