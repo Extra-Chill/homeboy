@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.19] - 2026-10-10
+
+### Changed
+- publish the runtime-A pin into the managed store, as current controllers do
+- delete legacy lifecycle record and loop migrations
+- delete generation registry compatibility code
+- squash schema migrations into a single baseline
+
 ## [0.417.18] - 2026-10-10
 
 ### Changed
