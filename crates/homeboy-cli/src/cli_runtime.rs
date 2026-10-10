@@ -7819,12 +7819,27 @@ mod tests {
                 "{:x}",
                 Sha256::digest(std::fs::read(&runtime_a).expect("read runtime-A fixture"))
             );
+            // Current controllers publish every pin into the managed runtime
+            // store at `<identity>-<digest>/homeboy`; a pin outside that store
+            // is legacy data and is no longer relocated (#15742).
+            let pinned_runtime_a = homeboy_core::paths::controller_runtimes_store()
+                .expect("controller runtime store")
+                .join(format!(
+                    "{}-{digest}",
+                    homeboy_core::paths::sanitize_path_segment(identity)
+                ))
+                .join("homeboy");
+            std::fs::create_dir_all(pinned_runtime_a.parent().expect("pin directory"))
+                .expect("create managed pin directory");
+            std::fs::copy(&runtime_a, &pinned_runtime_a).expect("publish runtime-A pin");
+            std::fs::set_permissions(&pinned_runtime_a, std::fs::Permissions::from_mode(0o700))
+                .expect("make runtime-A pin executable");
             crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.state = crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded;
                 record.metadata["controller_runtime"] = serde_json::json!({
                     "originating": {
                         "build_identity": identity,
-                        "pinned_executable": runtime_a,
+                        "pinned_executable": pinned_runtime_a,
                         "sha256": digest,
                     }
                 });
@@ -7879,10 +7894,11 @@ mod tests {
                 .expect("validate runtime-A pin")
                 .expect("select runtime-A pin");
             assert!(pinned.is_file());
-            assert_ne!(
-                pinned, runtime_a,
-                "runtime A must execute from its immutable pin"
+            assert_eq!(
+                pinned, pinned_runtime_a,
+                "runtime A must execute from its immutable pin in the managed store"
             );
+            assert_ne!(pinned, runtime_a);
         });
     }
 
