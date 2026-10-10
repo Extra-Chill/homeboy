@@ -10,8 +10,6 @@ pub(crate) mod schemas {
 }
 
 pub const AGENT_TASK_RECORD_HEALTH_SCHEMA: &str = "homeboy/agent-task-record-health/v1";
-pub const AGENT_TASK_RECORD_RECONCILIATION_SCHEMA: &str =
-    "homeboy/agent-task-record-reconciliation/v1";
 pub const AGENT_TASK_LAB_RUNTIME_RECOVERY_SCHEMA: &str =
     "homeboy/agent-task-lab-runtime-recovery/v1";
 
@@ -47,7 +45,6 @@ pub(crate) enum LocalOwnerLiveness {
 pub enum AgentTaskRecordHealthReason {
     MissingMetadata,
     MalformedMetadata,
-    LegacySchema,
     ConflictingProjections,
     FixtureRunnerProvenance,
 }
@@ -65,7 +62,6 @@ pub struct AgentTaskRecordHealthSummary {
     pub schema: String,
     pub healthy: usize,
     pub malformed: usize,
-    pub legacy: usize,
     pub conflicting: usize,
     pub fixture: usize,
     pub quarantined: usize,
@@ -82,24 +78,6 @@ impl AgentTaskRecordHealthSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskRecordReconciliationItem {
-    pub run_id: String,
-    pub reason: AgentTaskRecordHealthReason,
-    pub action: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskRecordReconciliationReport {
-    pub schema: String,
-    pub dry_run: bool,
-    pub considered: usize,
-    pub migrated: usize,
-    pub quarantined: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub records: Vec<AgentTaskRecordReconciliationItem>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunRecord {
     pub schema: String,
@@ -111,8 +89,8 @@ pub struct AgentTaskRunRecord {
     /// Every committed write sets it to the stored revision plus one, whatever
     /// the caller supplied, and [`AgentTaskLifecycleStore::transition`] commits
     /// only while the stored revision still equals the caller's expected one.
-    /// Snapshots written before the field existed, or by an older binary that
-    /// drops it, read as `0` (#15718).
+    /// `0` means "never committed": an in-memory record that has not been
+    /// written yet omits the field, and every stored record carries it (#15718).
     ///
     /// [`AgentTaskLifecycleStore::transition`]: super::AgentTaskLifecycleStore::transition
     #[serde(default, skip_serializing_if = "is_zero_revision")]

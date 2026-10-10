@@ -3,10 +3,9 @@ use crate::agent_task::AgentTaskEvidenceRef;
 use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionEligibilityReport,
-    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
-    ControlPlaneOwner, ControlPlaneRun, ControlPlaneRunState, RunId,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneOwner, ControlPlaneRun,
+    RunId, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{
     register_control_plane_action_delegate as register_core_action_delegate,
@@ -165,15 +164,9 @@ pub fn loop_status_read_with(
                     .to_string();
         }
     }
-    let stored = match stored_run(&run_id) {
-        Ok(resource) => resource,
-        Err(error)
-            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
-        {
-            legacy_loop_resource(&run_id, &report.controller)?
-        }
-        Err(error) => return Err(Error::internal_unexpected(error.message)),
-    };
+    // Every controller write publishes its control-plane identity. A persisted
+    // controller without one is not synthesized from the file (#15742).
+    let stored = stored_run(&run_id).map_err(|error| Error::internal_unexpected(error.message))?;
     let mut resource = project_loop_read(&report.controller, stored);
     if !loop_runtime_metadata(&report.controller.metadata)["on"]
         .as_bool()
@@ -242,70 +235,6 @@ pub fn controller_file_exists(loop_id: &str) -> Result<bool> {
     Ok(controller_path(loop_id)?.exists())
 }
 
-/// Publish a missing control-plane identity for a persisted controller. Status
-/// reads do not call this; stop and resume do, because they are the mutating
-/// operations that require the durable action identity.
-pub fn migrate_loop_control_plane_identity(loop_id: &str) -> Result<()> {
-    migrate_loop_control_plane_identity_with(loop_id, homeboy_core::control_plane::run_stored)
-}
-
-pub fn migrate_loop_control_plane_identity_with(
-    loop_id: &str,
-    stored_run: impl FnOnce(
-        &RunId,
-    ) -> std::result::Result<
-        ControlPlaneRun,
-        homeboy_control_plane_contract::ControlPlaneError,
-    >,
-) -> Result<()> {
-    if !controller_file_exists(loop_id)? {
-        return Ok(());
-    }
-    let record = load_controller(loop_id)?;
-    let run_id = control_plane_run_id(&record.loop_id)?;
-    match stored_run(&run_id) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
-        {
-            publish_control_plane_loop(&record)
-        }
-        Err(error) => Err(Error::internal_unexpected(error.message)),
-    }
-}
-
-fn legacy_loop_resource(
-    run_id: &RunId,
-    record: &AgentTaskLoopControllerRecord,
-) -> Result<ControlPlaneRun> {
-    let status = loop_observation_status(record.state);
-    let mut resource = ControlPlaneRun::new(run_id.clone());
-    resource.state = loop_resource_state(status);
-    if !record.phase.is_empty() {
-        resource.phase = Some(record.phase.clone());
-    }
-    resource.created_at = record.created_at.clone();
-    resource.finished_at = (status != "running").then(|| record.updated_at.clone());
-    resource.updated_at = resource
-        .finished_at
-        .clone()
-        .or_else(|| Some(record.created_at.clone()));
-    let actions = serde_json::from_value(loop_control_plane_actions(
-        status,
-        runtime_is_off(&record.metadata),
-    ))
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("loop control-plane action eligibility".to_string()),
-        )
-    })?;
-    let mut eligibility = ControlPlaneActionEligibilityReport::new(run_id.clone());
-    eligibility.actions = actions;
-    resource.action_eligibility = Some(eligibility);
-    Ok(resource)
-}
-
 fn project_loop_read(
     record: &AgentTaskLoopControllerRecord,
     mut resource: ControlPlaneRun,
@@ -325,17 +254,6 @@ fn loop_observation_status(state: AgentTaskLoopControllerState) -> &'static str 
         AgentTaskLoopControllerState::Completed => "pass",
         AgentTaskLoopControllerState::Failed | AgentTaskLoopControllerState::Escalated => "fail",
         AgentTaskLoopControllerState::Abandoned => "cancelled",
-    }
-}
-
-fn loop_resource_state(status: &str) -> ControlPlaneRunState {
-    match status {
-        "running" => ControlPlaneRunState::Running,
-        "pass" => ControlPlaneRunState::Succeeded,
-        "fail" | "error" => ControlPlaneRunState::Failed,
-        "cancelled" => ControlPlaneRunState::Cancelled,
-        "skipped" => ControlPlaneRunState::Skipped,
-        _ => ControlPlaneRunState::Unknown,
     }
 }
 

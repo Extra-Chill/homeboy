@@ -20,10 +20,10 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, LogsArgs, MigrateEventHistoryArgs, PlacementUpdateArgs, PromoteArgs,
-    QuarantineArgs, RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
-    ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
+    LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
+    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
+    RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -138,15 +138,10 @@ pub enum AgentTaskCommand {
     /// provider state. Success leaves every selected durable record reconciled
     /// to that state.
     Reconcile(ReconcileArgs),
-    /// Reconcile stored durable run records against authoritative provider state.
-    ReconcileRecords(ReconcileRecordsArgs),
     /// Show the latest durable run.
     Latest(LatestArgs),
     /// Read the canonical durable event stream for a run.
     Logs(LogsArgs),
-    /// Persist recoverable historical progress onto the canonical ledger for one
-    /// exact run without reconciling provider or lifecycle state.
-    MigrateEventHistory(MigrateEventHistoryArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(LifecycleReadArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
@@ -585,12 +580,6 @@ pub struct ReconcileArgs {
     pub idempotency_key: Option<String>,
 }
 #[derive(Args, Debug)]
-pub struct ReconcileRecordsArgs {
-    /// Preview record reconciliation without persisting changes.
-    #[arg(long = "dry-run")]
-    pub dry_run: bool,
-}
-#[derive(Args, Debug)]
 pub struct LatestArgs {
     /// Number of newest durable runs to inspect before selecting the latest.
     #[arg(long = "limit", value_name = "N")]
@@ -811,28 +800,5 @@ mod tests {
             "{help}"
         );
         assert!(!help.contains("--verify 'cargo test'"), "{help}");
-    }
-
-    #[test]
-    fn migrate_event_history_parses_an_exact_run_id() {
-        use clap::Parser;
-
-        use crate::cli_surface::{Cli, Commands};
-        use crate::commands::agent_task::AgentTaskCommand;
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "migrate-event-history",
-            "run-historical",
-        ])
-        .expect("migrate-event-history parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::MigrateEventHistory(args) = agent_task.command else {
-            panic!("expected migrate-event-history command");
-        };
-        assert_eq!(args.run_id, "run-historical");
     }
 }

@@ -1714,7 +1714,7 @@ mod tests {
                 "visibility": "visible",
                 "reveal_policy": "full_evidence",
                 "status": "succeeded",
-                "command": ["sh", "-lc", command],
+                "command": ["sh", "-c", command],
                 "exit_code": 0,
                 "stdout": "test result: FAILED. 175 passed; 2 failed; 0 ignored",
                 "candidate_checkout": {

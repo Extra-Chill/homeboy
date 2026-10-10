@@ -2941,10 +2941,10 @@ fn cancel_run_signals_live_running_record() {
         .expect("submitted");
     // Drop the stub admission before marking running (#12721).
     //
-    // `mark_running_in_store` migrates the pin before it validates it, and
-    // migration skips only when the key is ABSENT -- an empty object is
-    // present, so `migrate_legacy_pin_unlocked` demands
-    // `/originating/build_identity` and fails closed. That contract is
+    // `mark_running_in_store` validates the pin before it mutates, and
+    // validation skips only when the key is ABSENT -- an empty object is
+    // present, so `validate_pin` demands `/originating/pinned_executable`
+    // and fails closed. That contract is
     // correct: `{}` is malformed durable metadata and refusing to mutate on
     // it is the point. What is wrong is persisting `{}` in the first place.
     //
@@ -3020,54 +3020,38 @@ fn cancel_run_signals_live_running_record() {
 }
 
 #[test]
-fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
+fn record_health_reports_older_schema_as_malformed_and_conflicting_projections() {
     with_isolated_home(|_| {
-        submit_plan(&test_plan(), Some("legacy-record")).expect("submitted");
-        // #11446 made the typed writer reject unsupported schemas, which is the
-        // point of the guard but also blocks planting the very legacy record
-        // this test migrates. Use the raw injector built for that.
+        submit_plan(&test_plan(), Some("older-schema-record")).expect("submitted");
+        // #11446 made the typed writer reject unsupported schemas. Use the raw
+        // injector to plant a record in an older shape.
         crate::agent_task_lifecycle::inject_raw_record_metadata_for_corruption_test(
-            "legacy-record",
+            "older-schema-record",
             |value| {
                 value["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
             },
         )
-        .expect("legacy stored");
-        let legacy = reconcile_record_health_in_store(&test_lifecycle_store(), false)
-            .expect("legacy migrated");
-        assert_eq!(legacy.migrated, 1);
-        let legacy_record = reconcile_status("legacy-record").expect("legacy loaded");
-        assert_eq!(legacy_record.schema, schemas::RUN);
-        assert!(legacy_record
-            .metadata
-            .get("lifecycle_reconstruction")
-            .is_some());
+        .expect("older schema stored");
+        // Older record shapes are not migrated: they are reported and excluded
+        // from typed reads (#15742).
+        let health =
+            record_health_summary_in_store(&test_lifecycle_store()).expect("older schema health");
+        assert_eq!(health.malformed, 1);
+        assert_eq!(
+            health.samples[0].reason,
+            AgentTaskRecordHealthReason::MalformedMetadata
+        );
 
         submit_plan(&test_plan(), Some("conflicting-record")).expect("submitted");
         rewrite_record_for_test("conflicting-record", |record| {
             record.lifecycle.execution.state = RunExecutionState::Succeeded;
         })
         .expect("conflict stored");
-        let dry_run = reconcile_record_health_in_store(&test_lifecycle_store(), true)
-            .expect("conflict dry run");
-        assert_eq!(
-            dry_run.records[0].reason,
-            AgentTaskRecordHealthReason::ConflictingProjections
-        );
-        assert_eq!(dry_run.records[0].action, "would-quarantine");
-        let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
-            .expect("conflict quarantined");
-        assert_eq!(applied.quarantined, 1);
         let health =
-            record_health_summary_in_store(&test_lifecycle_store()).expect("quarantine health");
+            record_health_summary_in_store(&test_lifecycle_store()).expect("conflict health");
+        assert_eq!(health.malformed, 1);
         assert_eq!(health.conflicting, 1);
-        assert_eq!(health.quarantined, 1);
-        assert_eq!(
-            reconcile_record_health_in_store(&test_lifecycle_store(), false)
-                .expect("repeat no-op")
-                .considered,
-            0
-        );
+        assert_eq!(health.quarantined, 0);
     });
 }
 
@@ -3110,11 +3094,8 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
         let health =
             record_health_summary_in_store(&test_lifecycle_store()).expect("health report");
         assert_eq!(health.malformed, 1);
-        let report = reconcile_record_health_in_store(&test_lifecycle_store(), false)
-            .expect("quarantine malformed state");
-        assert_eq!(report.quarantined, 1);
         assert_eq!(
-            report.records[0].reason,
+            health.samples[0].reason,
             AgentTaskRecordHealthReason::MalformedMetadata
         );
     });

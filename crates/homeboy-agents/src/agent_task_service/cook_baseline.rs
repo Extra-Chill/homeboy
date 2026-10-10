@@ -1022,14 +1022,6 @@ mod tests {
                 AgentTaskGateDifferentialResult::Inconclusive,
                 false,
             ),
-            (
-                "historical-shell-contract",
-                "printf 'same\\n' >&2; exit 1",
-                "same\n",
-                std::time::Duration::from_secs(1),
-                AgentTaskGateDifferentialResult::Inconclusive,
-                false,
-            ),
         ] {
             let temp = tempfile::tempdir().expect("repository");
             git_output(temp.path(), &["init", "-b", "main"]).expect("init");
@@ -1054,11 +1046,7 @@ mod tests {
                 .expect("promotion");
             let mut gate = crate::agent_task_gate::AgentTaskGateReport::new(
                 name,
-                if name == "historical-shell-contract" {
-                    vec!["sh".to_string(), "-lc".to_string(), command.to_string()]
-                } else {
-                    crate::agent_task_gate::legacy_gate_argv(command)
-                },
+                crate::agent_task_gate::legacy_gate_argv(command),
                 1,
                 "",
                 candidate_output,

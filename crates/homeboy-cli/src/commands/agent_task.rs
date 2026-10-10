@@ -45,11 +45,11 @@ pub use args::{
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs,
     DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
-    MigrateEventHistoryArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs,
-    ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs,
-    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
-    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
-    ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
+    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
+    RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyGateArgs,
+    VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -380,13 +380,11 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
         }
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
-        AgentTaskCommand::ReconcileRecords(args) => status::reconcile_records(args.dry_run),
         AgentTaskCommand::Latest(latest_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::Latest,
             latest_args.into(),
         ),
         AgentTaskCommand::Logs(status_args) => status::logs(status_args),
-        AgentTaskCommand::MigrateEventHistory(args) => status::migrate_event_history(args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),

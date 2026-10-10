@@ -950,7 +950,8 @@ pub enum AgentTaskGateTermination {
 pub enum AgentTaskGateInvocation {
     LegacyShell {
         command: String,
-        #[serde(default, skip_serializing_if = "LegacyGateShell::is_historical")]
+        /// Always serialized and required: an invocation without it is an
+        /// older record shape and fails to load (#15742).
         shell: LegacyGateShell,
     },
     DeclaredTest {
@@ -958,23 +959,17 @@ pub enum AgentTaskGateInvocation {
     },
 }
 
-/// Missing mode means the historical login-shell contract, never today's default.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Shell mode of a legacy gate program. Only the non-login, noninteractive
+/// contract exists; the historical `sh -lc` login mode is not replayed (#15742).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LegacyGateShell {
-    #[default]
-    HistoricalLogin,
     NonInteractive,
 }
 
 impl LegacyGateShell {
-    fn is_historical(&self) -> bool {
-        *self == Self::HistoricalLogin
-    }
-
     fn flag(self) -> &'static str {
         match self {
-            Self::HistoricalLogin => "-lc",
             Self::NonInteractive => "-c",
         }
     }
@@ -992,14 +987,10 @@ pub fn legacy_gate_argv(command: &str) -> Vec<String> {
 
 fn recorded_legacy_gate_invocation(argv: &[String]) -> Option<AgentTaskGateInvocation> {
     match argv {
-        [shell, flag, command] if shell == "sh" && (flag == "-lc" || flag == "-c") => {
+        [shell, flag, command] if shell == "sh" && flag == "-c" => {
             Some(AgentTaskGateInvocation::LegacyShell {
                 command: command.clone(),
-                shell: if flag == "-lc" {
-                    LegacyGateShell::HistoricalLogin
-                } else {
-                    LegacyGateShell::NonInteractive
-                },
+                shell: LegacyGateShell::NonInteractive,
             })
         }
         _ => None,
@@ -1325,7 +1316,7 @@ impl AgentTaskGateReport {
         recorded_legacy_gate_invocation(&self.command).ok_or_else(|| {
             Error::validation_invalid_argument(
                 "gate.command",
-                "legacy gate reports must contain a concrete `sh -lc` or `sh -c` invocation",
+                "legacy gate reports must contain a concrete `sh -c` invocation",
                 Some(self.id.clone()),
                 None,
             )
@@ -6031,30 +6022,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_shell_invocation_keeps_the_historical_gate_command_digest() {
+    fn legacy_shell_invocation_digest_is_the_noninteractive_argv_and_shell_is_required() {
         let command = "cargo test --locked".to_string();
-        let invocation = AgentTaskGateInvocation::LegacyShell {
-            command: command.clone(),
-            shell: LegacyGateShell::HistoricalLogin,
-        };
-        assert_eq!(
-            invocation.identity_digest().unwrap(),
-            homeboy_engine_primitives::content_hash::nul_separated_digest([
-                "sh",
-                "-lc",
-                command.as_str(),
-            ])
-        );
-        let historical: AgentTaskGateInvocation = serde_json::from_value(serde_json::json!({
-            "kind": "legacy_shell", "command": command
-        }))
-        .unwrap();
-        assert_eq!(historical, invocation);
         let fresh = recorded_legacy_gate_invocation(&legacy_gate_argv(&command)).unwrap();
-        assert_ne!(
-            fresh.identity_digest().unwrap(),
-            historical.identity_digest().unwrap()
-        );
         assert_eq!(
             fresh.identity_digest().unwrap(),
             homeboy_engine_primitives::content_hash::nul_separated_digest([
@@ -6063,6 +6033,23 @@ mod tests {
                 command.as_str(),
             ])
         );
+        assert_eq!(
+            serde_json::to_value(&fresh).unwrap()["shell"],
+            serde_json::json!("non_interactive")
+        );
+        // An invocation without an explicit shell is an older record shape.
+        assert!(
+            serde_json::from_value::<AgentTaskGateInvocation>(serde_json::json!({
+                "kind": "legacy_shell", "command": command
+            }))
+            .is_err()
+        );
+        assert!(recorded_legacy_gate_invocation(&[
+            "sh".to_string(),
+            "-lc".to_string(),
+            command.clone(),
+        ])
+        .is_none());
     }
 
     #[cfg(unix)]
@@ -6096,26 +6083,6 @@ mod tests {
                 serde_json::from_value(serde_json::to_value(&report).unwrap()).unwrap();
             assert_eq!(recorded.command, argv);
         }
-        // A pre-invocation report is historical evidence, not a fresh program.
-        let mut value = serde_json::to_value(AgentTaskGateReport::new(
-            "historical",
-            vec!["sh".to_string(), "-lc".to_string(), "false".to_string()],
-            1,
-            "",
-            "",
-            None,
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-            AgentTaskGateEnvironment::default(),
-        ))
-        .unwrap();
-        value.as_object_mut().unwrap().remove("invocation");
-        let historical: AgentTaskGateReport = serde_json::from_value(value).unwrap();
-        assert_eq!(historical.command, ["sh", "-lc", "false"]);
-        assert_eq!(
-            historical.invocation().unwrap().identity_digest().unwrap(),
-            homeboy_engine_primitives::content_hash::nul_separated_digest(["sh", "-lc", "false"])
-        );
     }
 
     #[cfg(target_os = "macos")]

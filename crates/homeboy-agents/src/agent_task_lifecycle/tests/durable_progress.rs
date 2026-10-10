@@ -10,13 +10,10 @@ use homeboy_control_plane_contract::{
     ControlPlaneErrorClass, ControlPlaneEventAppendRequest, ControlPlaneEventSource, RunId,
     CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
 };
-use homeboy_core::api_jobs::Job;
 
-fn persist_unmarked_record(store: &AgentTaskLifecycleStore, record: &AgentTaskRunRecord) {
-    let mut record = record.clone();
-    if let Some(metadata) = record.metadata.as_object_mut() {
-        metadata.remove(super::super::durable_progress::DURABLE_EVENT_HISTORY_METADATA_KEY);
-    }
+/// Persist a snapshot directly, bypassing the owning writer so no progress
+/// events are minted for it.
+fn persist_record_without_writer(store: &AgentTaskLifecycleStore, record: &AgentTaskRunRecord) {
     store
         .open_observation_initialized()
         .expect("observation")
@@ -710,8 +707,8 @@ fn seed_historical_fixture(store: &AgentTaskLifecycleStore, run_id: &str) -> Age
             "result": { "outcome": "succeeded" }
         }
     ]);
-    persist_unmarked_record(store, &record);
-    let record = store.read_record(run_id).expect("unmarked record");
+    persist_record_without_writer(store, &record);
+    let record = store.read_record(run_id).expect("persisted record");
     append_ledger_event(
         store,
         &record,
@@ -968,159 +965,4 @@ fn interrupted_canonical_accepted_does_not_synthesize_a_terminal() {
         .map(|event| event.kind)
         .collect();
     assert_eq!(actions, ["action.accepted"]);
-}
-
-struct ProviderMustNotRun;
-
-impl RunnerContinuationProvider for ProviderMustNotRun {
-    fn runner_job_log_snapshot(
-        &self,
-        _runner_id: &str,
-        _job_id: &str,
-    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
-        panic!("history migration must not invoke the runner provider");
-    }
-
-    fn is_runner_connected(&self, _runner_id: &str) -> bool {
-        panic!("history migration must not invoke the runner provider");
-    }
-
-    fn run_continuation_exec(
-        &self,
-        _runner_id: &str,
-        _cwd: &str,
-        _command: &[String],
-        _run_id: &str,
-    ) -> Result<i32> {
-        panic!("history migration must not invoke the runner provider");
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
-    ) -> Result<Job> {
-        panic!("history migration must not invoke the runner provider");
-    }
-}
-
-fn seed_historical_terminal_fixture(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> AgentTaskRunRecord {
-    let mut record = seed_historical_fixture(store, run_id);
-    set_run_state(&mut record, AgentTaskRunState::Succeeded);
-    record.artifact_refs = vec![AgentTaskArtifactRef {
-        task_id: "task-a".to_string(),
-        kind: "patch".to_string(),
-        uri: "file:///tmp/historical.patch".to_string(),
-        role: Some("review".to_string()),
-        label: Some("historical patch".to_string()),
-        semantic_key: None,
-        size_bytes: Some(32),
-    }];
-    persist_unmarked_record(store, &record);
-    store
-        .read_record(run_id)
-        .expect("terminal historical record")
-}
-
-#[test]
-fn explicit_history_migration_backfills_terminal_run_without_provider_or_state_change() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
-    let _provider = RunnerContinuationTestGuard::install(Box::new(ProviderMustNotRun));
-    let run_id = "explicit-history-migration";
-    let before = seed_historical_terminal_fixture(&lifecycle_store, run_id);
-    assert_eq!(before.state, AgentTaskRunState::Succeeded);
-    assert!(!super::super::durable_progress::has_durable_event_history(
-        &before
-    ));
-
-    let pre_logs = logs_in_store(&lifecycle_store, run_id).expect("pre-migration logs");
-    let pre_events = durable_events(&lifecycle_store, run_id);
-    assert_eq!(pre_logs.events, pre_events);
-    assert!(
-        !pre_events
-            .iter()
-            .any(|event| event.data["state"] == "running"),
-        "reads must not migrate provider progress"
-    );
-    assert_eq!(
-        durable_events(&lifecycle_store, run_id).len(),
-        pre_events.len(),
-        "reads must not mint ledger events"
-    );
-
-    let first = migrate_durable_event_history_in_store(&lifecycle_store, run_id)
-        .expect("first explicit migration");
-    assert_eq!(first.state, AgentTaskRunState::Succeeded);
-    assert_eq!(
-        first.durable_event_history,
-        crate::orchestration::EVENT_STREAM_DURABLE_PROGRESS
-    );
-    let after = lifecycle_store
-        .read_record(run_id)
-        .expect("migrated record");
-    assert_eq!(after.state, before.state);
-    assert_eq!(after.workspace_owner_lease, before.workspace_owner_lease);
-    assert_eq!(after.workspace_claim, before.workspace_claim);
-    assert_eq!(after.artifact_refs, before.artifact_refs);
-    assert_eq!(
-        after.metadata["provider_executions"],
-        before.metadata["provider_executions"]
-    );
-    assert_eq!(
-        after.metadata["cook_operation_claims"],
-        before.metadata["cook_operation_claims"]
-    );
-    assert!(super::super::durable_progress::has_durable_event_history(
-        &after
-    ));
-
-    let first_events = durable_events(&lifecycle_store, run_id);
-    let logs = logs_in_store(&lifecycle_store, run_id).expect("migrated logs");
-    assert_eq!(logs.events, first_events);
-    assert!(first_events
-        .iter()
-        .any(|event| event.data["state"] == "queued"));
-    assert!(first_events.iter().any(|event| event.data["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("provider execution running"))));
-    assert!(first_events
-        .iter()
-        .any(|event| event.kind == "run.progress" && event.data["message"] == "external note"));
-    assert!(first_events.iter().any(|event| {
-        event.kind == "action.accepted" && event.data.get("acknowledgement").is_none()
-    }));
-    assert!(first_events
-        .iter()
-        .any(|event| event.kind == "action.succeeded"
-            && event.data["acknowledgement"] == "receipted"));
-    assert!(
-        !first_events
-            .iter()
-            .any(|event| event.data.get("backend").is_some()
-                || event.data.get("started_at").is_some()),
-        "event payloads do not recover provider backend/started_at strings"
-    );
-    assert_eq!(
-        after.metadata["provider_executions"][0]["backend"],
-        "opencode"
-    );
-    assert_eq!(
-        after.metadata["provider_executions"][0]["started_at"],
-        "2026-07-24T00:00:00Z"
-    );
-    let artifacts =
-        artifacts_in_store(&lifecycle_store, run_id).expect("artifacts remain readable");
-    assert_eq!(artifacts.run_id, run_id);
-    assert_eq!(after.artifact_refs[0].uri, "file:///tmp/historical.patch");
-
-    let second = migrate_durable_event_history_in_store(&lifecycle_store, run_id)
-        .expect("second explicit migration");
-    assert_eq!(second, first);
-    assert_eq!(durable_events(&lifecycle_store, run_id), first_events);
-    let logs = logs_in_store(&lifecycle_store, run_id).expect("replay logs");
-    assert_eq!(logs.events, first_events);
 }

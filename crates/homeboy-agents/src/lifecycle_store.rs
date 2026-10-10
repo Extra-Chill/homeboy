@@ -2228,7 +2228,6 @@ pub(super) fn write_record_guarded(
             )?,
         );
     }
-    super::durable_progress::stamp_durable_event_history(&mut record);
     let stored_snapshot = guard.is_none().then(|| existing_metadata.clone());
     let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);

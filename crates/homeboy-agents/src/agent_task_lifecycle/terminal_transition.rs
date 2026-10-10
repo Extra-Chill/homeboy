@@ -250,5 +250,5 @@ impl From<AgentTaskTransitionError> for Error {
 
 /// Bounded re-read attempts for transitions whose decision is re-evaluated
 /// against each fresh read. Each attempt holds the config lock, so a conflict
-/// means a writer outside it (another store or an older binary) committed.
+/// means a writer outside it (another store) committed.
 pub(crate) const TRANSITION_RETRY_ATTEMPTS: usize = 3;
