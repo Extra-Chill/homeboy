@@ -1656,8 +1656,8 @@ fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates
         "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
         "changed_files": ["src/lib.rs"],
         "deterministic_gates": [
-            { "id": "test", "status": "succeeded", "command": ["sh", "-lc", "cargo test"], "exit_code": 0, "candidate_checkout": candidate },
-            { "id": "package", "status": "succeeded", "command": ["sh", "-lc", "cargo package"], "exit_code": 0, "candidate_checkout": candidate }
+            { "id": "test", "status": "succeeded", "command": ["sh", "-c", "cargo test"], "exit_code": 0, "candidate_checkout": candidate },
+            { "id": "package", "status": "succeeded", "command": ["sh", "-c", "cargo package"], "exit_code": 0, "candidate_checkout": candidate }
         ],
         "gate_results": [],
         "verified_base": { "base": "main", "sha": "verified-base" },

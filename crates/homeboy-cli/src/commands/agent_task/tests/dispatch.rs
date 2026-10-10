@@ -2981,7 +2981,7 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
             ["page-z", "page-a"]
         );
         assert_eq!(first["record_health"]["healthy"], 2);
-        assert_eq!(first["record_health"]["legacy"], 0);
+        assert_eq!(first["record_health"]["malformed"], 0);
         assert_eq!(first["next_cursor"], Value::Null);
     });
 }
@@ -3026,7 +3026,7 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
         ]);
         assert_eq!(page["runs"][0]["run_id"], "filtered-z");
         assert_eq!(page["record_health"]["healthy"], 1);
-        assert_eq!(page["record_health"]["legacy"], 0);
+        assert_eq!(page["record_health"]["malformed"], 0);
     });
 }
 

@@ -70,8 +70,8 @@ fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> Run
 /// plus one in the same statement that replaces the row, so the bump cannot
 /// race the write. When `expected` is set the update additionally commits only
 /// while the stored value still equals it: a compare-and-swap. A missing stored
-/// value reads as `0`, which is what a row written before the revision existed
-/// (or by an older writer that drops the field) presents.
+/// value reads as `0`: a row inserted by a writer that does not keep the
+/// revision (or a snapshot never committed through a revisioned write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunMetadataRevision<'a> {
     /// SQLite JSON path of the revision inside `metadata_json`.

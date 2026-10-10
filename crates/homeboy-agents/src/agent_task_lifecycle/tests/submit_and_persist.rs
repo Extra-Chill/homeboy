@@ -2053,10 +2053,8 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
                 .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
                 .expect("submit the same queue into both roots");
             // Remove the admission-supplied runtime pin rather than leaving a
-            // malformed one. An invalid *present* pin sends
-            // `validate_controller_runtime_in_store` through
-            // `migrate_legacy_pin_and_persist`. With no pin at all the preflight
-            // fails on the record itself without materializing runtime state.
+            // malformed one. With no pin at all the preflight fails on the
+            // record itself without materializing runtime state.
             lifecycle_store
                 .mutate_record(run_id, |record| {
                     record
@@ -3670,81 +3668,6 @@ fn provider_run_result_reads_declared_output_alias() {
             .and_then(Value::as_str),
         Some("custom-run-1")
     );
-}
-
-/// Stays on `with_isolated_home` (#7505). `validate_controller_runtime_in_store`
-/// reaches `migrate_record_controller_runtime_in_store`, which calls
-/// `controller_runtime::migrate_legacy_pin_and_persist` — that resolves
-/// `runtime_root()` and takes the machine-global admission lock under
-/// `paths::controller_runtimes_store()`, which is deliberately not a lifecycle
-/// root. Rooted, this test would take a cross-process lock on the *real
-/// operator* home. It is also a legacy-pin provenance fixture, so the pins have
-/// to be real rather than a stub `{}`.
-#[cfg(unix)]
-#[test]
-fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
-    with_isolated_home(|_| {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temporary = tempfile::tempdir().expect("temporary fake controller directory");
-        let identity = homeboy_core::build_identity::current().display;
-        let record = submit_plan(&test_plan(), Some("migration-failure")).expect("submit");
-        let cases = [
-            (
-                "missing",
-                temporary.path().join("missing-homeboy"),
-                None,
-                "missing",
-            ),
-            (
-                "non-executable",
-                temporary.path().join("non-executable-homeboy"),
-                Some(identity.clone()),
-                "not executable",
-            ),
-            (
-                "identity-mismatch",
-                temporary.path().join("wrong-identity-homeboy"),
-                Some("homeboy test+wrong".to_string()),
-                "build identity mismatch",
-            ),
-        ];
-
-        for (name, legacy, artifact_identity, expected_error) in cases {
-            if let Some(artifact_identity) = artifact_identity {
-                fake_controller_artifact(&legacy, &artifact_identity, name);
-                if name == "non-executable" {
-                    std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600))
-                        .expect("remove executable permission");
-                }
-            }
-            rewrite_record_for_test(&record.run_id, |record| {
-                record.metadata
-                    [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-                    "originating": {
-                        "build_identity": identity,
-                        "pinned_executable": legacy,
-                    }
-                });
-            })
-            .expect("project v1 legacy pin");
-            let before = reconcile_status(&record.run_id).expect("record before migration");
-
-            let error =
-                validate_controller_runtime_in_store(&test_lifecycle_store(), &record.run_id)
-                    .expect_err("legacy migration fails closed");
-
-            assert!(
-                error.message.contains(expected_error),
-                "{name}: {}",
-                error.message
-            );
-            assert_eq!(
-                reconcile_status(&record.run_id).expect("record after migration"),
-                before
-            );
-        }
-    });
 }
 
 #[test]
@@ -5522,14 +5445,11 @@ fn terminal_reconciliation_reuses_verified_directly_imported_artifact() {
     assert_eq!(std::fs::read(output).expect("recovered patch bytes"), patch);
 }
 
-/// Stays on `with_isolated_home` (#7505). `mark_running_in_store` is rooted for
-/// its lifecycle reads and writes but still calls
-/// `migrate_record_controller_runtime_in_store` first, which resolves
-/// `runtime_root()` and takes the machine-global admission lock. A run
-/// submitted with a stub `{}` admission — the only submission a rooted test can
-/// make without reaching that same lock — therefore cannot be marked running at
-/// all. Rooting the `mark_running` family needs its pin migration threaded
-/// through the injected store first, which is its own slice.
+/// Stays on `with_isolated_home` (#7505). `mark_running_in_store` validates the
+/// controller runtime pin before it mutates, and a run submitted with a stub
+/// `{}` admission — the only submission a rooted test can make without the
+/// machine-global admission lock — is a malformed pin it refuses. A rooted test
+/// therefore cannot mark such a run running at all.
 #[test]
 fn running_observation_projects_each_terminal_aggregate_state() {
     with_isolated_home(|_| {
@@ -5977,46 +5897,6 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
         .contains("homeboy runner exec lab-a"));
     // No real local process was signalled.
     assert!(cancelled.metadata.get("live_cancellation").is_none());
-}
-
-/// Stays on `with_isolated_home` because record-health reconciliation still
-/// resolves its store from the ambient test home. Fault injection is scoped to
-/// this thread, independently of that legacy path (#11897).
-#[test]
-fn record_health_recovers_after_interrupted_migration_without_changing_terminal_status() {
-    with_isolated_home(|_| {
-        let plan = test_plan();
-        submit_plan(&plan, Some("interrupted-terminal")).expect("submitted");
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let mut observation = store
-            .get_run("interrupted-terminal")
-            .expect("read")
-            .expect("observation");
-        observation.status = "pass".to_string();
-        observation.finished_at = Some("2026-01-01T00:01:00Z".to_string());
-        observation.metadata_json = json!({});
-        store
-            .upsert_imported_run(&observation)
-            .expect("terminal malformed fixture");
-
-        store::fail_next_record_write_for_test();
-        assert!(reconcile_record_health_in_store(&test_lifecycle_store(), false).is_err());
-        assert_eq!(
-            record_health_summary_in_store(&test_lifecycle_store(),)
-                .expect("still malformed")
-                .malformed,
-            1
-        );
-        let applied = reconcile_record_health_in_store(&test_lifecycle_store(), false)
-            .expect("retry migration");
-        assert_eq!(applied.migrated, 1);
-        let repaired = reconcile_status("interrupted-terminal").expect("repaired");
-        assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
-        assert_eq!(
-            repaired.lifecycle.execution.finished_at.as_deref(),
-            Some("2026-01-01T00:01:00Z")
-        );
-    });
 }
 
 #[test]

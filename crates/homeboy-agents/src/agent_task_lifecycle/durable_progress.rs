@@ -4,73 +4,10 @@ use homeboy_control_plane_contract::{
     ControlPlaneEventSource, RunId, TaskId, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
 };
 use homeboy_core::observation::PreparedControlPlaneEventAppend;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-pub(crate) const DURABLE_EVENT_HISTORY_METADATA_KEY: &str = "durable_event_history";
-pub const EVENT_HISTORY_MIGRATION_SCHEMA: &str = "homeboy/agent-task-event-history-migration/v1";
 const PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES: usize = 8 * 1024;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AgentTaskEventHistoryMigration {
-    pub schema: String,
-    pub run_id: String,
-    pub state: AgentTaskRunState,
-    pub durable_event_history: String,
-}
-
-pub(crate) fn stamp_durable_event_history(record: &mut AgentTaskRunRecord) {
-    record.metadata[DURABLE_EVENT_HISTORY_METADATA_KEY] =
-        json!(crate::orchestration::EVENT_STREAM_DURABLE_PROGRESS);
-}
-
-pub(crate) fn has_durable_event_history(record: &AgentTaskRunRecord) -> bool {
-    record
-        .metadata
-        .get(DURABLE_EVENT_HISTORY_METADATA_KEY)
-        .and_then(Value::as_str)
-        == Some(crate::orchestration::EVENT_STREAM_DURABLE_PROGRESS)
-}
-
-/// Persist recoverable historical progress and unreceipted claims onto the
-/// canonical ledger for one exact run. Uses the locked atomic writer without
-/// workspace-claim renewal, terminal projection, provider execution, or
-/// lifecycle-state change.
-pub fn migrate_durable_event_history(run_id: &str) -> Result<AgentTaskEventHistoryMigration> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    migrate_durable_event_history_in_store(&lifecycle_store, run_id)
-}
-
-/// [`migrate_durable_event_history`] against explicitly injected durable roots.
-pub fn migrate_durable_event_history_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskEventHistoryMigration> {
-    let run_id = sanitize_run_id(run_id);
-    let committed = lifecycle_store.with_config_lock(|| {
-        let record = lifecycle_store.read_record(&run_id)?;
-        let original_state = record.state;
-        let committed = lifecycle_store.write_record_locked_without_terminal_projection(&record)?;
-        if committed.state != original_state {
-            return Err(Error::internal_unexpected(format!(
-                "event history migration changed lifecycle state for {run_id}"
-            )));
-        }
-        Ok(committed)
-    })?;
-    if !has_durable_event_history(&committed) {
-        return Err(Error::internal_unexpected(format!(
-            "durable event history stamp missing after migration: {run_id}"
-        )));
-    }
-    Ok(AgentTaskEventHistoryMigration {
-        schema: EVENT_HISTORY_MIGRATION_SCHEMA.to_string(),
-        run_id: committed.run_id,
-        state: committed.state,
-        durable_event_history: crate::orchestration::EVENT_STREAM_DURABLE_PROGRESS.to_string(),
-    })
-}
 
 pub(crate) fn prepared_unreceipted_action_events(
     record: &AgentTaskRunRecord,

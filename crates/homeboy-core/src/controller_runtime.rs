@@ -1650,75 +1650,6 @@ fn mutation_identity_mismatch(
     )
 }
 
-/// `migrate_legacy_pin` under an already-resolved runtime root.
-pub fn migrate_legacy_pin_in_root(root: &Path, runtime: &Value) -> Result<Value> {
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
-    migrate_legacy_pin_unlocked(root, runtime)
-}
-
-/// [`migrate_legacy_pin_and_persist`] under an already-resolved runtime root.
-pub fn migrate_legacy_pin_and_persist_in_root(
-    runtime_root: &Path,
-    runtime: &Value,
-    persist: impl FnOnce(&Value) -> Result<()>,
-) -> Result<Value> {
-    let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
-    let migrated = migrate_legacy_pin_unlocked(runtime_root, runtime)?;
-    if &migrated != runtime {
-        persist(&migrated)?;
-    }
-    Ok(migrated)
-}
-
-fn migrate_legacy_pin_unlocked(root: &Path, runtime: &Value) -> Result<Value> {
-    let identity =
-        required_runtime_string(runtime, "/originating/build_identity", "build identity")?;
-    let current = required_runtime_string(
-        runtime,
-        "/originating/pinned_executable",
-        "immutable executable",
-    )?;
-    let current = Path::new(current);
-
-    // v1 pins predate a content digest. The retained executable is the only
-    // trusted migration source; never substitute the current binary or a checkout.
-    if runtime.pointer("/originating/sha256").is_none() {
-        verify_executable(current, "legacy controller runtime")?;
-        verify_self_status_identity(current, identity)?;
-        let digest = executable_digest(current)?;
-        let destination = pinned_path_in_root(root, identity, &digest);
-        publish_pin(current, &destination, &digest)?;
-
-        let mut migrated = runtime.clone();
-        migrated["schema"] = json!("homeboy/controller-runtime-pin/v2");
-        migrated["originating"]["sha256"] = json!(digest);
-        migrated["originating"]["pinned_executable"] = json!(destination);
-        for field in ["requested", "current", "executed"] {
-            if migrated.get(field).is_none() || migrated[field].is_null() {
-                migrated[field] = json!(identity);
-            }
-        }
-        validate_pin(&migrated)?;
-        return Ok(migrated);
-    }
-
-    let digest = required_runtime_string(runtime, "/originating/sha256", "content digest")?;
-    let destination = pinned_path_in_root(root, identity, digest);
-    if current == destination {
-        validate_pin(runtime)?;
-        return Ok(runtime.clone());
-    }
-
-    // Validation includes the digest, executable bit, and advertised identity.
-    // Never update durable metadata until the no-clobber publication succeeds.
-    validate_pin(runtime)?;
-    publish_pin(current, &destination, digest)?;
-    let mut migrated = runtime.clone();
-    migrated["originating"]["pinned_executable"] = json!(destination);
-    validate_pin(&migrated)?;
-    Ok(migrated)
-}
-
 pub fn validate(runtime: &Value) -> Result<()> {
     validate_pin(runtime)
 }
@@ -2941,52 +2872,6 @@ fn verify_self_identity(path: &Path, expected: &str, verified_digest: Option<&st
         "controller_runtime",
         format!(
             "pinned controller executable build identity mismatch: expected {expected}, found {actual}"
-        ),
-        Some(path.display().to_string()),
-        None,
-    ))
-}
-
-/// v1 records have no digest, so require the historical executable's full
-/// status report to advertise the identity retained by the durable record.
-fn verify_self_status_identity(path: &Path, expected: &str) -> Result<()> {
-    let output = Command::new(path)
-        .args(["self", "status"])
-        .output()
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                format!("legacy controller runtime status check failed: {error}"),
-                Some(path.display().to_string()),
-                None,
-            )
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let actual = serde_json::from_str::<Value>(&stdout)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/data/active_build_identity/display")
-                .or_else(|| value.pointer("/active_build_identity/display"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-    if !output.status.success() || actual.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "controller_runtime",
-            format!("legacy controller runtime status check returned invalid output: {stdout}"),
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
-    let actual = actual.expect("status identity was checked above");
-    if actual == expected {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "controller_runtime",
-        format!(
-            "legacy controller runtime build identity mismatch: expected {expected}, found {actual}"
         ),
         Some(path.display().to_string()),
         None,
@@ -5582,37 +5467,6 @@ mod tests {
             }
         });
         assert_eq!(fs::read(&destination).expect("read pin"), b"generation-a");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn legacy_v1_pin_migration_publishes_before_returning_updated_metadata() {
-        crate::test_support::with_isolated_home(|_| {
-            let temporary = tempfile::tempdir().expect("temporary runtime directory");
-            let legacy = temporary.path().join("legacy-homeboy");
-            let identity = "homeboy test+legacy";
-            fake_controller(&legacy, identity, "legacy");
-            let runtime = json!({ "originating": {
-                "build_identity": identity,
-                "pinned_executable": legacy,
-            }});
-
-            let migrated = migrate_legacy_pin_in_root(&test_runtime_root(), &runtime)
-                .expect("migrate legacy pin");
-            let destination = PathBuf::from(
-                migrated["originating"]["pinned_executable"]
-                    .as_str()
-                    .expect("migrated path"),
-            );
-            assert_ne!(destination, legacy);
-            assert!(legacy.exists());
-            assert!(destination.is_file());
-            assert_eq!(migrated["schema"], "homeboy/controller-runtime-pin/v2");
-            assert_eq!(migrated["requested"], identity);
-            assert_eq!(migrated["current"], identity);
-            assert_eq!(migrated["executed"], identity);
-            validate_pin(&migrated).expect("migrated pin validates");
-        });
     }
 
     #[test]

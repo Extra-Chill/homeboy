@@ -1535,7 +1535,6 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert_eq!(report.count, 1);
         assert_eq!(report.total, 1);
         assert_eq!(report.record_health.malformed, 0);
-        assert_eq!(report.record_health.legacy, 0);
         assert_eq!(report.record_health.conflicting, 0);
         assert!(!report.truncated);
         assert!(report.limit.is_none());
@@ -2711,18 +2710,15 @@ fn upgrade_admission_keeps_an_unindexed_handoff_child_independent_with_executabl
         assert_eq!(admission.blockers.len(), 2);
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == cook_id
-                && blocker.recovery_command == "homeboy agent-task reconcile-records --dry-run"
+                && blocker.recovery_command
+                    == format!("homeboy --placement local agent-task status {cook_id}")
+                && blocker.owner == "durable_agent_tasks"
         }));
         assert!(admission.blockers.iter().any(|blocker| {
             blocker.run_id == attempt_id
                 && blocker.recovery_command
                     == format!("homeboy --placement local agent-task status {attempt_id}")
         }));
-        assert!(agent_task_lifecycle::reconcile_record_health_in_store(
-            &test_lifecycle_store(),
-            true
-        )
-        .is_ok());
     });
 }
 
@@ -3592,22 +3588,9 @@ fn fixture_runner_records_are_quarantined_without_hiding_unknown_runner_ownershi
             "homeboy runner reconcile offline-unknown-runner"
         );
 
-        let preview =
-            agent_task_lifecycle::reconcile_record_health_in_store(&test_lifecycle_store(), true)
-                .expect("preview repair");
-        assert_eq!(preview.considered, 1);
-        assert_eq!(preview.quarantined, 0);
-        assert_eq!(preview.records[0].run_id, fixture_run_id);
-        assert_eq!(
-            preview.records[0].reason,
-            agent_task_lifecycle::AgentTaskRecordHealthReason::FixtureRunnerProvenance
-        );
-        assert_eq!(preview.records[0].action, "would-quarantine");
-
-        let repaired =
-            agent_task_lifecycle::reconcile_record_health_in_store(&test_lifecycle_store(), false)
-                .expect("apply repair");
-        assert_eq!(repaired.quarantined, 1);
+        let repaired = agent_task_lifecycle::quarantine_verified_fixture_runner_records()
+            .expect("quarantine fixture residue");
+        assert_eq!(repaired, 1);
         let health = agent_task_lifecycle::record_health_summary_in_store(&test_lifecycle_store())
             .expect("quarantine health");
         assert_eq!(health.fixture, 1);

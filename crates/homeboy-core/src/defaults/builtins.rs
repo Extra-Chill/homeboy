@@ -139,7 +139,6 @@ SELECTED_TAG_OR_ARTIFACT="${HOMEBOY_UPGRADE_RELEASE_TAG:-v$TARGET_VERSION}"
 CANDIDATE_VERSION="$("$TMP_DIR/homeboy" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//; s/+.*$//')"
 if [ "$CANDIDATE_VERSION" != "$TARGET_VERSION" ]; then
   echo "Target-version bootstrap recovery refused: verified archive candidate reports ${CANDIDATE_VERSION:-unverifiable}, expected $TARGET_VERSION." >&2
-  echo "Same-version repair: homeboy agent-task reconcile-records --dry-run" >&2
   exit 1
 fi
 LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"

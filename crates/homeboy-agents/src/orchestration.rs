@@ -7292,16 +7292,6 @@ impl ControlPlaneProvider for RegisteredProvider {
         context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
-        if let Some(loop_id) =
-            crate::agent_task_loop_controller::loop_id_from_control_plane_run(requested_id.as_str())
-        {
-            // Action dispatch also runs under the registry lock.
-            crate::agent_task_loop_controller::migrate_loop_control_plane_identity_with(
-                loop_id,
-                |run| self.run(run),
-            )
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-        }
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         let observation = store
@@ -7546,57 +7536,6 @@ mod loop_control_plane_tests {
                 .expect("status");
             let after = std::fs::read(path).expect("controller bytes");
             assert_eq!(before, after);
-        });
-    }
-
-    #[test]
-    fn legacy_loop_status_does_not_publish_or_rewrite_the_controller() {
-        with_isolated_home(|_| {
-            super::register();
-            let record = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
-                "legacy-loop-status",
-                "repair",
-                "v1",
-            );
-            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
-                .expect("path");
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
-            std::fs::write(&path, serde_json::to_vec(&record).expect("record")).expect("write");
-            let before = std::fs::read(&path).expect("bytes");
-            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
-
-            let read = loop_status_read(
-                &record.loop_id,
-                &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-            )
-            .expect("legacy status");
-            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
-                method: homeboy_core::http_api::HttpMethod::Get,
-                path: format!("/v1/control-plane/runs/{canonical}"),
-                body: None,
-            })
-            .expect("HTTP status");
-
-            assert_eq!(std::fs::read(&path).expect("bytes"), before);
-            assert_eq!(read.resource.run, canonical);
-            assert_eq!(
-                read.resource.owner.as_ref().expect("owner").id,
-                record.loop_id
-            );
-            assert_eq!(read.work, serde_json::Value::Null);
-            assert_eq!(http.status, 200);
-            assert_eq!(
-                http.body["resource"],
-                serde_json::to_value(&read.resource).expect("resource")
-            );
-            let store =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .expect("store");
-            let observation = store.open_observation_readonly().expect("observation");
-            assert!(observation
-                .get_run(canonical.as_str())
-                .expect("lookup")
-                .is_none());
         });
     }
 

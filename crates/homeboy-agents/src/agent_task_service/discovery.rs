@@ -862,9 +862,9 @@ pub(crate) fn controller_upgrade_admission_for_records(
             if belongs_to_parent && indexed {
                 parent_by_attempt.insert(attempt, &record.run_id);
             } else {
-                // Do not prescribe the parent alias here: scoped reconciliation
-                // correctly rejects an untrusted handoff link. The record-health
-                // primitive is executable and owns repairing malformed authority.
+                // Do not prescribe reconciling the parent here: scoped
+                // reconciliation correctly rejects an untrusted handoff link.
+                // Point at the read-only status of the exact record instead.
                 invalid_handoff_parents.insert(record.run_id.as_str());
             }
         }
@@ -908,7 +908,7 @@ pub(crate) fn controller_upgrade_admission_for_records(
                 let locally_reconcilable_after_runner_idle =
                     record.is_locally_reconcilable_after_runner_idle();
                 let recovery_command = if invalid_handoff_parents.contains(record.run_id.as_str()) {
-                    "homeboy agent-task reconcile-records --dry-run".to_string()
+                    format!("homeboy --placement local agent-task status {}", record.run_id)
                 } else if locally_reconcilable_after_runner_idle {
                     format!(
                         "homeboy --placement local agent-task reconcile {group_run_id} --apply"
@@ -948,12 +948,6 @@ pub(crate) fn controller_upgrade_admission_for_records(
                         "runner_generations",
                         format!("runner `{}` and its persisted daemon generations", record.runner_id().unwrap_or_default()),
                         "the runner accepts jobs with no unresolved generation projection",
-                    )
-                } else if recovery_command.starts_with("homeboy agent-task reconcile-records") {
-                    (
-                        "durable_agent_task_record_health",
-                        "stored durable agent-task record health".to_string(),
-                        "durable record authority is internally consistent",
                     )
                 } else {
                     (

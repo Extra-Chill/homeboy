@@ -5945,11 +5945,9 @@ fn provider_terminalization_rejects_a_missing_execution_attempt() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). Every assertion here is a *population count* — `malformed == 1`,
-/// `migrated == 1`, `considered == 0` — over one installation's observation
-/// rows. Run ambiently those counts would be taken over the operator's real
-/// data root and would mean nothing; run split across homes the malformed row
-/// this test seeds would never be the row the reconciliation repairs.
+/// (#7505). Every assertion here is a *population count* over one
+/// installation's observation rows. Run ambiently those counts would be taken
+/// over the operator's real data root and would mean nothing.
 ///
 /// The observation store is opened with `open_initialized_in_roots`, the rooted
 /// counterpart of the ambient `open_initialized()` this fixture used — same
@@ -5957,7 +5955,7 @@ fn provider_terminalization_rejects_a_missing_execution_attempt() {
 /// database file below `lifecycle_store`'s data root. Same pairing as
 /// `detached_lab_handoff_upgrades_existing_observation_record`.
 #[test]
-fn record_health_reconciles_plan_backed_missing_metadata_idempotently() {
+fn record_health_reports_plan_backed_missing_metadata_without_repair() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -5984,37 +5982,12 @@ fn record_health_reconciles_plan_backed_missing_metadata_idempotently() {
         before.samples[0].reason,
         AgentTaskRecordHealthReason::MissingMetadata
     );
-    let dry_run = reconcile_record_health_in_store(&lifecycle_store, true).expect("dry run");
-    assert_eq!(dry_run.records[0].action, "would-migrate");
+    // Missing metadata is reported, never reconstructed from the plan (#15742).
     assert_eq!(
         record_health_summary_in_store(&lifecycle_store)
             .expect("unmodified health")
             .malformed,
         1
-    );
-
-    let applied = reconcile_record_health_in_store(&lifecycle_store, false).expect("applied");
-    assert_eq!(applied.migrated, 1);
-    let repaired = reconcile_status_in_store(
-        &lifecycle_store,
-        "repairable-metadata",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("reconstructed record")
-    .record;
-    assert_eq!(repaired.state, AgentTaskRunState::Running);
-    assert_eq!(
-        repaired.metadata["lifecycle_reconstruction"]["original_metadata"]["legacy_source"],
-        json!("fixture")
-    );
-    let healthy = record_health_summary_in_store(&lifecycle_store).expect("healthy health");
-    assert_eq!(healthy.malformed + healthy.legacy + healthy.conflicting, 0);
-    assert_eq!(
-        reconcile_record_health_in_store(&lifecycle_store, false)
-            .expect("repeat")
-            .considered,
-        0
     );
 }
 

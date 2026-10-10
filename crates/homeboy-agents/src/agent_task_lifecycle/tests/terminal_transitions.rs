@@ -222,48 +222,6 @@ fn stale_transition_is_a_typed_conflict_and_writes_nothing() {
 }
 
 #[test]
-fn a_write_by_an_older_binary_that_drops_the_revision_is_detected() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = seeded(&context);
-    store
-        .mutate_record(RUN_ID, |record| {
-            record.metadata["progress"] = json!("second write");
-            true
-        })
-        .unwrap();
-    let holder = store.read_record(RUN_ID).unwrap();
-    assert_eq!(holder.revision, 2);
-
-    // An older binary round-trips the snapshot without the field it does not
-    // know, so the stored revision disappears and reads as 0.
-    let observation = store.open_observation_initialized().unwrap();
-    let mut row = observation.get_run(RUN_ID).unwrap().unwrap();
-    row.metadata_json["agent_task_run"]
-        .as_object_mut()
-        .unwrap()
-        .remove("revision");
-    row.metadata_json["agent_task_run"]["metadata"]["progress"] = json!("older binary");
-    observation
-        .upsert_imported_run_preserving_terminal(&row)
-        .unwrap();
-    assert_eq!(store.read_record(RUN_ID).unwrap().revision, 0);
-
-    let error = store
-        .transition(RUN_ID, holder.revision, failed_with("stale holder"))
-        .expect_err("the older binary's write moved the record");
-    assert!(matches!(error, AgentTaskTransitionError::Conflict(_)));
-    let stored = store.read_record(RUN_ID).unwrap();
-    assert_eq!(stored.state, AgentTaskRunState::Running);
-    assert_eq!(stored.metadata["progress"], "older binary");
-
-    // A writer that re-reads sees revision 0 and commits on top of it.
-    let committed = store
-        .transition(RUN_ID, 0, failed_with("fresh holder"))
-        .expect("re-read revision commits");
-    assert_eq!(committed.revision, 1);
-}
-
-#[test]
 fn transition_when_redecides_from_the_fresh_record_and_skips_a_terminal_run() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = seeded(&context);

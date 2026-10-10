@@ -4605,7 +4605,7 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
                 "target": {"worktree": options.workspace.to_worktree, "path": destination},
                 "patch_artifact": {"id": "candidate", "kind": "patch", "path": patch},
                 "changed_files": ["src/lib.rs"],
-                "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "true"], "exit_code": 0}],
+                "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "true"], "exit_code": 0}],
                 "gate_results": [{"id": "gate", "name": "true", "kind": "command", "status": "passed"}],
                 "verified_base": {"base": "main", "sha": verified_base},
                 "provenance": {"worktree_path": destination, "candidate": candidate},
@@ -15088,7 +15088,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "candidate_sha256": "fixture-candidate-sha",
         });
         gate_proof["deterministic_gates"][0]["command"] =
-            serde_json::json!(["sh", "-lc", "test \"$(cat lib.rs)\" = candidate"]);
+            serde_json::json!(["sh", "-c", "test \"$(cat lib.rs)\" = candidate"]);
         gate_proof["deterministic_gates"][0]["candidate_checkout"] = candidate_checkout.clone();
         gate_proof["provenance"]["worktree_path"] = serde_json::json!(target.display().to_string());
         gate_proof["provenance"]["candidate_checkout"] = candidate_checkout;
@@ -17841,7 +17841,7 @@ fn promotion(run_id: &str) -> AgentTaskPromotionReport {
             "target": {"worktree": "homeboy@8058", "path": worktree_path},
             "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch", "sha256": "fixture-patch-sha"},
             "changed_files": ["src/lib.rs"],
-            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
+            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
@@ -23132,7 +23132,7 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         let mut resumed = promotion_with_existing_path(run_id, target.path());
         resumed.deterministic_gates[0].command = vec![
             "sh".to_string(),
-            "-lc".to_string(),
+            "-c".to_string(),
             "cargo test resumed-gate-contract".to_string(),
         ];
         resumed.gate_results[0].name = "cargo test resumed-gate-contract".to_string();
@@ -23448,7 +23448,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             crate::agent_task_promotion::AgentTaskPromotionCommandReport {
                 command: vec![
                     "sh".to_string(),
-                    "-lc".to_string(),
+                    "-c".to_string(),
                     "cargo test --locked agent_task_promotion --lib".to_string(),
                 ],
                 exit_code: 0,
@@ -23475,7 +23475,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         let mut mismatched_evidence = replacement.clone();
         mismatched_evidence.command_evidence[0].command = vec![
             "sh".to_string(),
-            "-lc".to_string(),
+            "-c".to_string(),
             "cargo test unrelated".to_string(),
         ];
         let error = record_replacement_gate_proof(
@@ -23532,7 +23532,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         unbound_private_gate.visibility = homeboy_core::gate::HomeboyGateVisibility::Private;
         unbound_private_gate.command = vec![
             "sh".to_string(),
-            "-lc".to_string(),
+            "-c".to_string(),
             "cargo test private-replacement-gate".to_string(),
         ];
         unbound_private_gate

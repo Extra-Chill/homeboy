@@ -3853,14 +3853,14 @@ pub fn load_plan_for_execution_in_store(
 /// Validate a queued lifecycle's pinned controller against an explicitly rooted
 /// store.
 ///
-/// The record read, legacy-pin migration, and immutable controller runtime all
-/// follow `lifecycle_store`.
+/// The record read and the immutable controller runtime both follow
+/// `lifecycle_store`. A pin that is not in the current immutable shape fails
+/// validation; it is never migrated (#15742).
 pub fn validate_controller_runtime_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    migrate_record_controller_runtime_in_store(lifecycle_store, &mut record)?;
+    let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     homeboy_core::controller_runtime::validate(
         record
             .metadata
@@ -3878,15 +3878,12 @@ pub fn validate_controller_runtime_in_store(
 }
 
 /// Resolve the compatible immutable executable for a lifecycle mutation.
-/// Legacy pins are migrated atomically before returning a path for re-exec.
 pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::PathBuf>> {
-    // One root for the whole read: resolving the run id, reading the record,
-    // and migrating its pin are one operation. Three separately resolved homes
-    // migrate a pin in a record the caller cannot read back (#7505).
+    // One root for the whole read: resolving the run id and reading the record
+    // are one operation (#7505).
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let resolved = resolve_run_id_in_store(&lifecycle_store, run_id)?;
-    let mut record = lifecycle_store.read_record(&resolved)?;
-    migrate_record_controller_runtime_in_store(&lifecycle_store, &mut record)?;
+    let record = lifecycle_store.read_record(&resolved)?;
     homeboy_core::controller_runtime::pinned_executable_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
@@ -4000,36 +3997,6 @@ pub fn prune_controller_runtime_pins(
     homeboy_core::controller_runtime::prune_pins(apply, overrides)
 }
 
-// The ambient `migrate_record_controller_runtime()` shim that used to sit here
-// is gone. `pinned_runtime_for_mutation` was its only caller and now migrates
-// inside the store it read the record from (#7505).
-
-fn migrate_record_controller_runtime_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &mut AgentTaskRunRecord,
-) -> Result<()> {
-    let Some(runtime) = record
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-    else {
-        return Ok(());
-    };
-    let original = runtime.clone();
-    let runtime_root =
-        homeboy_core::controller_runtime::runtime_root_in(lifecycle_store.roots().data())?;
-    let migrated = homeboy_core::controller_runtime::migrate_legacy_pin_and_persist_in_root(
-        &runtime_root,
-        &original,
-        |migrated| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
-                migrated.clone();
-            lifecycle_store.write_record(record)
-        },
-    )?;
-    record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = migrated;
-    Ok(())
-}
-
 /// Repair a run's pinned controller executable against an explicitly rooted
 /// store.
 ///
@@ -4084,8 +4051,7 @@ pub fn mark_running_in_store(
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let mut record = lifecycle_store.read_record(&run_id)?;
-    migrate_record_controller_runtime_in_store(lifecycle_store, &mut record)?;
+    let record = lifecycle_store.read_record(&run_id)?;
     homeboy_core::controller_runtime::validate_for_mutation(
         &record.metadata,
         &homeboy_core::build_identity::current().display,
