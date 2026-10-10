@@ -12,8 +12,8 @@
 //! environment.
 
 use crate::observation::store::{
-    self, ObservationStore, CURRENT_MIGRATION_COUNT, CURRENT_SCHEMA_VERSION,
-    LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
+    self, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
+    SOURCE_SNAPSHOT_METADATA_ENV,
 };
 use crate::observation::{
     FindingListFilter, NewFindingRecord, NewRunRecord, RunContext, RunListFilter, RunProvenance,
@@ -23,6 +23,10 @@ use crate::test_support::{with_isolated_home, HermeticTestContext};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
+
+/// A store this binary creates records exactly one `schema_migrations` row:
+/// the squashed baseline at [`CURRENT_SCHEMA_VERSION`] (#15742).
+const BASELINE_SCHEMA_RECORDS: i64 = 1;
 
 mod store_init_tests {
     use super::*;
@@ -90,7 +94,7 @@ mod store_init_tests {
 
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
         // 12 historical tables, two resource projections, and the work outbox.
         assert_eq!(status.table_count, 15);
     }
@@ -105,33 +109,10 @@ mod store_init_tests {
         let status = second.status().expect("status");
 
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+        assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
         // Reasserted after a second initialization: the control-plane resource
         // tables are created once and idempotent re-init adds nothing.
         assert_eq!(status.table_count, 15);
-    }
-
-    #[test]
-    fn initialization_recovers_when_artifact_type_migration_was_interrupted() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-
-        ObservationStore::open_initialized_in_roots(&roots).expect("initial migration");
-        // The database the rooted opens above and below use, resolved from the
-        // injected data root rather than re-derived from the environment.
-        let path = crate::paths::observation_db_in_root(roots.data());
-        let connection = rusqlite::Connection::open(&path).expect("open raw db");
-        connection
-            .execute("DELETE FROM schema_migrations WHERE version = 4", [])
-            .expect("remove migration marker");
-        drop(connection);
-
-        let reopened =
-            ObservationStore::open_initialized_in_roots(&roots).expect("resume migration");
-        let status = reopened.status().expect("status");
-
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
     }
 
     #[test]
@@ -157,7 +138,7 @@ mod store_init_tests {
         for handle in handles {
             let status = handle.join().expect("worker joined");
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
+            assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
         }
     }
 
@@ -241,7 +222,7 @@ mod store_init_tests {
             .expect("open initialized store");
         assert_eq!(
             store.status().expect("final status").migration_count,
-            CURRENT_MIGRATION_COUNT
+            BASELINE_SCHEMA_RECORDS
         );
     }
 
@@ -253,7 +234,7 @@ mod store_init_tests {
         std::fs::create_dir_all(path.parent().expect("database parent"))
             .expect("create database parent");
         let connection = super::super::schema::open_connection(&path).expect("open schema");
-        super::super::schema::apply_migrations(&connection).expect("apply schema");
+        super::super::schema::ensure_schema(&connection, &path).expect("apply schema");
         drop(connection);
         let writer = rusqlite::Connection::open(&path).expect("open locking connection");
         writer
@@ -379,146 +360,6 @@ mod store_init_tests {
             projection.diagnostic_handle,
             Some(projection.artifacts[0].id.clone())
         );
-    }
-
-    #[test]
-    fn migration_from_version_8_preserves_artifacts_and_adds_query_indexes() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let path = crate::paths::observation_db_in_root(roots.data());
-        std::fs::create_dir_all(path.parent().expect("db parent")).expect("create db parent");
-        let db = rusqlite::Connection::open(&path).expect("open version 8 db");
-        db.execute_batch(
-            r#"
-                CREATE TABLE schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-                INSERT INTO schema_migrations(version, applied_at)
-                VALUES (1, '2026-01-01T00:00:00Z'), (2, '2026-01-01T00:00:00Z'),
-                       (3, '2026-01-01T00:00:00Z'), (4, '2026-01-01T00:00:00Z'),
-                       (5, '2026-01-01T00:00:00Z'), (6, '2026-01-01T00:00:00Z'),
-                       (7, '2026-01-01T00:00:00Z'), (8, '2026-01-01T00:00:00Z');
-                -- Faithful to the migration-1 `runs` table. A stub with only
-                -- `id` used to be enough, but migration 10 indexes
-                -- `json_extract(metadata_json, ...)`, so an unfaithful fixture
-                -- fails the upgrade with `no such column: metadata_json` and
-                -- misreports a fixture gap as a broken migration path.
-                CREATE TABLE runs (
-                    id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL DEFAULT 'test',
-                    component_id TEXT,
-                    started_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
-                    finished_at TEXT,
-                    status TEXT NOT NULL DEFAULT 'success',
-                    command TEXT,
-                    cwd TEXT,
-                    homeboy_version TEXT,
-                    git_sha TEXT,
-                    rig_id TEXT,
-                    metadata_json TEXT NOT NULL DEFAULT '{}'
-                );
-                CREATE TABLE artifacts (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    artifact_type TEXT NOT NULL DEFAULT 'file',
-                    path TEXT NOT NULL,
-                    url TEXT,
-                    public_url TEXT,
-                    viewer_url TEXT,
-                    viewer_links_json TEXT NOT NULL DEFAULT '[]',
-                    sha256 TEXT,
-                    size_bytes INTEGER,
-                    mime TEXT,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                CREATE TABLE findings (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                CREATE TABLE triage_items (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                CREATE TABLE trace_runs (
-                    run_id TEXT PRIMARY KEY,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                CREATE TABLE trace_spans (
-                    id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES runs(id)
-                );
-                INSERT INTO runs(id) VALUES ('run-1'), ('run-2');
-                INSERT INTO artifacts(id, run_id, kind, path, created_at)
-                VALUES ('artifact-1', 'run-1', 'log', '/tmp/one', '2026-01-01T00:00:00Z'),
-                       ('artifact-2', 'run-1', 'log', '/tmp/two', '2026-01-01T00:01:00Z'),
-                       ('artifact-3', 'run-2', 'log', '/tmp/three', '2026-01-01T00:02:00Z');
-                "#,
-        )
-        .expect("create version 8 fixture");
-        drop(db);
-
-        // `open_initialized_in_roots` resolves the same database as `path`
-        // above, and additionally roots the artifact tree the migrated store
-        // indexes — which `open_initialized_at` would have left ambient.
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("migrate version 8");
-        let status = store.status().expect("status");
-        assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-
-        let db = rusqlite::Connection::open(path).expect("inspect migrated db");
-        let indexes = db
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'artifacts' ORDER BY name")
-                .expect("prepare indexes")
-                .query_map([], |row| row.get::<_, String>(0))
-                .expect("query indexes")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("collect indexes");
-        assert!(indexes.contains(&"idx_artifacts_run_created".to_string()));
-        assert!(indexes.contains(&"idx_artifacts_created_at".to_string()));
-
-        let artifact_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
-            .expect("count migrated artifacts");
-        assert_eq!(artifact_count, 3);
-
-        for (index, columns) in [
-            (
-                "idx_artifacts_run_created",
-                vec![("run_id", 0), ("created_at", 0), ("id", 0)],
-            ),
-            (
-                "idx_artifacts_created_at",
-                vec![("created_at", 0), ("id", 0)],
-            ),
-        ] {
-            let mut statement = db
-                    .prepare(
-                        "SELECT name, desc FROM pragma_index_xinfo(?1) WHERE \"key\" = 1 ORDER BY seqno",
-                    )
-                    .expect("prepare index columns");
-            let actual_columns = statement
-                .query_map([index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })
-                .expect("query index columns")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("collect index columns");
-            assert_eq!(
-                actual_columns
-                    .iter()
-                    .map(|(name, descending)| (name.as_str(), *descending))
-                    .collect::<Vec<_>>(),
-                columns,
-                "unexpected columns for {index}"
-            );
-        }
     }
 
     #[test]

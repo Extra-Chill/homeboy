@@ -4,524 +4,343 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use super::{sqlite_error, ObservationDbStatus};
 use crate::{paths, Result};
 
-struct Migration {
-    version: i64,
-    sql: &'static str,
-}
-
-const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS runs (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            component_id TEXT,
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            status TEXT NOT NULL,
-            command TEXT,
-            cwd TEXT,
-            homeboy_version TEXT,
-            git_sha TEXT,
-            rig_id TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS artifacts (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            path TEXT NOT NULL,
-            sha256 TEXT,
-            size_bytes INTEGER,
-            mime TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-    "#,
-    },
-    Migration {
-        version: 2,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS trace_runs (
-            run_id TEXT PRIMARY KEY,
-            component_id TEXT NOT NULL,
-            rig_id TEXT,
-            scenario_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            baseline_status TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS trace_spans (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            span_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            duration_ms REAL,
-            from_event TEXT,
-            to_event TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_trace_runs_component_scenario
-            ON trace_runs(component_id, scenario_id);
-        CREATE INDEX IF NOT EXISTS idx_trace_runs_rig
-            ON trace_runs(rig_id);
-        CREATE INDEX IF NOT EXISTS idx_trace_spans_run
-            ON trace_spans(run_id);
-    "#,
-    },
-    Migration {
-        version: 3,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS findings (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            tool TEXT NOT NULL,
-            rule TEXT,
-            file TEXT,
-            line INTEGER,
-            severity TEXT,
-            fingerprint TEXT,
-            message TEXT NOT NULL,
-            fixable INTEGER,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_findings_run
-            ON findings(run_id);
-        CREATE INDEX IF NOT EXISTS idx_findings_tool_file
-            ON findings(tool, file);
-        CREATE INDEX IF NOT EXISTS idx_findings_fingerprint
-            ON findings(fingerprint);
-    "#,
-    },
-    Migration {
-        version: 4,
-        sql: "",
-    },
-    Migration {
-        version: 5,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS triage_items (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            provider TEXT NOT NULL,
-            repo_owner TEXT NOT NULL,
-            repo_name TEXT NOT NULL,
-            item_type TEXT NOT NULL,
-            number INTEGER NOT NULL,
-            state TEXT NOT NULL,
-            title TEXT NOT NULL,
-            url TEXT NOT NULL,
-            checks TEXT,
-            review_decision TEXT,
-            merge_state TEXT,
-            next_action TEXT,
-            comments_count INTEGER,
-            reviews_count INTEGER,
-            last_comment_at TEXT,
-            last_review_at TEXT,
-            updated_at TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            observed_at TEXT NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_triage_items_run
-            ON triage_items(run_id);
-        CREATE INDEX IF NOT EXISTS idx_triage_items_repo_item
-            ON triage_items(provider, repo_owner, repo_name, item_type, number);
-    "#,
-    },
-    Migration {
-        version: 6,
-        sql: "",
-    },
-    Migration {
-        version: 7,
-        sql: "",
-    },
-    Migration {
-        version: 8,
-        sql: r#"
-        -- Equality filters followed by started_at let latest/list queries walk
-        -- a bounded index instead of sorting the full observation history.
-        CREATE INDEX IF NOT EXISTS idx_runs_started_at_desc
-            ON runs(started_at DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_runs_status_started_at_desc
-            ON runs(status, started_at DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_runs_kind_component_started_at_desc
-            ON runs(kind, component_id, started_at DESC, id DESC);
-        -- Terminal retention selects known statuses before its finished-at
-        -- cutoff, so this avoids scanning the full history on each cleanup.
-        CREATE INDEX IF NOT EXISTS idx_runs_status_finished_at
-            ON runs(status, finished_at ASC, id ASC);
-        "#,
-    },
-    Migration {
-        version: 9,
-        sql: r#"
-        -- Artifact reads are ordered within a run, while retention walks the
-        -- global creation order. Keep both traversals index-backed.
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_created
-            ON artifacts(run_id, created_at ASC, id ASC);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_created_at
-            ON artifacts(created_at ASC, id ASC);
-        "#,
-    },
-    Migration {
-        version: 10,
-        sql: r#"
-        -- Retry reconciliation starts from its durable predecessor identity.
-        -- Keep this JSON projection indexed so it never walks run history.
-        CREATE INDEX IF NOT EXISTS idx_runs_metadata_retry_of
-            ON runs(json_extract(metadata_json, '$.agent_task_run.metadata.retry_of'));
-        "#,
-    },
-    Migration {
-        version: 11,
-        sql: r#"
-        -- A publication is journaled before final paths are materialized. On
-        -- startup unfinished intents are removed with their unowned files.
-        CREATE TABLE IF NOT EXISTS artifact_publication_intents (
-            publication_id TEXT NOT NULL,
-            artifact_id TEXT NOT NULL,
-            staging_path TEXT NOT NULL,
-            final_path TEXT NOT NULL,
-            PRIMARY KEY(publication_id, artifact_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_publication
-            ON artifact_publication_intents(publication_id);
-        "#,
-    },
-    Migration {
-        version: 12,
-        sql: "",
-    },
-    Migration {
-        version: 13,
-        sql: r#"
-        -- Every child table has declared FOREIGN KEY(run_id) REFERENCES runs(id)
-        -- since it was created, but SQLite enforces foreign keys per connection
-        -- and defaults them off, and the pragma was never set. The schema
-        -- documented an invariant the database did not hold: deleting a run
-        -- left its children behind, and an orphaned `artifacts` row keeps
-        -- pointing at a path whose bytes retention has already reclaimed.
-        --
-        -- Enforcement only applies to statements issued after it is enabled, so
-        -- rows that accumulated while it was off would survive indefinitely and
-        -- keep contradicting the constraint. Reap them once, here, so the
-        -- pragma is turned on against a database that actually satisfies it.
-        --
-        -- NOT EXISTS rather than NOT IN: `runs.id` is a TEXT primary key, which
-        -- SQLite permits to be NULL, and a single NULL would make every NOT IN
-        -- comparison NULL and silently reap nothing.
-        DELETE FROM artifacts
-            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = artifacts.run_id);
-        DELETE FROM findings
-            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = findings.run_id);
-        DELETE FROM triage_items
-            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = triage_items.run_id);
-        DELETE FROM trace_spans
-            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = trace_spans.run_id);
-        DELETE FROM trace_runs
-            WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = trace_runs.run_id);
-        "#,
-    },
-    Migration {
-        // A running runner-exec recovery is a controller-wide singleton. The
-        // unique partial index makes the durable record itself the atomic claim.
-        version: 14,
-        sql: r#"
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_one_running_runner_exec_recovery
-            ON runs(kind)
-            WHERE kind = 'runner_exec_recovery' AND status = 'running';
-        "#,
-    },
-    Migration {
-        // A short opaque handle is the only artifact identifier exposed by the
-        // bounded evidence projection. It is derived from immutable ownership
-        // identity and indexed so handle lookup never needs a run-id selector.
-        version: 15,
-        sql: r#"
-        ALTER TABLE artifacts ADD COLUMN artifact_handle TEXT;
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_handle
-            ON artifacts(artifact_handle);
-        "#,
-    },
-    Migration {
-        // Rust backfill records the full-report rank semantics once, avoiding
-        // SQLite numeric coercion when a bounded projection selects a diagnostic.
-        version: 16,
-        sql: r#"
-        ALTER TABLE artifacts ADD COLUMN failure_diagnostic INTEGER;
-        ALTER TABLE artifacts ADD COLUMN failure_diagnostic_rank TEXT;
-        CREATE INDEX IF NOT EXISTS idx_artifacts_failure_diagnostic
-            ON artifacts(run_id, failure_diagnostic, failure_diagnostic_rank);
-        "#,
-    },
-    Migration {
-        // Artifact inventory pagination commonly narrows by these persisted fields.
-        version: 17,
-        sql: r#"
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_kind_created
-            ON artifacts(run_id, kind, created_at ASC, id ASC);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_mime_created
-            ON artifacts(run_id, mime, created_at ASC, id ASC);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_fixture_created
-            ON artifacts(run_id, json_extract(metadata_json, '$.fixture_id'), created_at ASC, id ASC);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_surface_created
-            ON artifacts(run_id, json_extract(metadata_json, '$.surface_id'), created_at ASC, id ASC);
-        CREATE INDEX IF NOT EXISTS idx_artifacts_run_scenario_created
-            ON artifacts(run_id, json_extract(metadata_json, '$.scenario_id'), created_at ASC, id ASC);
-        "#,
-    },
-    Migration {
-        version: 18,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_missions (
-            id TEXT PRIMARY KEY,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS control_plane_mission_runs (
-            mission_id TEXT NOT NULL,
-            run_id TEXT NOT NULL UNIQUE,
-            PRIMARY KEY(mission_id, run_id),
-            FOREIGN KEY(mission_id) REFERENCES control_plane_missions(id),
-            FOREIGN KEY(run_id) REFERENCES runs(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_missions_created
-            ON control_plane_missions(created_at DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_control_plane_mission_runs_mission
-            ON control_plane_mission_runs(mission_id, run_id);
-        "#,
-    },
-    Migration {
-        version: 19,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_event_appends (
-            run_id TEXT NOT NULL,
-            idempotency_digest TEXT NOT NULL,
-            request_digest TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            event_json TEXT,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY(run_id, idempotency_digest),
-            UNIQUE(run_id, sequence),
-            UNIQUE(event_id),
-            FOREIGN KEY(run_id) REFERENCES runs(id),
-            CHECK(length(idempotency_digest) = 64),
-            CHECK(length(request_digest) = 64),
-            CHECK(sequence > 0)
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_sequence
-            ON control_plane_event_appends(run_id, sequence);
-        CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_retained
-            ON control_plane_event_appends(run_id, sequence) WHERE event_json IS NOT NULL;
-        "#,
-    },
-    Migration {
-        // Migration 18 introduced the canonical mission index, but existing
-        // agent-task rows were only indexed after their next lifecycle write.
-        // Backfill them once so read-only discovery is complete after upgrade.
-        version: 20,
-        sql: "",
-    },
-    Migration {
-        // The kernel owns action acceptance and replay even when a domain
-        // extension owns the effect. A durable claim lets a replacement
-        // controller reconcile an interrupted effect instead of repeating it.
-        version: 21,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_action_claims (
-            run_id TEXT NOT NULL,
-            idempotency_digest TEXT NOT NULL,
-            request_digest TEXT NOT NULL,
-            state TEXT NOT NULL,
-            owner_pid INTEGER NOT NULL,
-            owner_start_identity_json TEXT,
-            accepted_at TEXT NOT NULL,
-            acknowledgement_json TEXT,
-            completed_at TEXT,
-            PRIMARY KEY(run_id, idempotency_digest),
-            FOREIGN KEY(run_id) REFERENCES runs(id),
-            CHECK(length(idempotency_digest) = 64),
-            CHECK(length(request_digest) = 64),
-            CHECK(state IN ('running', 'completed'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_action_claims_run_state
-            ON control_plane_action_claims(run_id, state);
-        "#,
-    },
-    Migration {
-        // Schema 21's claim is the action ledger. Evolve it in place into the
-        // transactional intent/outbox; existing completed acknowledgements
-        // remain authoritative and running claims become recoverable pending
-        // effects after restart.
-        version: 22,
-        sql: "",
-    },
-    Migration {
-        // Action admission needs the same transactional authority as the
-        // intent outbox. Domains supply generic resource projections; aliases
-        // are indexed separately so reassignment is an explicit transaction.
-        version: 23,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_resources (
-            resource_type TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
-            version TEXT NOT NULL,
-            state TEXT NOT NULL,
-            eligibility_json TEXT NOT NULL DEFAULT '{}',
-            provenance_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(resource_type, resource_id)
-        );
-        CREATE TABLE IF NOT EXISTS control_plane_resource_aliases (
-            resource_type TEXT NOT NULL,
-            alias TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
-            PRIMARY KEY(resource_type, alias),
-            FOREIGN KEY(resource_type, resource_id)
-                REFERENCES control_plane_resources(resource_type, resource_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_resource_aliases_target
-            ON control_plane_resource_aliases(resource_type, resource_id);
-        "#,
-    },
-    Migration {
-        // Some pre-release databases recorded migration 23 before its resource
-        // projection tables were present. Reassert the idempotent DDL as a new
-        // migration so an already-recorded version cannot leave action routing
-        // without its canonical authority.
-        version: 24,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_resources (
-            resource_type TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
-            version TEXT NOT NULL,
-            state TEXT NOT NULL,
-            eligibility_json TEXT NOT NULL DEFAULT '{}',
-            provenance_json TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY(resource_type, resource_id)
-        );
-        CREATE TABLE IF NOT EXISTS control_plane_resource_aliases (
-            resource_type TEXT NOT NULL,
-            alias TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
-            PRIMARY KEY(resource_type, alias),
-            FOREIGN KEY(resource_type, resource_id)
-                REFERENCES control_plane_resources(resource_type, resource_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_resource_aliases_target
-            ON control_plane_resource_aliases(resource_type, resource_id);
-        "#,
-    },
-    Migration {
-        // A domain's pending work and its lifecycle record must be committed
-        // together. The daemon drains this indexed outbox into its separate
-        // durable job store; idempotent submission closes the ACK crash window.
-        version: 25,
-        sql: r#"
-        CREATE TABLE IF NOT EXISTS control_plane_work_intents (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            version INTEGER NOT NULL,
-            payload_json TEXT NOT NULL,
-            state TEXT NOT NULL DEFAULT 'pending',
-            receipt_json TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
-            CHECK(state IN ('pending', 'submitted')),
-            CHECK(version > 0)
-        );
-        CREATE INDEX IF NOT EXISTS idx_control_plane_work_intents_pending
-            ON control_plane_work_intents(created_at, id) WHERE state = 'pending';
-        "#,
-    },
-    Migration {
-        version: 26,
-        sql: r#"
-        CREATE INDEX IF NOT EXISTS idx_agent_task_active_scope
-        ON runs (
-            json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),
-            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
-            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
-            id
-        )
-        WHERE kind = 'agent-task'
-          AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running');
-        "#,
-    },
-    Migration {
-        version: 27,
-        sql: r#"
-        DROP INDEX idx_agent_task_active_scope;
-        CREATE INDEX idx_agent_task_active_scope
-        ON runs (
-            json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),
-            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
-            json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
-            id
-        )
-        WHERE kind = 'agent-task'
-          AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
-          AND (json_type(metadata_json, '$.agent_task_run.metadata.caller_workspace') IS NOT NULL
-               OR json_type(metadata_json, '$.agent_task_run.metadata.detached_cook_handoff') = 'object'
-               OR json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'
-               OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text');
-        "#,
-    },
-    Migration {
-        // `run.cancelled` is a lifecycle authority, not telemetry (#15718).
-        // Its payload is copied into a column the per-run payload pruning never
-        // touches, so a cancellation outlives the bounded progress window.
-        // Additive and nullable: older binaries keep inserting and pruning
-        // `event_json` exactly as before and never read this column.
-        version: 28,
-        sql: "",
-    },
-];
-
-/// The schema version a freshly initialized store lands on.
+/// The only observation-store schema this binary creates or opens.
 ///
-/// Derived from `MIGRATIONS` rather than written down separately. A
-/// hand-maintained copy drifted: migration 12 was added and the constant stayed
-/// at 11, so a correctly migrated store reported a version its own code did not
-/// recognise as current. Five store-initialization tests had been failing on
-/// that for as long as the drift existed, unseen because member-crate lib tests
-/// were compiled and never executed (#10477).
-/// How many migrations a fully initialized store has applied.
+/// Homeboy keeps no migrations for older stores (#15742). The 28 historical
+/// migrations were squashed into [`BASELINE_SCHEMA`]; a store recorded at an
+/// older version is refused with an actionable error instead of upgraded.
+/// Changing the schema means editing the baseline and bumping this version,
+/// which deliberately makes every existing store fail to open.
+pub(crate) const SCHEMA_VERSION: i64 = 28;
+
+/// The full observation-store schema at [`SCHEMA_VERSION`].
 ///
-/// Derived for the same reason as [`LATEST_MIGRATION_VERSION`]: the test suite
-/// asserted a hand-written `11` and adding migration 12 silently invalidated it.
-pub(crate) const MIGRATION_COUNT: i64 = MIGRATIONS.len() as i64;
+/// Column order matches what the historical migrations produced (columns
+/// added by `ALTER TABLE` sit after the original columns), so positional
+/// reads and a store created by the old migration chain are indistinguishable.
+/// `schema_equivalence_tests` pins this against a fixture captured from the
+/// migration chain itself.
+const BASELINE_SCHEMA: &str = r#"
+CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
 
-pub(crate) const LATEST_MIGRATION_VERSION: i64 = {
-    assert!(!MIGRATIONS.is_empty(), "the store must declare a schema");
-    MIGRATIONS[MIGRATIONS.len() - 1].version
-};
+CREATE TABLE runs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    component_id TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    command TEXT,
+    cwd TEXT,
+    homeboy_version TEXT,
+    git_sha TEXT,
+    rig_id TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
 
-static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+-- Equality filters followed by started_at let latest/list queries walk a
+-- bounded index instead of sorting the full observation history.
+CREATE INDEX idx_runs_started_at_desc
+    ON runs(started_at DESC, id DESC);
+CREATE INDEX idx_runs_status_started_at_desc
+    ON runs(status, started_at DESC, id DESC);
+CREATE INDEX idx_runs_kind_component_started_at_desc
+    ON runs(kind, component_id, started_at DESC, id DESC);
+-- Terminal retention selects known statuses before its finished-at cutoff.
+CREATE INDEX idx_runs_status_finished_at
+    ON runs(status, finished_at ASC, id ASC);
+-- Retry reconciliation starts from its durable predecessor identity.
+CREATE INDEX idx_runs_metadata_retry_of
+    ON runs(json_extract(metadata_json, '$.agent_task_run.metadata.retry_of'));
+-- A running runner-exec recovery is a controller-wide singleton; the unique
+-- partial index makes the durable record itself the atomic claim.
+CREATE UNIQUE INDEX idx_runs_one_running_runner_exec_recovery
+    ON runs(kind)
+    WHERE kind = 'runner_exec_recovery' AND status = 'running';
+CREATE INDEX idx_agent_task_active_scope
+    ON runs (
+        json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),
+        json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
+        json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
+        id
+    )
+    WHERE kind = 'agent-task'
+      AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+      AND (json_type(metadata_json, '$.agent_task_run.metadata.caller_workspace') IS NOT NULL
+           OR json_type(metadata_json, '$.agent_task_run.metadata.detached_cook_handoff') = 'object'
+           OR json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'
+           OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text');
+
+CREATE TABLE artifacts (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    sha256 TEXT,
+    size_bytes INTEGER,
+    mime TEXT,
+    created_at TEXT NOT NULL,
+    artifact_type TEXT NOT NULL DEFAULT 'file',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    url TEXT,
+    public_url TEXT,
+    viewer_url TEXT,
+    viewer_links_json TEXT NOT NULL DEFAULT '[]',
+    artifact_handle TEXT,
+    failure_diagnostic INTEGER,
+    failure_diagnostic_rank TEXT,
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+-- Artifact reads are ordered within a run, while retention walks the global
+-- creation order. Keep both traversals index-backed. `artifact_handle` is the
+-- short opaque identifier the bounded evidence projection exposes.
+CREATE INDEX idx_artifacts_run_created
+    ON artifacts(run_id, created_at ASC, id ASC);
+CREATE INDEX idx_artifacts_created_at
+    ON artifacts(created_at ASC, id ASC);
+CREATE UNIQUE INDEX idx_artifacts_handle
+    ON artifacts(artifact_handle);
+CREATE INDEX idx_artifacts_failure_diagnostic
+    ON artifacts(run_id, failure_diagnostic, failure_diagnostic_rank);
+-- Artifact inventory pagination commonly narrows by these persisted fields.
+CREATE INDEX idx_artifacts_run_kind_created
+    ON artifacts(run_id, kind, created_at ASC, id ASC);
+CREATE INDEX idx_artifacts_run_mime_created
+    ON artifacts(run_id, mime, created_at ASC, id ASC);
+CREATE INDEX idx_artifacts_run_fixture_created
+    ON artifacts(run_id, json_extract(metadata_json, '$.fixture_id'), created_at ASC, id ASC);
+CREATE INDEX idx_artifacts_run_surface_created
+    ON artifacts(run_id, json_extract(metadata_json, '$.surface_id'), created_at ASC, id ASC);
+CREATE INDEX idx_artifacts_run_scenario_created
+    ON artifacts(run_id, json_extract(metadata_json, '$.scenario_id'), created_at ASC, id ASC);
+
+-- A publication is journaled before final paths are materialized. On startup
+-- unfinished intents are removed with their unowned files.
+CREATE TABLE artifact_publication_intents (
+    publication_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    staging_path TEXT NOT NULL,
+    final_path TEXT NOT NULL,
+    owner_token TEXT,
+    lease_expires_at_ms INTEGER,
+    PRIMARY KEY(publication_id, artifact_id)
+);
+CREATE INDEX idx_artifact_publication_intents_publication
+    ON artifact_publication_intents(publication_id);
+CREATE INDEX idx_artifact_publication_intents_lease
+    ON artifact_publication_intents(lease_expires_at_ms);
+
+CREATE TABLE trace_runs (
+    run_id TEXT PRIMARY KEY,
+    component_id TEXT NOT NULL,
+    rig_id TEXT,
+    scenario_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    baseline_status TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX idx_trace_runs_component_scenario
+    ON trace_runs(component_id, scenario_id);
+CREATE INDEX idx_trace_runs_rig
+    ON trace_runs(rig_id);
+
+CREATE TABLE trace_spans (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    span_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms REAL,
+    from_event TEXT,
+    to_event TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX idx_trace_spans_run
+    ON trace_spans(run_id);
+
+CREATE TABLE findings (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    rule TEXT,
+    file TEXT,
+    line INTEGER,
+    severity TEXT,
+    fingerprint TEXT,
+    message TEXT NOT NULL,
+    fixable INTEGER,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX idx_findings_run
+    ON findings(run_id);
+CREATE INDEX idx_findings_tool_file
+    ON findings(tool, file);
+CREATE INDEX idx_findings_fingerprint
+    ON findings(fingerprint);
+
+CREATE TABLE triage_items (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    item_type TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    checks TEXT,
+    review_decision TEXT,
+    merge_state TEXT,
+    next_action TEXT,
+    comments_count INTEGER,
+    reviews_count INTEGER,
+    last_comment_at TEXT,
+    last_review_at TEXT,
+    updated_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX idx_triage_items_run
+    ON triage_items(run_id);
+CREATE INDEX idx_triage_items_repo_item
+    ON triage_items(provider, repo_owner, repo_name, item_type, number);
+
+CREATE TABLE control_plane_missions (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE control_plane_mission_runs (
+    mission_id TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(mission_id, run_id),
+    FOREIGN KEY(mission_id) REFERENCES control_plane_missions(id),
+    FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+CREATE INDEX idx_control_plane_missions_created
+    ON control_plane_missions(created_at DESC, id DESC);
+CREATE INDEX idx_control_plane_mission_runs_mission
+    ON control_plane_mission_runs(mission_id, run_id);
+
+CREATE TABLE control_plane_event_appends (
+    run_id TEXT NOT NULL,
+    idempotency_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    event_json TEXT,
+    created_at TEXT NOT NULL,
+    durable_event_json TEXT,
+    PRIMARY KEY(run_id, idempotency_digest),
+    UNIQUE(run_id, sequence),
+    UNIQUE(event_id),
+    FOREIGN KEY(run_id) REFERENCES runs(id),
+    CHECK(length(idempotency_digest) = 64),
+    CHECK(length(request_digest) = 64),
+    CHECK(sequence > 0)
+);
+-- `run.cancelled` is a lifecycle authority, not telemetry (#15718): its payload
+-- is copied into `durable_event_json`, which per-run payload pruning never
+-- touches, so a cancellation outlives the bounded progress window.
+CREATE INDEX idx_control_plane_event_appends_run_sequence
+    ON control_plane_event_appends(run_id, sequence);
+CREATE INDEX idx_control_plane_event_appends_run_retained
+    ON control_plane_event_appends(run_id, sequence) WHERE event_json IS NOT NULL;
+CREATE INDEX idx_control_plane_event_appends_run_durable
+    ON control_plane_event_appends(run_id, sequence)
+    WHERE durable_event_json IS NOT NULL;
+
+-- The kernel owns action acceptance and replay even when a domain extension
+-- owns the effect: the claim is the transactional intent/outbox a replacement
+-- controller reconciles instead of repeating an interrupted effect.
+CREATE TABLE control_plane_action_claims (
+    run_id TEXT NOT NULL,
+    idempotency_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL,
+    owner_pid INTEGER NOT NULL,
+    owner_start_identity_json TEXT,
+    accepted_at TEXT NOT NULL,
+    acknowledgement_json TEXT,
+    completed_at TEXT,
+    intent_json TEXT,
+    fence_json TEXT,
+    effect_id TEXT,
+    outbox_state TEXT,
+    lease_owner TEXT,
+    lease_fence INTEGER NOT NULL DEFAULT 0,
+    lease_expires_at TEXT,
+    terminal_json TEXT,
+    audit_json TEXT,
+    PRIMARY KEY(run_id, idempotency_digest),
+    FOREIGN KEY(run_id) REFERENCES runs(id),
+    CHECK(length(idempotency_digest) = 64),
+    CHECK(length(request_digest) = 64),
+    CHECK(state IN ('running', 'completed'))
+);
+CREATE INDEX idx_control_plane_action_claims_run_state
+    ON control_plane_action_claims(run_id, state);
+CREATE UNIQUE INDEX idx_control_plane_action_claims_effect_id
+    ON control_plane_action_claims(effect_id) WHERE effect_id IS NOT NULL;
+CREATE INDEX idx_control_plane_action_claims_outbox
+    ON control_plane_action_claims(outbox_state, lease_expires_at, accepted_at);
+
+-- Action admission resource projections. Aliases are indexed separately so
+-- reassignment is an explicit transaction.
+CREATE TABLE control_plane_resources (
+    resource_type TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    state TEXT NOT NULL,
+    eligibility_json TEXT NOT NULL DEFAULT '{}',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(resource_type, resource_id)
+);
+CREATE TABLE control_plane_resource_aliases (
+    resource_type TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    resource_id TEXT NOT NULL,
+    PRIMARY KEY(resource_type, alias),
+    FOREIGN KEY(resource_type, resource_id)
+        REFERENCES control_plane_resources(resource_type, resource_id)
+);
+CREATE INDEX idx_control_plane_resource_aliases_target
+    ON control_plane_resource_aliases(resource_type, resource_id);
+
+-- A domain's pending work and its lifecycle record are committed together.
+-- The daemon drains this indexed outbox into its separate durable job store.
+CREATE TABLE control_plane_work_intents (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    receipt_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+    CHECK(state IN ('pending', 'submitted')),
+    CHECK(version > 0)
+);
+CREATE INDEX idx_control_plane_work_intents_pending
+    ON control_plane_work_intents(created_at, id) WHERE state = 'pending';
+"#;
+
+static SCHEMA_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) fn database_path() -> Result<PathBuf> {
     paths::observation_db()
@@ -544,282 +363,101 @@ pub(crate) fn status() -> Result<ObservationDbStatus> {
     status_for_open_connection(&connection, path, true)
 }
 
-pub(crate) fn apply_migrations(connection: &Connection) -> Result<()> {
-    let _guard = MIGRATION_LOCK
+/// Create the baseline schema in an empty store, or accept a store already at
+/// [`SCHEMA_VERSION`]. Anything else is refused: there is no upgrade path.
+///
+/// A store recorded at a *newer* version is accepted, matching the previous
+/// behaviour where an older binary simply had no further migrations to apply.
+pub(crate) fn ensure_schema(connection: &Connection, path: &Path) -> Result<()> {
+    let _guard = SCHEMA_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| crate::Error::internal_unexpected("observation migration lock poisoned"))?;
+        .map_err(|_| crate::Error::internal_unexpected("observation schema lock poisoned"))?;
 
-    connection
-        .execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                applied_at TEXT NOT NULL
-            );
-        "#,
-        )
-        .map_err(sqlite_error("create schema_migrations"))?;
-
-    for migration in MIGRATIONS {
-        if migration_applied(connection, migration.version)? {
-            continue;
-        }
-
-        let tx = connection
-            .unchecked_transaction()
-            .map_err(sqlite_error("begin observation migration"))?;
-        if migration_applied(&tx, migration.version)? {
-            tx.commit().map_err(sqlite_error(format!(
-                "commit migration {}",
-                migration.version
-            )))?;
-            continue;
-        }
-        apply_migration(&tx, migration)?;
-        tx.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-            rusqlite::params![migration.version, chrono::Utc::now().to_rfc3339()],
-        )
-        .map_err(sqlite_error(format!(
-            "record migration {}",
-            migration.version
-        )))?;
-        tx.commit().map_err(sqlite_error(format!(
-            "commit migration {}",
-            migration.version
-        )))?;
+    // The common case is an existing current store; read it without taking
+    // the writer lock so ordinary opens stay as cheap as they were.
+    if store_state(connection)? == StoreState::Current {
+        return Ok(());
     }
 
-    Ok(())
-}
-
-fn apply_migration(connection: &Connection, migration: &Migration) -> Result<()> {
-    apply_migration_sql(connection, migration)?;
-    if migration.version == 20 {
-        backfill_control_plane_missions(connection)?;
-    }
-    if migration.version == 22 {
-        evolve_control_plane_action_claims(connection)?;
-    }
-    Ok(())
-}
-
-fn evolve_control_plane_action_claims(connection: &Connection) -> Result<()> {
-    use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionFence,
-        ControlPlaneActionIntent, ControlPlaneActionPayload, ControlPlaneActionRequest,
-        ControlPlaneActionResource, ControlPlaneEffectAudit, ControlPlaneEffectTerminal,
-        ControlPlaneRef, EffectId, RunId, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
-        CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
-    };
-    for (column, definition) in [
-        ("intent_json", "TEXT"),
-        ("fence_json", "TEXT"),
-        ("effect_id", "TEXT"),
-        ("outbox_state", "TEXT"),
-        ("lease_owner", "TEXT"),
-        ("lease_fence", "INTEGER NOT NULL DEFAULT 0"),
-        ("lease_expires_at", "TEXT"),
-        ("terminal_json", "TEXT"),
-        ("audit_json", "TEXT"),
-    ] {
-        if !column_exists(connection, "control_plane_action_claims", column)? {
-            connection
-                .execute_batch(&format!(
-                    "ALTER TABLE control_plane_action_claims ADD COLUMN {column} {definition};"
-                ))
-                .map_err(sqlite_error("evolve control-plane action claims"))?;
-        }
-    }
-    let mut statement = connection.prepare(
-        "SELECT c.run_id, c.idempotency_digest, c.request_digest, c.state, c.accepted_at, c.acknowledgement_json, r.started_at, COALESCE(r.finished_at, r.started_at) FROM control_plane_action_claims c JOIN runs r ON r.id = c.run_id WHERE c.intent_json IS NULL OR c.effect_id IS NULL OR c.fence_json IS NULL OR c.outbox_state IS NULL"
-    ).map_err(sqlite_error("read legacy control-plane action claims"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-            ))
-        })
-        .map_err(sqlite_error("map legacy control-plane action claims"))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(sqlite_error("collect legacy control-plane action claims"))?;
-    drop(statement);
-    for (
-        run_id,
-        idempotency_digest,
-        request_digest,
-        state,
-        accepted_at,
-        acknowledgement,
-        started_at,
-        updated_at,
-    ) in rows
-    {
-        let run = RunId::new(&run_id)
-            .map_err(|error| crate::Error::internal_unexpected(error.to_string()))?;
-        let effect_id = EffectId(format!(
-            "legacy:{}",
-            homeboy_engine_primitives::content_hash::sha256_hex(
-                format!("{run_id}\0{idempotency_digest}").as_bytes()
+    let tx = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)
+        .map_err(sqlite_error("begin observation schema initialization"))?;
+    match store_state(&tx)? {
+        StoreState::Current => {}
+        StoreState::Empty => {
+            tx.execute_batch(BASELINE_SCHEMA)
+                .map_err(sqlite_error("create observation store baseline schema"))?;
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![SCHEMA_VERSION, chrono::Utc::now().to_rfc3339()],
             )
-        ));
-        let acknowledgement = acknowledgement
-            .as_deref()
-            .map(serde_json::from_str::<ControlPlaneActionAcknowledgement>)
-            .transpose()
-            .map_err(|error| crate::Error::internal_json(error.to_string(), None))?;
-        let request = acknowledgement
-            .as_ref()
-            .map(|ack| ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: effect_id.clone(),
-                action: ack.action,
-                idempotency_key: ack.idempotency_key.clone(),
-                actor: ack.actor.clone(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: true,
-            })
-            .unwrap_or(ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: effect_id.clone(),
-                action: ControlPlaneAction::Reconcile,
-                idempotency_key: format!("legacy-{idempotency_digest}"),
-                actor: "migration-22".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: false,
-            });
-        let intent = ControlPlaneActionIntent {
-            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
-            effect_id: effect_id.clone(),
-            resource: ControlPlaneActionResource {
-                resource: ControlPlaneRef::Run(run.clone()),
-                run: run.clone(),
-                original_alias: None,
-            },
-            request,
-            request_digest,
-            accepted_at: accepted_at.clone(),
-        };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: updated_at,
-            eligible: state == "completed",
-            reason: (state != "completed").then(|| {
-                "legacy claim requires authoritative reconciliation before redispatch".to_string()
-            }),
-        };
-        let terminal = acknowledgement.as_ref().map(|acknowledgement| ControlPlaneEffectTerminal { schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(), completed_at: acknowledgement.completed_at.clone(), acknowledgement: acknowledgement.clone(), audit: ControlPlaneEffectAudit { schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(), observed_at: started_at, evidence: serde_json::json!({ "migration": 22, "legacy_completed_acknowledgement": true }) } });
-        connection.execute("UPDATE control_plane_action_claims SET intent_json = ?3, fence_json = ?4, effect_id = ?5, outbox_state = ?6, terminal_json = ?7 WHERE run_id = ?1 AND idempotency_digest = ?2", rusqlite::params![run_id, idempotency_digest, serde_json::to_string(&intent).map_err(|error| crate::Error::internal_json(error.to_string(), None))?, serde_json::to_string(&fence).map_err(|error| crate::Error::internal_json(error.to_string(), None))?, effect_id.0, if terminal.is_some() { "terminal" } else { "recovery_required" }, terminal.map(|value| serde_json::to_string(&value)).transpose().map_err(|error| crate::Error::internal_json(error.to_string(), None))?]).map_err(sqlite_error("backfill legacy control-plane action effect"))?;
+            .map_err(sqlite_error("record observation store baseline schema"))?;
+        }
+        StoreState::Unsupported(found) => return Err(unsupported_store_error(path, found)),
     }
-    connection.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_control_plane_action_claims_effect_id ON control_plane_action_claims(effect_id) WHERE effect_id IS NOT NULL;
-         CREATE INDEX IF NOT EXISTS idx_control_plane_action_claims_outbox ON control_plane_action_claims(outbox_state, lease_expires_at, accepted_at);"
-    ).map_err(sqlite_error("finalize control-plane action outbox evolution"))
+    tx.commit()
+        .map_err(sqlite_error("commit observation schema initialization"))
 }
 
-fn backfill_control_plane_missions(connection: &Connection) -> Result<()> {
-    use homeboy_control_plane_contract::{resolve, IdentityKind};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreState {
+    /// No tables at all: a brand-new database file.
+    Empty,
+    /// Recorded at (or beyond) the version this binary creates.
+    Current,
+    /// Has tables but is unversioned (`None`) or recorded at an older version.
+    Unsupported(Option<i64>),
+}
 
-    let mut statement = connection
-        .prepare(
-            "SELECT id, started_at, COALESCE(finished_at, started_at), metadata_json \
-             FROM runs WHERE kind = 'agent-task' ORDER BY id",
-        )
-        .map_err(sqlite_error("prepare control-plane mission backfill"))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(sqlite_error("read control-plane mission backfill"))?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(sqlite_error("collect control-plane mission backfill"))?;
-    drop(statement);
-
-    for (run_id, created_at, updated_at, metadata_json) in rows {
-        let metadata: serde_json::Value =
-            serde_json::from_str(&metadata_json).unwrap_or(serde_json::Value::Null);
-        let mission = if let Some(fanout_id) = metadata
-            .pointer("/agent_task_run/metadata/fanout/id")
-            .and_then(serde_json::Value::as_str)
-        {
-            resolve(IdentityKind::FanoutPortfolioId, fanout_id)
-                .map_err(|error| {
-                    crate::Error::internal_json(
-                        error.to_string(),
-                        Some(format!("backfill fanout mission for run {run_id}")),
-                    )
-                })?
-                .mission
+fn store_state(connection: &Connection) -> Result<StoreState> {
+    if !table_exists(connection, "schema_migrations")? {
+        return Ok(if table_count(connection)? == 0 {
+            StoreState::Empty
         } else {
-            resolve(IdentityKind::RunId, &run_id)
-                .ok()
-                .and_then(|resolved| resolved.mission)
-        };
-        let Some(mission) = mission else {
-            continue;
-        };
-        let existing = connection
-            .query_row(
-                "SELECT mission_id FROM control_plane_mission_runs WHERE run_id = ?1",
-                [&run_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(sqlite_error(
-                "read existing control-plane mission ownership",
-            ))?;
-        if existing
-            .as_deref()
-            .is_some_and(|value| value != mission.as_str())
-        {
-            return Err(crate::Error::internal_unexpected(format!(
-                "control-plane run {run_id} is already owned by mission {}, not {}",
-                existing.expect("checked existing mission"),
-                mission
-            )));
-        }
-        connection
-            .execute(
-                "INSERT INTO control_plane_missions(id, created_at, updated_at) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(id) DO UPDATE SET updated_at = MAX(updated_at, excluded.updated_at)",
-                rusqlite::params![mission.as_str(), created_at, updated_at],
-            )
-            .map_err(sqlite_error("backfill control-plane mission"))?;
-        connection
-            .execute(
-                "INSERT INTO control_plane_mission_runs(mission_id, run_id) VALUES (?1, ?2) \
-                 ON CONFLICT(run_id) DO NOTHING",
-                rusqlite::params![mission.as_str(), run_id],
-            )
-            .map_err(sqlite_error("backfill control-plane mission run"))?;
+            StoreState::Unsupported(None)
+        });
     }
-    Ok(())
+    let version = current_schema_version(connection)?;
+    Ok(if version >= SCHEMA_VERSION {
+        StoreState::Current
+    } else {
+        StoreState::Unsupported(Some(version))
+    })
+}
+
+fn unsupported_store_error(path: &Path, found: Option<i64>) -> crate::Error {
+    let found_label = found.map_or_else(
+        || "an unversioned schema".to_string(),
+        |version| format!("schema version {version}"),
+    );
+    let path_label = path.display().to_string();
+    crate::Error::new(
+        crate::ErrorCode::ConfigInvalidValue,
+        format!(
+            "Observation store {path_label} has {found_label}; this Homeboy only opens schema \
+             version {SCHEMA_VERSION} and does not migrate older stores"
+        ),
+        serde_json::json!({
+            "path": path_label,
+            "found_schema_version": found,
+            "required_schema_version": SCHEMA_VERSION,
+        }),
+    )
+    .with_hint(format!(
+        "Move or delete {path_label} (together with its -wal and -shm files) and rerun; Homeboy \
+         creates a fresh store at schema version {SCHEMA_VERSION}. Local run history in the old \
+         store is not carried over."
+    ))
 }
 
 /// Open an initializing connection under a bounded, cross-process lease.
 /// SQLite needs an exclusive lock to convert a rollback journal into WAL, and
-/// the process-local migration mutex cannot coordinate separate CLI processes.
+/// the process-local schema mutex cannot coordinate separate CLI processes.
 pub(crate) fn open_initialized_connection(path: &Path) -> Result<Connection> {
     with_initialization_lock(path, || {
         let connection = open_connection(path)?;
         ensure_wal_journal_mode(&connection)?;
-        apply_migrations(&connection)?;
+        ensure_schema(&connection, path)?;
         Ok(connection)
     })
 }
@@ -949,7 +587,7 @@ pub(crate) fn foreign_keys_enforced(connection: &Connection) -> Result<bool> {
 
 /// Open an existing observation store for a bounded metadata read.
 ///
-/// This deliberately skips migrations and journal-mode configuration: both can
+/// This deliberately skips schema initialization and journal-mode configuration: both can
 /// acquire writer locks even though the caller only needs persisted metadata.
 pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
     const READ_TIMEOUT: Duration = Duration::from_millis(750);
@@ -962,7 +600,7 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
 }
 
 /// Open an existing store for a bounded scheduler write. This deliberately
-/// avoids migrations, pragma maintenance, and artifact reconciliation: a
+/// avoids schema initialization, pragma maintenance, and artifact reconciliation: a
 /// scheduler may only claim or terminalize its own durable work.
 pub(crate) fn open_bounded_writer_connection(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path).map_err(sqlite_error(format!(
@@ -999,146 +637,6 @@ fn read_store_error(path: &Path, operation: &str, error: rusqlite::Error) -> cra
         return crate::Error::observation_store_busy(path.to_string_lossy(), operation, 750);
     }
     sqlite_error(format!("{operation} {}", path.display()))(error)
-}
-
-fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result<()> {
-    if migration.version == 4 {
-        if !column_exists(connection, "artifacts", "artifact_type")? {
-            connection
-                .execute_batch(
-                    r#"
-                    ALTER TABLE artifacts
-                        ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'file';
-                    "#,
-                )
-                .map_err(sqlite_error("apply migration 4"))?;
-        }
-        return Ok(());
-    }
-
-    if migration.version == 6 {
-        if !column_exists(connection, "artifacts", "metadata_json")? {
-            connection
-                .execute_batch(
-                    r#"
-                    ALTER TABLE artifacts
-                        ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
-                    "#,
-                )
-                .map_err(sqlite_error("apply migration 6"))?;
-        }
-        return Ok(());
-    }
-
-    if migration.version == 7 {
-        for (column, definition) in [
-            ("url", "TEXT"),
-            ("public_url", "TEXT"),
-            ("viewer_url", "TEXT"),
-            ("viewer_links_json", "TEXT NOT NULL DEFAULT '[]'"),
-        ] {
-            if !column_exists(connection, "artifacts", column)? {
-                connection
-                    .execute_batch(&format!(
-                        "ALTER TABLE artifacts ADD COLUMN {column} {definition};"
-                    ))
-                    .map_err(sqlite_error("apply migration 7"))?;
-            }
-        }
-        return Ok(());
-    }
-
-    if migration.version == 12 {
-        for (column, definition) in [("owner_token", "TEXT"), ("lease_expires_at_ms", "INTEGER")] {
-            if !column_exists(connection, "artifact_publication_intents", column)? {
-                connection
-                    .execute_batch(&format!(
-                        "ALTER TABLE artifact_publication_intents ADD COLUMN {column} {definition};"
-                    ))
-                    .map_err(sqlite_error("apply migration 12"))?;
-            }
-        }
-        connection
-            .execute_batch(
-                r#"
-                CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_lease
-                    ON artifact_publication_intents(lease_expires_at_ms);
-                "#,
-            )
-            .map_err(sqlite_error("apply migration 12"))?;
-        return Ok(());
-    }
-
-    if migration.version == 28 {
-        if !column_exists(
-            connection,
-            "control_plane_event_appends",
-            "durable_event_json",
-        )? {
-            connection
-                .execute_batch(
-                    "ALTER TABLE control_plane_event_appends ADD COLUMN durable_event_json TEXT;",
-                )
-                .map_err(sqlite_error("apply migration 28"))?;
-        }
-        // Receipts still inside the bounded window become durable now; a
-        // payload already pruned before this migration cannot be recovered.
-        connection
-            .execute_batch(
-                r#"
-                UPDATE control_plane_event_appends
-                    SET durable_event_json = event_json
-                    WHERE durable_event_json IS NULL
-                      AND event_json IS NOT NULL
-                      AND json_extract(event_json, '$.kind') = 'run.cancelled';
-                CREATE INDEX IF NOT EXISTS idx_control_plane_event_appends_run_durable
-                    ON control_plane_event_appends(run_id, sequence)
-                    WHERE durable_event_json IS NOT NULL;
-                "#,
-            )
-            .map_err(sqlite_error("apply migration 28"))?;
-        return Ok(());
-    }
-
-    if migration.version == 13 {
-        // Some historical stores recorded later migration markers despite never
-        // creating optional child tables. Reap only tables that exist so the
-        // foreign-key migration remains a valid upgrade from those stores.
-        for table in [
-            "artifacts",
-            "findings",
-            "triage_items",
-            "trace_spans",
-            "trace_runs",
-        ] {
-            if table_exists(connection, table)? {
-                connection
-                    .execute_batch(&format!(
-                        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.id = {table}.run_id);"
-                    ))
-                    .map_err(sqlite_error(format!("apply migration 13 for {table}")))?;
-            }
-        }
-        return Ok(());
-    }
-
-    connection
-        .execute_batch(migration.sql)
-        .map_err(sqlite_error(format!(
-            "apply migration {}",
-            migration.version
-        )))
-}
-
-fn migration_applied(connection: &Connection, version: i64) -> Result<bool> {
-    let count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-            [version],
-            |row| row.get(0),
-        )
-        .map_err(sqlite_error(format!("check migration {}", version)))?;
-    Ok(count > 0)
 }
 
 fn current_schema_version(connection: &Connection) -> Result<i64> {
@@ -1188,22 +686,6 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(sqlite_error(format!("inspect table {table}")))?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(sqlite_error(format!("list columns for {table}")))?;
-
-    for row in rows {
-        if row.map_err(sqlite_error(format!("read column for {table}")))? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,111 +729,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn migration_12_adds_both_missing_columns() {
-        assert_migration_12_completes(false, false);
-    }
-
-    #[test]
-    fn migration_12_preserves_preexisting_owner_token() {
-        assert_migration_12_completes(true, false);
-    }
-
-    #[test]
-    fn migration_12_preserves_preexisting_lease_expiry() {
-        assert_migration_12_completes(false, true);
-    }
-
-    #[test]
-    fn migration_12_accepts_both_preexisting_columns() {
-        assert_migration_12_completes(true, true);
-    }
-
-    fn assert_migration_12_completes(has_owner_token: bool, has_lease_expiry: bool) {
-        let connection = schema_through_migration_11();
-        connection
-            .execute_batch(
-                "INSERT INTO artifact_publication_intents \
-                 (publication_id, artifact_id, staging_path, final_path) \
-                 VALUES ('publication', 'artifact', '/staging', '/final');",
-            )
-            .unwrap();
-
-        if has_owner_token {
-            connection
-                .execute_batch(
-                    "ALTER TABLE artifact_publication_intents ADD COLUMN owner_token TEXT; \
-                     UPDATE artifact_publication_intents SET owner_token = 'existing-owner';",
-                )
-                .unwrap();
-        }
-        if has_lease_expiry {
-            connection
-                .execute_batch(
-                    "ALTER TABLE artifact_publication_intents \
-                         ADD COLUMN lease_expires_at_ms INTEGER; \
-                     UPDATE artifact_publication_intents SET lease_expires_at_ms = 4242;",
-                )
-                .unwrap();
-        }
-        if has_owner_token && has_lease_expiry {
-            connection
-                .execute_batch(
-                    "CREATE INDEX idx_artifact_publication_intents_lease \
-                     ON artifact_publication_intents(lease_expires_at_ms);",
-                )
-                .unwrap();
-        }
-
-        apply_migrations(&connection).unwrap();
-
-        assert!(column_exists(&connection, "artifact_publication_intents", "owner_token").unwrap());
-        assert!(column_exists(
-            &connection,
-            "artifact_publication_intents",
-            "lease_expires_at_ms"
-        )
-        .unwrap());
-        let values: (Option<String>, Option<i64>) = connection
-            .query_row(
-                "SELECT owner_token, lease_expires_at_ms \
-                 FROM artifact_publication_intents \
-                 WHERE publication_id = 'publication' AND artifact_id = 'artifact'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            values,
-            (
-                has_owner_token.then(|| "existing-owner".to_owned()),
-                has_lease_expiry.then_some(4242),
-            )
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master \
-                     WHERE type = 'index' \
-                       AND name = 'idx_artifact_publication_intents_lease'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 12",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
-        );
-    }
-
     /// The pragma is the whole point of #11129: without it every
     /// `FOREIGN KEY(run_id) REFERENCES runs(id)` in this schema is decorative,
     /// because SQLite enforces foreign keys per connection and defaults them
@@ -1368,437 +745,305 @@ mod tests {
         );
     }
 
-    /// Rows that accumulated while enforcement was off are invisible to the
-    /// pragma -- it only constrains statements issued after it is enabled -- so
-    /// they would contradict the constraint forever. Migration 13 reaps them.
+    /// The schema a store created by the historical 28-migration chain had,
+    /// captured from unmodified `origin/main` (96a210446) by opening a fresh
+    /// store and snapshotting it with [`schema_snapshot`]. Each object's
+    /// original `sql` is kept verbatim so tests can also rebuild such a store.
+    const MIGRATED_SCHEMA_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/observation-schema/v28-migrated-schema.json");
+
+    fn migrated_schema_fixture() -> serde_json::Value {
+        serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("migrated schema fixture")
+    }
+
+    /// The squashed baseline must be indistinguishable from what the deleted
+    /// migration chain produced: every table, column (order, type, NOT NULL,
+    /// default, primary-key position), foreign key, CHECK and UNIQUE
+    /// constraint, index (columns, collation, direction, uniqueness, partial
+    /// predicate) and trigger. `sql` text is compared after collapsing
+    /// whitespace only, which is how `ALTER TABLE ADD COLUMN` rewrote it.
     #[test]
-    fn migration_13_reaps_rows_orphaned_while_enforcement_was_off() {
-        let connection = schema_through_migration(12);
-        seed_owned_and_orphaned_children(&connection);
+    fn baseline_schema_matches_the_historical_migration_chain() {
+        let fixture = migrated_schema_fixture();
+        assert_eq!(fixture["schema_version"], SCHEMA_VERSION);
 
-        apply_migrations(&connection).unwrap();
+        let directory = tempfile::tempdir().expect("temp dir");
+        let connection = open_initialized_connection(&directory.path().join("observations.sqlite"))
+            .expect("create baseline store");
 
-        for table in [
-            "artifacts",
-            "findings",
-            "triage_items",
-            "trace_spans",
-            "trace_runs",
-        ] {
-            let surviving: Vec<String> = surviving_run_ids(&connection, table);
+        let mut expected = fixture.clone();
+        let expected = expected.as_object_mut().expect("fixture object");
+        expected.remove("schema_version");
+        expected.remove("recorded_versions");
+        let expected = normalize_snapshot(serde_json::Value::Object(expected.clone()));
+        let actual = normalize_snapshot(schema_snapshot(&connection));
+
+        assert_eq!(
+            serde_json::to_string_pretty(&actual).unwrap(),
+            serde_json::to_string_pretty(&expected).unwrap(),
+            "the baseline schema drifted from the historical migration chain"
+        );
+        assert_eq!(recorded_versions(&connection), vec![SCHEMA_VERSION]);
+    }
+
+    /// A store recorded at any older version is refused with an actionable
+    /// error, and refusing it does not write anything to it.
+    #[test]
+    fn a_store_at_an_older_schema_version_is_refused() {
+        for version in [1, 8, 20, SCHEMA_VERSION - 1] {
+            let directory = tempfile::tempdir().expect("temp dir");
+            let path = directory.path().join("observations.sqlite");
+            {
+                let connection = Connection::open(&path).expect("create old store");
+                replay_migrated_schema(&connection, 1..=version);
+            }
+            let before = store_fingerprint(&path);
+
+            let error = match open_initialized_connection(&path) {
+                Ok(_) => panic!("a version {version} store must be refused"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code, crate::ErrorCode::ConfigInvalidValue);
+            assert!(
+                error
+                    .message
+                    .contains(&format!("has schema version {version};")),
+                "the error names the version it found: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains(&path.display().to_string()),
+                "the error names the store: {}",
+                error.message
+            );
+            assert_eq!(error.details["found_schema_version"], version);
+            assert_eq!(error.details["required_schema_version"], SCHEMA_VERSION);
+            let hint = &error.hints.first().expect("actionable hint").message;
+            assert!(
+                hint.contains("Move or delete") && hint.contains(&path.display().to_string()),
+                "the hint tells the operator how to recover: {hint}"
+            );
             assert_eq!(
-                surviving,
-                vec!["live".to_string()],
-                "{table} must keep its owned row and lose its orphan"
+                store_fingerprint(&path),
+                before,
+                "refusing a version {version} store must not modify it"
             );
         }
     }
 
-    /// A `NULL` id is legal in a TEXT primary key, and one of them turns every
-    /// `run_id NOT IN (SELECT id FROM runs)` comparison into NULL -- reaping
-    /// nothing, silently. The migration uses NOT EXISTS for exactly this.
+    /// Tables without a version record are not an empty store either.
     #[test]
-    fn a_null_run_id_does_not_disarm_the_orphan_reap() {
-        let connection = schema_through_migration(12);
-        seed_owned_and_orphaned_children(&connection);
-        connection
-            .execute_batch(
-                "INSERT INTO runs(id, kind, started_at, status) \
-                 VALUES (NULL, 'test', 'now', 'pass');",
-            )
-            .unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM artifacts \
-                     WHERE run_id NOT IN (SELECT id FROM runs)",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0,
-            "the NOT IN formulation must be shown to be disarmed by the NULL"
+    fn an_unversioned_store_with_tables_is_refused() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("observations.sqlite");
+        Connection::open(&path)
+            .expect("create unversioned store")
+            .execute_batch("CREATE TABLE runs (id TEXT PRIMARY KEY);")
+            .expect("seed unversioned table");
+
+        let error = match open_initialized_connection(&path) {
+            Ok(_) => panic!("an unversioned store must be refused"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.message.contains("has an unversioned schema"),
+            "{}",
+            error.message
         );
-
-        apply_migrations(&connection).unwrap();
-
-        assert_eq!(surviving_run_ids(&connection, "artifacts"), vec!["live"]);
-    }
-
-    /// Owned rows are not collateral. The reap is scoped to rows whose parent
-    /// is genuinely absent.
-    #[test]
-    fn the_orphan_reap_leaves_owned_rows_untouched() {
-        let connection = schema_through_migration(12);
-        seed_owned_and_orphaned_children(&connection);
-
-        apply_migrations(&connection).unwrap();
-
-        assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
-                .unwrap(),
-            1,
-            "the reap must not touch the runs table"
-        );
-        assert_eq!(
-            connection
-                .query_row("SELECT id FROM artifacts", [], |row| row
-                    .get::<_, String>(0))
-                .unwrap(),
-            "artifact-live"
+        assert!(error.details["found_schema_version"].is_null());
+        assert!(
+            !error.hints.is_empty(),
+            "the refusal carries a recovery hint"
         );
     }
 
+    /// A store the migration chain brought to the current version -- with its
+    /// 28 version records and its rows -- opens without a single change.
     #[test]
-    fn migration_20_backfills_pre_index_agent_task_missions_once() {
-        let connection = schema_through_migration(19);
-        let regular_run = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
-        let fanout_run = "agent-task-401a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
-        connection
-            .execute(
-                "INSERT INTO runs(id, kind, started_at, finished_at, status, metadata_json) \
-                 VALUES (?1, 'agent-task', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'pass', '{}')",
-                [regular_run],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO runs(id, kind, started_at, status, metadata_json) \
-                 VALUES (?1, 'agent-task', '2026-01-02T00:00:00Z', 'running', ?2)",
-                rusqlite::params![
-                    fanout_run,
-                    serde_json::json!({
-                        "agent_task_run": {
-                            "metadata": { "fanout": { "id": "portfolio-13697" } }
-                        }
-                    })
-                    .to_string()
-                ],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO runs(id, kind, started_at, status, metadata_json) \
-                 VALUES ('release-unrelated', 'release', '2026-01-03T00:00:00Z', 'pass', '{}')",
-                [],
-            )
-            .unwrap();
-
-        apply_migrations(&connection).unwrap();
-        apply_migrations(&connection).unwrap();
-
-        let mappings = connection
-            .prepare(
-                "SELECT mission_id, run_id FROM control_plane_mission_runs ORDER BY mission_id",
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            mappings,
-            vec![
-                (
-                    "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e".to_string(),
-                    regular_run.to_string(),
-                ),
-                ("portfolio-13697".to_string(), fanout_run.to_string()),
-            ]
-        );
-        assert_eq!(
+    fn a_store_at_the_current_version_opens_unchanged() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("observations.sqlite");
+        {
+            let connection = Connection::open(&path).expect("create current store");
+            replay_migrated_schema(&connection, 1..=SCHEMA_VERSION);
             connection
-                .query_row(
-                    "SELECT updated_at FROM control_plane_missions WHERE id = ?1",
-                    ["agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e"],
-                    |row| row.get::<_, String>(0),
+                .execute_batch(
+                    "INSERT INTO runs(id, kind, started_at, status) \
+                     VALUES ('kept', 'test', '2026-01-01T00:00:00Z', 'pass'); \
+                     INSERT INTO artifacts(id, run_id, kind, path, created_at) \
+                     VALUES ('artifact', 'kept', 'log', '/kept', '2026-01-01T00:00:00Z');",
                 )
-                .unwrap(),
-            "2026-01-01T00:01:00Z"
-        );
-    }
-
-    #[test]
-    fn migration_22_evolves_schema_21_claims_idempotently() {
-        let connection = schema_through_migration(21);
-        connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run', 'test', 'now', 'running')", []).unwrap();
-        connection.execute("INSERT INTO control_plane_action_claims(run_id, idempotency_digest, request_digest, state, owner_pid, accepted_at) VALUES ('run', ?1, ?2, 'running', 1, 'now')", rusqlite::params!["a".repeat(64), "b".repeat(64)]).unwrap();
-        apply_migrations(&connection).unwrap();
-        apply_migrations(&connection).unwrap();
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT outbox_state FROM control_plane_action_claims",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            "recovery_required"
-        );
-        let (intent, effect_id, fence, terminal): (String, String, String, Option<String>) = connection
-            .query_row(
-                "SELECT intent_json, effect_id, fence_json, terminal_json FROM control_plane_action_claims",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert!(intent.contains("migration-22"));
-        assert!(effect_id.starts_with("legacy:"));
-        assert!(fence.contains("authoritative reconciliation"));
-        assert!(terminal.is_none());
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 22",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn migration_28_backfills_retained_cancellation_receipts_idempotently() {
-        let connection = schema_through_migration(27);
-        connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run', 'test', 'now', 'running')", []).unwrap();
-        for (sequence, kind, payload) in [
-            (1, "run.cancelled", true),
-            (2, "runner.progress", true),
-            (3, "run.cancelled", false),
-        ] {
-            let json = payload.then(|| format!(r#"{{"kind":"{kind}","sequence":{sequence}}}"#));
-            connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES ('run', ?1, ?2, ?3, ?4, ?5, 'now')", rusqlite::params![format!("{sequence:064x}"), "b".repeat(64), format!("run:event:{sequence}"), sequence, json]).unwrap();
+                .expect("seed current store");
         }
-        apply_migrations(&connection).unwrap();
-        apply_migrations(&connection).unwrap();
-        let durable: Vec<i64> = connection
-            .prepare("SELECT sequence FROM control_plane_event_appends WHERE durable_event_json IS NOT NULL ORDER BY sequence")
+        let before = store_fingerprint(&path);
+
+        let connection = open_initialized_connection(&path).expect("open current store");
+        let status = status_for_open_connection(&connection, path.clone(), true).expect("status");
+        drop(connection);
+
+        let historical_records = migrated_schema_fixture()["recorded_versions"]
+            .as_array()
+            .expect("recorded versions")
+            .len() as i64;
+        assert_eq!(status.schema_version, SCHEMA_VERSION);
+        assert_eq!(status.migration_count, historical_records);
+        assert_eq!(store_fingerprint(&path), before);
+    }
+
+    /// Reopening a store this binary created is equally a no-op.
+    #[test]
+    fn reopening_a_baseline_store_is_a_no_op() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("observations.sqlite");
+        drop(open_initialized_connection(&path).expect("create"));
+        let before = store_fingerprint(&path);
+
+        drop(open_initialized_connection(&path).expect("reopen"));
+
+        assert_eq!(store_fingerprint(&path), before);
+    }
+
+    /// Rebuild a store exactly as the historical chain left it: the captured
+    /// object DDL verbatim, with `versions` recorded in `schema_migrations`.
+    fn replay_migrated_schema(connection: &Connection, versions: std::ops::RangeInclusive<i64>) {
+        let fixture = migrated_schema_fixture();
+        let objects = fixture["objects"].as_array().expect("fixture objects");
+        for kind in ["table", "index", "trigger", "view"] {
+            for object in objects.iter().filter(|object| object["type"] == kind) {
+                if let Some(sql) = object["sql"].as_str() {
+                    connection
+                        .execute_batch(sql)
+                        .expect("replay fixture object");
+                }
+            }
+        }
+        for version in versions {
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'fixture')",
+                    [version],
+                )
+                .expect("record fixture version");
+        }
+    }
+
+    /// Everything observable about a store: its schema, its version records,
+    /// and every row of every table.
+    fn store_fingerprint(path: &Path) -> serde_json::Value {
+        let connection =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).expect("inspect");
+        let mut snapshot = schema_snapshot(&connection);
+        let tables: Vec<String> = snapshot["tables"]
+            .as_object()
+            .expect("tables")
+            .keys()
+            .cloned()
+            .collect();
+        let mut contents = serde_json::Map::new();
+        for table in tables {
+            contents.insert(
+                table.clone(),
+                query_rows(
+                    &connection,
+                    &format!("SELECT * FROM \"{table}\" ORDER BY rowid"),
+                    None,
+                )
+                .into(),
+            );
+        }
+        snapshot["contents"] = contents.into();
+        snapshot
+    }
+
+    fn recorded_versions(connection: &Connection) -> Vec<i64> {
+        connection
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
-            .map(|row| row.unwrap())
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// Collapse whitespace in every `sql` text; nothing else is normalized.
+    fn normalize_snapshot(mut snapshot: serde_json::Value) -> serde_json::Value {
+        for object in snapshot["objects"].as_array_mut().expect("objects") {
+            if let Some(sql) = object["sql"].as_str() {
+                object["sql"] = sql.split_whitespace().collect::<Vec<_>>().join(" ").into();
+            }
+        }
+        snapshot
+    }
+
+    /// Structural snapshot of every schema object SQLite knows about. This is
+    /// the same function that produced `MIGRATED_SCHEMA_FIXTURE`.
+    fn schema_snapshot(connection: &Connection) -> serde_json::Value {
+        let objects = query_rows(
+            connection,
+            "SELECT type, name, tbl_name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' OR type = 'index' ORDER BY type, name",
+            None,
+        );
+        let mut tables = serde_json::Map::new();
+        let mut indexes = serde_json::Map::new();
+        for object in &objects {
+            let name = object["name"].as_str().unwrap();
+            match object["type"].as_str().unwrap() {
+                "table" => {
+                    tables.insert(
+                        name.to_string(),
+                        serde_json::json!({
+                            "columns": query_rows(connection, "SELECT * FROM pragma_table_xinfo(?1) ORDER BY cid", Some(name)),
+                            "foreign_keys": query_rows(connection, "SELECT * FROM pragma_foreign_key_list(?1) ORDER BY id, seq", Some(name)),
+                            "indexes": query_rows(connection, "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?1) ORDER BY name", Some(name)),
+                        }),
+                    );
+                }
+                "index" => {
+                    indexes.insert(
+                        name.to_string(),
+                        serde_json::json!({
+                            "columns": query_rows(connection, "SELECT * FROM pragma_index_xinfo(?1) ORDER BY seqno", Some(name)),
+                        }),
+                    );
+                }
+                _ => {}
+            }
+        }
+        serde_json::json!({ "objects": objects, "tables": tables, "indexes": indexes })
+    }
+
+    fn query_rows(connection: &Connection, sql: &str, arg: Option<&str>) -> Vec<serde_json::Value> {
+        let mut statement = connection.prepare(sql).unwrap();
+        let names: Vec<String> = statement
+            .column_names()
+            .into_iter()
+            .map(str::to_string)
             .collect();
-        assert_eq!(
-            durable,
-            vec![1],
-            "only a retained run.cancelled payload is backfilled"
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 28",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-    }
-
-    #[test]
-    fn migration_20_backfills_pre_v1_fixture_once() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/control-plane-migration/pre-v1-agent-task-runs.json"
-        ))
-        .expect("legacy fixture");
-        let directory = tempfile::tempdir().expect("fixture database directory");
-        let path = directory.path().join("observations.sqlite");
-        let mut connection = Connection::open(&path).expect("legacy database");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);",
-            )
-            .unwrap();
-        for migration in MIGRATIONS
-            .iter()
-            .filter(|migration| migration.version <= 19)
-        {
-            let transaction = connection.transaction().unwrap();
-            apply_migration(&transaction, migration).unwrap();
-            transaction
-                .execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'fixture')",
-                    [migration.version],
-                )
-                .unwrap();
-            transaction.commit().unwrap();
+        let map = |row: &rusqlite::Row<'_>| {
+            let mut object = serde_json::Map::new();
+            for (index, name) in names.iter().enumerate() {
+                let value = match row.get_ref(index)? {
+                    rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                    rusqlite::types::ValueRef::Integer(value) => value.into(),
+                    rusqlite::types::ValueRef::Real(value) => value.into(),
+                    rusqlite::types::ValueRef::Text(value) => {
+                        String::from_utf8_lossy(value).into_owned().into()
+                    }
+                    rusqlite::types::ValueRef::Blob(_) => "<blob>".into(),
+                };
+                object.insert(name.clone(), value);
+            }
+            Ok(serde_json::Value::Object(object))
+        };
+        match arg {
+            Some(arg) => statement.query_map([arg], map),
+            None => statement.query_map([], map),
         }
-        for run in fixture["runs"].as_array().expect("fixture runs") {
-            connection
-                .execute(
-                    "INSERT INTO runs(id, kind, started_at, finished_at, status, metadata_json) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        run["id"].as_str().unwrap(),
-                        run["kind"].as_str().unwrap(),
-                        run["started_at"].as_str().unwrap(),
-                        run["finished_at"].as_str(),
-                        run["status"].as_str().unwrap(),
-                        run["metadata"].to_string(),
-                    ],
-                )
-                .unwrap();
-        }
-        drop(connection);
-
-        for _ in 0..2 {
-            let connection = Connection::open(&path).expect("reopen legacy database");
-            apply_migrations(&connection).expect("migrate fixture");
-        }
-        let connection = Connection::open(&path).expect("inspect migrated database");
-        let mappings = connection
-            .prepare(
-                "SELECT mission_id, run_id FROM control_plane_mission_runs ORDER BY mission_id",
-            )
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        let expected_mappings = fixture["mappings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|mapping| {
-                (
-                    mapping[0].as_str().unwrap().to_string(),
-                    mapping[1].as_str().unwrap().to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(mappings, expected_mappings);
-        let missions = connection
-            .prepare("SELECT id, created_at, updated_at FROM control_plane_missions ORDER BY id")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        let expected_missions = fixture["missions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|mission| {
-                (
-                    mission[0].as_str().unwrap().to_string(),
-                    mission[1].as_str().unwrap().to_string(),
-                    mission[2].as_str().unwrap().to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(missions, expected_missions);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 20",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
-        );
-    }
-
-    fn seed_owned_and_orphaned_children(connection: &Connection) {
-        // These rows model state written *while FK enforcement was off* -- the
-        // exact scenario migration 13 exists to clean up, and what
-        // `migration_13_reaps_rows_orphaned_while_enforcement_was_off` is named
-        // for. `enforce_foreign_keys` now turns enforcement on at open, so the
-        // seed must turn it off to create the orphans whose reaping is under
-        // test. (It also lets `trace_spans` be inserted before `trace_runs`.)
-        connection
-            .pragma_update(None, "foreign_keys", false)
-            .expect("relax foreign keys to seed orphaned children");
-        connection
-            .execute_batch(
-                r#"
-                INSERT INTO runs(id, kind, started_at, status)
-                    VALUES ('live', 'test', 'now', 'pass');
-
-                INSERT INTO artifacts(id, run_id, kind, path, created_at)
-                    VALUES ('artifact-live', 'live', 'log', '/live', 'now'),
-                           ('artifact-orphan', 'reaped', 'log', '/orphan', 'now');
-
-                INSERT INTO findings(id, run_id, tool, message, created_at)
-                    VALUES ('finding-live', 'live', 'clippy', 'kept', 'now'),
-                           ('finding-orphan', 'reaped', 'clippy', 'orphaned', 'now');
-
-                INSERT INTO triage_items(
-                    id, run_id, provider, repo_owner, repo_name, item_type, number,
-                    state, title, url, observed_at)
-                    VALUES ('triage-live', 'live', 'github', 'o', 'r', 'issue', 1,
-                            'open', 't', 'u', 'now'),
-                           ('triage-orphan', 'reaped', 'github', 'o', 'r', 'issue', 2,
-                            'open', 't', 'u', 'now');
-
-                INSERT INTO trace_spans(id, run_id, span_id, status)
-                    VALUES ('span-live', 'live', 's1', 'pass'),
-                           ('span-orphan', 'reaped', 's2', 'pass');
-
-                INSERT INTO trace_runs(run_id, component_id, scenario_id, status)
-                    VALUES ('live', 'c', 'sc', 'pass'),
-                           ('reaped', 'c', 'sc', 'pass');
-                "#,
-            )
-            .unwrap();
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .expect("restore foreign key enforcement after seeding");
-    }
-
-    fn surviving_run_ids(connection: &Connection, table: &str) -> Vec<String> {
-        let mut statement = connection
-            .prepare(&format!("SELECT run_id FROM {table} ORDER BY run_id"))
-            .unwrap();
-        let rows = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap();
-        rows.map(|row| row.unwrap()).collect()
-    }
-
-    fn schema_through_migration_11() -> Connection {
-        schema_through_migration(11)
-    }
-
-    fn schema_through_migration(max_version: i64) -> Connection {
-        let mut connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                r#"
-                CREATE TABLE schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TEXT NOT NULL
-                );
-                "#,
-            )
-            .unwrap();
-
-        for migration in MIGRATIONS
-            .iter()
-            .filter(|migration| migration.version <= max_version)
-        {
-            let tx = connection.transaction().unwrap();
-            apply_migration(&tx, migration).unwrap();
-            tx.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'test')",
-                [migration.version],
-            )
-            .unwrap();
-            tx.commit().unwrap();
-        }
-
-        connection
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
     }
 }

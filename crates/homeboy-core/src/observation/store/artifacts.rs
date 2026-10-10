@@ -2638,7 +2638,7 @@ mod tests {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
             let connection = schema::open_connection(&database).expect("open schema");
-            schema::apply_migrations(&connection).expect("apply schema");
+            schema::ensure_schema(&connection, &database).expect("apply schema");
             connection
                 .execute_batch("PRAGMA journal_mode=DELETE;")
                 .expect("use rollback journal mode");
