@@ -318,8 +318,11 @@ fn record_interrupted_local_owner_locked(
             "updated_at": now,
         }),
     );
+    // Decided under the config lock from the record read at `record.revision`;
+    // the compare-and-swap refuses it if a writer outside the lock moved the
+    // run since (#15718).
     let record = lifecycle_store
-        .write_aggregate_and_record_locked_without_terminal_projection(&record, &aggregate)?;
+        .commit_terminal_aggregate_locked_without_terminal_projection(&record, &aggregate)?;
     Ok((record, Some(aggregate)))
 }
 
@@ -743,11 +746,9 @@ fn record_pre_execution_failure_locked(
     if let Some(circuit) = circuit {
         metadata.insert("lab_pre_execution_circuit".to_string(), circuit);
     }
+    // Compare-and-swap at the revision this locked decision was read at (#15718).
     let failed_record = lifecycle_store
-        .write_aggregate_and_record_locked_without_terminal_projection(
-            &failed_record,
-            &aggregate,
-        )?;
+        .commit_terminal_aggregate_locked_without_terminal_projection(&failed_record, &aggregate)?;
     Ok((failed_record, Some(aggregate)))
 }
 

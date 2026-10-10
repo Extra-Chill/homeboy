@@ -7,6 +7,7 @@
 //! read-back half of the Lab handoff, extracted from `lifecycle_ops` so the
 //! projection/validation invariants stay reviewable in isolation.
 
+use super::terminal_transition::TerminalRecordCommit;
 use super::*;
 
 /// Reconcile terminal history from the trusted runner's durable run resource.
@@ -213,8 +214,14 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
             }),
         );
         project_terminal_runner_job_snapshot(&mut reconciled, snapshot);
-        lifecycle_store.write_record(&reconciled)?;
-        *record = reconciled;
+        // `reconciled` is the caller's snapshot. Commit it only at the revision
+        // it was read at: a terminal outcome another writer committed since
+        // (an aggregate projection, a controller failure) wins, and the caller
+        // adopts it instead of overwriting it with this cancellation (#15718).
+        *record = match lifecycle_store.commit_terminal_record(&reconciled)? {
+            TerminalRecordCommit::Committed(committed) => committed,
+            TerminalRecordCommit::Superseded(stored) => stored,
+        };
         return Ok(());
     }
     match snapshot.job.status {
@@ -370,8 +377,12 @@ pub fn project_terminal_runner_result_in_store(
         return Ok(false);
     }
     project_terminal_runner_job_snapshot(&mut record, snapshot);
-    lifecycle_store.write_record(&record)?;
-    Ok(true)
+    // The terminal check above read `record` before the bind and validation;
+    // a writer that terminalized the run since keeps its outcome (#15718).
+    Ok(matches!(
+        lifecycle_store.commit_terminal_record(&record)?,
+        TerminalRecordCommit::Committed(_)
+    ))
 }
 
 fn record_pending_runner_synchronization(
@@ -733,27 +744,61 @@ fn project_terminal_runner_pre_provider_failure_in_store(
         RUNNER_PRE_PROVIDER_FAILURE_PHASE,
         &error,
     )?;
-    record_runner_job_terminal_metadata(
-        &mut failed,
-        homeboy_core::api_jobs::JobStatus::Failed,
-        events,
-    );
-    let terminalized = failed.state.is_terminal();
-    let run_id = failed.run_id.clone();
-    let metadata = failed.ensure_metadata_object();
+    let sequence = event.sequence;
+    if !failed.state.is_terminal() {
+        annotate_runner_pre_provider_failure(&mut failed, events, sequence);
+        lifecycle_store.write_record(&failed)?;
+        *record = failed;
+        return Ok(true);
+    }
+    // The failure itself is already committed. Re-project the runner evidence
+    // onto the stored record at its own revision, and only while it still
+    // carries this pre-provider failure, so a write that landed in between is
+    // neither lost nor overwritten by a stale copy (#15718).
+    let projected = lifecycle_store.transition_when(&failed.run_id, |current| {
+        let still_this_failure = current.state == failed.state
+            && current
+                .metadata
+                .pointer("/pre_execution_failure/phase")
+                .and_then(Value::as_str)
+                == Some(RUNNER_PRE_PROVIDER_FAILURE_PHASE);
+        still_this_failure.then(|| {
+            let mut next = current.clone();
+            annotate_runner_pre_provider_failure(&mut next, events, sequence);
+            AgentTaskTransition::CommitRecord {
+                prepared: Box::new(next),
+            }
+        })
+    })?;
+    *record = match projected {
+        Some(projected) => projected,
+        None => lifecycle_store.read_record(&failed.run_id)?,
+    };
+    Ok(true)
+}
+
+/// Runner evidence for a typed pre-provider failure, applied to the record the
+/// failure was committed on. A non-terminal record kept its provider candidate.
+fn annotate_runner_pre_provider_failure(
+    record: &mut AgentTaskRunRecord,
+    events: &[homeboy_core::api_jobs::JobEvent],
+    event_sequence: u64,
+) {
+    record_runner_job_terminal_metadata(record, homeboy_core::api_jobs::JobStatus::Failed, events);
+    let terminalized = record.state.is_terminal();
+    let run_id = record.run_id.clone();
+    let metadata = record.ensure_metadata_object();
     metadata.insert(
         "runner_result_synchronization".to_string(),
         json!({
             "state": if terminalized { "projected" } else { "candidate_preserved" },
             "runner_job_status": "failed",
             "source": "typed_runner_job_error",
-            "event_sequence": event.sequence,
+            "event_sequence": event_sequence,
         }),
     );
     if !terminalized {
-        lifecycle_store.write_record(&failed)?;
-        *record = failed;
-        return Ok(true);
+        return;
     }
     metadata.insert(
         "phase".to_string(),
@@ -779,9 +824,6 @@ fn project_terminal_runner_pre_provider_failure_in_store(
     if let Some(handoff) = metadata.get_mut("runner_handoff") {
         handoff["state"] = json!("terminal");
     }
-    lifecycle_store.write_record(&failed)?;
-    *record = failed;
-    Ok(true)
 }
 
 /// A detached runner reports its terminal result through reconciliation rather

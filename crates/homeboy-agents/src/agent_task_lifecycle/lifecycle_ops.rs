@@ -2180,24 +2180,27 @@ fn complete_detached_cook_handoff_parent_in_store(
         return Ok(());
     }
     let _ =
-        lifecycle_store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
+        lifecycle_store.transition_when_locked_without_terminal_projection(&cook_id, |record| {
             if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
                 || record.state.is_terminal()
                 || record.metadata["detached_cook_handoff"]["state"] != "pending"
             {
-                return false;
+                return None;
             }
-            let metadata = record.ensure_metadata_object();
-            metadata["detached_cook_handoff"]["state"] = json!("redirected");
-            metadata["detached_cook_handoff"]["admission_state"] = json!("materialized");
-            metadata["detached_cook_handoff"]["attempt_run_id"] = json!(attempt_run_id);
-            metadata["detached_cook_handoff"]
+            let mut handoff = record.metadata["detached_cook_handoff"].clone();
+            handoff["state"] = json!("redirected");
+            handoff["admission_state"] = json!("materialized");
+            handoff["attempt_run_id"] = json!(attempt_run_id);
+            handoff
                 .as_object_mut()
                 .expect("handoff metadata object")
                 .remove("materializing_attempt_run_id");
-            set_run_state(record, AgentTaskRunState::Succeeded);
-            record.updated_at = Some(now_timestamp());
-            true
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("detached_cook_handoff".to_string(), handoff);
+            Some(AgentTaskTransition::Terminate {
+                outcome: AgentTaskTerminalOutcome::Succeeded,
+                metadata,
+            })
         })?;
     Ok(())
 }

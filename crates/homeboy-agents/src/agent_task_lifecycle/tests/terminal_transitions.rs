@@ -6,6 +6,7 @@
 //! decision wholesale.
 
 use super::{succeeded_aggregate, test_plan};
+use crate::agent_task_lifecycle::terminal_transition::TerminalRecordCommit;
 use crate::agent_task_lifecycle::{
     apply_aggregate_transition_in_store, set_run_state, AgentTaskAggregateTransition,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskTerminalOutcome,
@@ -333,4 +334,57 @@ fn a_projection_rebases_over_live_writes_but_not_over_another_terminal_state() {
         .iter()
         .all(|event| event["transition"] == "project_aggregate"));
     assert_eq!(events.len(), 2, "{events:?}");
+}
+
+fn prepared_cancellation(snapshot: &AgentTaskRunRecord) -> AgentTaskRunRecord {
+    let mut prepared = snapshot.clone();
+    prepared.metadata["cancellation_provenance"] = json!({ "cause": "stale caller" });
+    set_run_state(&mut prepared, AgentTaskRunState::Cancelled);
+    prepared
+}
+
+/// `commit_terminal_record` (#15718, step 2b): a caller-held terminal record
+/// rebases over an intervening live write but never over another terminal
+/// decision, and a refused commit writes nothing.
+#[test]
+fn a_terminal_record_commit_rebases_over_live_writes_but_yields_to_a_terminal_winner() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = seeded(&context);
+
+    // Live intervening write: the prepared terminal record still commits.
+    let snapshot = store.read_record(RUN_ID).unwrap();
+    store
+        .mutate_record(RUN_ID, |record| {
+            record.metadata["progress"] = json!("heartbeat");
+            true
+        })
+        .unwrap();
+    match store
+        .commit_terminal_record(&prepared_cancellation(&snapshot))
+        .expect("live intervening write rebases")
+    {
+        TerminalRecordCommit::Committed(committed) => {
+            assert_eq!(committed.state, AgentTaskRunState::Cancelled);
+            assert_eq!(committed.revision, snapshot.revision + 2);
+        }
+        other => panic!("expected a commit, got {other:?}"),
+    }
+
+    // Terminal winner: the stale commit yields and writes nothing.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = seeded(&context);
+    let snapshot = store.read_record(RUN_ID).unwrap();
+    store
+        .transition(RUN_ID, snapshot.revision, failed_with("terminal winner"))
+        .expect("winner commits");
+    let winner = store.read_record(RUN_ID).unwrap();
+    match store
+        .commit_terminal_record(&prepared_cancellation(&snapshot))
+        .expect("a superseded commit is not an error")
+    {
+        TerminalRecordCommit::Superseded(stored) => assert_eq!(stored, winner),
+        other => panic!("expected the terminal winner, got {other:?}"),
+    }
+    assert_eq!(store.read_record(RUN_ID).unwrap(), winner);
+    assert_eq!(transition_events(&store).len(), 1);
 }
