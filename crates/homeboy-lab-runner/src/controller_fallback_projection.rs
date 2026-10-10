@@ -28,8 +28,6 @@ use crate::runner_staging_operation::{
 /// finalized receipt is simply removed, because the agent-task lifecycle is
 /// the authority for terminal state.
 const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v3";
-/// The previous schema, migrated on load by [`State::from_v2`].
-const STORE_SCHEMA_V2: &str = "homeboy/controller-fallback-projection/v2";
 const STARTUP_RECONCILIATION_BATCH_SIZE: usize = 8;
 const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -115,44 +113,6 @@ impl Default for State {
         Self {
             schema: STORE_SCHEMA.to_string(),
             receipts: BTreeMap::new(),
-        }
-    }
-}
-
-/// The v2 ledger carried controller-owned `projections` and `reconciliation`
-/// maps. The agent-task lifecycle owns terminal state, so those maps were a
-/// second copy of the truth; v3 drops them on load.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StateV2 {
-    schema: String,
-    receipts: BTreeMap<String, DeferredControllerReceipt>,
-    #[serde(default)]
-    projections: BTreeMap<String, serde_json::Value>,
-    #[serde(default)]
-    reconciliation: BTreeMap<String, serde_json::Value>,
-}
-
-impl State {
-    /// Migrates a v2 ledger into the v3 pending-receipt queue: receipts whose
-    /// run id already has a v2 projection were finalized by the lifecycle and
-    /// are dropped, the remaining receipts keep their pending place (re-keyed
-    /// to the v3 schema), and the projection and reconciliation maps are
-    /// discarded. The migrated state replaces the v2 file at the next ledger
-    /// persist.
-    fn from_v2(previous: StateV2) -> Self {
-        let receipts = previous
-            .receipts
-            .into_iter()
-            .filter(|(run_id, _)| !previous.projections.contains_key(run_id))
-            .map(|(run_id, mut receipt)| {
-                receipt.schema = STORE_SCHEMA.to_string();
-                (run_id, receipt)
-            })
-            .collect();
-        Self {
-            schema: STORE_SCHEMA.to_string(),
-            receipts,
         }
     }
 }
@@ -397,17 +357,12 @@ impl ControllerFallbackProjectionStore {
                     Some(format!("parse {}", self.path.display())),
                 )
             }),
-            STORE_SCHEMA_V2 => serde_json::from_value::<StateV2>(value)
-                .map(State::from_v2)
-                .map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some(format!("migrate {}", self.path.display())),
-                    )
-                }),
             _ => Err(Error::validation_invalid_argument(
                 "controller_fallback_store",
-                "unsupported controller fallback projection store schema",
+                format!(
+                    "unsupported controller fallback projection store schema `{schema}`; expected `{STORE_SCHEMA}`. Older ledgers are not migrated: remove {} to start a fresh ledger",
+                    self.path.display()
+                ),
                 Some(self.path.display().to_string()),
                 None,
             )),
@@ -1124,116 +1079,12 @@ mod tests {
     }
 
     #[test]
-    fn v2_ledgers_migrate_to_a_v3_pending_queue_without_refinalizing_projected_runs() {
-        let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let mut runner = Transport::compatible();
-        let mut projected = DeferredControllerReceipt::new(
-            mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("mission"),
-            submit_remote_runner_staging(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
-                .expect("admission"),
-        );
-        projected.schema = STORE_SCHEMA_V2.to_string();
-        let mut pending_receipt = DeferredControllerReceipt::new(
-            mission_from_handoff_run_id(RETRY_ATTEMPT_RUN).expect("mission"),
-            submit_remote_runner_staging(&mut runner, &envelope_for_run(RETRY_ATTEMPT_RUN))
-                .expect("admission"),
-        );
-        pending_receipt.schema = STORE_SCHEMA_V2.to_string();
-        let retry_runner_job = pending_receipt.runner_receipt.handoff.runner_job_id.clone();
-        let mut still_pending = DeferredControllerReceipt::new(
-            mission_from_handoff_run_id("migration-still-pending").expect("mission"),
-            submit_remote_runner_staging(&mut runner, &envelope_for_run("migration-still-pending"))
-                .expect("admission"),
-        );
-        still_pending.schema = STORE_SCHEMA_V2.to_string();
-        let v2 = StateV2 {
-            schema: STORE_SCHEMA_V2.to_string(),
-            receipts: BTreeMap::from([
-                (FIRST_ATTEMPT_RUN.to_string(), projected),
-                (RETRY_ATTEMPT_RUN.to_string(), pending_receipt),
-                ("migration-still-pending".to_string(), still_pending),
-            ]),
-            projections: BTreeMap::from([(
-                FIRST_ATTEMPT_RUN.to_string(),
-                serde_json::json!({
-                    "mission_id": COOK_MISSION,
-                    "terminal_outcome": "succeeded",
-                }),
-            )]),
-            reconciliation: BTreeMap::from([(
-                RETRY_ATTEMPT_RUN.to_string(),
-                serde_json::json!({
-                    "state": "pending",
-                    "detail": "runner job remains running",
-                }),
-            )]),
-        };
-        fs::write(&path, serde_json::to_vec(&v2).expect("serialize v2 ledger"))
-            .expect("seed v2 ledger");
-        let finalizations = Arc::new(Mutex::new(Vec::new()));
-
-        let finalized = ControllerFallbackProjectionStore::open(&path)
-            .expect("v2 ledger migrates")
-            .reconcile_after_controller_restart_with(
-                8,
-                {
-                    let retry_runner_job = retry_runner_job.clone();
-                    move |_, job_id| {
-                        if job_id == retry_runner_job.as_str() {
-                            Ok(snapshot(JobStatus::Succeeded))
-                        } else {
-                            Ok(snapshot(JobStatus::Running))
-                        }
-                    }
-                },
-                {
-                    let finalizations = Arc::clone(&finalizations);
-                    move |run_id, _| {
-                        finalizations
-                            .lock()
-                            .expect("finalizations")
-                            .push(run_id.to_string());
-                        Ok(true)
-                    }
-                },
-            )
-            .expect("migrating reconciliation pass");
-
-        // The v2 projection already finalized the first attempt: the migration
-        // dropped its receipt and its lifecycle CAS is never re-entered.
-        assert_eq!(finalized, vec![RETRY_ATTEMPT_RUN.to_string()]);
-        assert_eq!(
-            finalizations.lock().expect("finalizations").as_slice(),
-            [RETRY_ATTEMPT_RUN]
-        );
-
-        // The rewritten ledger is a v3 pending queue with only the
-        // unfinalized receipts; the projection and reconciliation maps are
-        // gone.
-        let migrated: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("migrated ledger"))
-                .expect("parse migrated ledger");
-        assert_eq!(
-            migrated["schema"],
-            "homeboy/controller-fallback-projection/v3"
-        );
-        assert!(migrated.get("projections").is_none());
-        assert!(migrated.get("reconciliation").is_none());
-        let receipts = migrated["receipts"].as_object().expect("pending receipts");
-        assert_eq!(receipts.len(), 1);
-        let kept = receipts
-            .get("migration-still-pending")
-            .expect("unfinalized receipts keep their pending place");
-        assert_eq!(
-            kept["schema"], "homeboy/controller-fallback-projection/v3",
-            "kept receipts are re-keyed to the v3 schema"
-        );
-    }
-
-    #[test]
     fn unsupported_ledger_schemas_are_rejected_without_rewriting_evidence() {
-        for schema in ["homeboy/controller-fallback-projection/v1", "unsupported"] {
+        for schema in [
+            "homeboy/controller-fallback-projection/v1",
+            "homeboy/controller-fallback-projection/v2",
+            "unsupported",
+        ] {
             let directory = tempdir().expect("temp directory");
             let path = directory.path().join("controller.json");
             let mut runner = Transport::compatible();

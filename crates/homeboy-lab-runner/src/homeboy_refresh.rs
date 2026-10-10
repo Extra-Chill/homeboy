@@ -951,10 +951,8 @@ pub fn refresh_homeboy_binary_in_roots(
         let active_jobs =
             super::connection::active_jobs_from_replacement_observation(replacement.status)?;
         set_refresh_live_sub_phase("reconnect");
-        let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
-            &plan.runner_id,
-            refresh_session.as_ref(),
-        )?;
+        let preserve_generations =
+            super::generation_store::requires_generation_preserving_refresh(&plan.runner_id)?;
         // A service-managed runner never runs generations side by side. It
         // drains through the active-job guard below and restarts its unit.
         if !service_managed

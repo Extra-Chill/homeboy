@@ -186,8 +186,12 @@ pub(crate) fn disconnect_with_session_in_roots(
         // Retained generations are historical routing evidence, not authority
         // to mutate every port they once used. Resolve one current daemon via
         // SSH and clean up stale local tunnel processes only after its stop.
-        let retained_generations =
-            super::super::generation_store::live_sessions(runner_id, Some(session))?;
+        // An interrupted disconnect can delete the registry before the session;
+        // the session itself is then the only recorded generation.
+        let mut retained_generations = super::super::generation_store::live_sessions(runner_id)?;
+        if retained_generations.is_empty() {
+            retained_generations.push(session.clone());
+        }
         let authoritative_status = match probe_authoritative_daemon_status(runner_id) {
             Ok(status) => status,
             Err(error) => {
@@ -283,7 +287,7 @@ pub(crate) fn disconnect_with_session_in_roots(
         // A prior lease-safe stop can remove the controller session before the
         // historical registry is reconciled. Do not make reconnect create a
         // new generation merely to clean that already-dead inventory.
-        let retained_generations = super::super::generation_store::live_sessions(runner_id, None)?;
+        let retained_generations = super::super::generation_store::live_sessions(runner_id)?;
         let leases = eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
         let authoritative_status = if leases.is_empty() {
             None

@@ -26,14 +26,6 @@ pub struct RollingGenerations<E> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RollingGeneration<E> {
     pub endpoint: E,
-    /// Write-only compatibility counter: no production path reads it, but
-    /// older pinned binaries still read it from disk to decide retirement,
-    /// so it must never be written below the generation's real live job
-    /// count. Writers refresh it with `sync_compat_active_jobs`, whose
-    /// owner-derived count retains terminal-job routes and is therefore
-    /// always at least the live count.
-    #[serde(default)]
-    pub active_jobs: usize,
     #[serde(default)]
     pub observed_active_jobs: Option<usize>,
     pub drain_state: RollingDrainState,
@@ -67,7 +59,6 @@ impl<E> RollingGenerations<E> {
                 generation,
                 RollingGeneration {
                     endpoint,
-                    active_jobs: 0,
                     observed_active_jobs: None,
                     drain_state: RollingDrainState::Admitting,
                 },
@@ -88,7 +79,6 @@ impl<E> RollingGenerations<E> {
             generation,
             RollingGeneration {
                 endpoint,
-                active_jobs: 0,
                 observed_active_jobs: None,
                 drain_state: RollingDrainState::Draining,
             },
@@ -169,21 +159,6 @@ impl<E> RollingGenerations<E> {
         self.job_owners.remove(job_id).is_some()
     }
 
-    /// Rewrite each generation's write-only `active_jobs` compatibility
-    /// counter to its `job_owners` count. Registry writers call this before
-    /// persisting: `job_owners` keeps routes for terminal jobs, so the value
-    /// is always at least the generation's live job count, which is the
-    /// invariant older pinned binaries rely on when they read the field.
-    pub fn sync_compat_active_jobs(&mut self) {
-        for (generation, entry) in self.generations.iter_mut() {
-            entry.active_jobs = self
-                .job_owners
-                .values()
-                .filter(|owner| owner.as_str() == generation.as_str())
-                .count();
-        }
-    }
-
     pub fn retire_result_owner(&mut self, retirement: RollingResultOwnerRetirement<'_>) -> bool {
         let removed = match retirement {
             RollingResultOwnerRetirement::Run(id) => self.run_owners.remove(id),
@@ -238,35 +213,5 @@ mod tests {
         assert!(generations.rollback("B"));
         assert_eq!(generations.admission_owner, "A");
         assert_eq!(generations.job_owner("job-a"), Some("A"));
-    }
-
-    #[test]
-    fn sync_compat_active_jobs_writes_each_generation_owner_count() {
-        let mut generations = RollingGenerations::new("A", "endpoint-a");
-        assert!(generations.admit_job_for("A", "job-a"));
-        assert!(generations.admit_job_for("A", "job-a2"));
-        assert_eq!(generations.begin("B", "endpoint-b"), RollingStart::Start);
-        assert!(generations.activate_preserving_drained("B"));
-        assert!(generations.admit_job_for("B", "job-b"));
-        assert!(generations.complete_job_preserving_drained("job-a"));
-        generations.sync_compat_active_jobs();
-        assert_eq!(generations.generations["A"].active_jobs, 1);
-        assert_eq!(generations.generations["B"].active_jobs, 1);
-    }
-
-    #[test]
-    fn a_registry_without_active_jobs_still_loads() {
-        let registry: RollingGenerations<&str> = serde_json::from_str(
-            r#"{
-                "admission_owner": "A",
-                "generations": {
-                    "A": {"endpoint": "endpoint-a", "drain_state": "admitting"}
-                },
-                "job_owners": {"job-a": "A"}
-            }"#,
-        )
-        .expect("a missing active_jobs field defaults to zero");
-        assert_eq!(registry.generations["A"].active_jobs, 0);
-        assert_eq!(registry.job_owner("job-a"), Some("A"));
     }
 }

@@ -1264,7 +1264,6 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
                             "state_dir": "isolated-test-generation",
                             "build_identity": "isolated-test-build"
                         },
-                        "active_jobs": 1,
                         "observed_active_jobs": null,
                         "drain_state": "admitting"
                     }
@@ -1273,8 +1272,7 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
                 "run_owners": {},
                 "artifact_owners": {},
                 "retired_evidence": {}
-            },
-            "completed_jobs": []
+            }
         }))
         .expect("serialize rooted controller registry"),
     )

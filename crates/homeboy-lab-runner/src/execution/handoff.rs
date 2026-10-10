@@ -158,7 +158,7 @@ fn invoke_runner_job_cancel(runner_id: &str, job_id: &str) -> Result<Job> {
 pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
+    let Some(current_session) = connected.session.filter(|_| connected.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected; run `homeboy runner connect <runner-id>` first",
@@ -169,14 +169,9 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
             ]),
         ));
     };
-    let session = super::super::generation_store::endpoint_session(
-        runner_id,
-        Some(job_id),
-        None,
-        None,
-        Some(&legacy_session),
-    )?
-    .unwrap_or(legacy_session);
+    let session =
+        super::super::generation_store::endpoint_session(runner_id, Some(job_id), None, None)?
+            .unwrap_or(current_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -255,7 +250,7 @@ pub fn runner_job_cancel_projection(
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
+    let Some(current_session) = connected.session.filter(|_| connected.connected) else {
         return Err(runner_job_cancel_unsupported(
             &runner.id,
             "runner is not connected",
@@ -266,9 +261,8 @@ pub fn runner_job_cancel_projection(
         Some(job_id),
         Some(durable_run_id),
         None,
-        Some(&legacy_session),
     )?
-    .unwrap_or(legacy_session);
+    .unwrap_or(current_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

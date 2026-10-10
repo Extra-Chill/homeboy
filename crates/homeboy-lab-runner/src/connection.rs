@@ -533,8 +533,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
                     );
                     let _ = client.execute(&command);
                 }
-                let _ =
-                    super::generation_store::rollback_candidate(runner_id, &current, &generation);
+                let _ = super::generation_store::rollback_candidate(runner_id, &generation);
                 return Err(Error::validation_invalid_argument(
                     "reconnect",
                     report
@@ -564,7 +563,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
             // The candidate was never activated. Remove any retained entry for
             // this generation just as the preceding startup-validation path
             // does, leaving the current admission owner untouched.
-            let _ = super::generation_store::rollback_candidate(runner_id, &current, &generation);
+            let _ = super::generation_store::rollback_candidate(runner_id, &generation);
             return Err(error);
         }
     }
@@ -894,11 +893,10 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
         Err(error) => return Err(error),
     };
     // A controller can lose its local tunnel after B became admission owner.
-    // Rehydrate B from the durable ledger rather than treating the legacy
+    // Rehydrate B from the durable ledger rather than treating the session
     // record (which may still name draining A) as the reconnect target.
     let mut previous_session =
-        super::generation_store::admission_session(runner_id, previous_session.as_ref())?
-            .or(previous_session);
+        super::generation_store::admission_session(runner_id)?.or(previous_session);
     let mut pending_replacement = super::generation_store::pending_replacement(runner_id)?;
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
@@ -2418,7 +2416,7 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     // separately reports durable ownership and unidentified retained counters.
     let active_job_count = selected_active_job_count;
     let (generation_inventory, generation_owners) =
-        super::generation_store::status_admission_projection(runner_id, session.as_ref())?;
+        super::generation_store::status_admission_projection(runner_id)?;
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
@@ -2511,18 +2509,12 @@ fn reconcile_status_with_outcome_in_roots_with_policy(
     if report.connected {
         reconcile_terminal_jobs(runner_id)?;
     }
-    let generation_reconcile = if let Ok(Some((_, _, client))) =
-        remote_daemon::resolve_ssh_runner(&runner)
-    {
-        super::generation_store::reconcile_with_ssh_and_policy(
-            runner_id,
-            report.session.as_ref(),
-            &client,
-            policy,
-        )?
-    } else {
-        super::generation_store::reconcile_with_policy(runner_id, report.session.as_ref(), policy)?
-    };
+    let generation_reconcile =
+        if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
+            super::generation_store::reconcile_with_ssh_and_policy(runner_id, &client, policy)?
+        } else {
+            super::generation_store::reconcile_with_policy(runner_id, policy)?
+        };
     if report.connected {
         if let (Some(session), Some(_)) =
             (report.session.as_ref(), report.daemon_freshness.as_ref())
@@ -2656,15 +2648,9 @@ pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// persisted daemon lease and PID for the job-owning generation.
 fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
     let runner = load(runner_id)?;
-    let legacy = read_session_or_live_peer(runner_id)?;
-    let owner = super::generation_store::endpoint_session(
-        runner_id,
-        Some(job_id),
-        None,
-        None,
-        legacy.as_ref(),
-    )?
-    .or(legacy)
+    let current_session = read_session_or_live_peer(runner_id)?;
+    let owner = super::generation_store::endpoint_session(runner_id, Some(job_id), None, None)?
+    .or(current_session)
     .ok_or_else(|| Error::validation_invalid_argument(
         "runner",
         "runner has no durable daemon generation binding for this job; run `homeboy runner connect <runner-id>` first",
@@ -2739,9 +2725,9 @@ pub(crate) fn reconnect_job_owner_for_polling(
     runner_id: &str,
     job_id: &str,
 ) -> Result<RunnerSession> {
-    let legacy = read_session_or_live_peer(runner_id)?;
-    let owner = super::generation_store::job_session(runner_id, job_id, legacy.as_ref())?
-        .or(legacy)
+    let current_session = read_session_or_live_peer(runner_id)?;
+    let owner = super::generation_store::job_session(runner_id, job_id)?
+        .or(current_session)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
@@ -2756,10 +2742,7 @@ pub(crate) fn reconnect_job_owner_for_polling(
     reconnect_generation_for_polling_with(
         runner_id,
         &generation,
-        || {
-            let legacy = read_session_or_live_peer(runner_id)?;
-            super::generation_store::job_session(runner_id, job_id, legacy.as_ref())
-        },
+        || super::generation_store::job_session(runner_id, job_id),
         session_is_live,
         || reconnect_job_owner(runner_id, job_id),
         |session| super::generation_store::record_reconnected_job_owner(runner_id, session, job_id),
@@ -3994,7 +3977,7 @@ pub(crate) fn reverse_broker_artifact_content_at(
 /// transport. Direct sessions read the daemon's persisted job result; reverse
 /// sessions use the broker content endpoint.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
-    if super::generation_store::job_session(runner_id, job_id, None)?.is_none()
+    if super::generation_store::job_session(runner_id, job_id)?.is_none()
         && super::generation_store::has_retired_evidence_owner(runner_id, None, Some(artifact_id))?
     {
         let store = homeboy_core::observation::ObservationStore::open_initialized()?;
@@ -4016,7 +3999,7 @@ pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str)
         return Ok(response.body);
     }
     let report = status(runner_id)?;
-    let Some(legacy_session) = report.session.filter(|_| report.connected) else {
+    let Some(current_session) = report.session.filter(|_| report.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner_id",
             format!("runner `{runner_id}` is not connected"),
@@ -4029,9 +4012,8 @@ pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str)
         Some(job_id),
         None,
         Some(artifact_id),
-        Some(&legacy_session),
     )?
-    .unwrap_or(legacy_session);
+    .unwrap_or(current_session);
     match artifact_content_transport(&session)? {
         RunnerArtifactContentTransport::DirectDaemon => {
             direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)

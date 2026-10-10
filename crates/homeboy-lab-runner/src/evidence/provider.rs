@@ -32,17 +32,10 @@ impl RunnerEvidenceProvider for RunnerEvidence {
         let Some(runner_id) = runner_id else {
             return Ok(());
         };
-        let session = super::super::connection::status(runner_id)
-            .ok()
-            .and_then(|report| report.session);
         if let Some(artifact_id) = artifact_id {
-            super::super::generation_store::retire_artifact_owner(
-                runner_id,
-                session.as_ref(),
-                artifact_id,
-            )
+            super::super::generation_store::retire_artifact_owner(runner_id, artifact_id)
         } else {
-            super::super::generation_store::retire_run_owner(runner_id, session.as_ref(), &run.id)
+            super::super::generation_store::retire_run_owner(runner_id, &run.id)
         }
     }
 

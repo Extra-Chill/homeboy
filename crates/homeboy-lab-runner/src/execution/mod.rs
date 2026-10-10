@@ -148,10 +148,7 @@ pub use recovery::{
 /// Retire a completed direct daemon generation only after controller-owned
 /// evidence has been checkpointed and projected.
 pub fn reconcile_runner_generation_after_evidence(runner_id: &str) -> Result<()> {
-    let session = super::connection::status(runner_id)
-        .ok()
-        .and_then(|report| report.session);
-    super::generation_store::reconcile(runner_id, session.as_ref()).map(|_| ())
+    super::generation_store::reconcile(runner_id).map(|_| ())
 }
 
 #[derive(Debug, Clone)]

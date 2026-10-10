@@ -64,26 +64,12 @@ pub mod lab_staging_controller;
 pub mod runner_staging_operation;
 pub mod runner_staging_store;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
-    let report = connection::status(runner_id)?;
-    runner_generation_inventory_for_session(runner_id, report.session.as_ref())
+    generation_store::status_projection(runner_id)
 }
 
-/// Project persisted generation state from an already-observed status session.
-/// This keeps `runner status` from re-running its remote observation path just
-/// to render the generation ledger.
-pub fn runner_generation_inventory_for_session(
-    runner_id: &str,
-    session: Option<&RunnerSession>,
-) -> Result<Vec<RunnerDaemonGenerationStatus>> {
-    generation_store::status_projection(runner_id, session)
-}
-
-/// Durable job identities for an already-observed generation view.
-pub fn runner_generation_job_owners_for_session(
-    runner_id: &str,
-    session: Option<&RunnerSession>,
-) -> Result<Vec<RunnerGenerationJobOwners>> {
-    generation_store::status_job_owners(runner_id, session)
+/// Durable job identities grouped by generation, from the persisted ledger.
+pub fn runner_generation_job_owners(runner_id: &str) -> Result<Vec<RunnerGenerationJobOwners>> {
+    generation_store::status_job_owners(runner_id)
 }
 
 /// The complete read-only admission projection for a runner. Command surfaces
@@ -170,7 +156,7 @@ pub fn runner_admission_snapshot_for_status(
     status: RunnerStatusReport,
 ) -> Result<RunnerAdmissionSnapshot> {
     let (generation_inventory, generation_owners) =
-        generation_store::status_admission_projection(&status.runner_id, status.session.as_ref())?;
+        generation_store::status_admission_projection(&status.runner_id)?;
     Ok(RunnerAdmissionSnapshot::from_status_and_generations(
         status,
         generation_inventory,

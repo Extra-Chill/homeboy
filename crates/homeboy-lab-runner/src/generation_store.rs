@@ -392,30 +392,16 @@ pub(crate) fn with_generation_recovery_lock<T>(
     )
 }
 
-fn legacy_generation(session: &RunnerSession) -> String {
+/// The generation key a session is registered under: its daemon lease.
+fn session_generation(session: &RunnerSession) -> String {
     session
         .remote_daemon_lease_id
         .clone()
-        .unwrap_or_else(|| "legacy".to_string())
+        .unwrap_or_else(|| "unleased".to_string())
 }
-
-#[cfg(test)]
-const LEGACY_MIGRATION_SYNC_DIR_ENV: &str = "HOMEBOY_LEGACY_GENERATION_MIGRATION_SYNC_DIR";
 
 #[cfg(test)]
 const AUTHENTICATED_ADMISSION_SYNC_DIR_ENV: &str = "HOMEBOY_AUTHENTICATED_ADMISSION_SYNC_DIR";
-
-#[cfg(test)]
-fn pause_legacy_migration_before_lock() {
-    let Some(sync_dir) = std::env::var_os(LEGACY_MIGRATION_SYNC_DIR_ENV) else {
-        return;
-    };
-    let sync_dir = PathBuf::from(sync_dir);
-    std::fs::write(sync_dir.join("migration-ready"), "ready").expect("signal legacy migration");
-    while !sync_dir.join("allow-migration").exists() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
 
 #[cfg(test)]
 fn pause_authenticated_admission_after_read() {
@@ -429,14 +415,13 @@ fn pause_authenticated_admission_after_read() {
     }
 }
 
-pub(crate) fn read(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Option<RollingGenerations<RunnerSession>>> {
+/// Read this runner's generation registry. `None` means no registry has been
+/// written yet; a registry that does not parse as the current shape is an
+/// error rather than something to repair.
+pub(crate) fn read(runner_id: &str) -> Result<Option<RollingGenerations<RunnerSession>>> {
     let path = path(runner_id)?;
     if !path.exists() {
-        return Ok(legacy
-            .map(|session| RollingGenerations::new(legacy_generation(session), session.clone())));
+        return Ok(None);
     }
     let raw = std::fs::read_to_string(&path).map_err(|error| {
         Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
@@ -444,79 +429,16 @@ pub(crate) fn read(
     let value: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
     validate_registry_shape(&value)?;
-    match serde_json::from_str::<GenerationRegistry<RunnerSession>>(&raw) {
-        Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
-        Ok(registry) => Err(Error::config_invalid_value(
-            "runner_id",
-            Some(registry.runner_id),
-            format!("generation registry must match runner-scoped path `{runner_id}`"),
-        )),
-        Err(error) => recover_missing_runner_id(runner_id, &path, &raw, error),
-    }
-}
-
-/// Read generation state for an observation without acquiring a writer lock or
-/// repairing a legacy registry. Status must describe legacy state, not migrate
-/// it: a concurrent writer owns that repair through the normal mutation path.
-fn read_projection(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Option<RollingGenerations<RunnerSession>>> {
-    let path = path(runner_id)?;
-    if !path.exists() {
-        return Ok(legacy
-            .map(|session| RollingGenerations::new(legacy_generation(session), session.clone())));
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
+    let registry = serde_json::from_value::<GenerationRegistry<RunnerSession>>(value)
         .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    validate_registry_shape(&value)?;
-    match serde_json::from_value::<GenerationRegistry<RunnerSession>>(value.clone()) {
-        Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
-        Ok(registry) => Err(Error::config_invalid_value(
+    if registry.runner_id != runner_id {
+        return Err(Error::config_invalid_value(
             "runner_id",
             Some(registry.runner_id),
             format!("generation registry must match runner-scoped path `{runner_id}`"),
-        )),
-        // This is the precise legacy shape the mutating reader repairs. Keep it
-        // readable here so status remains a projection even while a writer owns
-        // the registry lock.
-        Err(_) => Ok(Some(
-            serde_json::from_value::<RollingGenerations<RunnerSession>>(value)
-                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?,
-        )),
+        ));
     }
-}
-
-/// Read while the caller already holds this runner's registry lock. Legacy
-/// migration stays inside that transaction instead of attempting a re-entrant
-/// `flock` acquisition.
-fn read_locked(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Option<RollingGenerations<RunnerSession>>> {
-    let path = path(runner_id)?;
-    if !path.exists() {
-        return Ok(legacy
-            .map(|session| RollingGenerations::new(legacy_generation(session), session.clone())));
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    validate_registry_shape(&value)?;
-    match serde_json::from_str::<GenerationRegistry<RunnerSession>>(&raw) {
-        Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
-        Ok(registry) => Err(Error::config_invalid_value(
-            "runner_id",
-            Some(registry.runner_id),
-            format!("generation registry must match runner-scoped path `{runner_id}`"),
-        )),
-        Err(error) => recover_missing_runner_id_unlocked(runner_id, &path, &raw, error),
-    }
+    Ok(Some(registry.generations))
 }
 
 fn validate_registry_shape(value: &serde_json::Value) -> Result<()> {
@@ -552,134 +474,17 @@ pub(crate) fn write(
     runner_id: &str,
     generations: &RollingGenerations<RunnerSession>,
 ) -> Result<()> {
-    // `active_jobs` is a write-only compatibility field that older pinned
-    // binaries still read from disk; it is derived from the owner ledger and
-    // never read back by this binary.
-    let mut persisted = generations.clone();
-    let owner_counts = persisted
-        .generations
-        .iter()
-        .map(|(generation, entry)| {
-            let count = job_owner_ids_for(&persisted, generation, &entry.endpoint).len();
-            (generation.clone(), count)
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for (generation, count) in owner_counts {
-        if let Some(entry) = persisted.generations.get_mut(&generation) {
-            entry.active_jobs = count;
-        }
-    }
     homeboy_core::engine::local_files::write_json_file(
         &path(runner_id)?,
         &GenerationRegistry {
             runner_id: runner_id.to_string(),
-            generations: persisted,
+            generations: generations.clone(),
         },
     )
 }
 
-/// A prior writer omitted the registry's runner identity. Repair only that
-/// exact shape when every persisted endpoint independently confirms this path.
-/// The normal atomic writer retains every ownership map during the rewrite.
-fn recover_missing_runner_id(
-    runner_id: &str,
-    _path: &std::path::Path,
-    _raw: &str,
-    deserialize_error: serde_json::Error,
-) -> Result<Option<RollingGenerations<RunnerSession>>> {
-    #[cfg(test)]
-    pause_legacy_migration_before_lock();
-
-    // Migration is a registry mutation too. Reload after acquiring the same
-    // runner lock used by job admission so an older legacy snapshot cannot
-    // overwrite ownership accepted by a concurrent controller.
-    with_registry_lock(runner_id, || {
-        let path = path(runner_id)?;
-        let raw = std::fs::read_to_string(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        let value: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        validate_registry_shape(&value)?;
-        match serde_json::from_str::<GenerationRegistry<RunnerSession>>(&raw) {
-            Ok(registry) if registry.runner_id == runner_id => Ok(Some(registry.generations)),
-            Ok(registry) => Err(Error::config_invalid_value(
-                "runner_id",
-                Some(registry.runner_id),
-                format!("generation registry must match runner-scoped path `{runner_id}`"),
-            )),
-            Err(current_error) => recover_missing_runner_id_unlocked(
-                runner_id,
-                &path,
-                &raw,
-                if value.get("runner_id").is_some() {
-                    current_error
-                } else {
-                    deserialize_error
-                },
-            ),
-        }
-    })
-}
-
-fn recover_missing_runner_id_unlocked(
-    runner_id: &str,
-    path: &std::path::Path,
-    raw: &str,
-    deserialize_error: serde_json::Error,
-) -> Result<Option<RollingGenerations<RunnerSession>>> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    if value.get("runner_id").is_some() {
-        return Err(Error::config_invalid_json(
-            path.display().to_string(),
-            deserialize_error,
-        ));
-    }
-    let generations = serde_json::from_value::<RollingGenerations<RunnerSession>>(value)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    if runner_id.trim().is_empty() {
-        return Err(Error::config_invalid_value(
-            "runner_id",
-            Some(runner_id.to_string()),
-            "runner-scoped generation registry path has an empty runner ID",
-        ));
-    }
-    if generations.generations.is_empty() {
-        return Err(Error::config_invalid_value(
-            "generations",
-            Some("{}".to_string()),
-            "prior generation registry has no endpoints to establish its runner identity",
-        ));
-    }
-    for (generation, entry) in &generations.generations {
-        let endpoint_runner_id = &entry.endpoint.runner_id;
-        if endpoint_runner_id.trim().is_empty() {
-            return Err(Error::config_invalid_value(
-                format!("generations.{generation}.endpoint.runner_id"),
-                Some(endpoint_runner_id.clone()),
-                format!("prior generation `{generation}` has an empty endpoint runner ID"),
-            ));
-        }
-        if endpoint_runner_id != runner_id {
-            return Err(Error::config_invalid_value(
-                format!("generations.{generation}.endpoint.runner_id"),
-                Some(endpoint_runner_id.clone()),
-                format!(
-                    "prior generation `{generation}` endpoint runner ID does not match runner-scoped path `{runner_id}`"
-                ),
-            ));
-        }
-    }
-    write(runner_id, &generations)?;
-    Ok(Some(generations))
-}
-
-pub(crate) fn admission_session(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Option<RunnerSession>> {
-    Ok(read(runner_id, legacy)?.and_then(|generations| {
+pub(crate) fn admission_session(runner_id: &str) -> Result<Option<RunnerSession>> {
+    Ok(read(runner_id)?.and_then(|generations| {
         generations
             .generations
             .get(&generations.admission_owner)
@@ -692,7 +497,7 @@ pub(crate) fn admission_session(
 /// the mutation completes or its reservation is cleared.
 pub(crate) fn with_admission_fence<T>(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
+    current_session: Option<&RunnerSession>,
     operation_name: &str,
     operation: impl FnOnce(Option<&AdmissionFence>) -> Result<T>,
 ) -> Result<T> {
@@ -700,7 +505,7 @@ pub(crate) fn with_admission_fence<T>(
         if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
             return Err(admission_reservation_error(runner_id, &reservation));
         }
-        let generations = read_locked(runner_id, legacy)?;
+        let generations = read(runner_id)?;
         let reservation = AdmissionReservation {
             operation_id: uuid::Uuid::new_v4().to_string(),
             owner_pid: std::process::id(),
@@ -713,7 +518,7 @@ pub(crate) fn with_admission_fence<T>(
                 })?,
             created_at: Utc::now().to_rfc3339(),
             operation: operation_name.to_string(),
-            generation: legacy.map(legacy_generation),
+            generation: current_session.map(session_generation),
         };
         write_durable_json(&admission_reservation_path(runner_id)?, &reservation)?;
         let fence = generations.as_ref().and_then(|generations| {
@@ -1225,9 +1030,10 @@ pub(crate) fn reconcile_admission_session(runner_id: &str, session: &RunnerSessi
         ));
     };
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(session))? else {
-            return Ok(());
-        };
+        // A healthy, leased direct session is registry authority on its own:
+        // seed the registry from it when none exists yet.
+        let mut generations =
+            read(runner_id)?.unwrap_or_else(|| RollingGenerations::new(lease_id, session.clone()));
         let generation = generations
             .generations
             .iter()
@@ -1249,12 +1055,8 @@ pub(crate) fn reconcile_admission_session(runner_id: &str, session: &RunnerSessi
     })
 }
 
-pub(crate) fn job_session(
-    runner_id: &str,
-    job_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Option<RunnerSession>> {
-    Ok(read(runner_id, legacy)?.and_then(|generations| {
+pub(crate) fn job_session(runner_id: &str, job_id: &str) -> Result<Option<RunnerSession>> {
+    Ok(read(runner_id)?.and_then(|generations| {
         generations
             .job_owner(job_id)
             .and_then(|owner| owner_session(&generations, owner))
@@ -1281,7 +1083,7 @@ pub(crate) fn has_retired_evidence_owner(
     run_id: Option<&str>,
     artifact_id: Option<&str>,
 ) -> Result<bool> {
-    Ok(read(runner_id, None)?.is_some_and(|registry| {
+    Ok(read(runner_id)?.is_some_and(|registry| {
         registry
             .endpoint_owner(None, run_id, artifact_id)
             .is_some_and(|owner| {
@@ -1303,41 +1105,33 @@ pub(crate) fn endpoint_session(
     job_id: Option<&str>,
     run_id: Option<&str>,
     artifact_id: Option<&str>,
-    legacy: Option<&RunnerSession>,
 ) -> Result<Option<RunnerSession>> {
-    Ok(read(runner_id, legacy)?.and_then(|generations| {
+    Ok(read(runner_id)?.and_then(|generations| {
         generations
             .endpoint_owner(job_id, run_id, artifact_id)
             .and_then(|owner| owner_session(&generations, owner))
     }))
 }
 
-pub(crate) fn status_projection(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Vec<RunnerDaemonGenerationStatus>> {
-    Ok(status_admission_projection(runner_id, legacy)?.0)
+pub(crate) fn status_projection(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
+    Ok(status_admission_projection(runner_id)?.0)
 }
 
 /// Return durable job identities grouped by generation. These identities can
 /// be deduplicated with live daemon jobs; persisted counters cannot.
-pub(crate) fn status_job_owners(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Vec<RunnerGenerationJobOwners>> {
-    Ok(status_admission_projection(runner_id, legacy)?.1)
+pub(crate) fn status_job_owners(runner_id: &str) -> Result<Vec<RunnerGenerationJobOwners>> {
+    Ok(status_admission_projection(runner_id)?.1)
 }
 
 /// Capture the complete admission ledger from one persisted generation read.
 /// Inventory and durable job ownership must describe the same generation state.
 pub(crate) fn status_admission_projection(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
 ) -> Result<(
     Vec<RunnerDaemonGenerationStatus>,
     Vec<RunnerGenerationJobOwners>,
 )> {
-    Ok(read_projection(runner_id, legacy)?.map_or_else(
+    Ok(read(runner_id)?.map_or_else(
         || (Vec::new(), Vec::new()),
         |generations| {
             let inventory = generations
@@ -1394,11 +1188,8 @@ pub(crate) fn status_admission_projection(
 /// Report whether a refresh must preserve existing daemon endpoints. Current
 /// daemon activity is queried separately; this covers durable ownership that
 /// remains after a producing job has completed.
-pub(crate) fn requires_generation_preserving_refresh(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<bool> {
-    Ok(read(runner_id, legacy)?.is_some_and(|generations| {
+pub(crate) fn requires_generation_preserving_refresh(runner_id: &str) -> Result<bool> {
+    Ok(read(runner_id)?.is_some_and(|generations| {
         !generations.job_owners.is_empty()
             || generations
                 .generations
@@ -1436,19 +1227,14 @@ fn has_result_owners_for(
         .any(|owner| owner_matches_generation(owner, generation, endpoint))
 }
 
-pub(crate) fn live_sessions(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<Vec<RunnerSession>> {
-    Ok(
-        read(runner_id, legacy)?.map_or_else(Vec::new, |generations| {
-            generations
-                .generations
-                .into_values()
-                .map(|generation| generation.endpoint)
-                .collect()
-        }),
-    )
+pub(crate) fn live_sessions(runner_id: &str) -> Result<Vec<RunnerSession>> {
+    Ok(read(runner_id)?.map_or_else(Vec::new, |generations| {
+        generations
+            .generations
+            .into_values()
+            .map(|generation| generation.endpoint)
+            .collect()
+    }))
 }
 
 pub(crate) fn clear(runner_id: &str) -> Result<()> {
@@ -1479,7 +1265,7 @@ pub(crate) fn tombstone_dead_direct_generations(
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     with_registry_lock(runner_id, || {
-        let Some(generations) = read_locked(runner_id, None)? else {
+        let Some(generations) = read(runner_id)? else {
             return Ok(());
         };
         let current_leases = generations
@@ -1821,68 +1607,6 @@ fn daemon_health_data(health: &serde_json::Value) -> &serde_json::Value {
     health.get("data").unwrap_or(health)
 }
 
-#[cfg(test)]
-mod projection_tests {
-    use super::*;
-    use crate::{RunnerSessionRole, RunnerTunnelMode};
-
-    fn session(lease_id: &str) -> RunnerSession {
-        RunnerSession {
-            runner_id: "shared-lab".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some("unreachable-lab".to_string()),
-            controller_id: Some("shared-controller".to_string()),
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
-            local_port: Some(49153),
-            local_url: Some("http://127.0.0.1:49153".to_string()),
-            tunnel_pid: Some(u32::MAX),
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(4242),
-            remote_daemon_lease_id: Some(lease_id.to_string()),
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some("homeboy test+shared".to_string()),
-            connected_at: "2026-08-05T00:00:00Z".to_string(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
-        }
-    }
-
-    #[test]
-    fn shared_status_projects_a_large_legacy_registry_without_repairing_it() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut generations = RollingGenerations::new("lease-000", session("lease-000"));
-            for index in 1..=70 {
-                let generation = format!("lease-{index:03}");
-                generations.begin(generation.clone(), session(&generation));
-            }
-            write("shared-lab", &generations).expect("write generation registry");
-            let path = path("shared-lab").expect("generation registry path");
-            let mut legacy: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&path).expect("read registry"))
-                    .expect("parse registry");
-            legacy
-                .as_object_mut()
-                .expect("registry object")
-                .remove("runner_id");
-            let legacy = serde_json::to_vec_pretty(&legacy).expect("serialize legacy registry");
-            std::fs::write(&path, &legacy).expect("write legacy registry");
-
-            let started = Instant::now();
-            let projection = status_projection("shared-lab", Some(&session("lease-000")))
-                .expect("project legacy generation registry");
-
-            assert_eq!(projection.len(), 71);
-            assert!(started.elapsed() < Duration::from_secs(3));
-            assert_eq!(std::fs::read(&path).expect("read after status"), legacy);
-        });
-    }
-}
-
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
     fn queued_jobs(&self, session: &RunnerSession) -> Option<Vec<crate::RunnerJob>> {
         if self.active_jobs(session)? == 0 {
@@ -2219,16 +1943,12 @@ fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> Ownership
     audit
 }
 
-pub(crate) fn reconcile(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-) -> Result<GenerationReconcileResult> {
-    reconcile_with_policy(runner_id, legacy, GenerationReconcilePolicy::default())
+pub(crate) fn reconcile(runner_id: &str) -> Result<GenerationReconcileResult> {
+    reconcile_with_policy(runner_id, GenerationReconcilePolicy::default())
 }
 
 pub(crate) fn reconcile_with_policy(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
     policy: GenerationReconcilePolicy,
 ) -> Result<GenerationReconcileResult> {
     let client = reqwest::blocking::Client::builder()
@@ -2240,7 +1960,6 @@ pub(crate) fn reconcile_with_policy(
         })?;
     reconcile_with_operations(
         runner_id,
-        legacy,
         &HttpGenerationEndpointOperations { client },
         policy,
     )
@@ -2252,7 +1971,6 @@ pub(crate) fn reconcile_with_policy(
 /// without weakening the daemon's terminal-job, zero-active-job, or stop gates.
 pub(crate) fn reconcile_with_ssh_and_policy(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
     ssh_client: &SshClient,
     policy: GenerationReconcilePolicy,
 ) -> Result<GenerationReconcileResult> {
@@ -2267,7 +1985,6 @@ pub(crate) fn reconcile_with_ssh_and_policy(
     let remote = SshGenerationEndpointOperations { client: ssh_client };
     reconcile_with_operations(
         runner_id,
-        legacy,
         &FallbackGenerationEndpointOperations {
             primary: &local,
             fallback: &remote,
@@ -2279,26 +1996,19 @@ pub(crate) fn reconcile_with_ssh_and_policy(
 #[cfg(test)]
 fn reconcile_with(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
     operations: &impl GenerationEndpointOperations,
 ) -> Result<GenerationReconcileResult> {
-    reconcile_with_operations(
-        runner_id,
-        legacy,
-        operations,
-        GenerationReconcilePolicy::default(),
-    )
+    reconcile_with_operations(runner_id, operations, GenerationReconcilePolicy::default())
 }
 
 fn reconcile_with_operations(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
     operations: &impl GenerationEndpointOperations,
     policy: GenerationReconcilePolicy,
 ) -> Result<GenerationReconcileResult> {
     let mut evidence_blocked_generation_ids = std::collections::BTreeSet::new();
     let mut released_unverified_evidence = std::collections::BTreeMap::new();
-    let Some(generations) = read(runner_id, legacy)? else {
+    let Some(generations) = read(runner_id)? else {
         return Ok(GenerationReconcileResult::default());
     };
     let OwnershipAudit {
@@ -2381,7 +2091,7 @@ fn reconcile_with_operations(
     // committing an observation. The bounded stop/retirement transaction below
     // fences concurrent registry writers.
     let stoppable = with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok((Vec::new(), Vec::new()));
         };
         let mut authoritative_zero = Vec::new();
@@ -2522,7 +2232,7 @@ fn reconcile_with_operations(
             .map(|entry| (generation.clone(), entry.endpoint.clone()))
     }));
     let retired_generation_ids = with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(Vec::new());
         };
         let mut retired = Vec::new();
@@ -2598,7 +2308,7 @@ fn reconcile_with_operations(
     Ok(GenerationReconcileResult {
         retired_generation_ids,
         retirement_blockers,
-        retained_evidence_generation_count: read(runner_id, None)?
+        retained_evidence_generation_count: read(runner_id)?
             .map_or(0, |registry| registry.retired_evidence.len()),
         evidence_blocked_generation_ids,
         released_unverified_evidence,
@@ -2610,8 +2320,8 @@ pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str)
         if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
             return Err(admission_reservation_error(runner_id, &reservation));
         }
-        let mut generations = read_locked(runner_id, Some(session))?.unwrap_or_else(|| {
-            RollingGenerations::new(legacy_generation(session), session.clone())
+        let mut generations = read(runner_id)?.unwrap_or_else(|| {
+            RollingGenerations::new(session_generation(session), session.clone())
         });
         let owner = session
             .remote_daemon_lease_id
@@ -2644,7 +2354,7 @@ pub(crate) fn record_reconnected_job_owner(
         .as_deref()
         .ok_or_else(|| Error::internal_unexpected("reconnected daemon session has no lease ID"))?;
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(session))? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Err(Error::validation_invalid_argument(
                 "runner",
                 "runner has no durable daemon generation binding for this job",
@@ -2766,8 +2476,8 @@ fn record_authenticated_admission_locked(
     session: &RunnerSession,
     generation: &str,
 ) -> Result<()> {
-    let mut generations = read_locked(runner_id, None)?
-        .unwrap_or_else(|| RollingGenerations::new(generation, session.clone()));
+    let mut generations =
+        read(runner_id)?.unwrap_or_else(|| RollingGenerations::new(generation, session.clone()));
     #[cfg(test)]
     pause_authenticated_admission_after_read();
     if let Some(entry) = generations.generations.get_mut(generation) {
@@ -2781,14 +2491,9 @@ fn record_authenticated_admission_locked(
     write(runner_id, &generations)
 }
 
-pub(crate) fn record_job_run(
-    runner_id: &str,
-    legacy: &RunnerSession,
-    job_id: &str,
-    run_id: &str,
-) -> Result<()> {
+pub(crate) fn record_job_run(runner_id: &str, job_id: &str, run_id: &str) -> Result<()> {
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(legacy))? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(());
         };
         generations.record_run(job_id, run_id);
@@ -2798,13 +2503,12 @@ pub(crate) fn record_job_run(
 
 pub(crate) fn record_job_artifacts(
     runner_id: &str,
-    legacy: &RunnerSession,
     job_id: &str,
     artifact_ids: impl IntoIterator<Item = String>,
 ) -> Result<()> {
     let artifact_ids = artifact_ids.into_iter().collect::<Vec<_>>();
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(legacy))? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(());
         };
         for artifact_id in artifact_ids {
@@ -2819,7 +2523,7 @@ pub(crate) fn record_job_artifacts(
 /// this boundary, so their generation ownership remains fail-closed.
 pub(crate) fn settle_observed_terminal_job(runner_id: &str, job_id: &str) -> Result<bool> {
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, None)? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(false);
         };
         if generations.job_owner(job_id).is_none() {
@@ -2833,35 +2537,25 @@ pub(crate) fn settle_observed_terminal_job(runner_id: &str, job_id: &str) -> Res
 
 /// Release a durable run's provenance claim after retention removes the record.
 /// Process retirement belongs exclusively to generation reconciliation.
-pub(crate) fn retire_run_owner(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-    run_id: &str,
-) -> Result<()> {
-    retire_result_owner(runner_id, legacy, RollingResultOwnerRetirement::Run(run_id))
+pub(crate) fn retire_run_owner(runner_id: &str, run_id: &str) -> Result<()> {
+    retire_result_owner(runner_id, RollingResultOwnerRetirement::Run(run_id))
 }
 
 /// Release one artifact routing claim after its owning lifecycle has consumed,
 /// finalized, or pruned the artifact.
-pub(crate) fn retire_artifact_owner(
-    runner_id: &str,
-    legacy: Option<&RunnerSession>,
-    artifact_id: &str,
-) -> Result<()> {
+pub(crate) fn retire_artifact_owner(runner_id: &str, artifact_id: &str) -> Result<()> {
     retire_result_owner(
         runner_id,
-        legacy,
         RollingResultOwnerRetirement::Artifact(artifact_id),
     )
 }
 
 fn retire_result_owner(
     runner_id: &str,
-    legacy: Option<&RunnerSession>,
     retirement: RollingResultOwnerRetirement<'_>,
 ) -> Result<()> {
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, legacy)? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(());
         };
         generations.retire_result_owner(retirement);
@@ -2887,8 +2581,8 @@ pub(crate) fn activate(
     draining_job_ids: &[String],
 ) -> Result<()> {
     with_registry_lock(runner_id, || {
-        let mut generations = read_locked(runner_id, Some(current))?.unwrap_or_else(|| {
-            RollingGenerations::new(legacy_generation(current), current.clone())
+        let mut generations = read(runner_id)?.unwrap_or_else(|| {
+            RollingGenerations::new(session_generation(current), current.clone())
         });
         let current_lease = current.remote_daemon_lease_id.as_deref();
         let draining_owner = generations
@@ -2899,23 +2593,25 @@ pub(crate) fn activate(
                     && entry.endpoint.remote_daemon_lease_id.as_deref() == current_lease)
                     .then(|| generation.clone())
             })
-            .unwrap_or_else(|| legacy_generation(current));
-        let legacy_owner = legacy_generation(current);
-        if draining_owner != legacy_owner {
+            .unwrap_or_else(|| session_generation(current));
+        // Owners may name the current generation by its lease rather than by
+        // its registry key; fold them onto the key before rotation.
+        let lease_owner = session_generation(current);
+        if draining_owner != lease_owner {
             for owners in [
                 &mut generations.job_owners,
                 &mut generations.run_owners,
                 &mut generations.artifact_owners,
             ] {
                 for owner in owners.values_mut() {
-                    if owner == &legacy_owner {
+                    if owner == &lease_owner {
                         *owner = draining_owner.clone();
                     }
                 }
             }
         }
-        // Legacy sessions have no ledger yet. Pin authoritative active work before
-        // activation because `activate` retires zero-job drains immediately.
+        // The daemon's live jobs may not all be in the ledger yet. Pin them to
+        // the draining generation before activation so it cannot retire early.
         for job_id in draining_job_ids {
             generations
                 .job_owners
@@ -2929,13 +2625,9 @@ pub(crate) fn activate(
 
 /// Remove an unactivated candidate from the durable ledger. This is safe to
 /// call after any candidate validation failure and never changes admission.
-pub(crate) fn rollback_candidate(
-    runner_id: &str,
-    legacy: &RunnerSession,
-    generation: &str,
-) -> Result<()> {
+pub(crate) fn rollback_candidate(runner_id: &str, generation: &str) -> Result<()> {
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(legacy))? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(());
         };
         if generations.rollback(generation) {
@@ -2953,10 +2645,10 @@ pub(crate) fn rollback_activation(
     generation: &str,
 ) -> Result<()> {
     with_registry_lock(runner_id, || {
-        let Some(mut generations) = read_locked(runner_id, Some(current))? else {
+        let Some(mut generations) = read(runner_id)? else {
             return Ok(());
         };
-        let previous = legacy_generation(current);
+        let previous = session_generation(current);
         if generations.admission_owner == generation {
             generations.generations.remove(generation);
             if let Some(entry) = generations.generations.get_mut(&previous) {
@@ -3728,10 +3420,10 @@ mod tests {
         server.join().expect("fixture server");
     }
 
-    fn idle_generation_with_unverifiable_evidence() -> RunnerSession {
+    fn idle_generation_with_unverifiable_evidence() {
         let idle = session("lease-idle", "daemon-idle", Some(101));
         let current = session("lease-current", "daemon-current", Some(303));
-        let mut generations = RollingGenerations::new("lease-current".to_string(), current.clone());
+        let mut generations = RollingGenerations::new("lease-current".to_string(), current);
         generations.begin("lease-idle", idle);
         // A legacy run the controller never recorded: verification fails with
         // "controller run is missing", like the Lab's pre-0.40 generations.
@@ -3739,7 +3431,6 @@ mod tests {
             .run_owners
             .insert("run-legacy".to_string(), "lease-idle".to_string());
         write("runner-a", &generations).expect("persist generations");
-        current
     }
 
     /// #15653: by default an idle generation whose retained evidence cannot be
@@ -3747,15 +3438,14 @@ mod tests {
     #[test]
     fn unverifiable_evidence_blocks_retirement_by_default_and_is_classified() {
         test_support::with_isolated_home(|_| {
-            let current = idle_generation_with_unverifiable_evidence();
+            idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
                 ("lease-idle".to_string(), 0),
                 ("lease-current".to_string(), 0),
             ]);
 
-            let result =
-                reconcile_with("runner-a", Some(&current), &operations).expect("reconcile");
+            let result = reconcile_with("runner-a", &operations).expect("reconcile");
 
             assert!(result.retired_generation_ids.is_empty(), "{result:?}");
             assert!(result.released_unverified_evidence.is_empty());
@@ -3775,7 +3465,7 @@ mod tests {
     #[test]
     fn release_unverified_evidence_retires_and_keeps_provenance() {
         test_support::with_isolated_home(|_| {
-            let current = idle_generation_with_unverifiable_evidence();
+            idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
                 ("lease-idle".to_string(), 0),
@@ -3784,7 +3474,6 @@ mod tests {
 
             let result = reconcile_with_operations(
                 "runner-a",
-                Some(&current),
                 &operations,
                 GenerationReconcilePolicy {
                     release_unverified_evidence: true,
@@ -3802,7 +3491,7 @@ mod tests {
                 operations.stopped_leases.borrow().as_slice(),
                 ["lease-idle"]
             );
-            let registry = read("runner-a", None).expect("read").expect("registry");
+            let registry = read("runner-a").expect("read").expect("registry");
             assert!(!registry.generations.contains_key("lease-idle"));
             assert_eq!(
                 registry.run_owners.get("run-legacy").map(String::as_str),
@@ -3820,7 +3509,7 @@ mod tests {
     #[test]
     fn release_unverified_evidence_never_retires_a_busy_generation() {
         test_support::with_isolated_home(|_| {
-            let current = idle_generation_with_unverifiable_evidence();
+            idle_generation_with_unverifiable_evidence();
             let operations = FakeEndpointOperations::default();
             operations.active_jobs.borrow_mut().extend([
                 ("lease-idle".to_string(), 2),
@@ -3829,7 +3518,6 @@ mod tests {
 
             let result = reconcile_with_operations(
                 "runner-a",
-                Some(&current),
                 &operations,
                 GenerationReconcilePolicy {
                     release_unverified_evidence: true,
@@ -3870,8 +3558,8 @@ mod tests {
                 ("lease-current".to_string(), 0),
             ]);
 
-            let result = reconcile_with("runner-a", Some(&current), &operations)
-                .expect("reconcile with dangling job owner");
+            let result =
+                reconcile_with("runner-a", &operations).expect("reconcile with dangling job owner");
 
             assert!(
                 !result.retired_generation_ids.is_empty(),
@@ -3897,9 +3585,7 @@ mod tests {
                 ["lease-idle"]
             );
 
-            let registry = read("runner-a", Some(&current))
-                .expect("read registry")
-                .expect("registry");
+            let registry = read("runner-a").expect("read registry").expect("registry");
             assert!(
                 !registry.generations.contains_key("lease-idle"),
                 "verified-idle draining generation must retire"
@@ -3933,10 +3619,9 @@ mod tests {
             let observers = (0..2)
                 .map(|_| {
                     let barrier = std::sync::Arc::clone(&barrier);
-                    let active = active.clone();
                     std::thread::spawn(move || {
                         barrier.wait();
-                        status_projection("runner-a", Some(&active)).expect("status projection")
+                        status_projection("runner-a").expect("status projection")
                     })
                 })
                 .collect::<Vec<_>>();
@@ -3989,7 +3674,6 @@ mod tests {
 
             reconcile_with(
                 "runner-a",
-                Some(&b),
                 &FallbackGenerationEndpointOperations {
                     primary: &local,
                     fallback: &remote,
@@ -4024,14 +3708,13 @@ mod tests {
                 .borrow_mut()
                 .insert("lease-current".to_string(), 0);
 
-            reconcile_with("runner-a", Some(&current), &operations)
-                .expect("reconcile authoritative remote zero");
+            reconcile_with("runner-a", &operations).expect("reconcile authoritative remote zero");
 
-            let projection = status_projection("runner-a", Some(&current)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert_eq!(projection[0].active_job_count, 0);
             assert_eq!(projection[0].observed_active_job_count, Some(0));
             assert!(
-                status_job_owners("runner-a", Some(&current)).expect("owners")[0]
+                status_job_owners("runner-a").expect("owners")[0]
                     .job_ids
                     .is_empty(),
                 "durable jobs with no live daemon owner are residue"
@@ -4055,10 +3738,10 @@ mod tests {
                 .borrow_mut()
                 .insert("lease-current".to_string(), 1);
 
-            reconcile_with("runner-a", Some(&current), &operations).expect("reconcile live owner");
+            reconcile_with("runner-a", &operations).expect("reconcile live owner");
 
             assert_eq!(
-                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
+                status_job_owners("runner-a").expect("owners")[0].job_ids,
                 ["job-live"]
             );
             with_admission_fence("runner-a", Some(&current), "connect", |fence| {
@@ -4112,17 +3795,6 @@ mod tests {
         serde_json::from_str(&raw).expect("parse registry")
     }
 
-    fn write_legacy_registry(runner_id: &str, generations: &RollingGenerations<RunnerSession>) {
-        homeboy_core::engine::local_files::write_json_file(
-            &path(runner_id).expect("registry path"),
-            &GenerationRegistry {
-                runner_id: runner_id.to_string(),
-                generations: generations.clone(),
-            },
-        )
-        .expect("write legacy registry without owner-count normalization");
-    }
-
     #[test]
     fn tombstones_a_large_dead_direct_generation_inventory_without_accepting_new_work() {
         test_support::with_isolated_home(|_| {
@@ -4143,7 +3815,7 @@ mod tests {
             tombstone_dead_direct_generations("runner-a", &leases)
                 .expect("dead authoritative daemon tombstones stale inventory");
 
-            assert!(read("runner-a", None)
+            assert!(read("runner-a")
                 .expect("read tombstoned registry")
                 .is_none());
         });
@@ -4230,7 +3902,6 @@ mod tests {
             registry["job_owners"]["accepted-during-reconcile"], "lease-fresh",
             "the locked reconciliation commit reloads after remote work"
         );
-        assert_eq!(registry["generations"]["lease-fresh"]["active_jobs"], 1);
         assert_eq!(
             registry["generations"]["lease-fresh"]["observed_active_jobs"],
             serde_json::Value::Null,
@@ -4250,56 +3921,6 @@ mod tests {
         assert_eq!(
             registry.generations.job_owner("accepted-during-reconcile"),
             Some("lease-fresh")
-        );
-    }
-
-    #[test]
-    fn process_isolated_legacy_migration_preserves_concurrent_job_admission() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let sync_dir = context.root().join("legacy-migration-sync");
-        std::fs::create_dir_all(&sync_dir).expect("create process sync directory");
-
-        assert!(generation_store_process(
-            &context,
-            "generation_store::tests::process_seed_legacy_generation",
-            &sync_dir,
-        )
-        .status()
-        .expect("seed legacy process")
-        .success());
-
-        let mut migration = generation_store_process(
-            &context,
-            "generation_store::tests::process_migrate_legacy_generation",
-            &sync_dir,
-        )
-        .env(LEGACY_MIGRATION_SYNC_DIR_ENV, &sync_dir)
-        .spawn()
-        .expect("start migration process");
-        wait_for_process_file(&sync_dir.join("migration-ready"));
-
-        assert!(generation_store_process(
-            &context,
-            "generation_store::tests::process_record_fresh_job",
-            &sync_dir,
-        )
-        .status()
-        .expect("record process")
-        .success());
-        std::fs::write(sync_dir.join("allow-migration"), "proceed").expect("release migration");
-        assert!(migration.wait().expect("migration process").success());
-
-        let registry = std::fs::read_to_string(
-            context
-                .config_dir()
-                .join("runner-sessions/runner-a/generations.json"),
-        )
-        .expect("read migrated registry");
-        let registry: serde_json::Value = serde_json::from_str(&registry).expect("parse registry");
-        assert_eq!(registry["runner_id"], "runner-a");
-        assert_eq!(
-            registry["job_owners"]["accepted-during-reconcile"], "lease-fresh",
-            "a stale legacy migration must reload rather than erase accepted ownership"
         );
     }
 
@@ -4373,23 +3994,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "invoked by process_isolated_legacy_migration_preserves_concurrent_job_admission"]
-    fn process_seed_legacy_generation() {
-        let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-        homeboy_core::engine::local_files::write_json_file(
-            &path("runner-a").expect("registry path"),
-            &RollingGenerations::new("lease-fresh", fresh),
-        )
-        .expect("seed legacy registry without runner identity");
-    }
-
-    #[test]
-    #[ignore = "invoked by process_isolated_legacy_migration_preserves_concurrent_job_admission"]
-    fn process_migrate_legacy_generation() {
-        read("runner-a", None).expect("migrate legacy registry");
-    }
-
-    #[test]
     #[ignore = "invoked by process_isolated_reconciliation_preserves_concurrent_job_admission"]
     fn process_record_fresh_job() {
         let fresh = session("lease-fresh", "daemon-fresh", Some(202));
@@ -4425,61 +4029,32 @@ mod tests {
             fn terminate_tunnel(&self, _: &RunnerSession) {}
         }
 
-        let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-        reconcile_with(
-            "runner-a",
-            Some(&fresh),
-            &ProcessBlockingOperations(process_sync_dir()),
-        )
-        .expect("reconcile after remote drain check");
+        reconcile_with("runner-a", &ProcessBlockingOperations(process_sync_dir()))
+            .expect("reconcile after remote drain check");
     }
 
     #[test]
-    fn missing_runner_identity_recovers_without_changing_generation_routing() {
+    fn a_registry_without_runner_identity_is_rejected_unchanged() {
         test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
-            let b = session("lease-b", "daemon-b", Some(202));
-            let mut prior = RollingGenerations::new("lease-a", a.clone());
+            let mut prior = RollingGenerations::new("lease-a", a);
             assert!(prior.admit_job_for("lease-a", "job-a"));
-            assert!(prior.record_run("job-a", "run-a"));
-            assert!(prior.record_artifact("job-a", "artifact-a"));
-            prior.begin("build-b", b.clone());
-            prior.activate_preserving_drained("build-b");
-            assert!(prior.admit_job_for("build-b", "job-b"));
             homeboy_core::engine::local_files::write_json_file(
                 &path("runner-a").expect("registry path"),
                 &prior,
             )
-            .expect("write prior registry");
+            .expect("write registry without runner identity");
+            let before = std::fs::read(path("runner-a").expect("registry path"))
+                .expect("read registry bytes");
 
-            let restored = read("runner-a", None)
-                .expect("load prior registry")
-                .expect("registry");
-            assert_eq!(restored.admission_owner, "build-b");
-            assert_eq!(restored.job_owner("job-a"), Some("lease-a"));
-            assert_eq!(restored.job_owner("job-b"), Some("build-b"));
+            let error = read("runner-a").expect_err("a registry without runner_id is rejected");
+            assert_eq!(error.code.as_str(), "config.invalid_json");
             assert_eq!(
-                restored.endpoint_owner(None, Some("run-a"), None),
-                Some("lease-a")
+                std::fs::read(path("runner-a").expect("registry path"))
+                    .expect("reread registry bytes"),
+                before,
+                "a rejected registry is never rewritten"
             );
-            assert_eq!(
-                restored.endpoint_owner(None, None, Some("artifact-a")),
-                Some("lease-a")
-            );
-            assert_eq!(
-                admission_session("runner-a", None).expect("route admission"),
-                Some(b)
-            );
-            assert_eq!(
-                job_session("runner-a", "job-a", None).expect("route draining job"),
-                Some(a)
-            );
-
-            let persisted = persisted_registry("runner-a");
-            assert_eq!(persisted["runner_id"], "runner-a");
-            assert_eq!(persisted["job_owners"]["job-a"], "lease-a");
-            assert_eq!(persisted["run_owners"]["run-a"], "lease-a");
-            assert_eq!(persisted["artifact_owners"]["artifact-a"], "lease-a");
         });
     }
 
@@ -4495,7 +4070,7 @@ mod tests {
             write("runner-a", &generations).expect("persist retained result ownership");
 
             assert!(
-                requires_generation_preserving_refresh("runner-a", Some(&current))
+                requires_generation_preserving_refresh("runner-a")
                     .expect("inspect retained ownership"),
                 "completed result owners keep their producing generation routable"
             );
@@ -4505,7 +4080,7 @@ mod tests {
             write("runner-a", &generations).expect("persist retired result ownership");
 
             assert!(
-                !requires_generation_preserving_refresh("runner-a", Some(&current))
+                !requires_generation_preserving_refresh("runner-a")
                     .expect("inspect idle generation"),
                 "an idle generation can use ordinary disconnect and reconnect"
             );
@@ -4525,54 +4100,13 @@ mod tests {
             )
             .expect("write registry");
 
-            let error = read("runner-a", None).expect_err("mismatched registry rejects");
+            let error = read("runner-a").expect_err("mismatched registry rejects");
             assert_eq!(error.code.as_str(), "config.invalid_value");
             assert_eq!(error.details["value"], "runner-b");
             assert!(error.details["problem"]
                 .as_str()
                 .expect("problem")
                 .contains("runner-scoped path `runner-a`"));
-        });
-    }
-
-    #[test]
-    fn missing_runner_identity_rejects_empty_and_conflicting_endpoints() {
-        test_support::with_isolated_home(|_| {
-            let a = session("lease-a", "daemon-a", Some(101));
-            let mut b = session("lease-b", "daemon-b", Some(202));
-            b.runner_id = "runner-b".to_string();
-            let mut generations = RollingGenerations::new("lease-a", a);
-            generations.begin("build-b", b);
-            homeboy_core::engine::local_files::write_json_file(
-                &path("runner-a").expect("registry path"),
-                &generations,
-            )
-            .expect("write conflicted prior registry");
-
-            let error = read("runner-a", None).expect_err("conflicting endpoint rejects");
-            assert_eq!(error.code.as_str(), "config.invalid_value");
-            assert_eq!(error.details["value"], "runner-b");
-            assert!(error.details["problem"]
-                .as_str()
-                .expect("problem")
-                .contains("generation `build-b` endpoint runner ID does not match"));
-            assert!(persisted_registry("runner-a").get("runner_id").is_none());
-
-            let mut empty = session("lease-a", "daemon-a", Some(101));
-            empty.runner_id.clear();
-            homeboy_core::engine::local_files::write_json_file(
-                &path("runner-a").expect("registry path"),
-                &RollingGenerations::new("lease-a", empty),
-            )
-            .expect("write empty prior registry");
-            let error = read("runner-a", None).expect_err("empty endpoint rejects");
-            assert_eq!(error.code.as_str(), "config.invalid_value");
-            assert_eq!(error.details["value"], "");
-            assert!(error.details["problem"]
-                .as_str()
-                .expect("problem")
-                .contains("empty endpoint runner ID"));
-            assert!(persisted_registry("runner-a").get("runner_id").is_none());
         });
     }
 
@@ -4585,7 +4119,7 @@ mod tests {
             std::fs::write(&registry_path, r#"{"generations": []}"#)
                 .expect("write malformed registry");
 
-            let error = read("runner-a", None).expect_err("malformed registry rejects");
+            let error = read("runner-a").expect_err("malformed registry rejects");
             assert_eq!(error.code.as_str(), "config.invalid_json");
             assert_eq!(
                 std::fs::read_to_string(registry_path).expect("read malformed registry"),
@@ -4606,7 +4140,7 @@ mod tests {
             )
             .expect("write unsupported registry");
 
-            let error = read("runner-a", None).expect_err("unsupported registry rejects");
+            let error = read("runner-a").expect_err("unsupported registry rejects");
             assert_eq!(error.code.as_str(), "config.invalid_value");
             assert_eq!(error.details["key"], "generation_registry.unexpected");
             assert_eq!(
@@ -4627,17 +4161,16 @@ mod tests {
             record_job("runner-a", &fresh, "fresh-cook-job").expect("record one fresh dispatch");
 
             assert_eq!(
-                admission_session("runner-a", Some(&fresh)).expect("resolve admission"),
+                admission_session("runner-a").expect("resolve admission"),
                 Some(fresh.clone()),
                 "new Cook work uses the same endpoint runner status just verified"
             );
             assert_eq!(
-                job_session("runner-a", "active-stale-job", Some(&fresh))
-                    .expect("resolve draining job"),
+                job_session("runner-a", "active-stale-job").expect("resolve draining job"),
                 Some(stale),
                 "existing work remains pinned to its draining generation"
             );
-            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert!(projection.iter().any(|entry| {
                 entry.admission_owner
                     && entry.remote_daemon_lease_id.as_deref() == Some("lease-fresh")
@@ -4659,8 +4192,8 @@ mod tests {
             let b = session("lease-b", "daemon-b", Some(202));
 
             record_job("runner-a", &a, "job-a").expect("record A job");
-            record_job_run("runner-a", &a, "job-a", "run-a").expect("record A run");
-            record_job_artifacts("runner-a", &a, "job-a", ["artifact-a".to_string()])
+            record_job_run("runner-a", "job-a", "run-a").expect("record A run");
+            record_job_artifacts("runner-a", "job-a", ["artifact-a".to_string()])
                 .expect("record A artifact");
             let initial = persisted_registry("runner-a");
             assert_eq!(initial["runner_id"], "runner-a");
@@ -4688,7 +4221,7 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-a".to_string(), 0);
-            reconcile_with("runner-a", Some(&b), &operations).expect("drain A");
+            reconcile_with("runner-a", &operations).expect("drain A");
             let drained = persisted_registry("runner-a");
             assert_eq!(drained["runner_id"], "runner-a");
             assert_eq!(drained["admission_owner"], "build-b");
@@ -4696,12 +4229,12 @@ mod tests {
             assert_eq!(drained["run_owners"]["run-a"], "lease-a");
             assert_eq!(drained["artifact_owners"]["artifact-a"], "lease-a");
             assert_eq!(
-                endpoint_session("runner-a", None, Some("run-a"), None, Some(&b))
+                endpoint_session("runner-a", None, Some("run-a"), None)
                     .expect("route retained run"),
                 Some(a.clone())
             );
             assert_eq!(
-                endpoint_session("runner-a", None, None, Some("artifact-a"), Some(&b))
+                endpoint_session("runner-a", None, None, Some("artifact-a"))
                     .expect("route retained artifact"),
                 Some(a)
             );
@@ -4711,29 +4244,13 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_reports_owner_counts_over_stale_ledger_counters() {
+    fn reconciliation_reports_owner_counts_and_observed_counts() {
         test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
             let mut generations = RollingGenerations::new("lease-fresh", fresh.clone());
             generations.begin("lease-stale", stale);
-            generations
-                .generations
-                .get_mut("lease-fresh")
-                .expect("admitting generation")
-                .active_jobs = 9;
-            generations
-                .generations
-                .get_mut("lease-stale")
-                .expect("draining generation")
-                .active_jobs = 18;
-            write_legacy_registry("runner-a", &generations);
-
-            let loaded = read("runner-a", Some(&fresh))
-                .expect("legacy registry loads")
-                .expect("registry");
-            assert_eq!(loaded.generations["lease-fresh"].active_jobs, 9);
-            assert_eq!(loaded.generations["lease-stale"].active_jobs, 18);
+            write("runner-a", &generations).expect("persist generations");
 
             let operations = FakeEndpointOperations::default();
             operations
@@ -4744,9 +4261,9 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-fresh".to_string(), 1);
-            reconcile_with("runner-a", Some(&fresh), &operations).expect("reconcile live count");
+            reconcile_with("runner-a", &operations).expect("reconcile live count");
 
-            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             let projected_fresh = projection
                 .iter()
                 .find(|entry| entry.generation == "lease-fresh")
@@ -4770,10 +4287,6 @@ mod tests {
                 Ok(())
             })
             .expect("observed fence");
-
-            let persisted = persisted_registry("runner-a");
-            assert_eq!(persisted["generations"]["lease-fresh"]["active_jobs"], 0);
-            assert_eq!(persisted["generations"]["lease-stale"]["active_jobs"], 0);
         });
     }
 
@@ -4785,33 +4298,28 @@ mod tests {
             let mut generations = RollingGenerations::new("lease-fresh", fresh.clone());
             generations.begin("lease-stale", stale);
             generations
-                .generations
-                .get_mut("lease-stale")
-                .expect("draining generation")
-                .active_jobs = 18;
-            generations
                 .job_owners
                 .insert("job-stale".to_string(), "lease-stale".to_string());
-            write_legacy_registry("runner-a", &generations);
+            write("runner-a", &generations).expect("persist generations");
 
             let operations = FakeEndpointOperations::default();
-            let result = reconcile_with("runner-a", Some(&fresh), &operations)
-                .expect("reconcile unreachable endpoint");
+            let result =
+                reconcile_with("runner-a", &operations).expect("reconcile unreachable endpoint");
 
-            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             let stale = projection
                 .iter()
                 .find(|entry| entry.generation == "lease-stale")
                 .expect("draining generation status");
             assert_eq!(
                 stale.active_job_count, 1,
-                "status follows the durable owner, not the stale ledger counter"
+                "status follows the durable owner"
             );
             assert_eq!(stale.observed_active_job_count, None);
             assert!(!stale.active_job_count_authoritative);
             assert_eq!(stale.job_owner_count, 1);
             assert_eq!(
-                job_session("runner-a", "job-stale", Some(&fresh)).expect("route persisted job"),
+                job_session("runner-a", "job-stale").expect("route persisted job"),
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
             with_admission_fence("runner-a", Some(&fresh), "connect", |fence| {
@@ -4901,7 +4409,7 @@ mod tests {
             assert_eq!(job.status, homeboy_core::api_jobs::JobStatus::Cancelled);
             server.join().expect("fixture server");
 
-            let owners = status_job_owners("runner-a", Some(&endpoint)).expect("owners");
+            let owners = status_job_owners("runner-a").expect("owners");
             assert!(
                 owners.iter().all(|owner| owner.job_ids.is_empty()),
                 "a terminal cancel response must settle its ledger owner: {owners:?}"
@@ -4914,7 +4422,7 @@ mod tests {
                 Ok(())
             })
             .expect("released fence");
-            let projection = status_projection("runner-a", Some(&endpoint)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert_eq!(projection[0].active_job_count, 0);
             assert_eq!(projection[0].observed_active_job_count, None);
             let report = RunnerStatusReport {
@@ -4942,21 +4450,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_registrations_still_write_the_owner_derived_active_job_count() {
-        test_support::with_isolated_home(|_| {
-            let current = session("lease-current", "daemon-current", Some(202));
-            record_job("runner-a", &current, "job-a").expect("record job");
-
-            let registry = persisted_registry("runner-a");
-            assert_eq!(registry["generations"]["lease-current"]["active_jobs"], 1);
-
-            settle_observed_terminal_job("runner-a", "job-a").expect("settle job");
-            let registry = persisted_registry("runner-a");
-            assert_eq!(registry["generations"]["lease-current"]["active_jobs"], 0);
-        });
-    }
-
-    #[test]
     fn unclaimed_draining_projection_retires_when_live_daemon_is_idle() {
         test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
@@ -4976,16 +4469,16 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-fresh".to_string(), 0);
-            let result = reconcile_with("runner-a", Some(&fresh), &operations)
+            let result = reconcile_with("runner-a", &operations)
                 .expect("resolve unclaimed draining projection");
 
             assert_eq!(result.retired_generation_ids, ["lease-stale"]);
-            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert_eq!(projection.len(), 1);
             assert_eq!(projection[0].generation, "lease-fresh");
             assert_eq!(projection[0].active_job_count, 0);
             assert_eq!(projection[0].observed_active_job_count, Some(0));
-            assert!(status_job_owners("runner-a", Some(&fresh))
+            assert!(status_job_owners("runner-a")
                 .expect("owners")
                 .iter()
                 .all(|owner| owner.job_ids.is_empty()));
@@ -5008,7 +4501,7 @@ mod tests {
                 active_job_recovery_evidence: None,
                 session_path: "test".to_string(),
             };
-            let owners = status_job_owners("runner-a", Some(&fresh)).expect("owners");
+            let owners = status_job_owners("runner-a").expect("owners");
             let summary = report.admission_summary_with_generations(&projection, &owners, 0);
             assert!(
                 !summary.accepting_jobs,
@@ -5048,10 +4541,10 @@ mod tests {
                 .terminal_reconcile_failures
                 .borrow_mut()
                 .insert("lease-stale".to_string());
-            reconcile_with("runner-a", Some(&fresh), &operations)
+            reconcile_with("runner-a", &operations)
                 .expect("reachable settlement failure stays fail-closed");
 
-            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert!(projection.iter().any(|entry| {
                 entry.generation == "lease-stale"
                     && entry.active_job_count == 1
@@ -5082,14 +4575,14 @@ mod tests {
                 .insert("lease-stopped".to_string());
             // A proven-stopped generation is never observed (#15685): its
             // stop proof and empty owner set stand in for an observed zero.
-            let result = reconcile_with("runner-a", Some(&live), &operations)
-                .expect("retire proven stopped generation");
+            let result =
+                reconcile_with("runner-a", &operations).expect("retire proven stopped generation");
 
             assert_eq!(
                 result.retired_generation_ids,
                 vec!["lease-stopped".to_string()]
             );
-            let projection = status_projection("runner-a", Some(&live)).expect("projection");
+            let projection = status_projection("runner-a").expect("projection");
             assert_eq!(projection.len(), 1);
             assert_eq!(projection[0].generation, "lease-live");
             assert!(operations.stopped_leases.borrow().is_empty());
@@ -5124,11 +4617,11 @@ mod tests {
             );
 
             assert_eq!(
-                job_session("runner-a", "job-stale", Some(&fresh)).expect("route stale job"),
+                job_session("runner-a", "job-stale").expect("route stale job"),
                 Some(reattached)
             );
             assert_eq!(
-                admission_session("runner-a", Some(&stale)).expect("retain admission owner"),
+                admission_session("runner-a").expect("retain admission owner"),
                 Some(fresh)
             );
         });
@@ -5140,23 +4633,18 @@ mod tests {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
-            // No generations file is the deployed legacy shape. Its active
-            // session becomes generation A without losing its job ownership.
-            assert_eq!(
-                admission_session("runner-a", Some(&a)).expect("admission"),
-                Some(a.clone())
-            );
+            // With no generations file yet, the first recorded job seeds
+            // generation A from its session.
+            assert_eq!(admission_session("runner-a").expect("admission"), None);
             record_job("runner-a", &a, "job-a").expect("record A job");
             assert_eq!(
-                job_session("runner-a", "job-a", Some(&a)).expect("route A job"),
+                job_session("runner-a", "job-a").expect("route A job"),
                 Some(a.clone())
             );
 
             // Candidate B has already passed startup/tunnel validation. Only
             // this activation moves admission; a failed candidate leaves A intact.
-            let before_candidate_activation = read("runner-a", Some(&a))
-                .expect("read A")
-                .expect("A ledger");
+            let before_candidate_activation = read("runner-a").expect("read A").expect("A ledger");
             assert_eq!(before_candidate_activation.admission_owner, "lease-a");
             activate(
                 "runner-a",
@@ -5169,24 +4657,24 @@ mod tests {
             record_job("runner-a", &b, "job-b").expect("record B job");
 
             // Reloading the persisted ledger simulates a controller restart.
-            let reloaded = read("runner-a", Some(&a)).expect("reload").expect("ledger");
+            let reloaded = read("runner-a").expect("reload").expect("ledger");
             assert_eq!(reloaded.admission_owner, "build-b");
             assert_eq!(reloaded.job_owner("job-a"), Some("lease-a"));
             assert_eq!(reloaded.job_owner("job-b"), Some("build-b"));
             assert_eq!(
-                admission_session("runner-a", Some(&a)).expect("route admission"),
+                admission_session("runner-a").expect("route admission"),
                 Some(b.clone())
             );
             assert_eq!(
-                job_session("runner-a", "job-a", Some(&a)).expect("route A operation"),
+                job_session("runner-a", "job-a").expect("route A operation"),
                 Some(a.clone())
             );
             assert_eq!(
-                job_session("runner-a", "job-b", Some(&a)).expect("route B operation"),
+                job_session("runner-a", "job-b").expect("route B operation"),
                 Some(b.clone())
             );
 
-            let projected = status_projection("runner-a", Some(&a)).expect("status projection");
+            let projected = status_projection("runner-a").expect("status projection");
             assert_eq!(projected.len(), 2);
             assert!(projected.iter().any(|entry| entry.generation == "lease-a"
                 && entry.active_job_count == 1
@@ -5198,7 +4686,7 @@ mod tests {
             // current generation job. Consumers use these identities, rather
             // than the overlapping per-generation counters, to deduplicate
             // admission pressure after rotation.
-            let owners = status_job_owners("runner-a", Some(&b)).expect("owner projection");
+            let owners = status_job_owners("runner-a").expect("owner projection");
             assert_eq!(
                 owners,
                 vec![
@@ -5238,7 +4726,7 @@ mod tests {
             );
             assert_eq!(
                 serde_json::to_value(
-                    status_projection("runner-a", Some(&b)).expect("explicit generation inventory")
+                    status_projection("runner-a").expect("explicit generation inventory")
                 )
                 .unwrap(),
                 serde_json::to_value(&projected).unwrap()
@@ -5296,24 +4784,18 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-a".to_string(), 1);
-            reconcile_with("runner-a", Some(&b), &operations).expect("busy A remains");
-            assert_eq!(
-                status_projection("runner-a", Some(&b))
-                    .expect("projection")
-                    .len(),
-                2
-            );
+            reconcile_with("runner-a", &operations).expect("busy A remains");
+            assert_eq!(status_projection("runner-a").expect("projection").len(), 2);
 
             operations
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-a".to_string(), 0);
-            reconcile_with("runner-a", Some(&b), &operations).expect("retire A");
-            reconcile_with("runner-a", Some(&b), &operations).expect("idempotent reconcile");
+            reconcile_with("runner-a", &operations).expect("retire A");
+            reconcile_with("runner-a", &operations).expect("idempotent reconcile");
             assert_eq!(operations.stopped_leases.into_inner(), vec!["lease-a"]);
             assert_eq!(operations.terminated_pids.into_inner(), vec![101]);
-            let final_projection =
-                status_projection("runner-a", Some(&b)).expect("final projection");
+            let final_projection = status_projection("runner-a").expect("final projection");
             assert_eq!(final_projection.len(), 1);
             assert_eq!(final_projection[0].generation, "build-b");
             assert_eq!(final_projection[0].active_job_count, 1);
@@ -5347,39 +4829,15 @@ mod tests {
             .expect("promote C");
             record_job("runner-a", &c, "job-c").expect("record C job");
 
-            // Simulate stale persisted ownership from an earlier controller.
-            let mut persisted = read("runner-a", Some(&c))
-                .expect("read registry")
-                .expect("registry");
-            persisted
-                .generations
-                .get_mut("lease-a")
-                .expect("A")
-                .active_jobs = 9;
-            persisted
-                .generations
-                .get_mut("build-b")
-                .expect("B")
-                .active_jobs = 18;
-            write_legacy_registry("runner-a", &persisted);
-
-            // Reload first to prove reconciliation does not depend on controller memory.
-            let restored = read("runner-a", Some(&c))
-                .expect("restart read")
-                .expect("registry");
-            assert_eq!(restored.generations["lease-a"].active_jobs, 9);
-            assert_eq!(restored.generations["build-b"].active_jobs, 18);
-
             let operations = FakeEndpointOperations::default();
             operations
                 .active_jobs
                 .borrow_mut()
                 .extend([("lease-a".to_string(), 0), ("lease-b".to_string(), 1)]);
-            let first =
-                reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal A");
+            let first = reconcile_with("runner-a", &operations).expect("reconcile terminal A");
             assert_eq!(first.retired_generation_ids, ["lease-a"]);
 
-            let projected = status_projection("runner-a", Some(&c)).expect("project after A");
+            let projected = status_projection("runner-a").expect("project after A");
             assert_eq!(projected.len(), 2);
             assert!(projected
                 .iter()
@@ -5398,10 +4856,9 @@ mod tests {
                 .active_jobs
                 .borrow_mut()
                 .insert("lease-b".to_string(), 0);
-            let second =
-                reconcile_with("runner-a", Some(&c), &operations).expect("reconcile terminal B");
+            let second = reconcile_with("runner-a", &operations).expect("reconcile terminal B");
             assert_eq!(second.retired_generation_ids, ["build-b"]);
-            let projected = status_projection("runner-a", Some(&c)).expect("final projection");
+            let projected = status_projection("runner-a").expect("final projection");
             assert_eq!(projected.len(), 1);
             assert_eq!(projected[0].generation, "build-c");
             assert_eq!(projected[0].active_job_count, 1);
@@ -5439,10 +4896,9 @@ mod tests {
                 .borrow_mut()
                 .insert("lease-a".to_string());
 
-            reconcile_with("runner-a", Some(&b), &operations)
-                .expect("failed settlement remains fail-closed");
+            reconcile_with("runner-a", &operations).expect("failed settlement remains fail-closed");
 
-            let projected = status_projection("runner-a", Some(&b)).expect("projection");
+            let projected = status_projection("runner-a").expect("projection");
             assert!(projected
                 .iter()
                 .any(|entry| entry.generation == "lease-a" && entry.active_job_count == 1));
@@ -5470,15 +4926,14 @@ mod tests {
             )
             .expect("promote C");
 
-            let generations = read("runner-a", Some(&c))
+            let generations = read("runner-a")
                 .expect("read generations")
                 .expect("generation registry");
             assert_eq!(generations.job_owner("job-b"), Some("build-b"));
             assert_eq!(
-                job_session("runner-a", "job-b", Some(&c)).expect("route B job"),
+                job_session("runner-a", "job-b").expect("route B job"),
                 Some(b)
             );
-            assert_eq!(generations.generations["build-b"].active_jobs, 1);
             assert_eq!(generations.admission_owner, "build-c");
         });
     }
@@ -5490,11 +4945,6 @@ mod tests {
             let b = session("lease-b", "daemon-b", Some(202));
             let mut generations = RollingGenerations::new("build-a", a.clone());
             generations
-                .generations
-                .get_mut("build-a")
-                .expect("build A generation")
-                .active_jobs = 1;
-            generations
                 .job_owners
                 .insert("job-a".to_string(), "lease-a".to_string());
             generations
@@ -5505,45 +4955,41 @@ mod tests {
             write("runner-a", &generations).expect("persist lease aliases");
 
             assert_eq!(
-                job_session("runner-a", "job-a", Some(&b)).expect("route aliased job"),
+                job_session("runner-a", "job-a").expect("route aliased job"),
                 Some(a.clone())
             );
             assert_eq!(
-                endpoint_session("runner-a", None, Some("run-a"), None, Some(&b))
-                    .expect("route aliased run"),
+                endpoint_session("runner-a", None, Some("run-a"), None).expect("route aliased run"),
                 Some(a)
             );
         });
     }
 
     #[test]
-    fn legacy_rotation_pins_active_a_jobs_before_b_can_retire_it() {
+    fn first_rotation_pins_active_a_jobs_before_b_can_retire_it() {
         test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
-            // This is the deployed pre-generation state: there is no ledger,
-            // but the daemon reports authoritative active job identities.
+            // No ledger exists yet, but the daemon reports authoritative
+            // active job identities.
             activate(
                 "runner-a",
                 &a,
                 "build-b".to_string(),
                 b.clone(),
-                &["legacy-job-a".to_string()],
+                &["active-job-a".to_string()],
             )
-            .expect("activate B without losing legacy A work");
+            .expect("activate B without losing active A work");
 
-            let ledger = read("runner-a", Some(&b))
-                .expect("read ledger")
-                .expect("ledger");
-            assert_eq!(ledger.generations["lease-a"].active_jobs, 1);
-            assert_eq!(ledger.job_owner("legacy-job-a"), Some("lease-a"));
+            let ledger = read("runner-a").expect("read ledger").expect("ledger");
+            assert_eq!(ledger.job_owner("active-job-a"), Some("lease-a"));
             assert_eq!(
-                job_session("runner-a", "legacy-job-a", Some(&b)).expect("route A job"),
+                job_session("runner-a", "active-job-a").expect("route A job"),
                 Some(a)
             );
             assert_eq!(
-                admission_session("runner-a", Some(&b)).expect("route admissions"),
+                admission_session("runner-a").expect("route admissions"),
                 Some(b)
             );
         });
@@ -5566,7 +5012,7 @@ mod tests {
             // This is the same ledger state reached when either durable
             // activation publication or controller-session publication fails.
             rollback_activation("runner-a", &a, "build-b").expect("restore A");
-            let restored = read("runner-a", Some(&a)).expect("read").expect("ledger");
+            let restored = read("runner-a").expect("read").expect("ledger");
             assert_eq!(restored.admission_owner, "lease-a");
             assert_eq!(restored.job_owner("job-a"), Some("lease-a"));
             assert!(!restored.generations.contains_key("build-b"));

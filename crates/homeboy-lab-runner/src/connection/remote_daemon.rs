@@ -1783,7 +1783,6 @@ mod tests {
                         "state_dir": "/home/lab/daemon/primary/generations/gen-a",
                         "build_identity": "homeboy 1.0.0"
                     },
-                    "active_jobs": 1,
                     "drain_state": "admitting"
                 },
                 "lease-b": {
@@ -1792,12 +1791,10 @@ mod tests {
                         "address": "127.0.0.1:9002",
                         "state_dir": "/home/lab/daemon/primary"
                     },
-                    "active_jobs": 0,
                     "drain_state": "draining"
                 }
               }
-            },
-            "completed_jobs": []
+            }
         });
         // The parser sorts by (state_dir, lease_id) for deterministic probing;
         // ".../primary" sorts before ".../primary/generations/gen-a".

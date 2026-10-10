@@ -161,8 +161,7 @@ struct JobListFilter {
 
 fn job_list(runner_id: &str, filter: JobListFilter) -> homeboy::core::Result<RunnerJobListOutput> {
     let report = runner::status(runner_id)?;
-    let owners =
-        runner::runner_generation_job_owners_for_session(runner_id, report.session.as_ref())?;
+    let owners = runner::runner_generation_job_owners(runner_id)?;
     let jobs = project_job_list(
         runner_id,
         &report.active_runner_jobs,
