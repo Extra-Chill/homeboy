@@ -212,6 +212,18 @@ fn resource_guard_blocks_replay(record: &AgentTaskRunRecord) -> bool {
 }
 
 fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
+    if record.state == AgentTaskRunState::CandidateRecoverable
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+        && record.metadata["cook_id"].as_str().is_some()
+    {
+        let cook_id = record.metadata["cook_id"]
+            .as_str()
+            .expect("checked cook_id");
+        return unavailable(format!(
+            "candidate_recoverable holds an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: continue the cook with `homeboy agent-task cook-continue {cook_id}`"
+        ));
+    }
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
     }
@@ -572,6 +584,27 @@ mod tests {
             decision(&local, ControlPlaneAction::Resume),
             ControlPlaneActionAvailability::Available
         );
+    }
+
+    #[test]
+    fn candidate_recoverable_cook_resume_names_cook_continue() {
+        let mut record = record(AgentTaskRunState::CandidateRecoverable, false);
+        record.metadata["runner_id"] = serde_json::json!("runner-7");
+        record.metadata["runner_job_id"] = serde_json::json!("job-7");
+        record.metadata["cook_id"] = serde_json::json!("cook-15732");
+
+        let resume = lifecycle_action_eligibility(&record, None)
+            .actions
+            .into_iter()
+            .find(|entry| entry.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
+        assert!(resume
+            .reason
+            .contains("homeboy agent-task cook-continue cook-15732"));
     }
 
     #[test]
