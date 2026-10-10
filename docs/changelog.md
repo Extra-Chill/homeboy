@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.17] - 2026-10-10
+
+### Fixed
+- route candidate_recoverable recovery to cook-continue and stop pinning terminal resume
+
 ## [0.417.16] - 2026-10-10
 
 ### Fixed
