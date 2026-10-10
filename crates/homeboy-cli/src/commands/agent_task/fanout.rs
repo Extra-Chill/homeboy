@@ -1276,6 +1276,24 @@ fn validate_batch_gate_contracts(
     plan: &BatchCookFanoutPlan,
     workspace: Option<&std::path::Path>,
 ) -> Result<GateContractValidation> {
+    for gate in plan.cooks.iter().flat_map(|cook| &cook.verify) {
+        let rejected = homeboy::agents::agent_task_review_dossier::reviewer_unsafe_tokens(gate);
+        if !rejected.is_empty() {
+            let tokens = rejected
+                .iter()
+                .map(|(token, rule)| format!("`{token}` ({rule})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::validation_invalid_argument(
+                "verification",
+                format!("public verify gate is not reviewer-safe; rejected tokens: {tokens}"),
+                None,
+                Some(vec![
+                    "Move machine-local values into gate environment configuration when they are static, or split runtime-computed checks into `--private-verify`.".to_string(),
+                ]),
+            ));
+        }
+    }
     let gates = plan
         .cooks
         .iter()
@@ -9322,6 +9340,32 @@ fi
                 "issue-6454"
             ])
         );
+    }
+
+    #[test]
+    fn cook_batch_rejects_reviewer_unsafe_public_gate_during_preview_admission() {
+        let mut args = cook_batch_args();
+        args.gates.verify = vec![
+            "docker run -p 127.0.0.1:5432:5432 postgres://user:secret@localhost/db".to_string(),
+        ];
+        let plan = build_cook_batch_plan(&args).expect("plan inputs are valid");
+        let error = validate_batch_cook_gates(&plan, None)
+            .expect_err("unsafe public gate is rejected before admission");
+        assert_eq!(error.details["field"], "verification");
+        assert!(error.message.contains("127.0.0.1:5432:5432"));
+        assert!(error.message.contains("IP-literal address"));
+        assert!(error.message.contains("localhost"));
+        assert!(error.message.contains("machine-local hostname"));
+        assert!(error.message.contains("--private-verify"));
+    }
+
+    #[test]
+    fn cook_batch_allows_runtime_local_values_in_private_verify() {
+        let mut args = cook_batch_args();
+        args.gates.verify = vec!["cargo test".to_string()];
+        args.gates.private_verify = vec!["check http://localhost:5432".to_string()];
+        let plan = build_cook_batch_plan(&args).expect("plan inputs are valid");
+        validate_batch_cook_gates(&plan, None).expect("private gate is not published to reviewers");
     }
 
     #[test]
