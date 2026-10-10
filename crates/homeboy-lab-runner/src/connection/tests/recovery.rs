@@ -376,7 +376,7 @@ esac
             !ensure_running.exists(),
             "active generation fence must prevent daemon ensure-running"
         );
-        let generations = crate::generation_store::status_projection("homeboy-lab", Some(&active))
+        let generations = crate::generation_store::status_projection("homeboy-lab")
             .expect("generation projection");
         assert_eq!(generations.len(), 1);
         assert_eq!(generations[0].active_job_count, 2);

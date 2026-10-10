@@ -135,12 +135,7 @@ fn mutate_registry<T>(
     })?;
     let mut registry = read_registry()?;
     let output = mutation(&mut registry)?;
-    if let Some(registry) = registry.as_mut() {
-        // Older pinned binaries read `active_jobs` from disk to decide
-        // retirement, so every registry write refreshes the write-only
-        // compatibility counter from the owner ledger, whose terminal-job
-        // routes keep it at or above the live count.
-        registry.generations.sync_compat_active_jobs();
+    if let Some(registry) = registry.as_ref() {
         write_registry(registry)?;
     }
     Ok(output)
@@ -373,9 +368,8 @@ pub(super) fn record_job_for_admission(
 /// Count a generation's active jobs from its own durable job store:
 /// non-terminal jobs whose `job_owners` entry names that generation.
 ///
-/// The stored `active_jobs` counter is write-only compatibility bookkeeping
-/// that registry writes refresh from the owner ledger; only each
-/// generation's own `jobs.json` owns terminality. The owner filter
+/// The registry stores no job counter; only each generation's own
+/// `jobs.json` owns terminality. The owner filter
 /// attributes a shared store's jobs to exactly one generation, because a
 /// replacement daemon can restart in the dead lease's directory and share
 /// its store. A job compacted out of the store no longer counts. An
@@ -409,10 +403,8 @@ fn generation_is_idle(registry: &RollingGenerations<LocalDaemonEndpoint>, lease_
 
 /// Retire drained generations whose derived active-job count is zero.
 ///
-/// This is the daemon's drain retirement for the registry, replacing the
-/// counter-based retirement the shared primitive used to perform: the
-/// stored counter is write-only compatibility bookkeeping, so only the
-/// derived count can prove a drained generation idle. Mirrors the retirement
+/// This is the daemon's drain retirement for the registry: only the derived
+/// count can prove a drained generation idle. Mirrors the retirement
 /// protocol of `reconcile_drained_generations`: terminal custody is archived
 /// before the entry and its job routes are removed, and the admission owner
 /// is never retired here. An unreadable store counts as busy. Runs inside an
@@ -481,8 +473,7 @@ pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> R
             // A non-empty registry re-points admission at a remaining
             // generation; an empty one is re-seeded by the next daemon start.
             // The shared primitive never retires draining generations on
-            // activation, and the stored counter is write-only bookkeeping,
-            // so the derived sweep below owns that decision.
+            // activation, so the derived sweep below owns that decision.
             let fallback = registry
                 .generations
                 .generations
@@ -1360,12 +1351,6 @@ mod tests {
                 generation_active_jobs(&registry.generations, "B").expect("derived B"),
                 1
             );
-            // Every registry write refreshes the write-only compat counters
-            // from the owner ledger: A keeps its retained route and B owns
-            // both transferred jobs.
-            assert_eq!(registry.generations.generations["A"].active_jobs, 1);
-            assert_eq!(registry.generations.generations["B"].active_jobs, 2);
-
             // Each generation still owns durable work, so neither retires.
             assert!(
                 !retire_exact_dead_generation("A", state_dir_of(&a)).expect("consult registry"),
@@ -1627,43 +1612,6 @@ mod tests {
             );
             assert!(endpoint_for_lease("A").expect("lookup").is_none());
             assert!(endpoint_for_lease("B").expect("lookup").is_some());
-        });
-    }
-
-    /// A legacy registry still carrying `completed_jobs` loads unchanged;
-    /// the removed set is ignored on read and never written back.
-    #[test]
-    fn a_legacy_registry_with_completed_jobs_still_loads() {
-        with_isolated_home(|_| {
-            seed(&state("legacy", "127.0.0.1:1001")).expect("seed legacy generation");
-            let path = registry_path().expect("registry path");
-            let mut value: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).expect("read registry"))
-                    .expect("parse registry");
-            value["completed_jobs"] = serde_json::json!(["finished-job"]);
-            std::fs::write(
-                &path,
-                serde_json::to_vec_pretty(&value).expect("serialize legacy registry"),
-            )
-            .expect("write legacy registry");
-
-            let registry = read_registry()
-                .expect("a legacy registry with completed_jobs still loads")
-                .expect("registry");
-            assert!(registry.generations.generations.contains_key("legacy"));
-            assert_eq!(
-                admitting().expect("admitting").expect("owner").lease_id,
-                "legacy"
-            );
-
-            record_job("legacy-job", "legacy").expect("record owner");
-            let rewritten: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).expect("reread registry"))
-                    .expect("reparse registry");
-            assert!(
-                rewritten.get("completed_jobs").is_none(),
-                "the retired set must not be written back"
-            );
         });
     }
 }

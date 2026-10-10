@@ -41,13 +41,12 @@ impl GenerationFixture {
                     "lease_id": state["lease_id"], "address": state["address"],
                     "state_dir": dir, "build_identity": state["build_identity"]["display"]
                 },
-                "active_jobs": 0, "drain_state": "admitting"
+                "drain_state": "admitting"
             })
         };
         let root_lease = root_state["lease_id"].as_str().unwrap();
         let selected_lease = selected_state["lease_id"].as_str().unwrap();
         let mut root = endpoint(&root_state, &context.daemon_dir());
-        root["active_jobs"] = json!(1);
         root["drain_state"] = json!("draining");
         fs::write(
             context.daemon_dir().join("generations.json"),
@@ -60,8 +59,7 @@ impl GenerationFixture {
                         selected_lease: endpoint(&selected_state, &selected_dir)
                     },
                     "job_owners": { root_job.id.to_string(): root_lease }
-                },
-                "completed_jobs": []
+                }
             }))
             .unwrap(),
         )

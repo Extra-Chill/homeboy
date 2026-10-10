@@ -62,7 +62,6 @@ fn write_registry(router: &Path, admission_owner: &str, entries: &[(&str, &Path,
                         "state_dir": dir.display().to_string(),
                         "build_identity": "test",
                     },
-                    "active_jobs": 0,
                     "drain_state": drain,
                 }),
             )
@@ -75,7 +74,6 @@ fn write_registry(router: &Path, admission_owner: &str, entries: &[(&str, &Path,
             "generations": generations,
             "job_owners": {},
         },
-        "completed_jobs": [],
     });
     std::fs::write(
         router.join("generations.json"),

@@ -250,7 +250,6 @@ pub(super) fn exec_via_daemon(
                 if let Some(durable_run_id) = run_id.as_deref() {
                     super::super::generation_store::record_job_run(
                         &runner.id,
-                        session,
                         &job.id.to_string(),
                         durable_run_id,
                     )?;
@@ -412,10 +411,9 @@ pub(super) fn exec_via_daemon(
             Ok(())
         },
         |job, artifacts| {
-            if let Some(session) = accepted_session.as_ref() {
+            if accepted_session.is_some() {
                 super::super::generation_store::record_job_artifacts(
                     &runner.id,
-                    session,
                     &job.id.to_string(),
                     artifacts.iter().map(|artifact| artifact.id.clone()),
                 )?;
@@ -1854,11 +1852,10 @@ pub(crate) fn observe_daemon_job_until_terminal(
     let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
     super::super::generation_store::record_job_artifacts(
         runner_id,
-        &session,
         runner_job_id,
         job.artifacts.iter().map(|artifact| artifact.id.clone()),
     )?;
-    super::super::generation_store::reconcile(runner_id, Some(&session))?;
+    super::super::generation_store::reconcile(runner_id)?;
     Ok(DaemonTerminalObservation { job, events })
 }
 

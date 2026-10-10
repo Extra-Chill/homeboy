@@ -325,13 +325,11 @@ fn write_runner_state(
         "generations": {
             "lease-live": {
                 "endpoint": current_session,
-                "active_jobs": 2,
                 "observed_active_jobs": 2,
                 "drain_state": "admitting"
             },
             "lease-retained": {
                 "endpoint": retained_session,
-                "active_jobs": 0,
                 "observed_active_jobs": 0,
                 "drain_state": "draining"
             }

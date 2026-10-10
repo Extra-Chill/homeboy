@@ -180,7 +180,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
     let connected = status(runner_id)?;
     let recorded_broker_read =
         reverse_broker_read_without_live_worker(connected.session.as_ref(), method);
-    let Some(legacy_session) = connected
+    let Some(current_session) = connected
         .session
         .filter(|_| connected.connected || recorded_broker_read)
     else {
@@ -197,9 +197,9 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
     // job. A recorded-only reverse session has no generation to reconcile, so
     // read it through the broker endpoint it recorded.
     let session = if connected.connected {
-        daemon_api_session_for_path(runner_id, path, legacy_session)?
+        daemon_api_session_for_path(runner_id, path, current_session)?
     } else {
-        legacy_session
+        current_session
     };
     let client = Client::builder()
         .no_proxy()
@@ -262,7 +262,7 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
 fn daemon_api_session_for_path(
     runner_id: &str,
     path: &str,
-    legacy_session: RunnerSession,
+    current_session: RunnerSession,
 ) -> Result<RunnerSession> {
     let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let (job_id, run_id, artifact_id) = match segments.as_slice() {
@@ -276,9 +276,8 @@ fn daemon_api_session_for_path(
         job_id.filter(|id| !id.is_empty()),
         run_id.filter(|id| !id.is_empty()),
         artifact_id.filter(|id| !id.is_empty()),
-        Some(&legacy_session),
     )?
-    .unwrap_or(legacy_session))
+    .unwrap_or(current_session))
 }
 
 #[cfg(test)]

@@ -167,11 +167,10 @@ impl RunnerContinuationProvider for RunnerContinuation {
         let Ok(status) = super::connection::status(runner_id) else {
             return RunnerJobReconciliation::UnconfirmedAbsence;
         };
-        let Some(session) = status.session.filter(|_| status.connected) else {
+        if !status.connected || status.session.is_none() {
             return RunnerJobReconciliation::UnconfirmedAbsence;
-        };
-        let Ok(generations) = super::generation_store::live_sessions(runner_id, Some(&session))
-        else {
+        }
+        let Ok(generations) = super::generation_store::live_sessions(runner_id) else {
             return RunnerJobReconciliation::UnconfirmedAbsence;
         };
         if generations.is_empty() {

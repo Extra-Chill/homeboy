@@ -1970,7 +1970,7 @@ fn status_lists_reverse_session_records() {
 }
 
 #[test]
-fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_unchanged() {
+fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged() {
     test_support::with_isolated_home(|home| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         homeboy_core::observation::ObservationStore::open_initialized()
@@ -1986,21 +1986,6 @@ fn full_status_projection_leaves_large_legacy_shared_state_and_observation_db_un
         }
         crate::generation_store::write("homeboy-lab", &generations)
             .expect("write generation registry");
-        let registry_path = homeboy_core::paths::runner_sessions_dir()
-            .expect("runner sessions directory")
-            .join("homeboy-lab/generations.json");
-        let mut legacy: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&registry_path).expect("read registry"))
-                .expect("parse registry");
-        legacy
-            .as_object_mut()
-            .expect("registry object")
-            .remove("runner_id");
-        std::fs::write(
-            &registry_path,
-            serde_json::to_vec_pretty(&legacy).expect("serialize legacy registry"),
-        )
-        .expect("write legacy registry");
         let before = snapshot_directory(home.path());
 
         let report = status("homeboy-lab").expect("full runner status projection");
@@ -2027,9 +2012,8 @@ fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
 
         let status = status("homeboy-lab").expect("read disconnected status");
         assert!(!status.connected);
-        let inventory =
-            crate::generation_store::status_projection("homeboy-lab", status.session.as_ref())
-                .expect("read persisted generation evidence");
+        let inventory = crate::generation_store::status_projection("homeboy-lab")
+            .expect("read persisted generation evidence");
         assert_eq!(
             status
                 .admission_summary_with_generations(&inventory, &[], inventory.len())
@@ -2482,7 +2466,6 @@ fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
             .generations
             .get_mut("lease-live")
             .expect("admission generation");
-        admission.active_jobs = 7;
         admission.observed_active_jobs = Some(7);
         crate::generation_store::write("homeboy-lab", &generations)
             .expect("write generation ledger");
@@ -2504,15 +2487,10 @@ fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
         assert_eq!(summary.active_job_count, Some(1));
         assert!(!report.admission_availability(Some(32)).accepts_jobs);
 
-        let mut mismatched = crate::generation_store::read("homeboy-lab", report.session.as_ref())
+        let mut mismatched = crate::generation_store::read("homeboy-lab")
             .expect("read generation ledger")
             .expect("generation ledger");
         let admission_owner = mismatched.admission_owner.clone();
-        mismatched
-            .generations
-            .get_mut(&admission_owner)
-            .expect("admission generation")
-            .active_jobs = 2;
         mismatched
             .generations
             .get_mut(&admission_owner)

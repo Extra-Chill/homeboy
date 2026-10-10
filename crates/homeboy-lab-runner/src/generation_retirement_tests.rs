@@ -245,8 +245,8 @@ fn controller_lifecycle_process() {
         .and_then(Value::as_str)
         .expect("A job ID");
     record_job("runner-a", &a, job_id).unwrap();
-    record_job_run("runner-a", &a, job_id, "retained-a").unwrap();
-    record_job_artifacts("runner-a", &a, job_id, ["artifact-a".to_string()]).unwrap();
+    record_job_run("runner-a", job_id, "retained-a").unwrap();
+    record_job_artifacts("runner-a", job_id, ["artifact-a".to_string()]).unwrap();
     activate(
         "runner-a",
         &a,
@@ -255,38 +255,29 @@ fn controller_lifecycle_process() {
         &[job_id.to_string()],
     )
     .unwrap();
-    assert_eq!(
-        admission_session("runner-a", None).unwrap(),
-        Some(b.clone())
-    );
+    assert_eq!(admission_session("runner-a").unwrap(), Some(b.clone()));
     let new_job = post(&b, "/audit", json!({"component": "new"}));
     let new_id = new_job
         .pointer("/data/body/job/id")
         .and_then(Value::as_str)
         .unwrap();
     record_job("runner-a", &b, new_id).unwrap();
-    assert_eq!(
-        job_session("runner-a", new_id, None).unwrap(),
-        Some(b.clone())
-    );
-    assert_eq!(
-        job_session("runner-a", job_id, None).unwrap(),
-        Some(a.clone())
-    );
+    assert_eq!(job_session("runner-a", new_id).unwrap(), Some(b.clone()));
+    assert_eq!(job_session("runner-a", job_id).unwrap(), Some(a.clone()));
     assert!(get(&a, &format!("/jobs/{job_id}"))
         .pointer("/data/body/job")
         .is_some());
-    let busy = reconcile("runner-a", None).unwrap();
+    let busy = reconcile("runner-a").unwrap();
     assert!(busy.retired_generation_ids.is_empty());
     assert!(!busy.retirement_blockers.is_empty());
     assert!(get(&a, "/health").is_object());
-    let valid_registry = read("runner-a", None).unwrap().unwrap();
+    let valid_registry = read("runner-a").unwrap().unwrap();
     let mut unknown = valid_registry.clone();
     unknown
         .run_owners
         .insert("unknown-run".to_string(), "missing-generation".to_string());
     write("runner-a", &unknown).unwrap();
-    let unknown = reconcile("runner-a", None).unwrap();
+    let unknown = reconcile("runner-a").unwrap();
     assert!(unknown.retired_generation_ids.is_empty());
     assert!(unknown.retirement_blockers["missing-generation"].contains("resolves to 0"));
     write("runner-a", &valid_registry).unwrap();
@@ -298,7 +289,7 @@ fn controller_lifecycle_process() {
         .and_then(Value::as_str)
         .unwrap();
     record_job("runner-a", &a, cancel_id).unwrap();
-    let owner = job_session("runner-a", cancel_id, None).unwrap().unwrap();
+    let owner = job_session("runner-a", cancel_id).unwrap().unwrap();
     post(&owner, &format!("/jobs/{cancel_id}/cancel"), json!({}));
 
     let a_root = PathBuf::from(std::fs::read_to_string(sync().join("a-root")).unwrap());
@@ -327,7 +318,7 @@ fn controller_lifecycle_process() {
     assert!(!operations.reconcile_terminal_jobs(&stale));
     assert!(!operations.stop(&stale));
     assert_eq!(operations.active_jobs(&a), Some(0));
-    let blocked = reconcile("runner-a", None).unwrap();
+    let blocked = reconcile("runner-a").unwrap();
     assert!(blocked.retired_generation_ids.is_empty());
     assert!(blocked
         .retirement_blockers
@@ -372,34 +363,34 @@ fn controller_lifecycle_process() {
         .unwrap();
     // Equal length is insufficient: a corrupted copy must not release A.
     std::fs::write(&retained.path, vec![b'x'; BYTES.len()]).unwrap();
-    let corrupt = reconcile("runner-a", None).unwrap();
+    let corrupt = reconcile("runner-a").unwrap();
     assert!(corrupt.retired_generation_ids.is_empty());
     assert!(corrupt
         .retirement_blockers
         .values()
         .any(|reason| reason.contains("checksum")));
     std::fs::write(&retained.path, BYTES).unwrap();
-    let retired = reconcile("runner-a", None).unwrap();
+    let retired = reconcile("runner-a").unwrap();
     assert_eq!(
         retired.retired_generation_ids,
         [a.remote_daemon_lease_id.clone().unwrap()],
         "{retired:?}"
     );
     assert!(retired.retirement_blockers.is_empty());
-    assert_eq!(live_sessions("runner-a", None).unwrap(), [b.clone()]);
-    assert!(reconcile("runner-a", None)
+    assert_eq!(live_sessions("runner-a").unwrap(), [b.clone()]);
+    assert!(reconcile("runner-a")
         .unwrap()
         .retired_generation_ids
         .is_empty());
     activate("runner-a", &b, "C".to_string(), c.clone(), &[]).unwrap();
-    let second = reconcile("runner-a", None).unwrap();
+    let second = reconcile("runner-a").unwrap();
     assert_eq!(second.retired_generation_ids, ["B"]);
-    assert_eq!(live_sessions("runner-a", None).unwrap(), [c]);
+    assert_eq!(live_sessions("runner-a").unwrap(), [c]);
     check_reads();
 }
 
 fn check_reads() {
-    let registry = read("runner-a", None).unwrap().unwrap();
+    let registry = read("runner-a").unwrap().unwrap();
     assert_eq!(registry.retired_evidence.len(), 1);
     assert_eq!(
         registry.run_owners["retained-a"],

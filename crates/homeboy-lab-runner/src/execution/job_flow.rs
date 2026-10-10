@@ -683,17 +683,14 @@ mod tests {
                 "runner-a", &terminal, true
             )
             .expect("settle terminal job-flow snapshot"));
+            assert!(generation_store::status_job_owners("runner-a")
+                .expect("read generation owners")
+                .iter()
+                .all(|owner| owner.job_ids.is_empty()));
             assert!(
-                generation_store::status_job_owners("runner-a", Some(&session))
-                    .expect("read generation owners")
-                    .iter()
-                    .all(|owner| owner.job_ids.is_empty())
+                !generation_store::requires_generation_preserving_refresh("runner-a")
+                    .expect("check retained generation ownership")
             );
-            assert!(!generation_store::requires_generation_preserving_refresh(
-                "runner-a",
-                Some(&session)
-            )
-            .expect("check retained generation ownership"));
             generation_store::with_admission_fence(
                 "runner-a",
                 Some(&session),

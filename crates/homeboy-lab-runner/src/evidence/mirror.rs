@@ -764,8 +764,7 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
                 job.status,
                 JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
             ) {
-                let report = super::super::status(&runner_id)?;
-                super::super::generation_store::reconcile(&runner_id, report.session.as_ref())?;
+                super::super::generation_store::reconcile(&runner_id)?;
             }
             Ok(())
         },
