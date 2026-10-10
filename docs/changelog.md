@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.16] - 2026-10-10
+
+### Fixed
+- treat an already-active release as activated and converge runner-service binaries
+
 ## [0.417.15] - 2026-10-10
 
 ### Changed
