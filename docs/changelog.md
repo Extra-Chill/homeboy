@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.15] - 2026-10-10
+
+### Changed
+- compare-and-swap terminal transitions for agent-task runs
+- stop re-parsing the job store on every transaction; cap terminal history at 1 MiB
+- transfer only commits missing from the runner's git object cache
+- hash the daemon binary once per file identity
+- stop re-running whole-checkout work for every dependency root
+
+### Fixed
+- plan size-independent runtime-tmp candidates before measuring
+- pass the lifecycle store to records_with_health in read_active_records
+
 ## [0.417.14] - 2026-10-09
 
 ### Changed
