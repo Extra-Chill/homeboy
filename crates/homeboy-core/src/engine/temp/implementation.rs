@@ -1497,11 +1497,6 @@ fn cleanup_runtime_tmp_root(
         // here — at an entry boundary, before that walk — is what lets the
         // sweep return normally, release its lock, and hand the caller a
         // resumable cursor instead of being killed mid-scan (#14221).
-        if options.budget_spent() {
-            managed_has_more = true;
-            page_last_name = last_inspected_name.clone().or(page_last_name);
-            break;
-        }
         lock.heartbeat()?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -1612,7 +1607,29 @@ fn cleanup_runtime_tmp_root(
             }
             RuntimeTempPinState::Dead | RuntimeTempPinState::Absent => None,
         });
-        let storage = path_storage_measure(&path)?;
+        // Terminal and age-expired entries are removable independently of
+        // their size. Do not let a large tree delay discovering later cleanup
+        // candidates; size is measured below only for retained-byte accounting.
+        let age_expired = age_seconds
+            >= options
+                .managed_older_than_days
+                .unwrap_or(options.older_than_days)
+                .saturating_mul(86_400);
+        let size_independent_candidate =
+            metadata_warning.is_some() || owner.state == "succeeded" || age_expired;
+        let storage = if protection_reason.is_some()
+            || (!size_independent_candidate && !options.budget_spent())
+        {
+            path_storage_measure(&path)?
+        } else {
+            if !size_independent_candidate && options.budget_spent() {
+                managed_has_more = true;
+            }
+            StorageMeasure {
+                logical_bytes: 0,
+                allocated_bytes: 0,
+            }
+        };
         managed_inspections.push(ManagedRunInspection {
             path: path.clone(),
             name,
@@ -1677,7 +1694,7 @@ fn cleanup_runtime_tmp_root(
     {
         // Removal is the phase that actually reclaims bytes, so a spent budget
         // stops it rather than abandoning the rows it already applied.
-        if options.budget_spent() {
+        if options.apply && options.budget_spent() {
             managed_has_more = true;
             break;
         }
@@ -1719,9 +1736,19 @@ fn cleanup_runtime_tmp_root(
             row.action = if options.apply { "removed" } else { "remove" }.to_string();
             row.reason = reason;
             output.planned_count += 1;
-            output.totals.planned_size_bytes += inspection.size_bytes;
-            output.planned_allocated_bytes += inspection.allocated_bytes;
+            let mut measured_size = inspection.size_bytes;
+            let mut measured_allocated = inspection.allocated_bytes;
             if options.apply {
+                if measured_size == 0 && inspection.path.exists() {
+                    if let Ok(storage) = path_storage_measure(&inspection.path) {
+                        measured_size = storage.logical_bytes;
+                        measured_allocated = storage.allocated_bytes;
+                        row.size_bytes = measured_size;
+                        row.allocated_bytes = measured_allocated;
+                    }
+                }
+                output.totals.planned_size_bytes += measured_size;
+                output.planned_allocated_bytes += measured_allocated;
                 let available_before = filesystem_available_bytes(&inspection.path);
                 let metadata = match fs::symlink_metadata(&inspection.path) {
                     Ok(metadata) => metadata,
@@ -1740,14 +1767,17 @@ fn cleanup_runtime_tmp_root(
                     let verified = verified_reclaimed_bytes(
                         available_before,
                         filesystem_available_bytes(&inspection.path),
-                        inspection.allocated_bytes,
+                        measured_allocated,
                     );
                     output.removed_count += 1;
-                    output.totals.removed_size_bytes += inspection.size_bytes;
-                    output.removed_allocated_bytes += inspection.allocated_bytes;
+                    output.totals.removed_size_bytes += measured_size;
+                    output.removed_allocated_bytes += measured_allocated;
                     output.verified_reclaimed_bytes += verified;
                     row.verified_reclaimed_bytes = verified;
                 }
+            } else {
+                output.totals.planned_size_bytes += measured_size;
+                output.planned_allocated_bytes += measured_allocated;
             }
         } else {
             row.reason = "failed run evidence is within bounded retention".to_string();

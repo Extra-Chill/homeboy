@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn short_budget_plans_succeeded_dead_owners_after_expensive_retained_entries() {
+    with_isolated_home(|_| {
+        let root = owned_runtime_tmp_root();
+        env::set_var(runtime_tmpdir_env(), root.path());
+
+        let mut succeeded = Vec::new();
+        for _ in 0..3 {
+            let (path, pin) = managed_run_temp_dir("homeboy-succeeded-dead").expect("managed");
+            let mut owner = read_run_owner(&path).expect("owner");
+            owner.state = "succeeded".to_string();
+            owner.owner_pid = u32::MAX;
+            owner.completed_at = Some("2000-01-01T00:00:00Z".to_string());
+            write_run_owner(&path, &owner).expect("write completed owner");
+            drop(pin);
+            succeeded.push(path);
+        }
+        // Newer failed entries sort before the older succeeded entries. Deep
+        // trees make the pre-fix eager retention measurements consume budget.
+        for index in 0..4 {
+            let path = failed_run(&format!("homeboy-slow-{index}"), 0);
+            for file_index in 0..20_000 {
+                fs::write(path.join(format!("tree-{file_index}")), b"payload")
+                    .expect("write slow tree entry");
+            }
+        }
+
+        let mut options = bounded_options(false, None);
+        options.limit = 1_000;
+        options.deadline = Some(Instant::now() + Duration::from_millis(50));
+        let output = cleanup_runtime_tmp_bounded(options).expect("short-budget sweep");
+        for path in succeeded {
+            assert!(
+                output.rows.iter().any(|row| {
+                    row.path == path.display().to_string() && row.action == "remove"
+                }),
+                "succeeded dead-owner entry was not planned: {}",
+                path.display()
+            );
+        }
+    });
+}
+
+#[test]
 fn active_invocation_lease_survives_transient_pin_loss() {
     with_isolated_home(|_| {
         let runtime_tmp = owned_runtime_tmp_root();
