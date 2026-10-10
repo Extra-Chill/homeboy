@@ -1551,16 +1551,20 @@ fn cancel_runner_job(
 }
 
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    if matches!(
-        record.state,
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialRecoverable
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-    ) {
-        return Err(Error::validation_invalid_argument(
+    let run_id = sanitize_run_id(run_id);
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let refuses_cancellation = |record: &AgentTaskRunRecord| {
+        matches!(
+            record.state,
+            AgentTaskRunState::Succeeded
+                | AgentTaskRunState::PartialRecoverable
+                | AgentTaskRunState::PartialFailure
+                | AgentTaskRunState::Failed
+                | AgentTaskRunState::Cancelled
+        )
+    };
+    let terminal_error = |record: AgentTaskRunRecord| {
+        Error::validation_invalid_argument(
             "run_id",
             format!(
                 "agent-task run '{}' is already terminal with state {:?}",
@@ -1568,12 +1572,31 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
             ),
             Some(record.run_id),
             None,
-        ));
-    }
+        )
+    };
+    // Decide from the stored record and commit at its revision, so a terminal
+    // result committed after an earlier read is never overwritten (#15718).
+    let committed = lifecycle_store.transition_when(&run_id, |current| {
+        if refuses_cancellation(current) {
+            return None;
+        }
+        let mut record = current.clone();
+        cancel_record_with_opaque_provider_handles(&mut record);
+        Some(AgentTaskTransition::CommitRecord {
+            prepared: Box::new(record),
+        })
+    })?;
+    let Some(record) = committed else {
+        return Err(terminal_error(lifecycle_store.read_record(&run_id)?));
+    };
+    crate::controller_scratch::finalize_run(&record.run_id)?;
+    Ok(record)
+}
 
+fn cancel_record_with_opaque_provider_handles(record: &mut AgentTaskRunRecord) {
     let cancelled_at = now_timestamp();
     record.updated_at = Some(cancelled_at.clone());
-    set_run_state(&mut record, AgentTaskRunState::Cancelled);
+    set_run_state(record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
             task.state = AgentTaskState::Cancelled;
@@ -1604,9 +1627,6 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
         "cancel_note".to_string(),
         json!("provider-specific cancellation is delegated through opaque provider handles"),
     );
-    store::write_record(&record)?;
-    crate::controller_scratch::finalize_run(&record.run_id)?;
-    Ok(record)
 }
 
 fn terminalize_running_provider_executions(

@@ -8,7 +8,7 @@ use std::cell::Cell;
 
 use serde_json::{json, Value};
 
-use super::terminal_transition::TRANSITION_RETRY_ATTEMPTS;
+use super::terminal_transition::{TerminalRecordCommit, TRANSITION_RETRY_ATTEMPTS};
 use super::{
     sanitize_run_id, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
     AgentTaskCookLatestSubstantiveCandidate, AgentTaskRunRecord, AgentTaskRunState,
@@ -1544,35 +1544,116 @@ impl AgentTaskLifecycleStore {
     pub(crate) fn transition_when(
         &self,
         run_id: &str,
-        mut decide: impl FnMut(&AgentTaskRunRecord) -> Option<AgentTaskTransition>,
+        decide: impl FnMut(&AgentTaskRunRecord) -> Option<AgentTaskTransition>,
     ) -> Result<Option<AgentTaskRunRecord>> {
         let run_id = sanitize_run_id(run_id);
         let committed = self.with_config_lock(|| {
-            let mut attempts = 0;
-            loop {
-                let current = self.read_record_without_historical_import(&run_id)?;
-                let Some(transition) = decide(&current) else {
-                    return Ok(None);
-                };
-                match self.transition_locked_without_terminal_projection(
-                    &run_id,
-                    current.revision,
-                    transition,
-                )? {
-                    Ok(committed) => return Ok(Some(committed)),
-                    Err(conflict) => {
-                        attempts += 1;
-                        if attempts >= TRANSITION_RETRY_ATTEMPTS {
-                            return Err(AgentTaskTransitionError::Conflict(conflict).into());
-                        }
-                    }
-                }
-            }
+            self.transition_when_locked_without_terminal_projection(&run_id, decide)
         })?;
         if let Some(record) = committed.as_ref() {
             self.project_terminal_record_after_unlock(&record.run_id)?;
         }
         Ok(committed)
+    }
+
+    /// The locked body of [`Self::transition_when`], for callers that already
+    /// own this store's config lock. Terminal authority is projected by the
+    /// caller only after the lock is released.
+    pub(crate) fn transition_when_locked_without_terminal_projection(
+        &self,
+        run_id: &str,
+        mut decide: impl FnMut(&AgentTaskRunRecord) -> Option<AgentTaskTransition>,
+    ) -> Result<Option<AgentTaskRunRecord>> {
+        let mut attempts = 0;
+        loop {
+            let current = self.read_record_without_historical_import(run_id)?;
+            let Some(transition) = decide(&current) else {
+                return Ok(None);
+            };
+            match self.transition_locked_without_terminal_projection(
+                run_id,
+                current.revision,
+                transition,
+            )? {
+                Ok(committed) => return Ok(Some(committed)),
+                Err(conflict) => {
+                    attempts += 1;
+                    if attempts >= TRANSITION_RETRY_ATTEMPTS {
+                        return Err(AgentTaskTransitionError::Conflict(conflict).into());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Commit a terminal record prepared from a caller-held snapshot, at that
+    /// snapshot's revision (#15718).
+    ///
+    /// A terminal decision another writer committed after the snapshot was
+    /// read is never replaced: nothing is written and the stored record is
+    /// returned as [`TerminalRecordCommit::Superseded`]. An intervening live
+    /// write is rebased over, keeping the last-writer semantics the plain
+    /// `write_record` this replaces had for non-terminal fields.
+    pub(crate) fn commit_terminal_record(
+        &self,
+        prepared: &AgentTaskRunRecord,
+    ) -> Result<TerminalRecordCommit> {
+        let committed = self.with_config_lock(|| {
+            let mut expected = prepared.revision;
+            let mut attempts = 0;
+            loop {
+                let transition = AgentTaskTransition::CommitRecord {
+                    prepared: Box::new(prepared.clone()),
+                };
+                match self.transition_locked_without_terminal_projection(
+                    &prepared.run_id,
+                    expected,
+                    transition,
+                )? {
+                    Ok(committed) => return Ok(TerminalRecordCommit::Committed(committed)),
+                    Err(conflict) if conflict.actual_state.is_some_and(|s| s.is_terminal()) => {
+                        return Ok(TerminalRecordCommit::Superseded(
+                            self.read_record_without_historical_import(&prepared.run_id)?,
+                        ));
+                    }
+                    Err(conflict) => {
+                        attempts += 1;
+                        if attempts >= TRANSITION_RETRY_ATTEMPTS {
+                            return Err(AgentTaskTransitionError::Conflict(conflict).into());
+                        }
+                        expected = conflict.actual_revision;
+                    }
+                }
+            }
+        })?;
+        if let TerminalRecordCommit::Committed(record) = &committed {
+            self.project_terminal_record_after_unlock(&record.run_id)?;
+        }
+        Ok(committed)
+    }
+
+    /// Commit a terminal record/aggregate pair decided, under this store's
+    /// config lock, from the record at `record.revision`. The compare-and-swap
+    /// refuses the commit if a writer outside the lock moved the run since;
+    /// the conflict is surfaced and nothing is written (#15718).
+    ///
+    /// Artifact and workspace authority projection must happen only after the
+    /// caller releases the lock.
+    pub(crate) fn commit_terminal_aggregate_locked_without_terminal_projection(
+        &self,
+        record: &AgentTaskRunRecord,
+        aggregate: &AgentTaskAggregate,
+    ) -> Result<AgentTaskRunRecord> {
+        let transition = AgentTaskTransition::ProjectAggregate {
+            prepared: Box::new(record.clone()),
+            aggregate: Box::new(aggregate.clone()),
+        };
+        self.transition_locked_without_terminal_projection(
+            &record.run_id,
+            record.revision,
+            transition,
+        )?
+        .map_err(|conflict| AgentTaskTransitionError::Conflict(conflict).into())
     }
 
     /// Commit a terminal aggregate projection prepared from a caller-held
@@ -2135,11 +2216,17 @@ pub(super) fn write_record_guarded(
         )?);
     }
     if let Some(guard) = guard {
-        events.push(super::durable_progress::prepared_transition_event(
-            &record,
-            guard.from,
-            guard.transition,
-        )?);
+        // The transition is the cause; the progress events it produces follow
+        // it, so a run's log still ends on its state event rather than on the
+        // audit record.
+        events.insert(
+            0,
+            super::durable_progress::prepared_transition_event(
+                &record,
+                guard.from,
+                guard.transition,
+            )?,
+        );
     }
     super::durable_progress::stamp_durable_event_history(&mut record);
     let stored_snapshot = guard.is_none().then(|| existing_metadata.clone());

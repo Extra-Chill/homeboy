@@ -409,35 +409,56 @@ pub fn finish_candidate_adoption_in_store(
     supersede_pre_execution_failure: bool,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.mutate_record(&run_id, |record| {
-        let Some(attempt) = record.candidate_adoption.as_mut() else {
-            return false;
-        };
-        if attempt.state == "cancelled" || attempt.state == "cancel_requested" {
-            return false;
-        }
-        let now = now_timestamp();
-        attempt.updated_at = now.clone();
-        attempt.heartbeat_at = now.clone();
-        attempt.completed_at = Some(now.clone());
-        attempt.terminal_error = error.clone();
-        attempt.state = if error.is_some() {
-            "failed"
-        } else {
-            "completed"
-        }
-        .to_string();
-        attempt.phase = "terminal".to_string();
-        // Only a direct successful adoption replaces the failed attempt's
-        // execution result. A completed adoption can instead have dispatched
-        // remediation, whose successor remains authoritative.
-        if error.is_none() && supersede_pre_execution_failure {
-            set_run_state(record, AgentTaskRunState::Succeeded);
-        }
-        record.updated_at = Some(now);
-        true
-    })?;
+    // Only a direct successful adoption replaces the failed attempt's
+    // execution result. A completed adoption can instead have dispatched
+    // remediation, whose successor remains authoritative.
+    let record = if error.is_none() && supersede_pre_execution_failure {
+        // A terminal transition: decide from the stored record and commit at
+        // its revision (#15718).
+        lifecycle_store.transition_when(&run_id, |current| {
+            let mut next = current.clone();
+            if !finish_candidate_adoption_attempt(&mut next, &error) {
+                return None;
+            }
+            set_run_state(&mut next, AgentTaskRunState::Succeeded);
+            Some(AgentTaskTransition::CommitRecord {
+                prepared: Box::new(next),
+            })
+        })?
+    } else {
+        lifecycle_store.mutate_record(&run_id, |record| {
+            finish_candidate_adoption_attempt(record, &error)
+        })?
+    };
     Ok(record.unwrap_or(lifecycle_store.read_record(&run_id)?))
+}
+
+/// Close the run's candidate-adoption attempt. `false` when there is none or
+/// it was cancelled, which leaves the record untouched.
+fn finish_candidate_adoption_attempt(
+    record: &mut AgentTaskRunRecord,
+    error: &Option<String>,
+) -> bool {
+    let Some(attempt) = record.candidate_adoption.as_mut() else {
+        return false;
+    };
+    if attempt.state == "cancelled" || attempt.state == "cancel_requested" {
+        return false;
+    }
+    let now = now_timestamp();
+    attempt.updated_at = now.clone();
+    attempt.heartbeat_at = now.clone();
+    attempt.completed_at = Some(now.clone());
+    attempt.terminal_error = error.clone();
+    attempt.state = if error.is_some() {
+        "failed"
+    } else {
+        "completed"
+    }
+    .to_string();
+    attempt.phase = "terminal".to_string();
+    record.updated_at = Some(now);
+    true
 }
 
 pub fn record_candidate_adoption_result_in_store(

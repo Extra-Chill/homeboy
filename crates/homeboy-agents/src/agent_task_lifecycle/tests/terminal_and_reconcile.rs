@@ -2501,6 +2501,70 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
     );
 }
 
+/// #15718: the reconciler holds a snapshot read before another writer
+/// terminalized the run. Projecting a verified pre-provider cancellation from
+/// that stale snapshot used to commit it whole, replacing the concurrent
+/// terminal outcome and its evidence: a `Cancelled` write over a `Failed` row
+/// is terminal-over-terminal, which the SQL `running` guard never refused.
+#[test]
+fn stale_snapshot_pre_provider_cancellation_cannot_overwrite_a_concurrent_terminal_failure() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let run_id = "cook-15718-stale-cancellation-snapshot";
+    let mut stale = record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .expect("accepted detached handoff");
+    assert_eq!(stale.state, AgentTaskRunState::Running);
+
+    // Another writer terminalizes the run after the reconciler's read.
+    lifecycle_store
+        .mutate_record(run_id, |record| {
+            record.metadata["cook_controller_failure"] =
+                json!({ "reason": "concurrent writer: controller failure" });
+            set_run_state(record, AgentTaskRunState::Failed);
+            true
+        })
+        .expect("concurrent terminal write")
+        .expect("concurrent writer wrote");
+
+    reconcile_runner_job_snapshot_in_store(
+        &lifecycle_store,
+        &mut stale,
+        &pre_provider_cancellation_snapshot(),
+    )
+    .expect("a superseded projection is not an error");
+
+    let stored = lifecycle_store.read_record(run_id).expect("settled record");
+    assert_eq!(
+        stored.state,
+        AgentTaskRunState::Failed,
+        "lost update: a stale runner snapshot replaced the concurrent terminal state"
+    );
+    assert_eq!(
+        stored.metadata["cook_controller_failure"]["reason"],
+        "concurrent writer: controller failure",
+        "lost update: the concurrent terminal evidence was erased"
+    );
+    assert!(
+        stored.metadata.get("cancellation_provenance").is_none(),
+        "the stale cancellation must write nothing: {:?}",
+        stored.metadata.get("cancellation_provenance")
+    );
+    assert_eq!(
+        stale, stored,
+        "the caller adopts the stored terminal record instead of its stale copy"
+    );
+}
+
 #[test]
 fn pre_provider_cancellation_rejects_mismatched_job_without_mutating_record() {
     let context = homeboy_core::test_support::HermeticTestContext::new();

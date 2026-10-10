@@ -79,6 +79,15 @@ pub enum AgentTaskTransition {
         prepared: Box<AgentTaskRunRecord>,
         aggregate: Box<AgentTaskAggregate>,
     },
+    /// Commit a terminal record the caller prepared from the record at the
+    /// expected revision, leaving the mirrored aggregate untouched.
+    ///
+    /// For terminal writes whose source-specific projection touches more than
+    /// top-level metadata (task states, provider handles, runner evidence), so
+    /// it cannot be expressed as [`Self::Terminate`]. As with
+    /// [`Self::ProjectAggregate`], the revision check is what makes carrying
+    /// the prepared record safe.
+    CommitRecord { prepared: Box<AgentTaskRunRecord> },
 }
 
 impl AgentTaskTransition {
@@ -86,6 +95,7 @@ impl AgentTaskTransition {
         match self {
             Self::Terminate { .. } => "terminate",
             Self::ProjectAggregate { .. } => "project_aggregate",
+            Self::CommitRecord { .. } => "commit_record",
         }
     }
 
@@ -93,7 +103,9 @@ impl AgentTaskTransition {
     pub fn target_state(&self) -> AgentTaskRunState {
         match self {
             Self::Terminate { outcome, .. } => outcome.run_state(),
-            Self::ProjectAggregate { prepared, .. } => prepared.state,
+            Self::ProjectAggregate { prepared, .. } | Self::CommitRecord { prepared } => {
+                prepared.state
+            }
         }
     }
 
@@ -123,26 +135,50 @@ impl AgentTaskTransition {
                 prepared,
                 aggregate,
             } => {
-                if prepared.run_id != stored.run_id || prepared.plan_id != stored.plan_id {
-                    return Err(Error::validation_invalid_argument(
-                        "transition",
-                        "an aggregate projection must keep the stored run and plan identity",
-                        Some(stored.run_id),
-                        None,
-                    ));
-                }
-                if !prepared.state.is_terminal() {
-                    return Err(Error::validation_invalid_argument(
-                        "transition",
-                        "an aggregate projection must commit a terminal run state",
-                        Some(stored.run_id),
-                        None,
-                    ));
-                }
+                validate_prepared_terminal_record(&prepared, &stored, "an aggregate projection")?;
                 Ok((*prepared, Some(*aggregate), true))
+            }
+            Self::CommitRecord { prepared } => {
+                validate_prepared_terminal_record(&prepared, &stored, "a terminal record commit")?;
+                Ok((*prepared, stored_aggregate, false))
             }
         }
     }
+}
+
+fn validate_prepared_terminal_record(
+    prepared: &AgentTaskRunRecord,
+    stored: &AgentTaskRunRecord,
+    what: &str,
+) -> Result<()> {
+    if prepared.run_id != stored.run_id || prepared.plan_id != stored.plan_id {
+        return Err(Error::validation_invalid_argument(
+            "transition",
+            format!("{what} must keep the stored run and plan identity"),
+            Some(stored.run_id.clone()),
+            None,
+        ));
+    }
+    if !prepared.state.is_terminal() {
+        return Err(Error::validation_invalid_argument(
+            "transition",
+            format!("{what} must commit a terminal run state"),
+            Some(stored.run_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Outcome of committing a terminal record prepared from a caller-held
+/// snapshot (#15718).
+#[derive(Debug, Clone)]
+pub(crate) enum TerminalRecordCommit {
+    /// The prepared record was committed; this is the committed copy.
+    Committed(AgentTaskRunRecord),
+    /// Another writer terminalized the run after the caller's snapshot was
+    /// read. Nothing was written; this is the stored record that won.
+    Superseded(AgentTaskRunRecord),
 }
 
 /// A transition refused because the stored record moved past the caller's
