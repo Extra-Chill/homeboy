@@ -43,7 +43,39 @@ pub fn check_for_updates() -> Result<VersionCheck> {
         newest_version: latest,
         uninstallable_versions: Vec::new(),
         notice: None,
+        runners: Vec::new(),
     })
+}
+
+/// `upgrade --check` with runner selection: the controller verdict plus a
+/// read-only view of each selected runner's selected binary and runner-service
+/// binaries against the version that runner would converge to (#15733).
+pub fn check_for_updates_with_runners(
+    runner_targets: &[String],
+    runner_only: bool,
+) -> Result<VersionCheck> {
+    let mut check = check_for_updates()?;
+    if runner_targets.is_empty() {
+        return Ok(check);
+    }
+    let target = runner_check_target_version(&check, runner_only);
+    check.runners = super::with_runner_upgrade(|provider| {
+        provider.check_configured_runners(runner_targets, &target)
+    })?;
+    Ok(check)
+}
+
+/// Runners converge to the controller identity. `--runner-only` leaves the
+/// controller in place, so its current version is the target; otherwise an
+/// installable update is what the controller (and then its runners) becomes.
+pub(crate) fn runner_check_target_version(check: &VersionCheck, runner_only: bool) -> String {
+    if runner_only || !check.update_available {
+        return check.current_version.clone();
+    }
+    check
+        .latest_version
+        .clone()
+        .unwrap_or_else(|| check.current_version.clone())
 }
 
 /// Build a check verdict from the release catalog, or `None` when the catalog
@@ -108,6 +140,7 @@ pub(crate) fn version_check_from_selection(
         newest_version: newest,
         uninstallable_versions: selection.skipped_versions(),
         notice,
+        runners: Vec::new(),
     }
 }
 
@@ -241,5 +274,62 @@ mod tests {
         assert!(!selects_an_installable_release(InstallMethod::Homebrew));
         assert!(!selects_an_installable_release(InstallMethod::Source));
         assert!(!selects_an_installable_release(InstallMethod::Unknown));
+    }
+
+    fn check(current: &str, latest: Option<&str>, update_available: bool) -> VersionCheck {
+        VersionCheck {
+            command: "upgrade.check".to_string(),
+            current_version: current.to_string(),
+            latest_version: latest.map(str::to_string),
+            update_available,
+            install_method: InstallMethod::Binary,
+            target: None,
+            newest_version: None,
+            uninstallable_versions: Vec::new(),
+            notice: None,
+            runners: Vec::new(),
+        }
+    }
+
+    /// #15733: `--runner-only --check` converges runners to the controller in
+    /// place; a plain check targets the release the controller would install.
+    #[test]
+    fn runner_check_targets_the_version_runners_converge_to() {
+        assert_eq!(
+            runner_check_target_version(&check("0.417.15", Some("0.418.0"), true), true),
+            "0.417.15"
+        );
+        assert_eq!(
+            runner_check_target_version(&check("0.417.15", Some("0.418.0"), true), false),
+            "0.418.0"
+        );
+        assert_eq!(
+            runner_check_target_version(&check("0.417.15", Some("0.417.15"), false), false),
+            "0.417.15"
+        );
+    }
+
+    #[test]
+    fn only_in_scope_unconverged_service_units_block_convergence() {
+        let unit = |scope: &str, status: &str| crate::upgrade::RunnerServiceBinaryEntry {
+            unit: "u.service".to_string(),
+            scope: scope.to_string(),
+            binary: "/b".to_string(),
+            binary_version: None,
+            running_version: None,
+            active_state: None,
+            target_version: "0.417.15".to_string(),
+            status: status.to_string(),
+            reason: None,
+            recovery_commands: Vec::new(),
+        };
+        assert!(unit("controller", "stale").blocks_convergence());
+        assert!(unit("legacy", "stale").blocks_convergence());
+        assert!(unit("controller", "pending").blocks_convergence());
+        assert!(unit("legacy", "unknown").blocks_convergence());
+        assert!(!unit("other_controller", "stale").blocks_convergence());
+        assert!(!unit("controller", "current").blocks_convergence());
+        assert!(!unit("controller", "refreshed").blocks_convergence());
+        assert!(!unit("legacy", "inactive").blocks_convergence());
     }
 }

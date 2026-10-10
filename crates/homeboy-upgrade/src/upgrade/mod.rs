@@ -43,11 +43,11 @@ pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgrad
 pub use services::restart_extension_services;
 pub use types::{
     ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod,
-    RunnerConvergenceDisposition, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
-    RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus, UpgradePreflight,
-    UpgradeResult, VersionCheck,
+    RunnerCheckEntry, RunnerConvergenceDisposition, RunnerDaemonDriftEntry,
+    RunnerExtensionSyncEntry, RunnerServiceBinaryEntry, RunnerUpgradeEntry, ServiceRestartEntry,
+    UpgradeComponentStatus, UpgradePreflight, UpgradeResult, VersionCheck,
 };
-pub use validation::check_for_updates;
+pub use validation::{check_for_updates, check_for_updates_with_runners};
 
 impl InstallMethod {
     pub fn as_str(&self) -> String {

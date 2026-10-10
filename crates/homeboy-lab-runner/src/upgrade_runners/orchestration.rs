@@ -616,17 +616,21 @@ pub(crate) fn upgrade_configured_runners(
         Ok(crate::controller_identity::with_converging_controller(
             expected_controller_identity,
             || {
-                upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
-                    &runners,
-                    force,
-                    method_override,
-                    source_path,
-                    extension_updates,
-                    runner::exec,
-                    runner::status,
-                    materialize_runner_source_path,
-                    expected_controller_identity,
-                )
+                let (updated, skipped) =
+                    upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
+                        &runners,
+                        force,
+                        method_override,
+                        source_path,
+                        extension_updates,
+                        runner::exec,
+                        runner::status,
+                        materialize_runner_source_path,
+                        expected_controller_identity,
+                    );
+                // A runner is converged only when its runner-service units
+                // run the converged binary too (#15733).
+                converge_service_binaries_for_entries(&runners, updated, skipped)
             },
         ))
     };
@@ -679,7 +683,7 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
         runners.len()
     );
     let upgrade = || {
-        Ok(
+        let (updated, skipped) =
             upgrade_runners_with_executor_and_source_materializer_with_expected_controller_identity(
                 &runners,
                 force,
@@ -690,8 +694,10 @@ pub fn upgrade_configured_runners_with_explicit_source_path(
                 runner::status,
                 materialize_explicit_runner_source_path,
                 expected_controller_identity,
-            ),
-        )
+            );
+        Ok(converge_service_binaries_for_entries(
+            &runners, updated, skipped,
+        ))
     };
     match promotion_lease {
         Some(lease) => lease.with_local_targets(
@@ -1321,6 +1327,7 @@ pub fn upgrade_runner_with_executor(
         stale_daemon,
         daemon_previous_version,
         daemon_new_version,
+        service_binaries: Vec::new(),
         exit_code,
         detail,
     }
@@ -1401,6 +1408,7 @@ fn refresh_managed_immutable_runner(
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code,
             detail: format!(
                 "managed immutable runner refresh failed: {:?}",
@@ -1462,6 +1470,7 @@ fn refresh_managed_immutable_runner(
         stale_daemon,
         daemon_previous_version: None,
         daemon_new_version: None,
+        service_binaries: Vec::new(),
         exit_code: i32::from(!success),
         detail: format!(
             "managed immutable runner refreshed through controller-owned promotion, daemon rotation, and reconciliation; admission ready: {admission_ready}"
@@ -1537,6 +1546,7 @@ fn managed_immutable_runner_failure_entry(
         stale_daemon: None,
         daemon_previous_version: None,
         daemon_new_version: None,
+        service_binaries: Vec::new(),
         exit_code,
         detail,
     }

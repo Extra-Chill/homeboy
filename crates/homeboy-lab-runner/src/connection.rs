@@ -4683,6 +4683,10 @@ pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_servic
 pub use service::{
     install as install_runner_service, service_status as runner_service_status, RunnerServiceReport,
 };
+pub(crate) use service::{
+    observe_service_units, probe_runner_binary_version,
+    service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
+};
 use session_store::*;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 

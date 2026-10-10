@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry};
+use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerCheckEntry, RunnerUpgradeEntry};
 use homeboy_core::error::Result;
 
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
@@ -48,6 +48,17 @@ pub trait RunnerUpgradeProvider: Send + Sync {
     /// A short build-identity string for a source checkout (commit + dirty
     /// marker), or `None` if it can't be identified.
     fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String>;
+
+    /// Read-only `upgrade --check` view of the selected runners: each one's
+    /// selected binary version and runner-service binary versions against
+    /// `target_version`. Must not mutate runner state.
+    fn check_configured_runners(
+        &self,
+        _runner_targets: &[String],
+        _target_version: &str,
+    ) -> Result<Vec<RunnerCheckEntry>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Default provider used when no runner layer is registered: no runners to

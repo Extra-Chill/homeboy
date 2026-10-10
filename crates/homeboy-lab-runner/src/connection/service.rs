@@ -428,6 +428,154 @@ pub(crate) fn repoint_and_restart(
     Ok(())
 }
 
+/// Marker that prefixes every inventory record, so unrelated stdout (login
+/// banners, shell noise) can never be parsed as a unit.
+const SERVICE_INVENTORY_MARKER: &str = "homeboy-runner-service";
+
+/// One systemd user unit on the runner host that runs a Homeboy daemon for
+/// this runner, as observed read-only (#15733).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceUnitObservation {
+    pub unit: String,
+    pub binary: String,
+    /// First line of `<ExecStart binary> --version`.
+    pub binary_version: Option<String>,
+    /// First line of `/proc/<MainPID>/exe --version`: what actually runs.
+    pub running_version: Option<String>,
+    pub active_state: Option<String>,
+}
+
+/// The pre-controller-scoping unit name (#15160 introduced scoped units). No
+/// controller repoints or restarts it, so upgrades must report it.
+pub(crate) fn legacy_service_unit_name(runner_id: &str) -> String {
+    format!(
+        "homeboy-runner-{}.service",
+        paths::sanitize_path_segment(runner_id)
+    )
+}
+
+/// Classify a unit against this runner's naming: this controller's scoped
+/// unit, the unscoped legacy unit, another controller's scoped unit, or `None`
+/// for a unit that belongs to a different runner whose id merely shares a
+/// prefix.
+pub(crate) fn service_unit_scope(runner_id: &str, unit: &str) -> Option<&'static str> {
+    service_unit_scope_for(runner_id, &controller_id(), unit)
+}
+
+fn service_unit_scope_for(
+    runner_id: &str,
+    controller_id: &str,
+    unit: &str,
+) -> Option<&'static str> {
+    if unit == service_unit_name_for(runner_id, controller_id) {
+        return Some("controller");
+    }
+    if unit == legacy_service_unit_name(runner_id) {
+        return Some("legacy");
+    }
+    let scoped = unit
+        .strip_prefix(&format!(
+            "homeboy-runner-{}-",
+            paths::sanitize_path_segment(runner_id)
+        ))?
+        .strip_suffix(".service")?;
+    // A controller scope segment always ends in `-<sha256 hex>`; anything
+    // else is another runner such as `<runner>-2`.
+    let (_, digest) = scoped.rsplit_once('-')?;
+    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some("other_controller")
+}
+
+/// Read-only shell that lists every Homeboy runner unit for `runner_id` with
+/// the binary its `ExecStart` runs, that binary's version, the version of the
+/// executable the main process is running, and the unit's active state. It
+/// never starts, stops, reloads, or rewrites anything.
+pub(crate) fn service_inventory_script(runner_id: &str) -> String {
+    format!(
+        r#"unit_dir="$HOME/.config/systemd/user"
+for unit_path in "$unit_dir"/homeboy-runner-{segment}.service "$unit_dir"/homeboy-runner-{segment}-*.service; do
+  [ -f "$unit_path" ] || continue
+  unit=$(basename "$unit_path")
+  exec_line=$(sed -n 's/^ExecStart=//p' "$unit_path" | tail -n 1)
+  binary=${{exec_line%% *}}
+  case "$binary" in %h/*) binary="$HOME/${{binary#%h/}}" ;; esac
+  binary_version=$("$binary" --version 2>/dev/null </dev/null | head -n 1) || binary_version=
+  active=$(systemctl --user is-active "$unit" 2>/dev/null </dev/null) || true
+  pid=$(systemctl --user show -p MainPID --value "$unit" 2>/dev/null </dev/null) || pid=
+  running_version=
+  if [ -n "$pid" ] && [ "$pid" != 0 ] && [ -e "/proc/$pid/exe" ]; then
+    running_version=$("/proc/$pid/exe" --version 2>/dev/null </dev/null | head -n 1) || running_version=
+  fi
+  printf '{marker}\t%s\t%s\t%s\t%s\t%s\n' "$unit" "$binary" "$binary_version" "$running_version" "$active"
+done"#,
+        segment = paths::sanitize_path_segment(runner_id),
+        marker = SERVICE_INVENTORY_MARKER,
+    )
+}
+
+pub(crate) fn parse_service_inventory(stdout: &str) -> Vec<ServiceUnitObservation> {
+    let present = |value: &str| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            if fields.next()? != SERVICE_INVENTORY_MARKER {
+                return None;
+            }
+            let unit = present(fields.next()?)?;
+            let binary = fields.next().unwrap_or_default().trim().to_string();
+            Some(ServiceUnitObservation {
+                unit,
+                binary,
+                binary_version: fields.next().and_then(present),
+                running_version: fields.next().and_then(present),
+                active_state: fields.next().and_then(present),
+            })
+        })
+        .collect()
+}
+
+/// Observe every runner-service unit on the runner host over SSH, read-only.
+/// Non-SSH runners have no runner-owned services and report none.
+pub(crate) fn observe_service_units(runner_id: &str) -> Result<Vec<ServiceUnitObservation>> {
+    let roots = paths::PathRoots::from_environment()?;
+    let runner = load_in_roots(&roots, runner_id)?;
+    let Some((_, _, client)) = resolve_ssh_runner(&runner)? else {
+        return Ok(Vec::new());
+    };
+    let stdout = run_remote(
+        &client,
+        &service_inventory_script(runner_id),
+        "inspecting runner service binaries",
+    )?;
+    Ok(parse_service_inventory(&stdout))
+}
+
+/// First line of `<homeboy_path> --version` on the runner host, read-only over
+/// SSH. `upgrade --check` uses this instead of a runner job so a check never
+/// records work on the runner.
+pub(crate) fn probe_runner_binary_version(
+    runner: &Runner,
+    homeboy_path: &str,
+) -> Result<Option<String>> {
+    let Some((_, _, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(None);
+    };
+    let stdout = run_remote(
+        &client,
+        &format!("{} --version </dev/null", shell::quote_arg(homeboy_path)),
+        "probing the runner's selected homeboy",
+    )?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string))
+}
+
 /// Attach to the runner's service daemon: wait for its lease, open the tunnel,
 /// and write the session. Nothing on the runner is started or stopped.
 pub(crate) fn connect_service_runner(
@@ -1003,6 +1151,166 @@ mod tests {
             "cat > \"$unit_dir/{}.tmp\"",
             service_unit_name("homeboy-lab")
         )));
+    }
+
+    /// #15733: the inventory sees the legacy unscoped unit and every scoped
+    /// unit, resolves `%h` in `ExecStart`, reads each binary's version, and
+    /// never invokes a mutating systemctl verb.
+    #[test]
+    fn service_inventory_reports_legacy_and_scoped_unit_binaries_read_only() {
+        let home = tempfile::tempdir().expect("home");
+        let unit_dir = home.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let fake_binary = |name: &str, version: &str| {
+            let path = home.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\necho 'homeboy {version}'\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let legacy_slot = fake_binary("slot-legacy", "0.395.1+5171701906f7");
+        let own_slot = fake_binary("slot-own", "0.417.15+708e00a1d439");
+        let legacy_link = home
+            .path()
+            .join(".local/share/homeboy/runner-service/homeboy-lab/homeboy");
+        std::fs::create_dir_all(legacy_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&legacy_slot, &legacy_link).unwrap();
+        let own_link = home
+            .path()
+            .join(service_binary_link_for("homeboy-lab", "controller-a"));
+        std::fs::create_dir_all(own_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&own_slot, &own_link).unwrap();
+
+        let legacy_unit = legacy_service_unit_name("homeboy-lab");
+        std::fs::write(
+            unit_dir.join(&legacy_unit),
+            "[Service]\nExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/homeboy daemon serve --addr 127.0.0.1:0\n",
+        )
+        .unwrap();
+        let own_unit = service_unit_name_for("homeboy-lab", "controller-a");
+        std::fs::write(
+            unit_dir.join(&own_unit),
+            render_service_unit_for("homeboy-lab", "controller-a", "token"),
+        )
+        .unwrap();
+        std::fs::write(unit_dir.join("homeboy-runner-other.service"), "[Service]\n").unwrap();
+
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let systemctl = bin_dir.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\ncase \"$*\" in\n  *is-active*) echo active ;;\n  *MainPID*) echo 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "echo 'login banner'\n{}",
+                service_inventory_script("homeboy-lab")
+            ))
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let observed = parse_service_inventory(&String::from_utf8_lossy(&output.stdout));
+
+        assert_eq!(observed.len(), 2, "{observed:?}");
+        let legacy = observed
+            .iter()
+            .find(|unit| unit.unit == legacy_unit)
+            .unwrap();
+        assert_eq!(legacy.binary, legacy_link.display().to_string());
+        assert_eq!(
+            legacy.binary_version.as_deref(),
+            Some("homeboy 0.395.1+5171701906f7")
+        );
+        assert_eq!(legacy.running_version, None);
+        assert_eq!(legacy.active_state.as_deref(), Some("active"));
+        let own = observed.iter().find(|unit| unit.unit == own_unit).unwrap();
+        assert_eq!(own.binary, own_link.display().to_string());
+        assert_eq!(
+            own.binary_version.as_deref(),
+            Some("homeboy 0.417.15+708e00a1d439")
+        );
+
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        for verb in [
+            "start",
+            "stop",
+            "restart",
+            "enable",
+            "disable",
+            "daemon-reload",
+        ] {
+            assert!(
+                !commands
+                    .lines()
+                    .any(|line| line.split_whitespace().any(|word| word == verb)),
+                "inventory must stay read-only, saw `{verb}` in {commands}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_unit_scope_distinguishes_own_legacy_other_controllers_and_other_runners() {
+        let own = service_unit_name_for("homeboy-lab", "controller-a");
+        let other = service_unit_name_for("homeboy-lab", "controller-b");
+        let other_runner = service_unit_name_for("homeboy-lab-2", "controller-a");
+        assert_eq!(
+            service_unit_scope_for("homeboy-lab", "controller-a", &own),
+            Some("controller")
+        );
+        assert_eq!(
+            service_unit_scope_for(
+                "homeboy-lab",
+                "controller-a",
+                "homeboy-runner-homeboy-lab.service"
+            ),
+            Some("legacy")
+        );
+        assert_eq!(
+            service_unit_scope_for("homeboy-lab", "controller-a", &other),
+            Some("other_controller")
+        );
+        assert_eq!(
+            service_unit_scope_for(
+                "homeboy-lab",
+                "controller-a",
+                "homeboy-runner-homeboy-lab-2.service"
+            ),
+            None
+        );
+        // `homeboy-lab-2`'s scoped unit shares the `homeboy-runner-homeboy-lab-`
+        // prefix and ends in a digest, so the other-runner case is resolved by
+        // the runner's own glob rather than mistaken for its own unit.
+        assert_ne!(
+            service_unit_scope_for("homeboy-lab", "controller-a", &other_runner),
+            Some("controller")
+        );
+    }
+
+    #[test]
+    fn service_inventory_parser_ignores_unmarked_lines_and_empty_fields() {
+        let parsed = parse_service_inventory(
+            "banner\thomeboy-runner-x.service\nhomeboy-runner-service\tu.service\t/b\t\t\tfailed\n",
+        );
+        assert_eq!(
+            parsed,
+            vec![ServiceUnitObservation {
+                unit: "u.service".to_string(),
+                binary: "/b".to_string(),
+                binary_version: None,
+                running_version: None,
+                active_state: Some("failed".to_string()),
+            }]
+        );
     }
 
     #[test]

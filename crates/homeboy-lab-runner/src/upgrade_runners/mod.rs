@@ -15,6 +15,7 @@ mod failure;
 mod orchestration;
 mod path_alignment;
 mod reporting;
+mod service_binaries;
 mod source_checkout;
 mod version;
 
@@ -24,6 +25,7 @@ pub(super) use failure::*;
 pub(super) use orchestration::*;
 pub(super) use path_alignment::*;
 pub(super) use reporting::*;
+pub(super) use service_binaries::*;
 pub(super) use source_checkout::*;
 pub(super) use version::*;
 
@@ -31,7 +33,8 @@ use std::path::Path;
 
 use homeboy_core::error::Result;
 use homeboy_upgrade::upgrade::{
-    ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry, RunnerUpgradeProvider,
+    ExtensionUpgradeEntry, InstallMethod, RunnerCheckEntry, RunnerUpgradeEntry,
+    RunnerUpgradeProvider,
 };
 
 /// The runner layer's `RunnerUpgradeProvider`, delegating to this cluster's
@@ -92,6 +95,14 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
 
     fn source_checkout_build_identity(&self, source_path: &Path) -> Option<String> {
         source_checkout_build_identity(source_path)
+    }
+
+    fn check_configured_runners(
+        &self,
+        runner_targets: &[String],
+        target_version: &str,
+    ) -> Result<Vec<RunnerCheckEntry>> {
+        check_configured_runners(runner_targets, target_version)
     }
 }
 
