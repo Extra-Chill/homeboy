@@ -2839,19 +2839,37 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     cli: &Cli,
     normalized_args: &[String],
 ) -> homeboy::core::Result<Option<i32>> {
+    let Some(run_id) = agent_task_lifecycle_delegation_run_id(cli) else {
+        return Ok(None);
+    };
+    delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
+}
+
+/// The durable run whose admitting runtime must own this command, if any.
+fn agent_task_lifecycle_delegation_run_id(cli: &Cli) -> Option<String> {
     // Run and Resume mutate the SAME durable record, so they must re-exec under
     // the runtime that admitted it. Retry is intentionally excluded: it reads the
     // source record but creates a NEW replacement run, which must be owned by the
     // runtime that creates it rather than inheriting the source's (possibly stale)
     // pinned runtime. Delegating Retry here stamped the replacement with the
     // obsolete runtime after an upgrade (Extra-Chill/homeboy#8550).
-    let run_id: Option<String> = match &cli.command {
+    match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(args.run_id.clone()),
             crate::commands::agent_task::AgentTaskCommand::Resume(args)
                 if crate::agents::agent_tasks::service::terminal_transport_recovery_required(
                     &args.run_id,
                 ) =>
+            {
+                None
+            }
+            // Resume on a terminal record only re-reads or reprojects terminal
+            // evidence; it never reopens execution. Run it under the current
+            // runtime so recovery fixes reach runs admitted by an older one
+            // (#15732: a 0.417.6 pin hid the #15668 cook-continue guard).
+            crate::commands::agent_task::AgentTaskCommand::Resume(args)
+                if crate::agents::agent_tasks::lifecycle::status(&args.run_id)
+                    .is_ok_and(|record| record.state.is_terminal()) =>
             {
                 None
             }
@@ -2874,11 +2892,7 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             _ => None,
         },
         _ => None,
-    };
-    let Some(run_id) = run_id else {
-        return Ok(None);
-    };
-    delegate_agent_task_lifecycle_to_resolved_runtime(&run_id, normalized_args)
+    }
 }
 
 enum AgentTaskLifecyclePinnedRuntime {
@@ -7564,6 +7578,80 @@ mod tests {
                 .expect("explicit local continuation stays on the controller"),
             None
         );
+    }
+
+    /// #15732: resume on a terminal record only re-reads terminal evidence, so
+    /// it runs under the current runtime instead of re-executing the record's
+    /// (possibly stale) admitting runtime. Run keeps the pinned delegation.
+    #[test]
+    fn terminal_resume_is_not_delegated_to_the_admitting_runtime() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState;
+            use homeboy::agents::agent_tasks::scheduler::{
+                AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskPlan,
+            };
+            use homeboy::agents::agent_tasks::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+
+            let run_id = "terminal-resume-15732";
+            let plan: AgentTaskPlan = serde_json::from_str(include_str!(
+                "../../../tests/fixtures/agent_task_smoke_plan.json"
+            ))
+            .expect("deserialize durable test plan");
+            crate::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id))
+                .expect("persist durable run");
+            // An aggregate with outcomes, so the transport-recovery exemption
+            // does not decide and the record state alone does.
+            let task_id = plan.tasks[0].task_id.clone();
+            let aggregate = AgentTaskAggregate {
+                schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::Succeeded,
+                totals: Default::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    task_id,
+                    status: AgentTaskOutcomeStatus::Succeeded,
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            };
+            crate::agents::agent_tasks::lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+                .expect("record aggregate");
+            assert!(
+                !crate::agents::agent_tasks::service::terminal_transport_recovery_required(run_id),
+                "fixture must not take the transport-recovery exemption"
+            );
+
+            let selected = |command: &str| {
+                agent_task_lifecycle_delegation_run_id(&Cli::parse_from([
+                    "homeboy",
+                    "agent-task",
+                    command,
+                    run_id,
+                ]))
+            };
+            let set_state = |state: AgentTaskRunState| {
+                crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                    record.state = state;
+                })
+                .expect("rewrite record state");
+            };
+
+            set_state(AgentTaskRunState::CandidateRecoverable);
+            assert_eq!(
+                selected("resume"),
+                None,
+                "terminal resume runs in the current runtime"
+            );
+            assert_eq!(
+                selected("run"),
+                Some(run_id.to_string()),
+                "run keeps its pinned runtime"
+            );
+        });
     }
 
     #[test]

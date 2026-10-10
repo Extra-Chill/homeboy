@@ -969,6 +969,13 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
     }
+    if string_value(payload, &["state"]) == Some("candidate_recoverable")
+        && string_value(payload, &["owner", "kind"]) == Some("runner")
+    {
+        if let Some(cook_id) = string_value(payload, &["mission"]) {
+            return format!("homeboy agent-task cook-continue {cook_id}");
+        }
+    }
     if string_value(payload, &["owner", "kind"]) == Some("runner") {
         let runner_id = string_value(payload, &["owner", "id"]);
         if string_value(payload, &["state"]) == Some("running") {
@@ -2408,6 +2415,25 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
+    }
+
+    #[test]
+    fn candidate_recoverable_runner_status_recommends_cook_continue() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "attempt-1",
+            "state": "candidate_recoverable",
+            "mission": "cook-15732",
+            "owner": { "id": "runner-7", "kind": "runner" },
+            "action_eligibility": { "actions": [{
+                "action": "resume", "availability": "unavailable",
+                "reason": "candidate_recoverable requires cook-continue"
+            }] },
+            "artifacts": []
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("Next: homeboy agent-task cook-continue cook-15732\n"));
+        assert!(!summary.contains("Next: homeboy agent-task resume attempt-1"));
     }
 
     #[test]
