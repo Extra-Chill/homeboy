@@ -2499,10 +2499,62 @@ fn normalize_cook_batch_repo_with_placement(
     args: &mut AgentTaskFanoutCookBatchArgs,
     placement: Placement,
 ) -> Result<()> {
-    let handle_like = args.repo.contains('@');
-    let path_like = std::path::Path::new(&args.repo).is_absolute()
-        || args.repo.contains(std::path::MAIN_SEPARATOR)
-        || std::path::Path::new(&args.repo).exists();
+    let issues = args
+        .issues
+        .iter()
+        .map(|issue| IssueRef::parse(issue))
+        .collect::<Result<Vec<_>>>()?;
+    let requested_repo = if args.repo.is_empty() {
+        let repositories = issues
+            .iter()
+            .map(|issue| format!("{}/{}", issue.owner, issue.repo))
+            .collect::<BTreeSet<_>>();
+        if repositories.len() != 1 {
+            return Err(invalid_cook_batch_repo(args, Vec::new(), placement));
+        }
+        repositories.into_iter().next().expect("one repository")
+    } else {
+        args.repo.clone()
+    };
+    args.repo = requested_repo.clone();
+    let requested_repo = requested_repo
+        .strip_prefix("https://github.com/")
+        .unwrap_or(&requested_repo);
+    let requested_repo = requested_repo
+        .trim_end_matches(".git")
+        .trim_end_matches('/');
+    if requested_repo.contains('/') && !std::path::Path::new(requested_repo).is_absolute() {
+        let components = homeboy::core::component::registered_base()?;
+        let matching = components
+            .iter()
+            .filter(|component| {
+                component.remote_url.as_deref().is_some_and(|remote| {
+                    remote
+                        .trim_end_matches(".git")
+                        .trim_end_matches('/')
+                        .rsplit(['/', ':'])
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("/")
+                        .eq_ignore_ascii_case(requested_repo)
+                })
+            })
+            .map(|component| component.id.clone())
+            .collect::<Vec<_>>();
+        if matching.len() == 1 {
+            args.repo = matching[0].clone();
+        } else {
+            return Err(invalid_cook_batch_repo(args, matching, placement));
+        }
+    }
+    let args_repo = args.repo.as_str();
+    let handle_like = args_repo.contains('@');
+    let path_like = std::path::Path::new(args_repo).is_absolute()
+        || args_repo.contains(std::path::MAIN_SEPARATOR)
+        || std::path::Path::new(args_repo).exists();
 
     if handle_like && !path_like {
         let candidates = args
@@ -2522,7 +2574,7 @@ fn normalize_cook_batch_repo_with_placement(
         return Err(invalid_cook_batch_repo(args, candidates, placement));
     }
 
-    let resolution = homeboy::core::component::resolve_registered_primary_identity(&args.repo)?;
+    let resolution = homeboy::core::component::resolve_registered_primary_identity(args_repo)?;
     match resolution {
         homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
             args.repo = id;
@@ -8652,6 +8704,33 @@ fi
             );
             assert_eq!(path.repo, "fixture");
             assert!(!git_invoked.exists(), "identity normalization invoked Git");
+        });
+    }
+
+    #[test]
+    fn cook_batch_repo_normalization_resolves_owner_repo_and_infers_from_issues() {
+        with_isolated_home(|home| {
+            let primary = home.path().join("spacefast-monorepo");
+            std::fs::create_dir(&primary).expect("primary directory");
+            init_git_primary(&primary);
+            write_component_registration_with_identity(
+                home.path(),
+                "spacefast-monorepo",
+                &primary,
+                Some("https://github.com/spacefast/monorepo.git"),
+            );
+
+            let mut explicit = cook_batch_args();
+            explicit.repo = "spacefast/monorepo".to_string();
+            explicit.issues = vec!["https://github.com/spacefast/monorepo/issues/1".to_string()];
+            normalize_cook_batch_repo(&mut explicit).expect("owner/repo resolves");
+            assert_eq!(explicit.repo, "spacefast-monorepo");
+
+            let mut inferred = cook_batch_args();
+            inferred.repo.clear();
+            inferred.issues = vec!["https://github.com/spacefast/monorepo/issues/2".to_string()];
+            normalize_cook_batch_repo(&mut inferred).expect("issue repository infers");
+            assert_eq!(inferred.repo, "spacefast-monorepo");
         });
     }
 
