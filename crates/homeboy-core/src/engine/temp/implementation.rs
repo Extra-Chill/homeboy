@@ -1482,25 +1482,19 @@ fn cleanup_runtime_tmp_root(
         .saturating_add(options.limit.max(1))
         .min(managed.len());
     let mut managed_has_more = page_end < managed.len();
-    let mut page_last_name = managed
+    let page_last_name = managed
         .get(page_end.saturating_sub(1))
         .map(|entry| entry.file_name().to_string_lossy().to_string());
     let managed = managed.into_iter().skip(start).take(options.limit.max(1));
 
     let mut managed_inspections = Vec::new();
-    // Resume point for a budget-truncated page: the last entry this invocation
-    // actually finished with, so the next one starts at the first it did not.
-    let mut last_inspected_name: Option<String> = None;
     for entry in managed {
-        // Inspecting an entry recursively measures its storage, which on a
-        // large runtime root is the dominant cost of the whole sweep. Stopping
-        // here — at an entry boundary, before that walk — is what lets the
-        // sweep return normally, release its lock, and hand the caller a
-        // resumable cursor instead of being killed mid-scan (#14221).
+        // Planning reads only the owner record and pin for every entry; the
+        // recursive storage walk below is skipped for size-independent
+        // candidates and bounded by the budget for the rest (#14221, #15724).
         lock.heartbeat()?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        last_inspected_name = Some(name.clone());
         if options
             .prefix
             .is_some_and(|prefix| !managed_entry_matches_prefix(&path, &name, prefix))
