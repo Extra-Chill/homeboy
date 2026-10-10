@@ -1808,6 +1808,7 @@ mod tests {
                     stale_daemon: None,
                     daemon_previous_version: None,
                     daemon_new_version: None,
+                    service_binaries: Vec::new(),
                     exit_code: 1,
                     detail: "post-swap identity verification failed".to_string(),
                 });

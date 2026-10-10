@@ -85,7 +85,9 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     }
 
     if args.check {
-        let result = upgrade::check_for_updates()?;
+        // With runner selection the check also reports each selected runner's
+        // selected binary and runner-service binaries, read-only (#15733).
+        let result = upgrade::check_for_updates_with_runners(&args.runners, args.runner_only)?;
         // A check that quietly withholds an update because the newest release
         // has no asset for this platform is indistinguishable from "you are
         // current". Say which release was passed over and why (#11750).
@@ -285,6 +287,7 @@ mod tests {
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code: 0,
             detail: "extension sync failed".to_string(),
         });
@@ -344,6 +347,7 @@ mod tests {
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code: 1,
             detail: "runner unavailable".to_string(),
         });
@@ -376,6 +380,7 @@ mod tests {
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code: 0,
             detail: "runner remains degraded".to_string(),
         });
@@ -408,6 +413,7 @@ mod tests {
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code: 0,
             detail: "upgraded".to_string(),
         });

@@ -3753,6 +3753,7 @@ mod runner_source_upgrade_tests {
                         stale_daemon: None,
                         daemon_previous_version: None,
                         daemon_new_version: None,
+                        service_binaries: Vec::new(),
                         exit_code: 1,
                         detail: "runner manifest changed to an incompatible requirement"
                             .to_string(),
@@ -4746,6 +4747,7 @@ mod convergence_tests {
             stale_daemon: None,
             daemon_previous_version: None,
             daemon_new_version: None,
+            service_binaries: Vec::new(),
             exit_code: 0,
             detail: String::new(),
         }

@@ -90,6 +90,67 @@ pub struct VersionCheck {
     /// release, or when nothing installable was found at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Read-only convergence view of each runner selected with
+    /// `--upgrade-runner` (#15733). Empty when no runner was selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners: Vec<RunnerCheckEntry>,
+}
+
+/// Read-only `upgrade --check` view of one selected runner: the binary its
+/// configuration selects and every runner-service binary on the host, each
+/// compared to the version the runner would converge to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerCheckEntry {
+    pub runner_id: String,
+    pub homeboy_path: String,
+    pub target_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_binary_version: Option<String>,
+    /// `current`, `stale`, or `unknown`.
+    pub selected_binary_status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_binaries: Vec<RunnerServiceBinaryEntry>,
+    /// True only when the selected binary and every in-scope service binary
+    /// already run `target_version`.
+    pub converged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One systemd user unit on a runner host that runs a Homeboy runner daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerServiceBinaryEntry {
+    pub unit: String,
+    /// `controller` (this controller's scoped unit), `legacy` (the unscoped
+    /// pre-controller-scoping unit no controller refreshes), or
+    /// `other_controller` (owned and converged by another controller).
+    pub scope: String,
+    /// Binary path the unit's `ExecStart` runs (usually a stable link).
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_version: Option<String>,
+    /// Version of the executable the unit's main process is actually running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_state: Option<String>,
+    pub target_version: String,
+    /// `current`, `stale`, `unknown`, `inactive`, `refreshed`, or `pending`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_commands: Vec<String>,
+}
+
+impl RunnerServiceBinaryEntry {
+    /// Whether this unit prevents the runner from being reported converged.
+    /// Other controllers' units converge through their own owners, so only
+    /// this controller's unit and the ownerless legacy unit are in scope.
+    pub fn blocks_convergence(&self) -> bool {
+        matches!(self.scope.as_str(), "controller" | "legacy")
+            && matches!(self.status.as_str(), "stale" | "unknown" | "pending")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +367,9 @@ pub struct RunnerUpgradeEntry {
     pub daemon_previous_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_new_version: Option<String>,
+    /// Runner-service unit binaries observed after convergence (#15733).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_binaries: Vec<RunnerServiceBinaryEntry>,
     pub exit_code: i32,
     pub detail: String,
 }

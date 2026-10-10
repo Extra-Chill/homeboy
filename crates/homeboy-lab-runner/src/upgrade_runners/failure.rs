@@ -41,6 +41,7 @@ pub fn runner_upgrade_failure_entry(
         stale_daemon: None,
         daemon_previous_version: None,
         daemon_new_version: None,
+        service_binaries: Vec::new(),
         exit_code,
         detail,
     }

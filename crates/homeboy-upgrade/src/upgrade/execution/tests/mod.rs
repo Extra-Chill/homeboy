@@ -121,6 +121,202 @@ fn exact_source_bytes_prove_replacement_even_when_identity_probe_fails() {
     assert!(replacement_applied_identity(&checkpoint).is_err());
 }
 
+#[cfg(unix)]
+fn write_executable_fixture(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, body).expect("write executable fixture");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("make fixture executable");
+}
+
+/// #15733: `homeboy upgrade --force` with the selected release already
+/// installed staged byte-identical bytes, so the destination digest never
+/// changed and the upgrade failed with `did not activate the selected release
+/// 0.417.15 ... (observed 0.417.15)`. Unchanged bytes that equal the staged
+/// artifact's digest are the selected release, not a failed activation.
+#[cfg(unix)]
+#[test]
+fn already_active_exact_release_bytes_prove_replacement() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let target = directory.path().join("homeboy");
+    let staged = directory.path().join("stage-homeboy");
+    let release = "#!/bin/sh\necho 'homeboy 0.417.15+708e00a1d439e7b47141132b80ef5a0894656e83'\n";
+    write_executable_fixture(&target, release);
+    write_executable_fixture(&staged, release);
+    let checkpoint = ReplacementCheckpoint::pending(
+        &target,
+        Some("0.417.15"),
+        None,
+        Some(sha256_file(&staged).expect("hash staged release")),
+    )
+    .expect("capture replacement baseline");
+
+    std::fs::copy(&staged, &target).expect("reinstall identical bytes");
+
+    assert!(replacement_was_applied(&checkpoint).expect("inspect identical release bytes"));
+    assert_eq!(
+        replacement_applied_identity(&checkpoint)
+            .expect("read installed identity")
+            .map(|identity| identity.version),
+        Some("0.417.15".to_string())
+    );
+    assert_eq!(
+        replacement_observed_state(&checkpoint).expect("observe state"),
+        "applied"
+    );
+}
+
+/// The digest exemption is exact: unchanged bytes that differ from the staged
+/// artifact (an older or different build left in place) still fail.
+#[cfg(unix)]
+#[test]
+fn unchanged_bytes_that_differ_from_the_staged_release_are_not_applied() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let target = directory.path().join("homeboy");
+    let staged = directory.path().join("stage-homeboy");
+    write_executable_fixture(&target, "#!/bin/sh\necho 'homeboy 0.417.15+aaaaaaa'\n");
+    write_executable_fixture(&staged, "#!/bin/sh\necho 'homeboy 0.417.15+bbbbbbb'\n");
+    let checkpoint = ReplacementCheckpoint::pending(
+        &target,
+        Some("0.417.15"),
+        None,
+        Some(sha256_file(&staged).expect("hash staged release")),
+    )
+    .expect("capture replacement baseline");
+
+    assert!(!replacement_was_applied(&checkpoint).expect("inspect unchanged target"));
+    assert_eq!(
+        replacement_observed_state(&checkpoint).expect("observe state"),
+        "not_applied"
+    );
+}
+
+/// End to end over the release promotion step: a forced reinstall of the
+/// already-active release stages identical bytes and must succeed.
+#[cfg(unix)]
+#[test]
+fn forced_reinstall_of_the_active_release_is_activated() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let destination = directory.path().join("homeboy");
+    let staged = directory.path().join("stage").join("homeboy");
+    std::fs::create_dir_all(staged.parent().unwrap()).expect("stage dir");
+    let release = "#!/bin/sh\necho 'homeboy 0.417.15+708e00a1d439e7b47141132b80ef5a0894656e83'\n";
+    write_executable_fixture(&destination, release);
+    write_executable_fixture(&staged, release);
+    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.417.15"), None, None)
+        .expect("capture replacement baseline");
+    let mut states = Vec::new();
+
+    finalize_release_replacement(
+        &checkpoint,
+        &staged,
+        &destination,
+        "0.417.15",
+        &mut |checkpoint| {
+            states.push(checkpoint.state.clone());
+            Ok(())
+        },
+    )
+    .expect("already-active exact release activates");
+
+    assert_eq!(states.last().map(String::as_str), Some("applied"));
+}
+
+/// A real upgrade still replaces the destination and verifies the staged bytes.
+#[cfg(unix)]
+#[test]
+fn staged_newer_release_replaces_the_destination() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let destination = directory.path().join("homeboy");
+    let staged = directory.path().join("stage").join("homeboy");
+    std::fs::create_dir_all(staged.parent().unwrap()).expect("stage dir");
+    write_executable_fixture(&destination, "#!/bin/sh\necho 'homeboy 0.417.14+aaaaaaa'\n");
+    write_executable_fixture(&staged, "#!/bin/sh\necho 'homeboy 0.417.15+bbbbbbb'\n");
+    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.417.15"), None, None)
+        .expect("capture replacement baseline");
+
+    finalize_release_replacement(&checkpoint, &staged, &destination, "0.417.15", &mut |_| {
+        Ok(())
+    })
+    .expect("newer staged release activates");
+
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        std::fs::read(&staged).unwrap()
+    );
+}
+
+/// #11152 stays fixed: a successful installer that staged nothing resolves
+/// its candidate to the destination itself, so there is no digest evidence
+/// and an unchanged older controller still fails loudly, naming the observed
+/// identity rather than silently exiting 0.
+#[cfg(unix)]
+#[test]
+fn no_op_installer_without_a_staged_artifact_still_fails() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let destination = directory.path().join("homeboy");
+    write_executable_fixture(
+        &destination,
+        "#!/bin/sh\necho 'homeboy 0.326.0+dff9eb75eaf6'\n",
+    );
+    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.326.1"), None, None)
+        .expect("capture replacement baseline");
+    let mut states = Vec::new();
+
+    let error = finalize_release_replacement(
+        &checkpoint,
+        &destination,
+        &destination,
+        "0.326.1",
+        &mut |checkpoint| {
+            states.push(checkpoint.state.clone());
+            Ok(())
+        },
+    )
+    .expect_err("no-op installer must not report activation");
+
+    assert!(error
+        .message
+        .contains("did not activate the selected release 0.326.1"));
+    assert!(error.message.contains("observed 0.326.0"));
+    assert_eq!(
+        error.details["observed_build_identity"],
+        "homeboy 0.326.0+dff9eb75eaf6"
+    );
+    assert_eq!(states.last().map(String::as_str), Some("not_applied"));
+}
+
+/// Even a same-version no-op without a staged artifact fails, but the error
+/// no longer reads as the self-contradictory `selected X (observed X)`.
+#[cfg(unix)]
+#[test]
+fn same_version_failure_names_the_byte_discrepancy() {
+    let directory = tempfile::tempdir().expect("target directory");
+    let destination = directory.path().join("homeboy");
+    write_executable_fixture(&destination, "#!/bin/sh\necho 'homeboy 0.417.15+aaaaaaa'\n");
+    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.417.15"), None, None)
+        .expect("capture replacement baseline");
+
+    let error = finalize_release_replacement(
+        &checkpoint,
+        &destination,
+        &destination,
+        "0.417.15",
+        &mut |_| Ok(()),
+    )
+    .expect_err("no staged artifact means no activation proof");
+
+    assert!(
+        error
+            .message
+            .contains("bytes were not proven to be the staged release artifact"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("homeboy 0.417.15+aaaaaaa"));
+}
+
 pub(super) fn git_stdout(path: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")

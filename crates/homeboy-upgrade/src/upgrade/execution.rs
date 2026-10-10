@@ -409,28 +409,13 @@ pub(crate) fn execute_upgrade(
         promotion_lease
             .expect("release replacement requires promotion ownership")
             .assert_generation()?;
-        if !paths_identify_same_binary(&candidate, destination) {
-            if let Err(error) = install_source_built_binary(&candidate, destination) {
-                replacement_checkpoint(
-                    &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-                )?;
-                return Err(error);
-            }
-        }
-        if !replacement_was_applied(checkpoint)? {
-            replacement_checkpoint(
-                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-            )?;
-            return Err(binary_swap_failure(
-                selected_version,
-                Some(destination),
-                active_binary_info_at(&checkpoint.target)
-                    .ok()
-                    .flatten()
-                    .as_ref(),
-            ));
-        }
-        replacement_checkpoint(&checkpoint.with_state("applied"))?;
+        finalize_release_replacement(
+            checkpoint,
+            &candidate,
+            destination,
+            selected_version,
+            replacement_checkpoint,
+        )?;
     }
 
     phase("verifying_install")?;
@@ -955,6 +940,61 @@ pub(super) fn bounded_upgrade_cause(detail: &str) -> String {
     result
 }
 
+/// Promote a verified staged release over the PATH-active destination and
+/// prove the destination now holds it.
+///
+/// A distinct staged artifact is digest evidence for the selected release, so
+/// its sha256 is recorded as the checkpoint's expected bytes before any
+/// mutation. That makes an already-active exact release (a forced reinstall
+/// whose staged bytes equal the installed bytes) provably applied instead of
+/// an unchanged-bytes "not activated" failure (#15733). A no-op installer that
+/// staged nothing still resolves its candidate to the destination itself,
+/// carries no expected digest, and keeps failing as not applied (#11152).
+fn finalize_release_replacement(
+    checkpoint: &ReplacementCheckpoint,
+    candidate: &Path,
+    destination: &Path,
+    selected_version: &str,
+    replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
+) -> Result<()> {
+    let staged = !paths_identify_same_binary(candidate, destination);
+    let checkpoint = if staged {
+        let mut evidenced = checkpoint.clone();
+        evidenced.expected_sha256 = Some(sha256_file(candidate)?);
+        replacement_checkpoint(&evidenced)?;
+        evidenced
+    } else {
+        checkpoint.clone()
+    };
+    if staged {
+        if let Err(error) = install_source_built_binary(candidate, destination) {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(&checkpoint)?),
+            )?;
+            return Err(error);
+        }
+    }
+    if !replacement_was_applied(&checkpoint)? {
+        replacement_checkpoint(&checkpoint.with_state(replacement_observed_state(&checkpoint)?))?;
+        let mut error = binary_swap_failure(
+            selected_version,
+            Some(destination),
+            active_binary_info_at(&checkpoint.target)
+                .ok()
+                .flatten()
+                .as_ref(),
+        );
+        error.details["staged_candidate"] = serde_json::json!(candidate.display().to_string());
+        error.details["staged_candidate_distinct"] = serde_json::json!(staged);
+        error.details["expected_sha256"] = serde_json::json!(checkpoint.expected_sha256);
+        error.details["previous_sha256"] = serde_json::json!(checkpoint.previous_sha256);
+        error.details["observed_sha256"] = serde_json::json!(sha256_file(&checkpoint.target).ok());
+        return Err(error);
+    }
+    replacement_checkpoint(&checkpoint.with_state("applied"))?;
+    Ok(())
+}
+
 fn binary_swap_failure(
     selected_version: &str,
     destination: Option<&Path>,
@@ -966,16 +1006,41 @@ fn binary_swap_failure(
     let observed_version = observed
         .and_then(|info| info.version.as_deref())
         .unwrap_or("unverifiable");
+    let observed_identity = observed
+        .and_then(|info| info.build_identity.as_deref())
+        .unwrap_or("unverifiable");
+    // When the versions agree the version is not the discrepancy: the bytes
+    // are. Say so instead of printing `selected X (observed X)` (#15733).
+    let reason = if observed_version == selected_version {
+        format!(
+            "; the destination reports `{observed_identity}` but its bytes were not proven to be the staged release artifact"
+        )
+    } else {
+        String::new()
+    };
 
-    Error::internal_unexpected(format!(
-        "binary upgrade did not activate the selected release {selected_version} at {destination} (observed {observed_version})"
-    ))
+    let mut error = Error::internal_unexpected(format!(
+        "binary upgrade did not activate the selected release {selected_version} at {destination} (observed {observed_version}){reason}"
+    ));
+    error.details = serde_json::json!({
+        "selected_version": selected_version,
+        "destination": destination,
+        "observed_version": observed_version,
+        "observed_build_identity": observed_identity,
+    });
+    error
     .with_hint(format!(
         "The PATH-active destination was not verified after the installer exited: {destination}"
     ))
-    .with_hint(format!(
-        "Expected `{destination} --version` to report {selected_version}, but it reported {observed_version}."
-    ))
+    .with_hint(if observed_version == selected_version {
+        format!(
+            "`{destination} --version` reports {selected_version}, but the installed bytes did not match the staged {selected_version} artifact; compare `sha256sum {destination}` with the release asset."
+        )
+    } else {
+        format!(
+            "Expected `{destination} --version` to report {selected_version}, but it reported {observed_version}."
+        )
+    })
     .with_hint("Inspect PATH shadowing with: type -a homeboy")
     .with_hint("Retry explicitly after correcting the active destination: homeboy upgrade --force --method binary")
 }
@@ -1590,7 +1655,8 @@ pub(crate) fn replacement_applied_identity(
         Ok(digest) => digest,
         Err(_) => return Ok(None),
     };
-    if current_sha256 == checkpoint.previous_sha256
+    if (current_sha256 == checkpoint.previous_sha256
+        && !target_already_holds_expected_bytes(checkpoint, &current_sha256))
         || checkpoint
             .expected_sha256
             .as_ref()
@@ -1613,11 +1679,26 @@ pub(crate) fn replacement_applied_identity(
     Ok(matches_expected.then_some(identity))
 }
 
+/// Whether the target was already exactly the selected artifact before the
+/// replacement began: unchanged bytes that equal recorded expected bytes. This
+/// is digest evidence, not a version guess, so a successful no-op installer
+/// with no expected digest is never mistaken for an applied replacement.
+fn target_already_holds_expected_bytes(
+    checkpoint: &ReplacementCheckpoint,
+    current_sha256: &str,
+) -> bool {
+    current_sha256 == checkpoint.previous_sha256
+        && checkpoint.expected_sha256.as_deref() == Some(current_sha256)
+}
+
 pub(crate) fn replacement_was_applied(checkpoint: &ReplacementCheckpoint) -> Result<bool> {
     let current_sha256 = match sha256_file(&checkpoint.target) {
         Ok(digest) => digest,
         Err(_) => return Ok(false),
     };
+    if target_already_holds_expected_bytes(checkpoint, &current_sha256) {
+        return Ok(true);
+    }
     if current_sha256 == checkpoint.previous_sha256 {
         return Ok(false);
     }
