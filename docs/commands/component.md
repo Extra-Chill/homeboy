@@ -196,8 +196,7 @@ homeboy component shared my-plugin
 
 This is useful for:
 - Understanding component distribution across your projects
-- Planning coordinated deployments with `deploy --shared`
-- Identifying candidates for fleet grouping
+- Planning coordinated deployments
 
 ## JSON output
 
@@ -231,6 +230,5 @@ Notes:
 
 - [build](build.md)
 - [deploy](deploy.md)
-- [fleet](fleet.md)
 - [project](project.md)
 - [JSON output contract](../architecture/output-system.md)

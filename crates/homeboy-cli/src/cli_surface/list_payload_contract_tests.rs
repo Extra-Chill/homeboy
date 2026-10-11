@@ -19,7 +19,6 @@ use clap::CommandFactory;
 const ENTITY_LIST_COMMANDS: &[&str] = &[
     "component list",
     "extension list",
-    "fleet list",
     "project list",
     "rig list",
     "runner list",

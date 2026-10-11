@@ -453,7 +453,7 @@ pub struct NoExtra;
 
 /// Generic output for standard entity CRUD commands.
 ///
-/// `T` is the entity type (Component, Server, Project, Fleet).
+/// `T` is the entity type (Component, Server, Project).
 /// `E` is an optional extras struct for entity-specific fields, flattened
 /// into the output JSON. Use `NoExtra` (the default) when no extras are needed.
 ///

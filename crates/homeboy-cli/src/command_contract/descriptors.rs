@@ -19,7 +19,6 @@ macro_rules! builtin_json_command_descriptors {
             (Trace, $crate::commands::trace::run, CommandSpec { safety: mutating_safety(), ..command_spec_with_representative_argv(&["homeboy", "trace"], lab_command_spec_with_output_notes_and_summary("trace", CommandJsonFamily::Quality, "portable Lab offload is available for trace runs", "runs trace workflows and records observation artifacts unless using read-only subcommands", TRACE_LAB_SUPPORT)) }),
             (Deps, $crate::cli_surface::DepsArgs::run, CommandSpec { subcommand_safety: DEPS_SUBCOMMAND_SAFETY, ..command_spec("deps", CommandJsonFamily::Ops) }),
             (File, $crate::commands::file::run, CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) }),
-            (Fleet, $crate::commands::fleet::run, CommandSpec { subcommand_safety: FLEET_SUBCOMMAND_SAFETY, ..command_spec("fleet", CommandJsonFamily::Ops) }),
             (Deploy, $crate::commands::deploy::run, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS))),
             (Component, $crate::commands::component::run, CommandSpec { subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY, ..command_spec("component", CommandJsonFamily::Workspace) }),
             (Config, $crate::commands::config::run, CommandSpec { subcommand_safety: CONFIG_SUBCOMMAND_SAFETY, ..command_spec("config", CommandJsonFamily::Workspace) }),

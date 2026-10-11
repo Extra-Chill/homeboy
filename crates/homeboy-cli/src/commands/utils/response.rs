@@ -476,7 +476,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::ServerNotFound
         | ErrorCode::ComponentNotFound
         | ErrorCode::ComponentNotAttached
-        | ErrorCode::FleetNotFound
         | ErrorCode::ExtensionNotFound
         | ErrorCode::ExtensionUnsupported
         | ErrorCode::DocsTopicNotFound

@@ -1,9 +1,8 @@
 use crate::project::{Project, ProjectComponentOverrides};
 
-/// Apply component overrides with fleet → project cascade.
+/// Apply project-level component overrides.
 ///
-/// Resolution order: component (repo portable config) → fleet defaults → project overrides.
-/// Fleet-level overrides provide defaults, project-level overrides take precedence.
+/// Resolution order: component (repo portable config) → project overrides.
 ///
 /// `cli_path` has an extra fallback step: if no explicit override at any layer
 /// sets it, the project-scoped `Project::cli_path` fills it in via
@@ -26,13 +25,7 @@ pub fn resolve_deploy_override_inputs(
 ) -> (crate::component::Component, crate::component::Component) {
     let mut preparation = component.clone();
     let mut binding = component.clone();
-    let fleet_overrides = resolve_fleet_overrides(project, &component.id);
-    let project_overrides = project.component_overrides.get(&component.id);
-
-    for overrides in [fleet_overrides.as_ref(), project_overrides] {
-        let Some(overrides) = overrides else {
-            continue;
-        };
+    if let Some(overrides) = project.component_overrides.get(&component.id) {
         apply_preparation_overrides(overrides, &mut preparation);
         overrides.apply_to_component(&mut binding);
     }
@@ -59,28 +52,6 @@ fn apply_preparation_overrides(
     if !overrides.artifact_inputs.is_empty() {
         component.artifact_inputs = overrides.artifact_inputs.clone();
     }
-}
-
-/// Look up fleet-level component overrides for a project's component.
-///
-/// Finds the fleet(s) containing this project and returns the first matching
-/// fleet-level override for the given component ID. If the project belongs
-/// to multiple fleets, the first fleet with an override wins.
-fn resolve_fleet_overrides(
-    project: &Project,
-    component_id: &str,
-) -> Option<ProjectComponentOverrides> {
-    let fleets = crate::fleet::list().ok()?;
-
-    for fleet in &fleets {
-        if fleet.project_ids.contains(&project.id) {
-            if let Some(overrides) = fleet.component_overrides.get(component_id) {
-                return Some(overrides.clone());
-            }
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]

@@ -105,7 +105,6 @@ pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
-pub mod fleet;
 pub use homeboy_gate_contract::gate;
 pub mod control_plane;
 pub mod git;

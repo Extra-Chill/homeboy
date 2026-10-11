@@ -366,4 +366,3 @@ State is ephemeral. Deleting it makes the next command re-probe the environment;
 - [rig-spec.md](./rig-spec.md) - full spec schema reference.
 - [bench.md](./bench.md) - rig-pinned benchmark runs.
 - [rig-matrix-axis-composition.md](../architecture/rig-matrix-axis-composition.md) - future design for derived rig variants.
-- [fleet.md](./fleet.md) - remote multi-project equivalent; rigs are local, fleets are remote.

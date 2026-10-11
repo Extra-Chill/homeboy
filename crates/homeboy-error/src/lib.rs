@@ -111,7 +111,6 @@ pub enum ErrorCode {
     ServerNotFound,
     ComponentNotFound,
     ComponentNotAttached,
-    FleetNotFound,
     ExtensionNotFound,
     ExtensionUnsupported,
     DocsTopicNotFound,
@@ -184,7 +183,6 @@ impl ErrorCode {
             ErrorCode::ServerNotFound => "server.not_found",
             ErrorCode::ComponentNotFound => "component.not_found",
             ErrorCode::ComponentNotAttached => "component.not_attached",
-            ErrorCode::FleetNotFound => "fleet.not_found",
             ErrorCode::ExtensionNotFound => "extension.not_found",
             ErrorCode::ExtensionUnsupported => "extension.unsupported",
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
@@ -250,7 +248,6 @@ impl ErrorCode {
             "server.not_found" => Self::ServerNotFound,
             "component.not_found" => Self::ComponentNotFound,
             "component.not_attached" => Self::ComponentNotAttached,
-            "fleet.not_found" => Self::FleetNotFound,
             "extension.not_found" => Self::ExtensionNotFound,
             "extension.unsupported" => Self::ExtensionUnsupported,
             "docs.topic_not_found" => Self::DocsTopicNotFound,
@@ -1214,10 +1211,6 @@ impl Error {
 
     pub fn extension_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::ExtensionNotFound, "Extension", id, suggestions)
-    }
-
-    pub fn fleet_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
-        Self::entity_not_found(ErrorCode::FleetNotFound, "Fleet", id, suggestions)
     }
 
     pub fn rig_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {

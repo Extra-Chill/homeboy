@@ -12,13 +12,12 @@ use std::path::Path;
 use crate::component;
 use crate::error::{Error, Result};
 use crate::git::release_download::detect_remote_url;
-use crate::{fleet, project};
+use crate::project;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     Component(String),
     Project(String),
-    Fleet(String),
     Rig(String),
     Workspace,
     /// Operate on an unregistered checkout directly.
@@ -33,7 +32,6 @@ impl Scope {
         match self {
             Scope::Component(_) => ScopeKind::Component,
             Scope::Project(_) => ScopeKind::Project,
-            Scope::Fleet(_) => ScopeKind::Fleet,
             Scope::Rig(_) => ScopeKind::Rig,
             Scope::Workspace => ScopeKind::Workspace,
             Scope::Path { .. } => ScopeKind::Path,
@@ -46,7 +44,7 @@ impl Scope {
 
     pub fn id(&self) -> &str {
         match self {
-            Scope::Component(id) | Scope::Project(id) | Scope::Fleet(id) | Scope::Rig(id) => id,
+            Scope::Component(id) | Scope::Project(id) | Scope::Rig(id) => id,
             Scope::Workspace => "workspace",
             Scope::Path { path, component_id } => component_id.as_deref().unwrap_or(path.as_str()),
         }
@@ -67,7 +65,6 @@ impl Scope {
 pub enum ScopeKind {
     Component,
     Project,
-    Fleet,
     Rig,
     Workspace,
     Path,
@@ -78,7 +75,6 @@ impl ScopeKind {
         match self {
             ScopeKind::Component => "component",
             ScopeKind::Project => "project",
-            ScopeKind::Fleet => "fleet",
             ScopeKind::Rig => "rig",
             ScopeKind::Workspace => "workspace",
             ScopeKind::Path => "path",
@@ -104,7 +100,7 @@ impl CommandScopeClass {
             CommandScopeClass::Target => {
                 "runtime target commands: project/site/server context required"
             }
-            CommandScopeClass::Environment => "local environment commands: rig or stack context",
+            CommandScopeClass::Environment => "local environment commands: rig context",
             CommandScopeClass::Workspace => {
                 "aggregate commands: workspace-wide filters and evidence"
             }
@@ -138,24 +134,10 @@ pub fn resolve_scope_component_records(scope: &Scope) -> Result<Vec<component::C
             let project = project::load(project_id)?;
             project::resolve_project_components(&project)
         }
-        Scope::Fleet(fleet_id) => resolve_fleet_component_records(fleet_id),
         Scope::Rig(rig_id) => resolve_rig_component_records(rig_id),
         Scope::Workspace => resolve_workspace_component_records(),
         Scope::Path { path, component_id } => resolve_path_component_record(path, component_id),
     }
-}
-
-fn resolve_fleet_component_records(fleet_id: &str) -> Result<Vec<component::Component>> {
-    let fleet = fleet::load(fleet_id)?;
-    let mut components = BTreeMap::new();
-
-    for project_id in fleet.project_ids {
-        for component in resolve_scope_component_records(&Scope::Project(project_id))? {
-            components.entry(component.id.clone()).or_insert(component);
-        }
-    }
-
-    Ok(components.into_values().collect())
 }
 
 fn resolve_rig_component_records(rig_id: &str) -> Result<Vec<component::Component>> {
@@ -288,7 +270,7 @@ mod tests {
             .contains("project/site/server"));
         assert!(CommandScopeClass::Environment
             .description()
-            .contains("rig or stack"));
+            .contains("rig context"));
         assert!(CommandScopeClass::Workspace
             .description()
             .contains("workspace-wide"));
@@ -343,7 +325,6 @@ mod wire_label_tests {
         for (value, label) in [
             (ScopeKind::Component, "component"),
             (ScopeKind::Project, "project"),
-            (ScopeKind::Fleet, "fleet"),
             (ScopeKind::Rig, "rig"),
             (ScopeKind::Workspace, "workspace"),
             (ScopeKind::Path, "path"),

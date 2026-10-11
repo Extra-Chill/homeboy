@@ -100,7 +100,7 @@ impl Commands {
             Commands::Runner(args) if runner::is_compact_job_list_stdout(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }
-            Commands::Fleet(_) | Commands::Contract(_) => {
+            Commands::Contract(_) => {
                 unreachable!("adapter-backed command descriptor returned before legacy routing")
             }
             _ => spec.output_descriptor(output_file_mode),

@@ -45,7 +45,7 @@ Run homeboy on each platform:
 - Windows server builds Windows binaries  
 - Linux server builds Linux binaries
 
-Coordinate via fleet commands or post-release hooks.
+Coordinate via post-release hooks.
 
 ### Option 3: osxcross (Linux → macOS)
 

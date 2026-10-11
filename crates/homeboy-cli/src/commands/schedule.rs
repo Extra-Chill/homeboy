@@ -44,7 +44,7 @@ pub struct AddArgs {
     id: String,
 
     /// Homeboy command to run, without the leading binary name
-    /// (for example: --command "fleet check prod").
+    /// (for example: --command "status --refresh").
     ///
     /// Repeat to declare an ordered sequence. Steps run in order and stop at
     /// the first failure.
@@ -300,7 +300,7 @@ fn build_steps(add: &AddArgs) -> Result<Vec<ScheduleStep>> {
             "A schedule needs something to run",
             Some(add.id.clone()),
             Some(vec![
-                "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
+                "Pass --command 'status --refresh', or --exec with a program.".to_string(),
             ]),
         ));
     }
@@ -481,8 +481,8 @@ mod tests {
     #[test]
     fn splits_plain_and_quoted_commands() {
         assert_eq!(
-            split_command("fleet check prod").expect("split"),
-            vec!["fleet", "check", "prod"]
+            split_command("status prod --refresh").expect("split"),
+            vec!["status", "prod", "--refresh"]
         );
         assert_eq!(
             split_command("  status   --json  ").expect("split"),

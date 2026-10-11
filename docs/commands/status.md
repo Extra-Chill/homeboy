@@ -181,7 +181,7 @@ Status takes the shared scope selectors, which are mutually exclusive:
 
 - `--project <ID>` — the project dashboard, same as the positional `[PROJECT]`
 - `--component <ID>` — summarize one registered component
-- `--fleet <ID>` / `--rig <ID>` / `--workspace` — summarize every component the
+- `--rig <ID>` / `--workspace` — summarize every component the
   scope resolves to
 - `--path <PATH>` — inspect this checkout instead of the registered component
   path; composes with the positional target

@@ -35,7 +35,7 @@ Homeboy contributes to exponential engineering by making parallel work comparabl
 - Many branches can run the same review gate.
 - Many agents can produce the same patch/evidence envelope.
 - Many runners can execute hot workloads without overloading the controller.
-- Many projects can be inspected through the same status/deploy/fleet surface.
+- Many projects can be inspected through the same status/deploy surface.
 - Many artifacts can be compared without scraping logs.
 
 The multiplier is not “more prompts.” The multiplier is stable contracts: every agent can cook, verify, retry, report, and hand off using the same evidence shapes.
@@ -60,7 +60,7 @@ Homeboy core owns generic orchestration:
 - Runs, artifacts, and evidence references.
 - Runner routing and resource policy.
 - Agent-task lifecycle, controller state, retries, and handoffs.
-- Component/project/fleet scope resolution.
+- Component/project/rig scope resolution.
 
 ## What Extensions Own
 

@@ -13,7 +13,7 @@ use crate::command_contract::{
     AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
     RUNTIME_REFRESH_LAB_LABEL,
 };
-use crate::commands::{adapter, agent_task};
+use crate::commands::agent_task;
 use crate::core::engine::execution_context::{self, ResolveOptions};
 use homeboy_extension_contract::ExtensionCapability;
 
@@ -302,9 +302,6 @@ impl Commands {
             }
             Commands::Worktree(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract());
-            }
-            Commands::Fleet(_) => {
-                return CommandPortabilityContract::lab_optional(adapter::lab_contract(self));
             }
             Commands::Review(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract())

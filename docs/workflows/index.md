@@ -14,7 +14,7 @@ Workflow docs are task-oriented. They explain which Homeboy commands to use toge
 - [Manage local environments](manage-local-environments.md) - operate rigs and task worktrees.
 - [Hold a PR fleet](hold-a-pr-fleet.md) - keep many worktree-backed PR branches, blockers, and evidence refs organized.
 - [Release a component](release-a-component.md) - plan and apply releases from component metadata and commit history.
-- [Deploy and operate fleets](deploy-and-operate-fleets.md) - inspect project targets, preview deploys, and operate fleets safely.
+- [Deploy projects](deploy-projects.md) - inspect project targets and preview deploys safely.
 
 ## Related Reference
 

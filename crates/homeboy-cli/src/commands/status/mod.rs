@@ -391,7 +391,6 @@ fn status_probe_argv(args: &StatusArgs) -> Vec<String> {
     }
     for (flag, value) in [
         ("--project", args.scope.project.as_ref()),
-        ("--fleet", args.scope.fleet.as_ref()),
         ("--component", args.scope.component.as_ref()),
         ("--rig", args.scope.rig.as_ref()),
         ("--path", args.scope.path.as_ref()),
@@ -2200,12 +2199,6 @@ mod tests {
             Some(Scope::Component("homeboy".to_string()))
         );
         assert_eq!(
-            parse_status(&["homeboy", "status", "--fleet", "growth"])
-                .scope
-                .selection(),
-            Some(Scope::Fleet("growth".to_string()))
-        );
-        assert_eq!(
             parse_status(&["homeboy", "status", "--rig", "studio"])
                 .scope
                 .selection(),
@@ -2225,7 +2218,7 @@ mod tests {
             vec!["homeboy", "status", "--project", "a", "--component", "b"],
             vec!["homeboy", "status", "--component", "a", "--path", "/tmp/a"],
             vec!["homeboy", "status", "--project", "a", "--workspace"],
-            vec!["homeboy", "status", "--fleet", "a", "--rig", "b"],
+            vec!["homeboy", "status", "--project", "a", "--rig", "b"],
         ] {
             assert!(
                 Cli::try_parse_from(&argv).is_err(),

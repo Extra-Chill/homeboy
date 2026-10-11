@@ -372,7 +372,6 @@ const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 
 const fn mutating_safety() -> CommandSafetySpec {
     CommandSafetySpec {
@@ -462,7 +461,6 @@ const fn paths_safety_without_notes(
 const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
 const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
 const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
-const FLEET_CONFIG_PATHS: &[&str] = &["create", "set", "delete", "add", "remove"];
 const SERVER_OPERATOR_PATHS: &[&str] = &[
     "create",
     "set",
@@ -516,20 +514,6 @@ const FILE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "mutates file content unless --dry-run is passed",
     ),
     paths_safety_without_notes(FILE_TRANSFER_PATHS, mutating_safety()),
-];
-
-const FLEET_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    CommandPathSafetySpec {
-        paths: &["exec"],
-        safety: operator_safety(Some("--check"), FLEET_EXEC_DANGEROUS_FLAGS),
-        output_notes: Some(
-            "default output is blocked for remote execution; pass --check to plan or --apply to execute",
-        ),
-        lab_notes: Some(
-            "local-only: depends on local fleet/project/server configuration before SSH fan-out",
-        ),
-    },
-    paths_safety(FLEET_CONFIG_PATHS, mutating_safety(), "mutates local fleet configuration"),
 ];
 
 const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(

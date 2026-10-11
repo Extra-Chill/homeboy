@@ -68,7 +68,7 @@ pub(super) fn is_self_deploy(component: &Component) -> bool {
 /// This handles the upgrade-then-deploy scenario: `homeboy upgrade` installs a
 /// new binary to e.g. /usr/local/bin/homeboy, but the build artifact at
 /// target/release/homeboy is still the old version. Without this check,
-/// `deploy --shared` would push the stale build artifact to the fleet.
+/// a shared release deployment would push the stale build artifact to every target.
 pub(super) fn prefer_installed_binary(build_artifact: &Path) -> Option<std::path::PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
 

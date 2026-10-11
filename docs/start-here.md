@@ -58,7 +58,7 @@ That JSON is the handoff point for CI, scheduled automation, and coding agents.
 - I need durable multi-agent orchestration: [Run agent task loops](workflows/run-agent-task-loops.md)
 - I need local multi-component environments: [Manage local environments](workflows/manage-local-environments.md)
 - I need release automation: [Release a component](workflows/release-a-component.md)
-- I need deployment or fleet operations: [Deploy and operate fleets](workflows/deploy-and-operate-fleets.md)
+- I need deployment operations: [Deploy projects](workflows/deploy-projects.md)
 - I need the mental model: [Concepts](concepts/index.md)
 - I need exact CLI or config details: [Reference](reference/index.md)
 - I maintain Homeboy: [Internals](internals/index.md)
@@ -87,4 +87,4 @@ Read by task, not by command name:
 - Add [Run agent task loops](workflows/run-agent-task-loops.md) when work needs durable controller state, retries, events, or human handoffs.
 - Add [Manage local environments](workflows/manage-local-environments.md) when work spans rigs or task worktrees.
 - Add [Release a component](workflows/release-a-component.md) only after the review/evidence loop is clear.
-- Add [Deploy and operate fleets](workflows/deploy-and-operate-fleets.md) when you are operating configured targets.
+- Add [Deploy projects](workflows/deploy-projects.md) when you are operating configured targets.

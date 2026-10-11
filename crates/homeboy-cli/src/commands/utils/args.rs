@@ -850,7 +850,7 @@ mod normalize_tests {
 }
 
 // ============================================================================
-// ScopeArgs: --project + --fleet + --component + --rig + --path + --workspace
+// ScopeArgs: --project + --component + --rig + --path + --workspace
 // ============================================================================
 
 /// The shared six-way entity selector.
@@ -873,27 +873,23 @@ mod normalize_tests {
 #[derive(Args, Debug, Clone, Default)]
 pub struct ScopeArgs {
     /// Scope: project id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["fleet", "component", "rig", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["component", "rig", "path", "workspace"])]
     pub project: Option<String>,
 
-    /// Scope: fleet id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "component", "rig", "path", "workspace"])]
-    pub fleet: Option<String>,
-
     /// Scope: registered component id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "rig", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "rig", "path", "workspace"])]
     pub component: Option<String>,
 
     /// Scope: local rig id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "component", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "component", "path", "workspace"])]
     pub rig: Option<String>,
 
     /// Scope: checkout path, bypassing the registry.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "fleet", "component", "rig", "workspace"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "component", "rig", "workspace"])]
     pub path: Option<String>,
 
     /// Scope: every configured workspace repo.
-    #[arg(long, conflicts_with_all = ["project", "fleet", "component", "rig", "path"])]
+    #[arg(long, conflicts_with_all = ["project", "component", "rig", "path"])]
     pub workspace: bool,
 }
 
@@ -904,9 +900,6 @@ impl ScopeArgs {
     pub fn selection(&self) -> Option<Scope> {
         if let Some(project) = &self.project {
             return Some(Scope::Project(project.clone()));
-        }
-        if let Some(fleet) = &self.fleet {
-            return Some(Scope::Fleet(fleet.clone()));
         }
         if let Some(component) = &self.component {
             return Some(Scope::Component(component.clone()));
@@ -966,10 +959,6 @@ mod scope_args_tests {
             Scope::Project("growth".to_string())
         );
         assert_eq!(
-            parse(&["scoped", "--fleet", "growth"]).resolve(),
-            Scope::Fleet("growth".to_string())
-        );
-        assert_eq!(
             parse(&["scoped", "--component", "homeboy"]).resolve(),
             Scope::Component("homeboy".to_string())
         );
@@ -1012,10 +1001,6 @@ mod scope_args_tests {
             Some(ScopeKind::Project)
         );
         assert_eq!(
-            parse(&["scoped", "--fleet", "growth"]).kind(),
-            Some(ScopeKind::Fleet)
-        );
-        assert_eq!(
             parse(&["scoped", "--component", "homeboy"]).kind(),
             Some(ScopeKind::Component)
         );
@@ -1031,7 +1016,7 @@ mod scope_args_tests {
 
     #[test]
     fn selectors_are_mutually_exclusive() {
-        let valued = ["--project", "--fleet", "--component", "--rig", "--path"];
+        let valued = ["--project", "--component", "--rig", "--path"];
         for (index, first) in valued.iter().copied().enumerate() {
             for second in valued.iter().copied().skip(index + 1) {
                 let argv = vec!["scoped", first, "a", second, "b"];

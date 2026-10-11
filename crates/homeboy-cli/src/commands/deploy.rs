@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use homeboy_deploy::{
     self as deploy, ComponentDeployResult, DeployConfig, DeploySummary, DeployTarget,
-    MultiDeploySummary, ProjectDeployResult,
 };
 
 /// Operator-facing spelling of `homeboy_deploy::DeployTarget`.
@@ -76,15 +75,6 @@ pub struct DeployArgs {
     /// Deploy even with uncommitted changes
     #[arg(long)]
     pub force: bool,
-    /// Deploy to multiple projects (comma-separated or repeated)
-    #[arg(long, value_delimiter = ',')]
-    pub projects: Option<Vec<String>>,
-    /// Deploy to all projects in a fleet
-    #[arg(long, short = 'f')]
-    pub fleet: Option<String>,
-    /// Deploy to all projects using the specified component(s)
-    #[arg(long, short = 's')]
-    pub shared: bool,
     /// Keep build dependencies (skip post-deploy cleanup)
     #[arg(long)]
     pub keep_deps: bool,
@@ -145,17 +135,6 @@ pub struct DeployArgs {
     /// Pass this when you want to say which target you mean (#12853).
     #[arg(long, value_enum, value_name = "TARGET")]
     pub target: Option<DeployTargetArg>,
-    /// Resume a prior multi-project deploy run after exact identity validation
-    #[arg(long, value_name = "RUN_ID")]
-    pub resume: Option<String>,
-    /// Maximum number of project targets applied concurrently
-    #[arg(
-        long,
-        default_value_t = 4,
-        value_name = "COUNT",
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    pub max_concurrency: u32,
     // Populated only by a validated release-set manifest.
     #[arg(skip)]
     exact_refs: BTreeMap<String, String>,
@@ -191,48 +170,7 @@ pub struct DeployOutput {
     pub actionable: Option<CommandActionableMetadata>,
 }
 
-#[derive(Serialize)]
-pub struct MultiProjectDeployOutput {
-    pub command: String,
-    pub variant: &'static str,
-    pub component_ids: Vec<String>,
-    pub projects: Vec<ProjectDeployResult>,
-    pub summary: MultiDeploySummary,
-    pub dry_run: bool,
-    pub check: bool,
-    pub force: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_set_identity: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deploy_run_id: Option<String>,
-    /// Durable file checkpoint for `homeboy deploy --resume`, distinct from activity ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resume_run_id: Option<String>,
-    #[serde(
-        rename = "_homeboy_actionable",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub actionable: Option<CommandActionableMetadata>,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-pub enum DeployCommandOutput {
-    Single(DeployOutput),
-    Multi(MultiProjectDeployOutput),
-}
-
-pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
-    if args.release_set.is_some()
-        && (args.projects.is_some() || args.fleet.is_some() || args.shared)
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "release_set",
-            "--release-set currently supports one --project deployment at a time; run each target as a separate deploy until aggregate multi-target preflight is available",
-            None,
-            None,
-        ));
-    }
+pub fn run(mut args: DeployArgs) -> CmdResult<DeployOutput> {
     if args.release_set.is_some() && args.check {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "check",
@@ -251,47 +189,6 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
         let (project_id, _) = resolve_single_deploy_target(&args)?;
         args.target_id = Some(project_id.clone());
         apply_release_set(release_set, &project_id, &mut args)?;
-    }
-
-    // Fleet deploy
-    if let Some(ref fleet_id) = args.fleet {
-        let fl = homeboy::core::fleet::load(fleet_id)?;
-        let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(
-            &fl.project_ids,
-            &component_ids,
-            &config,
-            &args,
-            release_set.as_ref(),
-        );
-    }
-
-    // Shared component deploy (find all projects using the component)
-    if args.shared {
-        let component_ids = resolve_shared_component_ids(&args)?;
-        let project_ids = deploy::resolve_shared_targets(&component_ids)?;
-        args.component_ids = component_ids;
-        args.target_id = None;
-        let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(
-            &project_ids,
-            &component_ids,
-            &config,
-            &args,
-            release_set.as_ref(),
-        );
-    }
-
-    // Multi-project deploy
-    if let Some(ref project_ids) = args.projects {
-        let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(
-            project_ids,
-            &component_ids,
-            &config,
-            &args,
-            release_set.as_ref(),
-        );
     }
 
     // Single-project deploy: resolve project and component IDs
@@ -325,7 +222,7 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
     Ok((
-        DeployCommandOutput::Single(DeployOutput {
+        DeployOutput {
             command: "deploy.run".to_string(),
             variant: "single",
             project_id: project_id.clone(),
@@ -340,7 +237,7 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
             release_set_identity: release_set.map(|value| value.identity.clone()),
             deploy_run_id: result.deploy_run_id,
             actionable: Some(deploy_actionable(&project_id)),
-        }),
+        },
         exit_code,
     ))
 }
@@ -493,21 +390,6 @@ fn apply_release_set(
     Ok(())
 }
 
-fn resolve_shared_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
-    if let Some(ref comps) = args.component {
-        Ok(comps.clone())
-    } else if let Some(ref target) = args.target_id {
-        Ok(vec![target.clone()])
-    } else {
-        Err(homeboy::core::Error::validation_invalid_argument(
-            "component",
-            "At least one component ID is required when using --shared",
-            None,
-            None,
-        ))
-    }
-}
-
 fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::core::Result<(String, Vec<String>)> {
     match (&args.project, &args.component, &args.target_id) {
         (Some(proj), Some(comps), _) => Ok((proj.clone(), comps.clone())),
@@ -567,38 +449,6 @@ fn resolve_single_deploy_target(args: &DeployArgs) -> homeboy::core::Result<(Str
     }
 }
 
-fn resolve_multi_args(args: &DeployArgs) -> homeboy::core::Result<(Vec<String>, DeployConfig)> {
-    let component_ids = resolve_multi_component_ids(args)?;
-    let mut config = build_config(args, false);
-    config.component_ids = component_ids.clone();
-
-    Ok((component_ids, config))
-}
-
-fn resolve_multi_component_ids(args: &DeployArgs) -> homeboy::core::Result<Vec<String>> {
-    if let Some(ref spec) = args.json {
-        return Ok(deploy::parse_bulk_component_ids(spec)?
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect());
-    }
-
-    if let Some(ref comps) = args.component {
-        return Ok(comps.iter().filter(|s| !s.is_empty()).cloned().collect());
-    }
-
-    let mut component_ids: Vec<String> = Vec::new();
-    if let Some(ref target) = args.target_id {
-        component_ids.push(target.clone());
-    }
-    component_ids.extend(args.component_ids.clone());
-
-    Ok(component_ids
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect())
-}
-
 fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
     DeployConfig {
         component_ids: args.component_ids.clone(),
@@ -624,46 +474,10 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         tagged: args.tagged,
         prepared_artifact: None,
         prepared_projection: None,
-        resume_run_id: args.resume.clone(),
-        max_concurrency: args.max_concurrency as usize,
+        resume_run_id: None,
+        max_concurrency: 1,
         target: args.target.map(DeployTarget::from),
     }
-}
-
-fn run_multi_output(
-    project_ids: &[String],
-    component_ids: &[String],
-    config: &DeployConfig,
-    args: &DeployArgs,
-    release_set: Option<&homeboy_core::release_set::NormalizedReleaseSet>,
-) -> CmdResult<DeployCommandOutput> {
-    let result = deploy::run_multi(project_ids, component_ids, config)?;
-    let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
-
-    let actionable = multi_deploy_actionable(
-        &result.projects,
-        project_ids,
-        component_ids,
-        config,
-        result.resume_run_id.as_deref(),
-    );
-    Ok((
-        DeployCommandOutput::Multi(MultiProjectDeployOutput {
-            command: "deploy.run_multi".to_string(),
-            variant: "multi_project",
-            component_ids: result.component_ids,
-            projects: result.projects,
-            summary: result.summary,
-            dry_run: args.dry_run,
-            check: args.check,
-            force: args.force,
-            release_set_identity: release_set.map(|value| value.identity.clone()),
-            deploy_run_id: result.deploy_run_id,
-            resume_run_id: result.resume_run_id,
-            actionable: Some(actionable),
-        }),
-        exit_code,
-    ))
 }
 
 fn deploy_actionable(project_id: &str) -> CommandActionableMetadata {
@@ -674,99 +488,6 @@ fn deploy_actionable(project_id: &str) -> CommandActionableMetadata {
         )
         .with_kind(CommandNextActionKind::Show),
     )
-}
-
-fn multi_deploy_actionable(
-    projects: &[ProjectDeployResult],
-    project_ids: &[String],
-    component_ids: &[String],
-    config: &DeployConfig,
-    resume_run_id: Option<&str>,
-) -> CommandActionableMetadata {
-    let mut metadata = CommandActionableMetadata::default();
-    for project in projects.iter().take(10) {
-        metadata.next_actions.push(
-            CommandNextAction::new(
-                format!("check {}", project.project_id),
-                format!("homeboy deploy {} --check", project.project_id),
-            )
-            .with_kind(CommandNextActionKind::Show),
-        );
-    }
-    if let Some(run_id) = resume_run_id.filter(|_| {
-        has_retryable_multi_target_failures(projects.iter().map(|project| project.status.as_str()))
-    }) {
-        metadata.next_actions.push(
-            CommandNextAction::new(
-                "resume deploy checkpoint",
-                resume_deploy_command(project_ids, component_ids, config, run_id),
-            )
-            .with_kind(CommandNextActionKind::Repair),
-        );
-    }
-    metadata
-}
-
-fn has_retryable_multi_target_failures<'a>(statuses: impl IntoIterator<Item = &'a str>) -> bool {
-    statuses.into_iter().any(|status| status == "failed")
-}
-
-/// Reconstruct the CLI inputs whose lifecycle identity is stored by the
-/// checkpoint. The checkpoint validates the identity again before retrying.
-fn resume_deploy_command(
-    project_ids: &[String],
-    component_ids: &[String],
-    config: &DeployConfig,
-    run_id: &str,
-) -> String {
-    use homeboy_core::engine::shell::quote_arg;
-
-    let mut args = vec!["homeboy deploy".to_string()];
-    for project_id in project_ids {
-        args.push(format!("--projects {}", quote_arg(project_id)));
-    }
-    for component_id in component_ids {
-        args.push(format!("--component {}", quote_arg(component_id)));
-    }
-    if config.all {
-        args.push("--all".to_string());
-    }
-    if config.outdated {
-        args.push("--outdated".to_string());
-    }
-    if config.behind_upstream {
-        args.push("--behind-upstream".to_string());
-    }
-    if config.force {
-        args.push("--force".to_string());
-    }
-    if config.keep_deps {
-        args.push("--keep-deps".to_string());
-    }
-    if let Some(version) = config.expected_version.as_deref() {
-        args.push(format!("--version {}", quote_arg(version)));
-    }
-    if config.no_pull {
-        args.push("--no-pull".to_string());
-    }
-    if config.allow_stale_source {
-        args.push("--allow-stale-source".to_string());
-    }
-    if config.allow_downgrade {
-        args.push("--allow-downgrade".to_string());
-    }
-    if config.head {
-        args.push("--head".to_string());
-    }
-    if let Some(reference) = config.requested_ref.as_deref() {
-        args.push(format!("--ref {}", quote_arg(reference)));
-    }
-    if config.tagged {
-        args.push("--tagged".to_string());
-    }
-    args.push(format!("--resume {}", quote_arg(run_id)));
-    args.push("--confirm-dangerous".to_string());
-    args.join(" ")
 }
 
 #[cfg(test)]

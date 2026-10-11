@@ -422,7 +422,7 @@ pub(crate) struct DeploymentProvenanceEvidence {
 }
 
 // DeployReason and ComponentStatus moved DOWN to homeboy-release-contract so
-// core's fleet/project/context status mechanics can reference them without a
+// core's project/context status mechanics can reference them without a
 // cycle. Re-exported here so the deploy/release code keeps its paths.
 pub use homeboy_release_contract::ComponentStatus;
 pub(crate) use homeboy_release_contract::DeployReason;

@@ -26,7 +26,7 @@ A schedule runs **either** a homeboy command or an external program — one or t
 
 ```sh
 # a homeboy command
-homeboy schedule add fleet-drift --command 'fleet check prod' --every 1h
+homeboy schedule add drift --command 'status prod --outdated' --every 1h
 
 # an external program
 homeboy schedule add e2e \
@@ -48,7 +48,7 @@ Repeat `--command` to declare an ordered sequence. Steps run in order and **stop
 ```sh
 homeboy schedule add managed \
   --command 'status production --refresh' \
-  --command 'fleet check production' \
+  --command 'status production --outdated' \
   --every 24h
 ```
 
@@ -112,7 +112,7 @@ homeboy schedule add nightly-status \
   --notification-transport discord.run-completion \
   --notification-route 'discord:v1:channel:123456789012345678'
 
-homeboy schedule add fleet-drift --command 'fleet check prod' --every 1h --jitter-seconds 300
+homeboy schedule add drift --command 'status prod --outdated' --every 1h --jitter-seconds 300
 
 homeboy schedule list
 homeboy schedule tick --dry-run

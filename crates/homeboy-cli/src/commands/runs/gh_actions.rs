@@ -1,7 +1,7 @@
 //! GitHub Actions artifact ingestor for `homeboy runs import --from-gh-actions`.
 //!
 //! Pure data plumbing. Lists workflow runs via the existing `gh` CLI surface
-//! (same auth pathway as `homeboy git` / `homeboy triage`), downloads matching
+//! (same auth pathway as `homeboy git`), downloads matching
 //! artifacts, validates they parse as JSON, and writes them into the local
 //! observation store as artifacts attached to one synthetic Homeboy run per
 //! `(repo, gh_run_id)` pair.

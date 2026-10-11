@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
-    deferred_workload, deploy, extension, file, fleet, fuzz, git, project, refactor, release,
-    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace,
-    upgrade, worktree,
+    deferred_workload, deploy, extension, file, fuzz, git, project, refactor, release, review, rig,
+    runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace, upgrade,
+    worktree,
 };
 
 mod argument_provenance;
@@ -194,8 +194,6 @@ pub enum Commands {
     Deps(DepsArgs),
     /// Remote file operations
     File(file::FileArgs),
-    /// Manage fleets (groups of projects)
-    Fleet(fleet::FleetArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Manage standalone component configurations

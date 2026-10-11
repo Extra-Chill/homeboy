@@ -253,7 +253,7 @@ pub struct Schedule {
     pub id: String,
 
     /// Homeboy arguments to run, without the leading binary name.
-    /// For example `["fleet", "check", "prod"]`.
+    /// For example `["status", "--refresh"]`.
     ///
     /// Mutually exclusive with `exec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

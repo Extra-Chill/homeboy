@@ -736,7 +736,6 @@ fn config_entity_registry() -> Vec<ConfigEntityMetadata> {
         entity_metadata::<crate::project::Project>(),
         entity_metadata::<crate::server::Server>(),
         entity_metadata::<homeboy_extension_contract::ExtensionManifest>(),
-        entity_metadata::<crate::fleet::Fleet>(),
     ];
     let external = EXTERNAL_CONFIG_ENTITIES
         .lock()

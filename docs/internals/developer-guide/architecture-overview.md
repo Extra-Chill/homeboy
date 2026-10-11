@@ -69,7 +69,6 @@ Config entities:
   in repo-level `homeboy.json`
 - **Projects**: Deployable environments and server bindings
 - **Servers**: SSH connection settings
-- **Fleets**: Named groups of projects for batch inspection and operations
 - **Rigs**: Reproducible local multi-component environments
 - **Extensions**: Domain-specific behaviors and tools
 
@@ -128,7 +127,7 @@ Core exposes generic local path helpers for process and runtime adapters:
 
 Supports:
 - Local commands such as builds, tests, benchmarks, and review gates
-- Remote commands via SSH for configured projects and fleets
+- Remote commands via SSH for configured projects
 - Extension runtime execution
 - Extension actions, release hooks, and CLI routing
 - Lab offload for commands with portable runner contracts
@@ -250,19 +249,6 @@ Documentation verification:
 - Detects features in source code and checks documentation coverage
 - Identifies priority docs (source files changed since baseline tag)
 - Supports `--features` for machine-readable feature inventory
-
-### Fleet Management
-
-**Location:** `crates/homeboy-core/src/fleet/`
-
-Fleet management for grouped environments:
-- Named groups of projects
-- Shared component detection
-- Fleet-wide status, triage, and deploy operations
-- Coordinated operations across multiple servers or local environments
-
-Config entities:
-- **Fleets**: Named groups of projects for batch operations
 
 ### CLI Layer
 
