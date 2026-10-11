@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use homeboy_agents::agent_tasks::provider::run_provider_controller_refresh;
 use homeboy_agents::agent_tasks::{
     provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
 };
@@ -141,6 +142,33 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
     if provisions.is_empty() {
         return Ok(());
     }
+    if provisions.iter().any(|provision| {
+        !provision
+            .env_names
+            .iter()
+            .all(|name| request_env.contains_key(name.as_str()))
+    }) {
+        // The controller owns these accounts' refresh chains: bring every
+        // declared source current here before any of it is read or delivered.
+        for refresh in crate::lab::secrets::agent_task_controller_credential_refreshes(source_args)?
+        {
+            run_provider_controller_refresh(&refresh.provider, &refresh.invocation).map_err(
+                |reason| {
+                    Error::validation_invalid_argument(
+                        "secret_env",
+                        format!(
+                            "controller could not refresh provider credentials before provisioning runner `{}`: {reason}",
+                            runner.id
+                        ),
+                        Some(runner.id.clone()),
+                        Some(vec![
+                            "Refresh the provider login on the controller (for OpenCode: `opencode auth login`), then rerun.".to_string(),
+                        ]),
+                    )
+                },
+            )?;
+        }
+    }
 
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -183,13 +211,16 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
 pub(super) struct ProviderFileSecretSourceProvision {
     pub(super) path: String,
     pub(super) env_names: Vec<String>,
+    /// Dotted JSON paths the declared sources read (for example
+    /// `anthropic.access`). Only the entries they name cross to the runner.
+    pub(super) fields: Vec<String>,
 }
 
 pub(super) fn provider_file_secret_source_provisions(
     required_names: &[String],
     fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
 ) -> Vec<ProviderFileSecretSourceProvision> {
-    let mut by_path: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_path: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
     for name in required_names {
         let Some(source) = fallback_sources.get(name) else {
             continue;
@@ -204,18 +235,25 @@ pub(super) fn provider_file_secret_source_provisions(
         else {
             continue;
         };
-        by_path
-            .entry(path.to_string())
-            .or_default()
-            .push(name.clone());
+        let entry = by_path.entry(path.to_string()).or_default();
+        entry.0.push(name.clone());
+        entry.1.extend(source.field.iter().cloned());
+        entry.1.extend(source.fallback_fields.iter().cloned());
     }
 
     let mut provisions = by_path
         .into_iter()
-        .map(|(path, mut env_names)| {
+        .map(|(path, (mut env_names, mut fields))| {
             env_names.sort();
             env_names.dedup();
-            ProviderFileSecretSourceProvision { path, env_names }
+            fields.retain(|field| !field.trim().is_empty());
+            fields.sort();
+            fields.dedup();
+            ProviderFileSecretSourceProvision {
+                path,
+                env_names,
+                fields,
+            }
         })
         .collect::<Vec<_>>();
     provisions.sort_by(|left, right| left.path.cmp(&right.path));
@@ -263,7 +301,21 @@ pub(super) fn provision_provider_file_secret_source(
             Some("create provider credential temp file".to_string()),
         )
     })?;
-    std::fs::write(temp.path(), local_raw).map_err(|err| {
+    let existing = client.execute(&format!(
+        "if [ -f {path} ]; then cat {path}; fi",
+        path = shell::quote_arg(&remote_path)
+    ));
+    if !existing.success {
+        return Err(provider_file_secret_source_error(
+            runner_id,
+            provision,
+            "failed to read the runner credential source before merging".to_string(),
+        ));
+    }
+    let projected =
+        project_provider_file_secret_source(&local_raw, &existing.stdout, &provision.fields)
+            .map_err(|reason| provider_file_secret_source_error(runner_id, provision, reason))?;
+    std::fs::write(temp.path(), projected).map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some("write provider credential temp file".to_string()),
@@ -286,6 +338,72 @@ pub(super) fn provision_provider_file_secret_source(
         ));
     }
     Ok(())
+}
+
+/// Keys that mint new credentials. Sharing one between controller and runner
+/// shares a single-use refresh chain: whichever host refreshes second loses the
+/// account (#15783). They cross only when an account explicitly declares them.
+const REFRESH_CREDENTIAL_KEYS: &[&str] = &["refresh", "refresh_token", "refreshToken"];
+
+/// Build the runner's credential file from the controller's (#15783).
+///
+/// Only the top-level entries the declared fields live in are delivered, and
+/// they replace the runner's entries of the same name; every other runner entry
+/// (a login the runner owns) is kept. Inside a delivered entry, an undeclared
+/// refresh credential is blanked rather than removed, so consumers that expect
+/// the key still parse the entry but cannot rotate the controller's chain.
+pub(super) fn project_provider_file_secret_source(
+    controller_raw: &str,
+    runner_raw: &str,
+    declared_fields: &[String],
+) -> std::result::Result<String, String> {
+    let controller: serde_json::Value = serde_json::from_str(controller_raw)
+        .map_err(|err| format!("controller credential source is not valid JSON: {err}"))?;
+    let controller = controller
+        .as_object()
+        .ok_or_else(|| "controller credential source is not a JSON object".to_string())?;
+    let mut runner = if runner_raw.trim().is_empty() {
+        serde_json::Map::new()
+    } else {
+        match serde_json::from_str::<serde_json::Value>(runner_raw) {
+            Ok(serde_json::Value::Object(entries)) => entries,
+            _ => {
+                return Err(
+                    "runner credential source exists but is not a JSON object; repair or remove it so Homeboy can merge into it"
+                        .to_string(),
+                )
+            }
+        }
+    };
+    let mut entries = declared_fields
+        .iter()
+        .filter_map(|field| field.split('.').next())
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.dedup();
+    for key in entries {
+        let Some(value) = controller.get(key) else {
+            continue;
+        };
+        let mut value = value.clone();
+        if let serde_json::Value::Object(fields) = &mut value {
+            for refresh_key in REFRESH_CREDENTIAL_KEYS {
+                let declared = declared_fields
+                    .iter()
+                    .any(|field| field == &format!("{key}.{refresh_key}"));
+                if declared {
+                    continue;
+                }
+                if let Some(slot) = fields.get_mut(*refresh_key) {
+                    *slot = serde_json::Value::String(String::new());
+                }
+            }
+        }
+        runner.insert(key.to_string(), value);
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(runner))
+        .map_err(|err| format!("failed to encode runner credential source: {err}"))
 }
 
 pub(super) fn provider_file_secret_source_error(

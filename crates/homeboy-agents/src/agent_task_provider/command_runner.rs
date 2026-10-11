@@ -3322,6 +3322,103 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, None)
 }
 
+const PROVIDER_CONTROLLER_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run a provider account's declared `controller_refresh` on this host (#15783).
+///
+/// The command owns the account's refresh chain and must leave the declared
+/// credential source current, or exit non-zero. It receives no ambient
+/// credentials: only `PATH`, `HOME` and the XDG roots that locate the source.
+/// stdout is discarded; a bounded stderr tail becomes the failure message.
+pub fn run_provider_controller_refresh(
+    provider: &AgentTaskExecutorProvider,
+    invocation: &CommandInvocation,
+) -> Result<(), String> {
+    let Some((program, args, cwd)) = invocation_command_parts(provider, invocation) else {
+        return Err(format!(
+            "provider '{}' declares an empty controller_refresh invocation",
+            provider.id
+        ));
+    };
+    let timeout = invocation
+        .extra
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .unwrap_or(PROVIDER_CONTROLLER_REFRESH_TIMEOUT)
+        .min(PROVIDER_CONTROLLER_REFRESH_TIMEOUT);
+    let mut command = Command::new(&program);
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env_clear();
+    for name in ["PATH", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "failed to spawn provider '{}' controller_refresh `{program}`: {error}",
+            provider.id
+        )
+    })?;
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "provider '{}' controller_refresh timed out after {}s",
+                    provider.id,
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                return Err(format!(
+                    "failed to wait for provider '{}' controller_refresh: {error}",
+                    provider.id
+                ))
+            }
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+        .unwrap_or_default();
+    let tail = stderr
+        .char_indices()
+        .rev()
+        .nth(1999)
+        .map_or(stderr.as_str(), |(index, _)| &stderr[index..]);
+    Err(format!(
+        "provider '{}' controller_refresh exited {}: {}",
+        provider.id,
+        status
+            .code()
+            .map_or_else(|| "by signal".to_string(), |code| code.to_string()),
+        if tail.is_empty() { "no message" } else { tail }
+    ))
+}
+
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);

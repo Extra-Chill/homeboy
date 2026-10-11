@@ -82,10 +82,10 @@ pub use catalog::*;
 #[cfg(test)]
 pub(crate) use command_runner::run_provider_readiness_invocation_with_test_timeout;
 pub use command_runner::{
-    probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
-    validate_provider_immediate_failure_patterns, ProviderExecutorResolution,
-    ProviderReadinessInvocationCapacity, ProviderReadinessInvocationResult,
-    PROVIDER_READINESS_RESULT_SCHEMA,
+    probe_provider_executor_resolves, provider_command_parts, run_provider_controller_refresh,
+    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
+    ProviderExecutorResolution, ProviderReadinessInvocationCapacity,
+    ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{
@@ -135,9 +135,10 @@ pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;
 pub use secret_types::*;
 pub use secrets::{
+    provider_controller_refreshes_for_plan_with_providers,
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_credential_mappings_for_plan_with_providers,
-    provider_secret_sources_for_plan_with_providers,
+    provider_secret_sources_for_plan_with_providers, ProviderControllerRefresh,
 };
 pub use structured_error::{
     normalize_provider_error, normalize_runtime_stream_error,

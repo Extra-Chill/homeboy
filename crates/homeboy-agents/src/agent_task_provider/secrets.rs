@@ -86,6 +86,52 @@ pub fn provider_secret_sources_for_plan_with_providers(
     sources
 }
 
+/// A controller-side command that makes a route's declared credentials current
+/// before they are delivered to a runner (#15783).
+///
+/// A `provider_defaults` account may declare `controller_refresh` as a command
+/// invocation. The controller is then the sole owner of that account's OAuth
+/// refresh chain: it refreshes before every delivery, and the runner receives
+/// only what the account declares, never an undeclared refresh token.
+#[derive(Debug, Clone)]
+pub struct ProviderControllerRefresh {
+    pub provider: AgentTaskExecutorProvider,
+    pub invocation: CommandInvocation,
+}
+
+pub fn provider_controller_refreshes_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<ProviderControllerRefresh> {
+    let mut refreshes: Vec<ProviderControllerRefresh> = Vec::new();
+    for request in &plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        let Some(invocation) = effective_provider_default(provider, request)
+            .and_then(|config| {
+                config
+                    .get("controller_refresh")
+                    .or_else(|| config.get("controllerRefresh"))
+            })
+            .and_then(|value| serde_json::from_value::<CommandInvocation>(value.clone()).ok())
+            .filter(|invocation| !invocation.argv.is_empty())
+        else {
+            continue;
+        };
+        if refreshes.iter().any(|existing| {
+            existing.provider.id == provider.id && existing.invocation.argv == invocation.argv
+        }) {
+            continue;
+        }
+        refreshes.push(ProviderControllerRefresh {
+            provider: provider.clone(),
+            invocation,
+        });
+    }
+    refreshes
+}
+
 pub fn provider_secret_credential_mappings_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
