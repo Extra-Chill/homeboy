@@ -8,7 +8,6 @@ pub mod durations;
 pub mod parsing;
 pub mod report;
 pub mod run;
-pub mod workflow;
 
 use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
@@ -56,10 +55,7 @@ pub use run::{
     run_self_check_test_workflow_with_progress, RawTestOutput, TestRunWorkflowArgs,
     TestRunWorkflowResult,
 };
-pub use workflow::{
-    auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
-    DriftWorkflowResult, MainTestWorkflowResult,
-};
+pub use homeboy_extension_contract::test_results::MainTestWorkflowResult;
 
 pub fn resolve_test_command(
     component: &Component,

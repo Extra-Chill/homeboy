@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use homeboy_core::error::{Error, Result};
-use homeboy_core::git;
 use homeboy_engine_primitives::test_path::is_test_path;
 pub use homeboy_extension_contract::test_workflow::{
     ChangeType, DriftReport, DriftedTest, ProductionChange,
@@ -100,14 +99,6 @@ fn glob_patterns(dirs: &[String], extensions: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Detect test drift by cross-referencing git changes with test files.
-pub fn detect_drift(component: &str, opts: &DriftOptions) -> Result<DriftReport> {
-    // Step 1: Get changed production files from git diff
-    let changed_files = get_changed_files(&opts.root, &opts.since)?;
-
-    detect_drift_for_changed_files(component, opts, &changed_files)
-}
-
 pub fn detect_drift_for_changed_files(
     component: &str,
     opts: &DriftOptions,
@@ -128,7 +119,6 @@ pub fn detect_drift_for_changed_files(
             drifted_tests: Vec::new(),
             total_drifted_files: 0,
             total_drift_references: 0,
-            auto_fixable: 0,
         });
     }
 
@@ -170,8 +160,6 @@ pub fn detect_drift_for_changed_files(
     };
     let total_drift_references = drifted.len();
 
-    let auto_fixable = changes.iter().filter(|c| is_auto_fixable(c)).count();
-
     Ok(DriftReport {
         component: component.to_string(),
         since: opts.since.to_string(),
@@ -179,20 +167,12 @@ pub fn detect_drift_for_changed_files(
         drifted_tests: drifted,
         total_drifted_files,
         total_drift_references,
-        auto_fixable,
     })
 }
 
 // ============================================================================
 // Git operations
 // ============================================================================
-
-/// Get list of changed files between `since` ref and HEAD.
-/// Delegates to the core `git::changes::get_files_changed_since` primitive.
-fn get_changed_files(root: &Path, since: &str) -> Result<Vec<String>> {
-    let root_str = root.to_string_lossy();
-    git::get_files_changed_since(&root_str, since)
-}
 
 /// Get diff for a specific file.
 fn get_file_diff(root: &Path, since: &str, file: &str) -> Result<String> {
@@ -932,156 +912,16 @@ fn find_drift_references(
     drifted
 }
 
-/// Check if a change type is auto-fixable with refactor transform.
-fn is_auto_fixable(change: &ProductionChange) -> bool {
-    match change.change_type {
-        ChangeType::MethodRename => change.new_symbol.is_some(),
-        ChangeType::ClassRename => change.new_symbol.is_some(),
-        ChangeType::ErrorCodeChange => change.new_symbol.is_some(),
-        ChangeType::FileMove => change.new_symbol.is_some(),
-        ChangeType::StringChange => change.new_symbol.is_some(),
-        ChangeType::MethodRemoved => false,
-        ChangeType::ClassRemoved => false,
-        ChangeType::ReturnTypeChange => false,
-        ChangeType::SignatureChange => false,
-    }
-}
-
-/// Generate transform rules from a drift report.
-///
-/// For each auto-fixable change, creates a TransformRule that replaces
-/// the old symbol with the new one in test files.
-pub fn generate_transform_rules(
-    report: &DriftReport,
-) -> Vec<homeboy_refactor_contract::TransformRule> {
-    let mut rules = Vec::new();
-
-    for change in &report.production_changes {
-        if !is_auto_fixable(change) {
-            continue;
-        }
-
-        let new_symbol = match &change.new_symbol {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let id = format!("{:?}_{}", change.change_type, change.old_symbol)
-            .to_lowercase()
-            .replace(' ', "_");
-
-        let description = match change.change_type {
-            ChangeType::MethodRename => {
-                format!(
-                    "Rename {} → {} ({})",
-                    change.old_symbol, new_symbol, change.file
-                )
-            }
-            ChangeType::ClassRename => {
-                format!(
-                    "Rename class {} → {} ({})",
-                    change.old_symbol, new_symbol, change.file
-                )
-            }
-            ChangeType::ErrorCodeChange => {
-                format!(
-                    "Error code {} → {} ({})",
-                    change.old_symbol, new_symbol, change.file
-                )
-            }
-            ChangeType::FileMove => {
-                format!("File moved {} → {}", change.old_symbol, new_symbol)
-            }
-            _ => format!("{} → {} ({})", change.old_symbol, new_symbol, change.file),
-        };
-
-        let (find, replace) = match change.change_type {
-            // Identifier renames should use word boundaries to avoid partial matches.
-            ChangeType::MethodRename | ChangeType::ClassRename => {
-                if !is_identifier(&change.old_symbol) || !is_identifier(new_symbol) {
-                    continue;
-                }
-                (
-                    format!(r"\b{}\b", regex::escape(&change.old_symbol)),
-                    new_symbol.clone(),
-                )
-            }
-            // Error/string changes are prone to false positives when symbols are too generic
-            // (e.g. old="name", new="assistant"). Only auto-fix token-like literals.
-            ChangeType::ErrorCodeChange | ChangeType::StringChange => {
-                if !is_safe_literal_token(&change.old_symbol) || !is_safe_literal_token(new_symbol)
-                {
-                    continue;
-                }
-                (regex::escape(&change.old_symbol), new_symbol.clone())
-            }
-            // File moves should look like path-ish values.
-            ChangeType::FileMove => {
-                if !looks_like_path(&change.old_symbol) || !looks_like_path(new_symbol) {
-                    continue;
-                }
-                (regex::escape(&change.old_symbol), new_symbol.clone())
-            }
-            _ => continue,
-        };
-
-        rules.push(homeboy_refactor_contract::TransformRule {
-            id,
-            description,
-            find,
-            replace,
-            files: "tests/**/*".to_string(),
-            context: "line".to_string(),
-        });
-    }
-
-    rules
-}
-
-fn is_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
-fn is_safe_literal_token(s: &str) -> bool {
-    if s.len() < 4 {
-        return false;
-    }
-
-    // Path-ish and namespaced/string tokens are usually safe for literal replacement.
-    if s.contains('/') || s.contains('\\') || s.contains(':') || s.contains('.') || s.contains('-')
-    {
-        return true;
-    }
-
-    // For underscore tokens, constrain to error-code-like vocabulary.
-    // This avoids unsafe schema/field rewrites (e.g. flow_id -> pipeline_id).
-    if s.contains('_') {
-        let lower = s.to_ascii_lowercase();
-        return lower.starts_with("rest_")
-            || lower.starts_with("ability_")
-            || lower.contains("error")
-            || lower.contains("invalid")
-            || lower.contains("forbidden")
-            || lower.contains("denied")
-            || lower.contains("not_found")
-            || lower.contains("failed");
-    }
-
-    false
-}
-
-fn looks_like_path(s: &str) -> bool {
-    s.len() >= 5 && (s.contains('/') || s.contains('\\'))
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+fn detect_drift_since_for_test(component: &str, opts: &DriftOptions) -> Result<DriftReport> {
+    let changed =
+        homeboy_core::git::get_files_changed_since(&opts.root.to_string_lossy(), &opts.since)?;
+    detect_drift_for_changed_files(component, opts, &changed)
+}
 
 #[cfg(test)]
 mod tests {
@@ -1157,7 +997,7 @@ mod tests {
             inline_tests: false,
         };
 
-        let report = detect_drift("fixture", &opts).expect("drift report");
+        let report = detect_drift_since_for_test("fixture", &opts).expect("drift report");
         assert!(report.production_changes.is_empty());
     }
 
@@ -1198,7 +1038,7 @@ mod tests {
             inline_tests: false,
         };
 
-        let report = detect_drift("fixture", &opts).expect("drift report");
+        let report = detect_drift_since_for_test("fixture", &opts).expect("drift report");
 
         assert!(report
             .production_changes
@@ -1421,27 +1261,6 @@ mod tests {
         ));
         assert!(is_source_relevant_change(&opts, "phpunit-managed.xml.dist"));
         assert!(!is_source_relevant_change(&opts, "README.md"));
-    }
-
-    #[test]
-    fn auto_fixable_detection() {
-        let rename = ProductionChange {
-            change_type: ChangeType::MethodRename,
-            file: "src/Foo.php".into(),
-            old_symbol: "oldMethod".into(),
-            new_symbol: Some("newMethod".into()),
-            line: 10,
-        };
-        assert!(is_auto_fixable(&rename));
-
-        let removed = ProductionChange {
-            change_type: ChangeType::MethodRemoved,
-            file: "src/Foo.php".into(),
-            old_symbol: "deadMethod".into(),
-            new_symbol: None,
-            line: 10,
-        };
-        assert!(!is_auto_fixable(&removed));
     }
 
     #[test]
@@ -1869,7 +1688,7 @@ mod workspace_layout_tests {
     /// Drift detection must see a change inside a monorepo member crate as a
     /// production change and route it to the test that references the changed
     /// symbol. With only a root-anchored `src/**` pattern, `prod_files` was
-    /// empty for every `crates/<member>/src/**` edit, so `detect_drift` returned
+    /// empty for every `crates/<member>/src/**` edit, so drift detection returned
     /// early with zero drifted tests and the changed-scope gate selected nothing
     /// from that crate.
     #[test]
@@ -1913,7 +1732,7 @@ mod workspace_layout_tests {
             &["rs".to_string()],
         );
 
-        let report = detect_drift("fixture", &opts).expect("drift report");
+        let report = detect_drift_since_for_test("fixture", &opts).expect("drift report");
 
         assert!(
             report
