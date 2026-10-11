@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.18] - 2026-10-11
+
+### Changed
+- drop fleet operations routing
+
 ## [2.20.17] - 2026-10-06
 
 ### Fixed
