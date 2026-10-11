@@ -2,6 +2,11 @@ use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
+/// How long a terminated process group gets to exit on SIGTERM before it is
+/// sent SIGKILL.
+#[cfg(unix)]
+const PROCESS_GROUP_CLEANUP_GRACE: Duration = Duration::from_millis(200);
+
 #[cfg(unix)]
 static ACTIVE_CLEANUP_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
@@ -178,7 +183,7 @@ fn cleanup_process_group(
     let _ = context;
     #[cfg(target_os = "linux")]
     if let Some(containment) = containment {
-        match containment.cleanup_with_grace(Duration::from_millis(200), context) {
+        match containment.cleanup_with_grace(PROCESS_GROUP_CLEANUP_GRACE, context) {
             Ok(cleanup) if cleanup.complete => return None,
             Ok(cleanup) => {
                 return Some(ProcessCleanupReport {
@@ -203,12 +208,17 @@ fn cleanup_process_group(
 
 #[cfg(unix)]
 fn cleanup_process_group_fallback(pgid: libc::pid_t) {
+    cleanup_process_group_fallback_within(pgid, PROCESS_GROUP_CLEANUP_GRACE);
+}
+
+#[cfg(unix)]
+fn cleanup_process_group_fallback_within(pgid: libc::pid_t, grace: Duration) {
     unsafe {
         libc::kill(-pgid, libc::SIGTERM);
     }
     // Give the group up to the grace period to exit, but return as soon as it
     // has: a command that already finished must not pay the whole grace.
-    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    let deadline = std::time::Instant::now() + grace;
     while crate::process::process_group_is_running(pgid) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -238,12 +248,19 @@ mod tests {
         let pgid = child.id() as libc::pid_t;
         child.wait().expect("leader exits");
 
+        // The grace is deliberately huge. Cleanup of an exited group still
+        // scans /proc and signals the group, and a starved CI runner can
+        // stretch that past any bound a few times smaller than the real 200ms
+        // grace (#15756). Waiting out this grace would take a full minute, so
+        // returning in under half of it proves the grace was skipped, with a
+        // margin no scheduling delay can cross.
+        let grace = Duration::from_secs(60);
         let started = std::time::Instant::now();
-        cleanup_process_group_fallback(pgid);
+        cleanup_process_group_fallback_within(pgid, grace);
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "a finished command paid {:?} of cleanup grace",
-            started.elapsed()
+            elapsed < grace / 2,
+            "a finished command paid {elapsed:?} of a {grace:?} cleanup grace"
         );
     }
 
