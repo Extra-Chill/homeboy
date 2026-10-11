@@ -14,18 +14,13 @@ use uuid::Uuid;
 
 use crate::api_jobs::{
     canonical_run_ref_metadata, ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus,
-    JobStore, LocalRunnerJob, LocalRunnerJobRequest, RemoteRunnerJobRequest,
-    RunnerJobLifecycleMetadata,
+    JobStore, LocalRunnerJob, LocalRunnerJobRequest,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
 use crate::http_api::{self, AnalysisJobRunner, HttpMethod, UnsupportedAnalysisJobRunner};
-use crate::lab_contract::LabRunnerWorkload;
 use crate::paths;
 use crate::process::{pid_has_ownership_token, pid_is_running};
-use crate::runner_execution_envelope::PathMaterializationPlan;
-use crate::secret_env_plan::SecretEnvPlan;
-use crate::source_snapshot::SourceSnapshot;
 use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use homeboy_runner_contract::{
     RunnerApiSubmitRequest, RunnerExecutionEnvelope, RUNNER_API_SUBMIT_REQUEST_SCHEMA,
@@ -264,8 +259,15 @@ pub fn retained_controller_job(job_id: &str) -> Result<Option<crate::api_jobs::J
 pub enum ControllerJobSubmissionDisposition {
     Created,
     Reused,
-    /// An older daemon accepted the request before submission receipts existed.
-    Unknown,
+}
+
+impl ControllerJobSubmissionDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Reused => "reused",
+        }
+    }
 }
 
 /// A controller job plus the admission decision that selected it.
@@ -523,12 +525,11 @@ impl LocalControllerJobClient {
         {
             Some("created") => ControllerJobSubmissionDisposition::Created,
             Some("reused") => ControllerJobSubmissionDisposition::Reused,
-            Some(_) => {
+            _ => {
                 return Err(Error::internal_unexpected(
                     "local controller-job submission response has no recognized disposition",
                 ));
             }
-            None => ControllerJobSubmissionDisposition::Unknown,
         };
         let response = self
             .client
@@ -1215,60 +1216,11 @@ pub struct HttpResponse {
     pub artifact: Option<ArtifactDownload>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct LegacyExecRequest {
-    runner_id: String,
-    #[serde(default)]
-    runner: Option<serde_json::Value>,
-    #[serde(default)]
-    project_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    command: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    #[serde(default)]
-    secret_env_names: Vec<String>,
-    #[serde(default)]
-    secret_env_plan: SecretEnvPlan,
-    #[serde(default)]
-    capture_patch: bool,
-    #[serde(default)]
-    raw_exec: bool,
-    #[serde(default)]
-    source_snapshot: Option<SourceSnapshot>,
-    #[serde(default)]
-    path_materialization_plan: Option<PathMaterializationPlan>,
-    #[serde(default)]
-    require_paths: Vec<String>,
-    #[serde(default)]
-    extension_env_providers: Vec<String>,
-    #[serde(rename = "runner_workload", default)]
-    lab_runner_workload: Option<LabRunnerWorkload>,
-    #[serde(default)]
-    lifecycle: Option<RunnerJobLifecycleMetadata>,
-    #[serde(default)]
-    metadata: Option<serde_json::Value>,
-    /// Explicit, controller-asserted idempotency key. When present, the daemon
-    /// dedupes `/exec` on this key directly rather than reconstructing one from
-    /// nested lifecycle/metadata. Optional for compatibility with controllers
-    /// that predate the field — those fall back to the `durable_run_id`
-    /// extraction.
-    #[serde(default)]
-    idempotency_key: Option<String>,
-    #[serde(default)]
-    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
-    #[serde(default)]
-    workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
-}
-
 struct ExecRequest {
     submission_key: Option<String>,
-    legacy_submission_key_is_run_id: bool,
     envelope: RunnerExecutionEnvelope,
     runner: Option<serde_json::Value>,
     raw_exec: bool,
-    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
 }
 
@@ -1291,6 +1243,30 @@ pub struct DirectDaemonExecSubmitRequest {
     pub raw_exec: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
+}
+
+impl DirectDaemonExecSubmitRequest {
+    /// Wrap one runner job request in the canonical Runner API v1 submission,
+    /// with no inline runner descriptor or workspace owner registration.
+    pub fn new(
+        request: &crate::api_jobs::RemoteRunnerJobRequest,
+        submission_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            submission: RunnerApiSubmitRequest {
+                schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: RUNNER_API_V1,
+                submission_key: submission_key.into(),
+                envelope: request.execution_envelope(),
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
+                credential_delivery: None,
+            },
+            runner: None,
+            raw_exec: false,
+            workspace_owner_request: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2912,7 +2888,20 @@ fn reserve_admission(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let body = body.unwrap_or_else(|| json!({}));
-    let workspace_claim_binding = workspace_claim_binding_from_body(&Some(body.clone()))?;
+    if body
+        .get("admission_lease_protocol")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        return Err(Error::validation_invalid_argument(
+            "admission_lease_protocol",
+            "admission reservation requires admission lease protocol v1",
+            None,
+            Some(vec![
+                "Upgrade the controller and runner together so both speak admission lease protocol v1.".to_string(),
+            ]),
+        ));
+    }
     let workspace_owner_request = body
         .get("workspace_owner_request")
         .filter(|value| !value.is_null())
@@ -2927,14 +2916,6 @@ fn reserve_admission(
                 None,
             )
         })?;
-    if workspace_owner_request.is_some() && workspace_claim_binding.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "workspace_claim_binding",
-            "direct admission uses an owner lease, not a reconciliation claim",
-            None,
-            None,
-        ));
-    }
     let runner_id = body
         .get("runner_id")
         .and_then(serde_json::Value::as_str)
@@ -2986,37 +2967,8 @@ fn reserve_admission(
             "daemon_lease_id": daemon_lease.lease_id.clone(),
             "idempotency_key": idempotency_key,
         },
-        "workspace_claim_binding": body.get("workspace_claim_binding").cloned().unwrap_or(serde_json::Value::Null),
         "workspace_owner_lease": serde_json::Value::Null,
     });
-    // Lease protocol is opt-in so an older controller can finish an admission
-    // after a daemon upgrade. New controllers also tolerate old daemons that
-    // ignore this field and return the legacy response shape.
-    let lease_protocol_v1 = body
-        .get("admission_lease_protocol")
-        .and_then(serde_json::Value::as_u64)
-        == Some(1);
-    if !lease_protocol_v1 {
-        let (job, created) = match idempotency_key {
-            Some(idempotency_key) => {
-                job_store.create_or_reuse_active_admission(metadata, idempotency_key)
-            }
-            None => (
-                job_store.create_with_source_snapshot_metadata_and_path_materialization_plan(
-                    "runner.admission",
-                    None,
-                    Some(metadata),
-                    None,
-                ),
-                true,
-            ),
-        };
-        return Ok(json!({
-            "job": job,
-            "daemon_lease_id": daemon_lease.lease_id,
-            "idempotent_resubmission": !created,
-        }));
-    }
     // Register before committing the admission so reconciliation cannot win the
     // inter-store window. A failed commit is rolled back below.
     //
@@ -3043,13 +2995,11 @@ fn reserve_admission(
             metadata,
             idempotency_key,
             crate::api_jobs::timestamp_ms(),
-            workspace_claim_binding,
             pending_owner_lease.lease().cloned(),
         ),
         None => job_store.create_admission_at(
             metadata,
             crate::api_jobs::timestamp_ms(),
-            workspace_claim_binding,
             pending_owner_lease.lease().cloned(),
         ),
     };
@@ -3065,8 +3015,6 @@ fn reserve_admission(
         "job": reservation.job,
         "daemon_lease_id": daemon_lease.lease_id,
         "idempotent_resubmission": !reservation.created,
-        // A strict controller must receive an explicit server acknowledgement;
-        // a token-shaped legacy response alone is not sufficient authority.
         "admission_lease_protocol": 1,
         "admission_token": reservation.token,
         "lease": {
@@ -3427,32 +3375,6 @@ fn workspace_claim_authority_status(body: Option<serde_json::Value>) -> Result<s
     )
 }
 
-fn authorize_workspace_claim_binding(
-    binding: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
-) -> Result<()> {
-    if let Some(binding) = binding {
-        daemon_workspace_claim_store()?.authorize_binding(binding, workspace_claim_now_ms())?;
-    }
-    Ok(())
-}
-
-fn workspace_claim_binding_from_body(
-    body: &Option<serde_json::Value>,
-) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
-    body.as_ref()
-        .and_then(|body| body.get("workspace_claim_binding"))
-        .map(|value| serde_json::from_value(value.clone()))
-        .transpose()
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "workspace_claim_binding",
-                format!("malformed workspace claim binding: {error}"),
-                None,
-                None,
-            )
-        })
-}
-
 fn admission_job_id(path: &str, suffix: &str) -> Result<uuid::Uuid> {
     let job_id = path
         .trim_start_matches("/admissions/")
@@ -3532,40 +3454,8 @@ fn release_admission(
             ));
         }
     }
-    let binding = workspace_claim_binding_from_body(&body)?;
-    authorize_exact_admission_workspace_claim_binding(job_store, job_id, binding.as_ref())?;
-    let job = match body
-        .and_then(|body| {
-            body.get("admission_token")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|token| !token.trim().is_empty())
-    {
-        Some(token) => {
-            job_store.release_admission_at(job_id, &token, crate::api_jobs::timestamp_ms())?
-        }
-        None => {
-            if job_store.admission_is_leased(job_id)? {
-                return Err(Error::validation_invalid_argument(
-                    "admission_token",
-                    "admission reservation requires its opaque token",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            let job = job_store.get(job_id)?;
-            if job.operation != "runner.admission" {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "job is not an admission reservation",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            job_store.cancel(job_id, "admission reservation released")?
-        }
-    };
+    let token = admission_token(body)?;
+    let job = job_store.release_admission_at(job_id, &token, crate::api_jobs::timestamp_ms())?;
     if let (Some(lease), Some(store)) = (
         workspace_owner_lease.as_ref(),
         workspace_owner_store.as_ref(),
@@ -3603,8 +3493,6 @@ fn renew_admission(
         job_id,
         workspace_owner_lease.as_ref(),
     )?;
-    let binding = workspace_claim_binding_from_body(&body)?;
-    authorize_exact_admission_workspace_claim_binding(job_store, job_id, binding.as_ref())?;
     let token = admission_token(body)?;
     let now = crate::api_jobs::timestamp_ms();
     // Authentication and the exact durable reservation must be valid before
@@ -3702,27 +3590,6 @@ fn renew_admission(
         "lease": { "expires_at_ms": reservation.expires_at_ms, "renewable": true },
         "workspace_owner_lease": renewed_workspace_owner_lease,
     }))
-}
-
-/// A reservation's initial authorization is durable authority. Renew and release
-/// must present exactly that binding, rather than merely any live claim for the
-/// same workspace. This prevents a newer or different owner from taking over a
-/// reserved admission through its token path.
-fn authorize_exact_admission_workspace_claim_binding(
-    job_store: &JobStore,
-    job_id: uuid::Uuid,
-    presented: Option<&crate::workspace_claim::WorkspaceClaimBinding>,
-) -> Result<()> {
-    let persisted = job_store.admission_workspace_claim_binding(job_id)?;
-    if persisted != presented.cloned() {
-        return Err(Error::validation_invalid_argument(
-            "workspace_claim_binding",
-            "admission renew or release binding does not match the durable reservation",
-            Some(job_id.to_string()),
-            None,
-        ));
-    }
-    authorize_workspace_claim_binding(presented)
 }
 
 fn authorize_exact_admission_workspace_owner_lease(
@@ -3880,86 +3747,19 @@ fn method_not_allowed() -> HttpResponse {
     }
 }
 
-/// Resolve the effective exec idempotency key the daemon dedupes on.
-///
-/// Prefers the explicit, controller-asserted `idempotency_key`; falls back to
-/// the `durable_run_id` reconstructed from nested lifecycle/metadata for
-/// controllers that predate the explicit field. Empty/whitespace keys are
-/// ignored so a blank assertion never masks the fallback.
-fn resolve_exec_idempotency_key(
-    explicit_key: Option<&str>,
-    run_ref_metadata: Option<&serde_json::Value>,
-) -> Option<String> {
-    explicit_key
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            run_ref_metadata
-                .and_then(|metadata| metadata.get("durable_run_id"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-                .map(str::to_string)
-        })
-}
-
-/// Decode the shipped scalar `/exec` request only when a caller has not opted
-/// into the envelope-backed direct transport.
-fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
-    let legacy: LegacyExecRequest = serde_json::from_value(body).map_err(|err| {
-        Error::validation_invalid_argument(
-            "body",
-            format!("invalid exec request body (legacy transport): {err}"),
-            None,
-            None,
-        )
-    })?;
-    let submission_key = resolve_exec_idempotency_key(
-        legacy.idempotency_key.as_deref(),
-        canonical_run_ref_metadata(
-            legacy.lifecycle.as_ref(),
-            legacy.lab_runner_workload.as_ref(),
-            legacy.metadata.as_ref(),
-        )
-        .as_ref(),
-    );
-    let request = RemoteRunnerJobRequest {
-        runner_id: legacy.runner_id,
-        project_id: legacy.project_id,
-        operation: "runner.exec".to_string(),
-        command: legacy.command,
-        cwd: legacy.cwd,
-        env: legacy.env,
-        secret_env_names: legacy.secret_env_names,
-        secret_env_plan: legacy.secret_env_plan,
-        env_materialization: None,
-        capture_patch: legacy.capture_patch,
-        source_snapshot: legacy.source_snapshot,
-        path_materialization_plan: legacy.path_materialization_plan,
-        require_paths: legacy.require_paths,
-        extension_env_providers: legacy.extension_env_providers,
-        lab_runner_workload: legacy.lab_runner_workload,
-        lifecycle: legacy.lifecycle,
-        workspace_claim_binding: legacy.workspace_claim_binding.clone(),
-        workspace_owner_lease: None,
-        metadata: legacy.metadata,
-    };
-    Ok(ExecRequest {
-        submission_key,
-        legacy_submission_key_is_run_id: true,
-        envelope: request.execution_envelope(),
-        runner: legacy.runner,
-        raw_exec: legacy.raw_exec,
-        workspace_claim_binding: legacy.workspace_claim_binding,
-        workspace_owner_request: legacy.workspace_owner_request,
-    })
-}
-
+/// Decode the Runner API v1 direct `/exec` submission. A body without the
+/// `submission` envelope is refused with a typed error naming the contract.
 fn decode_exec_request(body: Option<serde_json::Value>) -> Result<ExecRequest> {
     let body = body.unwrap_or_else(|| json!({}));
     if body.get("submission").is_none() {
-        return decode_legacy_exec_request(body);
+        return Err(Error::validation_invalid_argument(
+            "submission",
+            "daemon /exec requires a Runner API v1 `submission` envelope",
+            None,
+            Some(vec![
+                "Upgrade the controller and runner together so both speak the direct runner submission contract.".to_string(),
+            ]),
+        ));
     }
     let direct: DirectDaemonExecSubmitRequest = serde_json::from_value(body).map_err(|err| {
         Error::validation_invalid_argument(
@@ -3998,11 +3798,9 @@ fn decode_exec_request(body: Option<serde_json::Value>) -> Result<ExecRequest> {
     }
     Ok(ExecRequest {
         submission_key: Some(submission.submission_key),
-        legacy_submission_key_is_run_id: false,
         envelope: submission.envelope,
         runner: direct.runner,
         raw_exec: direct.raw_exec,
-        workspace_claim_binding: None,
         workspace_owner_request: direct.workspace_owner_request,
     })
 }
@@ -4033,11 +3831,9 @@ fn recover_staged_direct_jobs_after_owner_death(
         };
         let request = ExecRequest {
             submission_key: None,
-            legacy_submission_key_is_run_id: false,
             envelope: envelope.clone(),
             runner: None,
             raw_exec: false,
-            workspace_claim_binding: None,
             workspace_owner_request: None,
         };
         // Rebind before preparation, so a terminal preparation failure and any
@@ -4137,11 +3933,9 @@ pub fn enqueue_staged_direct_exec(
     enqueue_exec_request(
         ExecRequest {
             submission_key: None,
-            legacy_submission_key_is_run_id: false,
             envelope: materialized_envelope,
             runner,
             raw_exec: false,
-            workspace_claim_binding: None,
             workspace_owner_request: None,
         },
         job_store,
@@ -4223,39 +4017,26 @@ fn enqueue_exec_request(
         })?;
     let execution_metadata =
         (!request.envelope.metadata.is_null()).then_some(&request.envelope.metadata);
-    // Reconciliation bindings are not direct execution authority. Existing
-    // clients may still send one only for ordinary compatibility; workspace
-    // work must carry an owner registration request negotiated through v2.
-    if request.workspace_owner_request.is_some() && request.workspace_claim_binding.is_some() {
+    let inline_secret_names = secret_env_plan
+        .secret_env_names()
+        .into_iter()
+        .filter(|name| {
+            dispatch
+                .env
+                .get(name)
+                .is_some_and(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>();
+    if !inline_secret_names.is_empty() {
         return Err(Error::validation_invalid_argument(
-            "workspace_claim_binding",
-            "direct workspace execution uses an owner lease, not a reconciliation claim",
-            None,
-            None,
+            "env",
+            "durable reverse-runner jobs cannot accept inline secret env values",
+            Some("durable_reverse_runner_inline_secret_env".to_string()),
+            Some(vec![format!(
+                "Inline secret variables: {}",
+                inline_secret_names.join(", ")
+            )]),
         ));
-    }
-    if !request.legacy_submission_key_is_run_id {
-        let inline_secret_names = secret_env_plan
-            .secret_env_names()
-            .into_iter()
-            .filter(|name| {
-                dispatch
-                    .env
-                    .get(name)
-                    .is_some_and(|value| !value.is_empty())
-            })
-            .collect::<Vec<_>>();
-        if !inline_secret_names.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "env",
-                "durable reverse-runner jobs cannot accept inline secret env values",
-                Some("durable_reverse_runner_inline_secret_env".to_string()),
-                Some(vec![format!(
-                    "Inline secret variables: {}",
-                    inline_secret_names.join(", ")
-                )]),
-            ));
-        }
     }
     crate::api_jobs::with_runner_job_preparation(|p| {
         p.validate_lab_runner_workload_dispatch(
@@ -4303,14 +4084,7 @@ fn enqueue_exec_request(
     };
     let source_snapshot = Some(plan.source_snapshot.clone());
 
-    let mut lifecycle = request.envelope.lifecycle.clone();
-    if request.legacy_submission_key_is_run_id {
-        if let Some(durable_run_id) = submission_key.clone() {
-            lifecycle
-                .get_or_insert_with(RunnerJobLifecycleMetadata::default)
-                .durable_run_id = Some(durable_run_id);
-        }
-    }
+    let lifecycle = request.envelope.lifecycle.clone();
     let summary = json!({
         "runner_id": plan.runner_id,
         "cwd": plan.cwd,
@@ -4399,7 +4173,6 @@ fn enqueue_exec_request(
         command: plan.command.clone(),
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
-        workspace_claim_binding: request.workspace_claim_binding.clone(),
         workspace_owner_lease: workspace_owner_lease.clone(),
     };
     let execution_controller_run_id = lifecycle
@@ -4844,21 +4617,19 @@ fn admit_controller_job(
         controller_job,
     )?;
     let (job, compacted, disposition) = match outcome {
-        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => {
-            (job_store.get(job_id)?, false, "created")
-        }
+        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => (
+            job_store.get(job_id)?,
+            false,
+            ControllerJobSubmissionDisposition::Created,
+        ),
         crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
             let compacted = job_store.get(job.id).is_err();
-            (*job, compacted, "reused")
+            (*job, compacted, ControllerJobSubmissionDisposition::Reused)
         }
     };
     Ok(ControllerJobAdmission {
         job,
-        disposition: match disposition {
-            "created" => ControllerJobSubmissionDisposition::Created,
-            "reused" => ControllerJobSubmissionDisposition::Reused,
-            _ => ControllerJobSubmissionDisposition::Unknown,
-        },
+        disposition,
         compacted,
     })
 }
@@ -4868,11 +4639,7 @@ fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serd
     json!({
         "command": "api.controller.jobs.create",
         "job": admission.job,
-        "submission": { "disposition": match admission.disposition {
-            ControllerJobSubmissionDisposition::Created => "created",
-            ControllerJobSubmissionDisposition::Reused => "reused",
-            ControllerJobSubmissionDisposition::Unknown => "unknown",
-        } },
+        "submission": { "disposition": admission.disposition.as_str() },
         "terminal_tombstone": if admission.compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
         "poll": if admission.compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
         "start": if admission.compacted { serde_json::Value::Null } else { json!({ "method": "POST", "path": format!("/controller/jobs/{job_id}/start") }) },
@@ -5419,7 +5186,6 @@ mod tests {
                     command: vec!["true".to_string()],
                     cwd: Some("/tmp".to_string()),
                     lifecycle: None,
-                    workspace_claim_binding: None,
                     workspace_owner_lease: None,
                 },
                 None,
@@ -6229,39 +5995,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolve_exec_idempotency_key_prefers_the_explicit_controller_key() {
-        let metadata = json!({ "durable_run_id": "run-from-metadata" });
-
-        // Explicit key wins over the metadata-reconstructed run id.
-        assert_eq!(
-            resolve_exec_idempotency_key(Some("explicit-run"), Some(&metadata)).as_deref(),
-            Some("explicit-run")
-        );
-
-        // The explicit key works on its own, even with no nested metadata — the
-        // whole point of asserting it up front instead of reconstructing it.
-        assert_eq!(
-            resolve_exec_idempotency_key(Some("explicit-run"), None).as_deref(),
-            Some("explicit-run")
-        );
-
-        // A blank/whitespace explicit key does not mask the metadata fallback.
-        assert_eq!(
-            resolve_exec_idempotency_key(Some("   "), Some(&metadata)).as_deref(),
-            Some("run-from-metadata")
-        );
-
-        // No explicit key falls back to the reconstructed durable run id.
-        assert_eq!(
-            resolve_exec_idempotency_key(None, Some(&metadata)).as_deref(),
-            Some("run-from-metadata")
-        );
-
-        // Nothing to key on at all.
-        assert_eq!(resolve_exec_idempotency_key(None, None), None);
-        assert_eq!(resolve_exec_idempotency_key(None, Some(&json!({}))), None);
-    }
     use crate::test_support::with_isolated_home;
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -6302,7 +6035,6 @@ mod tests {
             command: vec!["test".to_string()],
             cwd: None,
             lifecycle: None,
-            workspace_claim_binding: None,
             workspace_owner_lease: Some(lease),
         }
     }
@@ -6329,6 +6061,7 @@ mod tests {
                     "runner_id": "lab",
                     "command": "homeboy generic-workload",
                     "expected_daemon_lease_id": lease_id,
+                    "admission_lease_protocol": 1,
                 })),
                 &store,
             )
@@ -6347,9 +6080,15 @@ mod tests {
             assert_eq!(active_jobs[0].operation, "runner.admission");
             assert_eq!(active_jobs[0].kind, "runner.admission");
 
-            let released =
-                release_admission(&format!("/admissions/{job_id}/release"), None, &store)
-                    .expect("release admission");
+            let token = reserved["admission_token"]
+                .as_str()
+                .expect("admission token");
+            let released = release_admission(
+                &format!("/admissions/{job_id}/release"),
+                Some(json!({ "admission_token": token })),
+                &store,
+            )
+            .expect("release admission");
             assert_eq!(released["job"]["status"], "cancelled");
             assert_eq!(
                 daemon_freshness_report(&store)
@@ -6380,7 +6119,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_accepts_legacy_null_owner_request_but_rejects_malformed_structured_value() {
+    fn admission_accepts_null_owner_request_but_rejects_malformed_structured_value() {
         with_isolated_home(|_| {
             let lease_id = "lease-null-owner-request";
             write_test_lease(lease_id);
@@ -6391,7 +6130,7 @@ mod tests {
                     "expected_daemon_lease_id": lease_id,
                     "admission_lease_protocol": 1,
                 }),
-                // Older controllers serialized `Option::None` as JSON null.
+                // JSON null is the serde encoding of an absent `Option`.
                 json!({
                     "runner_id": "lab",
                     "expected_daemon_lease_id": lease_id,
@@ -6418,6 +6157,47 @@ mod tests {
             assert!(error
                 .message
                 .contains("malformed direct workspace owner request"));
+        });
+    }
+
+    #[test]
+    fn admission_without_lease_protocol_v1_is_refused_before_reserving() {
+        with_isolated_home(|_| {
+            let lease_id = "lease-unversioned-admission";
+            write_test_lease(lease_id);
+            let store = JobStore::default();
+            let error = reserve_admission(
+                Some(json!({
+                    "runner_id": "lab",
+                    "expected_daemon_lease_id": lease_id,
+                    "idempotency_key": "unversioned",
+                })),
+                &store,
+            )
+            .expect_err("an admission without lease protocol v1 is refused");
+            assert_eq!(error.details["field"], "admission_lease_protocol");
+            assert!(store.list().is_empty());
+        });
+    }
+
+    #[test]
+    fn exec_without_runner_submission_is_refused_before_admission() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let store = JobStore::default();
+            let error = enqueue_exec_job(
+                Some(json!({
+                    "runner_id": "lab",
+                    "cwd": "/tmp",
+                    "command": ["homeboy", "test"],
+                    "idempotency_key": "scalar-exec",
+                })),
+                &store,
+            )
+            .expect_err("a scalar exec body is refused");
+            assert_eq!(error.details["field"], "submission");
+            assert!(error.message.contains("Runner API v1"));
+            assert!(store.list().is_empty());
         });
     }
 
@@ -6910,14 +6690,14 @@ mod tests {
             .expect("durable store");
             store.fail_next_durable_writes(1);
             let workspace = direct_owner_workspace();
-            let error = enqueue_exec_job(
-                Some(json!({
-                    "runner_id": "lab", "cwd": "/tmp", "command": ["homeboy", "test"],
-                    "workspace_owner_request": { "workspace": workspace, "owner_id": "queue-commit" },
-                })),
-                &store,
-            )
-            .expect_err("durable queue commit fails");
+            let mut body = crate::test_support::direct_exec_body(
+                json!({ "runner_id": "lab", "cwd": "/tmp", "command": ["homeboy", "test"] }),
+                "queue-commit",
+            );
+            body["workspace_owner_request"] =
+                json!({ "workspace": workspace, "owner_id": "queue-commit" });
+            let error =
+                enqueue_exec_job(Some(body), &store).expect_err("durable queue commit fails");
             assert_eq!(error.code.as_str(), "internal.io_error");
             assert!(store.list().is_empty());
             daemon_workspace_claim_store()
@@ -6939,6 +6719,7 @@ mod tests {
                     "command": "homeboy agent-task run-plan",
                     "expected_daemon_lease_id": lease_id,
                     "idempotency_key": "mdi-134-bootstrap-hash-attempt-1",
+                    "admission_lease_protocol": 1,
                 }))
             };
 
@@ -6958,9 +6739,13 @@ mod tests {
                 "one durable attempt creates exactly one admission reservation"
             );
 
-            let released =
-                release_admission(&format!("/admissions/{job_id}/release"), None, &store)
-                    .expect("release reservation after failed handoff");
+            let token = first["admission_token"].as_str().expect("admission token");
+            let released = release_admission(
+                &format!("/admissions/{job_id}/release"),
+                Some(json!({ "admission_token": token })),
+                &store,
+            )
+            .expect("release reservation after failed handoff");
             assert_eq!(released["job"]["status"], "cancelled");
             assert_eq!(
                 daemon_freshness_report(&store)
@@ -6969,55 +6754,6 @@ mod tests {
                 0,
                 "a failed or timed-out handoff leaves no active admission job"
             );
-        });
-    }
-
-    #[test]
-    fn admission_renew_and_release_require_the_exact_durable_binding() {
-        with_isolated_home(|_| {
-            let lease_id = "lease-bound-admission";
-            write_test_lease(lease_id);
-            let store = JobStore::default();
-            let workspace = crate::workspace_claim::WorkspaceIdentity::new("test", "run-1")
-                .expect("workspace identity");
-            let claim = crate::workspace_claim::WorkspaceClaim {
-                schema: crate::workspace_claim::WORKSPACE_CLAIM_SCHEMA.to_string(),
-                protocol: crate::workspace_claim::WorkspaceClaimProtocol::current(),
-                workspace: workspace.clone(),
-                lifecycle_revision: 7,
-                token: "claim-token-a".to_string(),
-                expires_at_ms: u64::MAX,
-            };
-            let binding = crate::workspace_claim::WorkspaceClaimBinding {
-                workspace,
-                lifecycle_revision: 7,
-                claim: Some(claim),
-            };
-            let reserved = reserve_admission(
-                Some(json!({
-                    "runner_id": "lab", "expected_daemon_lease_id": lease_id,
-                    "idempotency_key": "bound-run", "admission_lease_protocol": 1,
-                    "workspace_claim_binding": binding,
-                })),
-                &store,
-            )
-            .expect("reserve bound admission");
-            let job_id = reserved["job"]["id"].as_str().expect("job id");
-            let token = reserved["admission_token"].as_str().expect("token");
-            let mut substituted = binding.clone();
-            substituted.claim.as_mut().expect("claim").token = "claim-token-b".to_string();
-            assert!(renew_admission(
-                &format!("/admissions/{job_id}/renew"),
-                Some(json!({ "admission_token": token, "workspace_claim_binding": substituted })),
-                &store,
-            )
-            .is_err());
-            assert!(release_admission(
-                &format!("/admissions/{job_id}/release"),
-                Some(json!({ "admission_token": token, "workspace_claim_binding": binding })),
-                &store,
-            )
-            .is_ok());
         });
     }
 
@@ -7048,17 +6784,19 @@ mod tests {
             assert!(reservation["admission_token"].as_str().is_some());
 
             let accepted = enqueue_exec_job(
-                Some(json!({
-                    "runner_id": "lab",
-                    "cwd": "/tmp",
-                    "command": ["homeboy", "agent-task", "run-plan"],
-                    "idempotency_key": run_id,
-                    "lifecycle": {
-                        "durable_run_id": run_id,
-                        "source": "runner-daemon",
-                        "kind": "runner.exec",
-                    },
-                })),
+                Some(crate::test_support::direct_exec_body(
+                    json!({
+                        "runner_id": "lab",
+                        "cwd": "/tmp",
+                        "command": ["homeboy", "agent-task", "run-plan"],
+                        "lifecycle": {
+                            "durable_run_id": run_id,
+                            "source": "runner-daemon",
+                            "kind": "runner.exec",
+                        },
+                    }),
+                    run_id,
+                )),
                 &store,
             )
             .expect("daemon accepts execution");
@@ -7097,11 +6835,14 @@ mod tests {
             let jobs = (0..6)
                 .map(|index| {
                     let response = enqueue_exec_job(
-                        Some(json!({
-                            "runner_id": "lab",
-                            "cwd": "/tmp",
-                            "command": ["__homeboy_test_hold__", index.to_string()],
-                        })),
+                        Some(crate::test_support::direct_exec_body(
+                            json!({
+                                "runner_id": "lab",
+                                "cwd": "/tmp",
+                                "command": ["__homeboy_test_hold__", index.to_string()],
+                            }),
+                            &format!("read-only-exec-{index}"),
+                        )),
                         &store,
                     )
                     .expect("daemon accepts read-only exec");
@@ -7401,7 +7142,7 @@ mod tests {
 
     #[test]
     fn canonical_run_ref_metadata_prefers_lifecycle_run_id() {
-        let lifecycle = RunnerJobLifecycleMetadata {
+        let lifecycle = crate::api_jobs::RunnerJobLifecycleMetadata {
             source: Some("runner-daemon".to_string()),
             kind: Some("runner.exec".to_string()),
             durable_run_id: Some("agent-task-run-123".to_string()),
@@ -7425,7 +7166,7 @@ mod tests {
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
         let store = JobStore::default();
         let response = enqueue_exec_job(
-            Some(json!({
+            Some(crate::test_support::direct_exec_body(json!({
                 "runner_id": "homeboy-lab",
                 "cwd": "/tmp",
                 "command": ["homeboy", "agent-task", "run-plan", "--plan", "{}", "--record-run-id", "run-8926"],
@@ -7452,7 +7193,7 @@ mod tests {
                     "kind": "runner.exec",
                     "durable_run_id": "run-8926"
                 }
-            })),
+            }), "run-8926")),
             &store,
         )
         .expect("direct daemon accepts the canonical agent-task workload");

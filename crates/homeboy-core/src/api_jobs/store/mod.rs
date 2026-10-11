@@ -338,9 +338,6 @@ pub(crate) struct LocalRunnerJob {
     pub(crate) command: Vec<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) lifecycle: Option<super::remote_runner::RunnerJobLifecycleMetadata>,
-    /// Reconciliation claims remain reverse-broker-only authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     /// Exact direct-daemon authority required to execute this queued job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[allow(
@@ -1045,7 +1042,6 @@ impl JobStore {
         metadata: Value,
         idempotency_key: &str,
         now: u64,
-        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
         workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         self.durable_transaction(|inner| {
@@ -1061,19 +1057,6 @@ impl JobStore {
                     return Err(Error::validation_invalid_argument(
                         "idempotency_key",
                         "admission idempotency key belongs to a terminal reservation",
-                        Some(idempotency_key.to_string()),
-                        None,
-                    ));
-                }
-                if stored
-                    .local_runner
-                    .as_ref()
-                    .and_then(|runner| runner.workspace_claim_binding.as_ref())
-                    != workspace_claim_binding.as_ref()
-                {
-                    return Err(Error::validation_invalid_argument(
-                        "workspace_claim_binding",
-                        "admission idempotency key belongs to a differently bound reservation",
                         Some(idempotency_key.to_string()),
                         None,
                     ));
@@ -1114,7 +1097,6 @@ impl JobStore {
                 metadata,
                 Some(idempotency_key.to_string()),
                 now,
-                workspace_claim_binding,
                 workspace_owner_lease,
             )
         })
@@ -1124,35 +1106,10 @@ impl JobStore {
         &self,
         metadata: Value,
         now: u64,
-        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
         workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         self.durable_transaction(|inner| {
-            self.create_admission_inner(
-                inner,
-                metadata,
-                None,
-                now,
-                workspace_claim_binding,
-                workspace_owner_lease,
-            )
-        })
-    }
-
-    /// Legacy, tokenless admission used only by pre-lease protocol clients
-    /// during a rolling daemon upgrade.
-    pub(crate) fn create_or_reuse_active_admission(
-        &self,
-        metadata: Value,
-        idempotency_key: &str,
-    ) -> (Job, bool) {
-        self.create_or_reuse_active_local_runner_job(LocalRunnerJobRequest {
-            operation: "runner.admission".to_string(),
-            source_snapshot: None,
-            metadata: Some(metadata),
-            path_materialization_plan: None,
-            local_runner: None,
-            admission_idempotency_key: Some(idempotency_key.to_string()),
+            self.create_admission_inner(inner, metadata, None, now, workspace_owner_lease)
         })
     }
 
@@ -1162,7 +1119,6 @@ impl JobStore {
         metadata: Value,
         idempotency_key: Option<String>,
         now: u64,
-        workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
         workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         let (job, created) = self.create_or_reuse_active_local_runner_job_inner(
@@ -1177,7 +1133,6 @@ impl JobStore {
                     command: Vec::new(),
                     cwd: None,
                     lifecycle: None,
-                    workspace_claim_binding,
                     workspace_owner_lease: workspace_owner_lease.clone(),
                 }),
                 admission_idempotency_key: idempotency_key.clone(),
@@ -1189,7 +1144,7 @@ impl JobStore {
                 let lease = stored.admission_lease.as_mut().ok_or_else(|| {
                     Error::validation_invalid_argument(
                         "idempotency_key",
-                        "admission idempotency key belongs to a legacy reservation",
+                        "admission idempotency key belongs to a reservation without a lease",
                         idempotency_key.clone(),
                         None,
                     )
@@ -1403,38 +1358,6 @@ impl JobStore {
             let job = stored.job.clone();
             Ok(job)
         })
-    }
-
-    pub(crate) fn admission_is_leased(&self, job_id: Uuid) -> Result<bool> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        Ok(stored.admission_lease.is_some())
-    }
-
-    pub(crate) fn admission_workspace_claim_binding(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        if stored.job.operation != "runner.admission" {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "job is not an admission reservation",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        Ok(stored
-            .local_runner
-            .as_ref()
-            .and_then(|runner| runner.workspace_claim_binding.clone()))
     }
 
     pub(crate) fn admission_workspace_owner_lease(

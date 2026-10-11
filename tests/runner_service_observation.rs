@@ -288,9 +288,11 @@ fn runner_service_lease_publication_race_retries_denial_and_preserves_job_identi
         );
 
         let marker = root.join("effect");
-        let request = json!({"runner_id":"fixture-local", "cwd":root,
-            "idempotency_key":"one-fixture-execution", "command":["/bin/sh","-c",
-                format!("sleep 8; echo effect >> '{}'", marker.display())]});
+        let request = homeboy_core::test_support::direct_exec_body(
+            json!({"runner_id":"fixture-local", "cwd":root, "command":["/bin/sh","-c",
+                format!("sleep 8; echo effect >> '{}'", marker.display())]}),
+            "one-fixture-execution",
+        );
         // Lose the submission transport before its admission response. Recovery
         // must resolve the same idempotency key, not start another execution.
         {

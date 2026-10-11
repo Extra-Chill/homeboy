@@ -737,11 +737,7 @@ fn admit_loop_work_job(
         "loop_id": loop_id,
         "job_id": job_id,
         "state": "submitted",
-        "admission": match submitted.disposition {
-            homeboy_core::daemon::ControllerJobSubmissionDisposition::Created => "created",
-            homeboy_core::daemon::ControllerJobSubmissionDisposition::Reused => "reused",
-            homeboy_core::daemon::ControllerJobSubmissionDisposition::Unknown => "unknown",
-        },
+        "admission": submitted.disposition.as_str(),
     }))
 }
 
