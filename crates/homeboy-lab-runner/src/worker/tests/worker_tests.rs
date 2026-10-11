@@ -284,7 +284,7 @@ fn reverse_worker_restart_cannot_replay_a_consumed_receipt_and_keeps_context_evi
             .claim_remote_runner_job("lab", None, 30_000, None)
             .expect("claim job")
             .expect("queued job");
-        let context = claim.execution_context.expect("execution context");
+        let context = claim.execution_context;
         let claim_id = claim.job.claim_id.as_deref().expect("claim id");
 
         // The first worker reaches the provider boundary, then is interrupted

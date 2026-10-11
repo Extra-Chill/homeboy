@@ -22,13 +22,11 @@ impl RunnerJobExecutionProtocol {
         }
     }
 
+    /// Only the current version is served. Controllers, brokers and workers
+    /// upgrade together, so an older version is never negotiated down.
     pub fn is_supported(&self) -> bool {
         self.capability == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            && (1..=RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION).contains(&self.version)
-    }
-
-    pub fn uses_envelope_only_claim(&self) -> bool {
-        self.version >= 2
+            && self.version == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION
     }
 }
 
@@ -88,5 +86,22 @@ mod tests {
         assert!(!is_internal_control_env(RUNNER_HOSTED_EXEC_ENV));
         assert!(!is_internal_control_env(RUNNER_ID_ENV));
         assert!(!is_internal_control_env("HOMEBOY_LAB_EXECUTION_RUNNER_ID"));
+    }
+
+    #[test]
+    fn only_the_current_execution_protocol_is_supported() {
+        assert!(RunnerJobExecutionProtocol::current().is_supported());
+        for version in [0, 1, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION + 1] {
+            assert!(!RunnerJobExecutionProtocol {
+                capability: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY.to_string(),
+                version,
+            }
+            .is_supported());
+        }
+        assert!(!RunnerJobExecutionProtocol {
+            capability: "other".to_string(),
+            version: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
+        }
+        .is_supported());
     }
 }

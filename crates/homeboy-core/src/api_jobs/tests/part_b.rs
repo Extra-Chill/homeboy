@@ -2020,7 +2020,6 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim envelope")
         .expect("claimed envelope");
-    assert!(claim.request.is_none());
     assert!(serde_json::to_value(&claim)
         .expect("claim serializes")
         .get("request")
@@ -2066,103 +2065,61 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
 }
 
 #[test]
-fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
+fn request_only_remote_runner_record_is_refused_with_a_typed_store_error() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
-    let workspace = crate::workspace_claim::WorkspaceIdentity::new("test", "legacy-owner")
-        .expect("workspace identity");
-    let lease = crate::workspace_claim::WorkspaceOwnerLease {
-        schema: crate::workspace_claim::WORKSPACE_OWNER_LEASE_SCHEMA.to_string(),
-        protocol: crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
-        workspace,
-        owner_id: "owner".to_string(),
-        lifecycle_revision: 1,
-        token: "legacy-token".to_string(),
-        expires_at_ms: crate::api_jobs::timestamp_ms() + 60_000,
-    };
-    let mut request = remote_runner_request("homeboy-lab", None);
-    request.workspace_owner_lease = Some(lease.clone());
+    let request = remote_runner_request("homeboy-lab", None);
     let job = store
         .submit_runner_api_fixture(request.clone())
         .expect("fixture submit");
     drop(store);
 
+    let assert_typed_refusal = |error: crate::error::Error| {
+        assert_eq!(error.code, crate::error::ErrorCode::ConfigInvalidJson);
+        let detail = error.details["error"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("unknown field `request`"),
+            "the refusal names the old field: {detail}"
+        );
+    };
+
+    // The request-only shape written before reverse claims became
+    // envelope-only. It is not reinterpreted as an envelope.
     let mut persisted = super::durable_snapshot(&path);
     let remote = persisted["jobs"][0]["remote_runner"]
         .as_object_mut()
         .expect("remote runner state");
     remote.remove("envelope");
-    remote.remove("workspace_owner_lease");
     remote.insert(
         "request".to_string(),
-        serde_json::to_value(&request).expect("legacy request JSON"),
+        serde_json::to_value(&request).expect("request JSON"),
     );
-    let mut conflicting = persisted.clone();
-    let mut conflicting_lease = lease.clone();
-    conflicting_lease.token = "conflicting-token".to_string();
-    conflicting["jobs"][0]["remote_runner"]["workspace_owner_lease"] =
-        serde_json::to_value(conflicting_lease).expect("conflicting lease JSON");
-    assert!(JobStore::open_without_reconciliation_from_bytes(
-        temp.path().join("conflicting-authority.json"),
-        &serde_json::to_vec(&conflicting).expect("conflicting store JSON"),
+    let snapshot_error = JobStore::open_without_reconciliation_from_bytes(
+        temp.path().join("request-only.json"),
+        &serde_json::to_vec(&persisted).expect("request-only store JSON"),
     )
-    .is_err());
-    super::install_legacy_store(&path, &persisted);
+    .expect_err("a request-only snapshot is refused");
+    assert_typed_refusal(snapshot_error);
 
-    let store = JobStore::open_without_reconciliation(&path).expect("reopen legacy record");
-    let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
-        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            .to_string(),
-        version: 1,
-    };
-    let claim = store
-        .claim_remote_runner_job_with_execution_protocol(
-            "homeboy-lab",
-            None,
-            30_000,
-            None,
-            Some(&protocol),
+    // The same record as a row of the SQLite store refuses the load instead of
+    // panicking or being silently dropped.
+    let connection = rusqlite::Connection::open(super::persistence::tombstone_path(&path))
+        .expect("open SQL job store");
+    let updated = connection
+        .execute(
+            "UPDATE daemon_jobs SET body = ?1 WHERE job_id = ?2",
+            rusqlite::params![
+                serde_json::to_string(&persisted["jobs"][0]).expect("request-only row"),
+                job.id.to_string(),
+            ],
         )
-        .expect("claim")
-        .expect("claimed");
-    assert_eq!(
-        claim.request.as_ref().expect("protocol-v1 request").command,
-        request.command
-    );
-    assert_eq!(
-        claim.envelope.dispatch.as_ref().expect("dispatch").command,
-        request.command
-    );
-    assert_eq!(claim.workspace_owner_lease, Some(lease.clone()));
-    let renewed = crate::workspace_claim::WorkspaceOwnerLease {
-        expires_at_ms: lease.expires_at_ms + 30_000,
-        ..lease.clone()
-    };
-    store
-        .renew_remote_runner_claim_with_workspace_owner_lease(
-            job.id,
-            "homeboy-lab",
-            claim.job.claim_id.as_deref().expect("claim id"),
-            30_000,
-            Some(&lease),
-            Some(renewed.clone()),
-        )
-        .expect("renew legacy owner lease");
-    assert_eq!(
-        store
-            .remote_runner_workspace_owner_lease(job.id)
-            .expect("owner lease"),
-        Some(renewed)
-    );
-    let persisted = super::durable_snapshot(&path);
-    let remote = &persisted["jobs"][0]["remote_runner"];
-    assert!(remote.get("envelope").is_some());
-    assert!(remote.get("request").is_none());
-    assert_eq!(
-        remote["workspace_owner_lease"]["expires_at_ms"],
-        lease.expires_at_ms + 30_000
-    );
+        .expect("rewrite job row");
+    assert_eq!(updated, 1);
+    drop(connection);
+    let row_error =
+        JobStore::open_without_reconciliation(&path).expect_err("a request-only row is refused");
+    assert_typed_refusal(row_error);
 }
 
 #[test]
@@ -2354,12 +2311,7 @@ fn remote_runner_submission_terminal_replay_returns_original_projection_without_
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
         .expect("claim")
         .expect("job claimed");
-    let context_id = claim
-        .execution_context
-        .as_ref()
-        .expect("execution context")
-        .id()
-        .to_string();
+    let context_id = claim.execution_context.id().to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
     store
         .consume_remote_runner_execution(accepted.id, "homeboy-lab", &claim_id, &context_id)

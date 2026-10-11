@@ -37,7 +37,7 @@ pub(super) fn claim_job(
             project_id: options.project_id.clone(),
             lease_ms: Some(options.lease_ms.max(1)),
             concurrency_limit: options.concurrency_limit,
-            execution_protocol: Some(RunnerJobExecutionProtocol::current()),
+            execution_protocol: RunnerJobExecutionProtocol::current(),
             workspace_claim_protocol: Some(WorkspaceClaimProtocol::current()),
             workspace_owner_lease_protocol: Some(WorkspaceOwnerLeaseProtocol::current()),
         })

@@ -414,7 +414,7 @@ fn canonical_claim_response(store: &JobStore, request: &MockRequest) -> Value {
             request.lease_ms.unwrap_or(30_000),
             request.concurrency_limit,
             homeboy_core::api_jobs::RemoteRunnerClaimProtocols {
-                execution: request.execution_protocol.as_ref(),
+                execution: &request.execution_protocol,
                 workspace_claim: request.workspace_claim_protocol.as_ref(),
                 workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
             },

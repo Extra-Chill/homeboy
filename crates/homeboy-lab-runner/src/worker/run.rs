@@ -254,37 +254,14 @@ fn run_once_output(
 
     // The broker claim is the execution boundary. Verify the typed receipt
     // before materializing inputs or invoking any provider/runtime adapter.
-    let execution_context = claim.execution_context.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "execution_context",
-            "reverse runner claim predates authenticated execution context support",
+    if !claim.execution_protocol.is_supported() {
+        return Err(Error::validation_invalid_argument(
+            "execution_protocol",
+            "reverse runner claim has an unsupported execution-context protocol",
             Some(claim.job_id.clone()),
-            Some(vec![
-                "Resubmit the handoff through a compatible controller before retrying.".to_string(),
-            ]),
-        )
-    })?;
-    claim
-        .execution_protocol
-        .as_ref()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "execution_protocol",
-                "reverse runner claim predates execution-context protocol negotiation",
-                Some(claim.job_id.clone()),
-                None,
-            )
-        })?
-        .is_supported()
-        .then_some(())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "execution_protocol",
-                "reverse runner claim has an unsupported execution-context protocol",
-                Some(claim.job_id.clone()),
-                None,
-            )
-        })?;
+            None,
+        ));
+    }
     if claim.workspace_claim_binding.is_some() {
         claim
             .workspace_claim_protocol
@@ -313,8 +290,13 @@ fn run_once_output(
             })?
             .verify()?;
     }
-    let execution_context = RunnerJobExecutionContext::from_assertion(execution_context.clone())
-        .verify_claimed_execution(&claim.job_id, &options.runner_id, claim.claim_expires_at_ms)?;
+    let execution_context =
+        RunnerJobExecutionContext::from_assertion(claim.execution_context.clone())
+            .verify_claimed_execution(
+                &claim.job_id,
+                &options.runner_id,
+                claim.claim_expires_at_ms,
+            )?;
 
     // Commit runner-owned evidence before materializing any broker input. The
     // controller persists the same identity in its claim event; keeping both

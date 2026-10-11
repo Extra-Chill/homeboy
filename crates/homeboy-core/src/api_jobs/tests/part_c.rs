@@ -644,12 +644,7 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, Some(1))
         .expect("claim succeeds")
         .expect("first job is claimed");
-    let first_context_id = first_claim
-        .execution_context
-        .as_ref()
-        .expect("execution context")
-        .id()
-        .to_string();
+    let first_context_id = first_claim.execution_context.id().to_string();
     assert_eq!(first_claim.job.id, first.id);
     let first_claim_id = first_claim.job.claim_id.as_deref().expect("claim id");
     store
@@ -733,7 +728,7 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    let context = claim.execution_context.as_ref().expect("execution context");
+    let context = &claim.execution_context;
     let serialized_context = serde_json::to_value(context).expect("serialize context");
     assert_eq!(serialized_context["controller_run_id"], "cook-42");
     assert_eq!(
@@ -762,14 +757,12 @@ fn remote_runner_claim_persists_and_requires_authenticated_execution_context() {
             == Some(&serde_json::to_value(context).expect("serialize context"))
     }));
 
-    let mut old_wire = serde_json::to_value(&claim).expect("serialize claim");
-    old_wire
+    let mut context_free_wire = serde_json::to_value(&claim).expect("serialize claim");
+    context_free_wire
         .as_object_mut()
         .expect("claim object")
         .remove("execution_context");
-    let old_claim: RemoteRunnerJobClaim =
-        serde_json::from_value(old_wire).expect("decode old claim");
-    assert!(old_claim.execution_context.is_none());
+    assert!(serde_json::from_value::<RemoteRunnerJobClaim>(context_free_wire).is_err());
 }
 
 #[test]
@@ -789,7 +782,7 @@ fn remote_runner_context_rejects_expired_or_different_durable_claims() {
         .claim_remote_runner_job("homeboy-lab", Some("two"), 30_000, None)
         .expect("second claim")
         .expect("second job");
-    let context = first_claim.execution_context.expect("first context");
+    let context = first_claim.execution_context;
 
     assert_ne!(first.id, second.id);
     assert!(context
@@ -813,7 +806,7 @@ fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() 
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    let context = claim.execution_context.expect("execution context");
+    let context = claim.execution_context;
     let claim_id = claim.job.claim_id.as_deref().expect("claim id");
 
     let consumed = store
@@ -838,7 +831,7 @@ fn remote_runner_execution_receipt_is_one_time_and_revalidates_the_live_claim() 
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
         .expect("expired claim succeeds")
         .expect("expired job is claimed");
-    let expired_context = expired_claim.execution_context.expect("expired context");
+    let expired_context = expired_claim.execution_context;
     let expired_claim_id = expired_claim
         .job
         .claim_id
@@ -872,37 +865,37 @@ fn remote_runner_claim_rejects_workers_without_the_context_protocol() {
         .submit_runner_api_fixture(request)
         .expect("remote runner job queues");
 
-    let missing = store.claim_remote_runner_job_with_execution_protocol(
-        "homeboy-lab",
-        None,
-        30_000,
-        None,
-        None,
-    );
-    assert!(missing.is_err());
-    assert_eq!(
-        store.get(job.id).expect("job remains queued").status,
-        JobStatus::Queued
-    );
-
-    let old = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
-        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            .to_string(),
-        version: 0,
-    };
-    assert!(store
-        .claim_remote_runner_job_with_execution_protocol(
-            "homeboy-lab",
-            None,
-            30_000,
-            None,
-            Some(&old)
-        )
-        .is_err());
-    assert_eq!(
-        store.get(job.id).expect("job remains queued").status,
-        JobStatus::Queued
-    );
+    // Version 1 was the context-free/request-projection protocol. Only the
+    // current version is served; older and unknown versions are refused.
+    for version in [0, 1, 99] {
+        let old = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
+            capability:
+                crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
+                    .to_string(),
+            version,
+        };
+        assert!(store
+            .claim_remote_runner_job_with_protocols(
+                "homeboy-lab",
+                None,
+                30_000,
+                None,
+                super::remote_runner::RemoteRunnerClaimProtocols {
+                    execution: &old,
+                    workspace_claim: Some(
+                        &crate::workspace_claim::WorkspaceClaimProtocol::current()
+                    ),
+                    workspace_owner_lease: Some(
+                        &crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current()
+                    ),
+                },
+            )
+            .is_err());
+        assert_eq!(
+            store.get(job.id).expect("job remains queued").status,
+            JobStatus::Queued
+        );
+    }
 }
 
 #[test]
@@ -935,7 +928,8 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
             30_000,
             None,
             super::remote_runner::RemoteRunnerClaimProtocols {
-                execution: None,
+                execution:
+                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
                 workspace_claim: None,
                 workspace_owner_lease: None
             }
@@ -957,9 +951,8 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
             30_000,
             None,
             super::remote_runner::RemoteRunnerClaimProtocols {
-                execution: Some(
-                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()
-                ),
+                execution:
+                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
                 workspace_claim: Some(&old),
                 workspace_owner_lease: None
             },
@@ -972,70 +965,7 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
 }
 
 #[test]
-fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
-    let store = JobStore::default();
-    let job = store
-        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
-        .expect("context-free job queues");
-
-    let claim = store
-        .claim_remote_runner_job_with_execution_protocol("homeboy-lab", None, 30_000, None, None)
-        .expect("legacy worker can claim context-free work")
-        .expect("legacy job is claimed");
-    assert_eq!(claim.job.id, job.id);
-    assert!(claim.request.is_some());
-    assert!(claim.execution_context.is_none());
-    assert!(claim.execution_protocol.is_none());
-    assert!(store.events(job.id).expect("events").iter().all(|event| {
-        event
-            .data
-            .as_ref()
-            .and_then(|data| data.get("runner_job_execution_context"))
-            .is_none()
-    }));
-}
-
-#[test]
-fn remote_runner_protocol_v1_claim_retains_legacy_request_projection() {
-    let store = JobStore::default();
-    let request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    let job = store
-        .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
-            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: homeboy_runner_contract::RUNNER_API_V1,
-            submission_key: "submission-v1-worker".to_string(),
-            envelope: request.execution_envelope(),
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-            credential_delivery: None,
-        })
-        .expect("runner API request queues");
-    let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
-        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            .to_string(),
-        version: 1,
-    };
-
-    let claim = store
-        .claim_remote_runner_job_with_execution_protocol(
-            "homeboy-lab",
-            Some("extrachill"),
-            30_000,
-            None,
-            Some(&protocol),
-        )
-        .expect("v1 claim succeeds")
-        .expect("matching job is claimed");
-
-    assert_eq!(claim.job.id, job.id);
-    assert_eq!(
-        claim.request.expect("v1 request projection").command,
-        claim.envelope.dispatch.expect("typed dispatch").command
-    );
-}
-
-#[test]
-fn runner_api_legacy_json_claim_sidecars_match_across_v2_and_v1_projections() {
+fn runner_api_claim_carries_the_submitted_workspace_sidecars() {
     let store = JobStore::default();
     let workspace =
         crate::workspace_claim::WorkspaceIdentity::new("test", "claim-sidecars").expect("identity");
@@ -1062,61 +992,35 @@ fn runner_api_legacy_json_claim_sidecars_match_across_v2_and_v1_projections() {
     };
     let submit = |submission_key: &str| {
         let request = remote_runner_request("homeboy-lab", None);
-        let legacy_json = serde_json::to_value(homeboy_runner_contract::RunnerApiSubmitRequest {
-            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: homeboy_runner_contract::RUNNER_API_V1,
-            submission_key: submission_key.to_string(),
-            envelope: request.execution_envelope(),
-            workspace_claim_binding: Some(binding.clone()),
-            workspace_owner_lease: Some(owner_lease.clone()),
-            credential_delivery: None,
-        })
-        .expect("legacy Runner API JSON");
+        let submission_json =
+            serde_json::to_value(homeboy_runner_contract::RunnerApiSubmitRequest {
+                schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: homeboy_runner_contract::RUNNER_API_V1,
+                submission_key: submission_key.to_string(),
+                envelope: request.execution_envelope(),
+                workspace_claim_binding: Some(binding.clone()),
+                workspace_owner_lease: Some(owner_lease.clone()),
+                credential_delivery: None,
+            })
+            .expect("Runner API JSON");
         let submission =
-            serde_json::from_value(legacy_json).expect("legacy Runner API JSON remains readable");
+            serde_json::from_value(submission_json).expect("Runner API JSON round-trips");
         store
             .submit_runner_api_request(submission)
             .expect("Runner API request queues")
     };
 
-    let v2_job = submit("claim-sidecars-v2");
-    let v2 = store
+    let job = submit("claim-sidecars");
+    let claim = store
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
-        .expect("v2 claim succeeds")
-        .expect("v2 claim");
-    assert_eq!(v2.job.id, v2_job.id);
-    assert!(v2.request.is_none());
-    assert_eq!(v2.workspace_claim_binding, Some(binding.clone()));
-    assert_eq!(v2.workspace_owner_lease, Some(owner_lease.clone()));
-
-    let v1_job = submit("claim-sidecars-v1");
-    let execution = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
-        capability: crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            .to_string(),
-        version: 1,
-    };
-    let workspace_claim = crate::workspace_claim::WorkspaceClaimProtocol::current();
-    let workspace_owner_lease = crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current();
-    let v1 = store
-        .claim_remote_runner_job_with_protocols(
-            "homeboy-lab",
-            None,
-            30_000,
-            None,
-            super::remote_runner::RemoteRunnerClaimProtocols {
-                execution: Some(&execution),
-                workspace_claim: Some(&workspace_claim),
-                workspace_owner_lease: Some(&workspace_owner_lease),
-            },
-        )
-        .expect("v1 claim succeeds")
-        .expect("v1 claim");
-    assert_eq!(v1.job.id, v1_job.id);
-    assert_eq!(v1.workspace_claim_binding, Some(binding.clone()));
-    assert_eq!(v1.workspace_owner_lease, Some(owner_lease.clone()));
-    let projected = v1.request.expect("v1 request projection");
-    assert_eq!(projected.workspace_claim_binding, Some(binding));
-    assert_eq!(projected.workspace_owner_lease, Some(owner_lease));
+        .expect("claim succeeds")
+        .expect("claim");
+    assert_eq!(claim.job.id, job.id);
+    assert_eq!(claim.workspace_claim_binding, Some(binding));
+    assert_eq!(claim.workspace_owner_lease, Some(owner_lease));
+    let wire = serde_json::to_value(claim.runner_api_claimed_execution().expect("project claim"))
+        .expect("claim JSON");
+    assert!(wire.get("legacy_request").is_none());
 }
 
 #[test]
@@ -1131,7 +1035,7 @@ fn remote_runner_context_evidence_survives_controller_restart() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    let expected = claim.execution_context.expect("execution context");
+    let expected = claim.execution_context;
     drop(store);
 
     let restarted = JobStore::open_without_reconciliation(&path).expect("restart store");
@@ -1157,7 +1061,7 @@ fn remote_runner_context_evidence_survives_controller_restart() {
 }
 
 #[test]
-fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
+fn claimed_record_without_context_id_rejects_finish() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
@@ -1171,7 +1075,8 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
     let claim_id = claim.job.claim_id.expect("claim id");
     drop(store);
 
-    // This is the durable shape written before execution_context_id was added.
+    // A claimed record without execution_context_id was not written by this
+    // broker. Its context is no longer recovered from event evidence.
     let mut persisted = super::durable_snapshot(&path);
     let stored = persisted["jobs"]
         .as_array_mut()
@@ -1210,9 +1115,13 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
                 capture: None,
             },
         )
-        .expect_err("context evidence requires a consumed receipt");
+        .expect_err("a claim without a recorded context cannot finish");
 
-    assert!(error.message.contains("receipt has not been consumed"));
+    assert!(
+        error.message.contains("has no execution context"),
+        "{}",
+        error.message
+    );
     assert_eq!(
         reopened.get(job.id).expect("job remains in flight").status,
         JobStatus::Running
@@ -1229,12 +1138,7 @@ fn remote_runner_job_result_records_terminal_state_and_artifacts() {
         .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    let context_id = claim
-        .execution_context
-        .as_ref()
-        .expect("execution context")
-        .id()
-        .to_string();
+    let context_id = claim.execution_context.id().to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
     store
         .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
@@ -1377,12 +1281,7 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
         .claim_remote_runner_job("homeboy-lab", None, 30_000, None)
         .expect("claim succeeds")
         .expect("job is claimed");
-    let context_id = claim
-        .execution_context
-        .as_ref()
-        .expect("execution context")
-        .id()
-        .to_string();
+    let context_id = claim.execution_context.id().to_string();
     let claim_id = claim.job.claim_id.expect("claim id");
     store
         .consume_remote_runner_execution(job.id, "homeboy-lab", &claim_id, &context_id)
@@ -1602,11 +1501,7 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
             queued.id,
             "homeboy-lab",
             &claim_id,
-            claim
-                .execution_context
-                .as_ref()
-                .expect("authenticated claim context")
-                .id(),
+            claim.execution_context.id(),
         )
         .expect("worker consumes the accepted execution receipt");
 
