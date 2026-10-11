@@ -359,6 +359,8 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
                     rss_limit_bytes: 23 * 1024 * 1024 * 1024,
                     process_count: 70,
                     process_count_limit: 128,
+                    process_count_limit_source: None,
+                    process_count_limit_ceiling: None,
                 }),
                 cgroup_memory: RunnerCgroupMemoryEvidence::default(),
                 source: "linux_procfs_process_tree".to_string(),

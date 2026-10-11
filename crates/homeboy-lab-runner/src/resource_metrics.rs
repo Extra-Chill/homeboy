@@ -36,13 +36,13 @@ const DEFAULT_PROCESS_COUNT_LIMIT: u64 = 128;
 const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
+const PROCESS_COUNT_LIMIT_ENV: &str = homeboy_runner_contract::PROCESS_COUNT_LIMIT_ENV;
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const DEFAULT_PROCESS_COUNT_LIMIT_CEILING: u64 = 256;
 #[cfg(any(target_os = "linux", test))]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-const PROCESS_COUNT_LIMIT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
+const PROCESS_COUNT_LIMIT_CEILING_ENV: &str = homeboy_runner_contract::PROCESS_COUNT_CEILING_ENV;
 
 fn require_process_tree_isolation() -> Result<()> {
     if supports_process_tree_isolation() {
@@ -801,6 +801,11 @@ fn resource_guard_violation(
         effective_rss_limit_bytes.unwrap_or(limits.rss_limit_bytes),
         limits.process_count_limit,
     )
+    .map(|violation| RunnerResourceGuardViolation {
+        process_count_limit_source: limits.process_count_limit_source.clone(),
+        process_count_limit_ceiling: limits.process_count_limit_ceiling,
+        ..violation
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1015,6 +1020,8 @@ fn classify_resource_guard_violation(
         rss_limit_bytes,
         process_count,
         process_count_limit,
+        process_count_limit_source: None,
+        process_count_limit_ceiling: None,
     })
 }
 
