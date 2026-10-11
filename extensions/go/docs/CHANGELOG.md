@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.4] - 2026-10-11
+
+### Changed
+- drop audit and refactor extension hooks (Extra-Chill/homeboy#15774)
+
 ## [1.8.3] - 2026-08-01
 
 ### Changed
