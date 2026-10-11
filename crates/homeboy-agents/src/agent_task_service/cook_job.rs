@@ -1651,7 +1651,10 @@ mod tests {
                 Disposition::BlockingAmbiguous,
                 "missing handler is not death evidence"
             );
-            assert_eq!(homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(), before);
+            assert_eq!(
+                homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(),
+                before
+            );
             assert_eq!(
                 harness
                     .store()
@@ -1887,10 +1890,16 @@ mod tests {
             );
             // A lost driver generation cannot fall back to the linked attempt
             // and erase an opaque checkpoint's still-live execution owner.
-            let mut durable: Value =
-                serde_json::from_slice(&homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap()).unwrap();
+            let mut durable: Value = serde_json::from_slice(
+                &homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(),
+            )
+            .unwrap();
             durable["jobs"][0]["controller_job"]["version"] = json!(999);
-            homeboy_core::test_support::replace_durable_job_store(&path, &serde_json::to_vec(&durable).unwrap()).unwrap();
+            homeboy_core::test_support::replace_durable_job_store(
+                &path,
+                &serde_json::to_vec(&durable).unwrap(),
+            )
+            .unwrap();
             let unavailable = harness.reopen(&path, "replacement-lease").unwrap();
             let evidence = unavailable
                 .store()

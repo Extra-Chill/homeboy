@@ -654,11 +654,7 @@ impl JobStore {
     pub(crate) fn replace_with_legacy_snapshot_at_path(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut durable: DurableJobStore = serde_json::from_slice(bytes)
             .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        sql_store::commit_sql_store(
-            path,
-            &mut durable,
-            &Mutex::new(SqlSyncState::default()),
-        )
+        sql_store::commit_sql_store(path, &mut durable, &Mutex::new(SqlSyncState::default()))
     }
 
     /// Count non-terminal jobs without opening or reconciling the durable store.
