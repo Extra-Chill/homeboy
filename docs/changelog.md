@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.417.20] - 2026-10-11
+
+### Fixed
+- let a daemon-local gate child wait for its recorded identity; surface the real gate setup cause
+
 ## [0.417.19] - 2026-10-10
 
 ### Changed
