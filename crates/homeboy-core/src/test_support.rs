@@ -22,6 +22,43 @@ use crate::error::{Error, Result};
 
 /// The durable daemon job store at `path` in its legacy `jobs.json` document
 /// shape. Fixtures compare these bytes to prove a read did not mutate state.
+/// Every row of the named observation tables, keyed `table:index`, read
+/// through a read-only connection. Two equal snapshots mean no row in those
+/// tables changed in between. Used to prove reads never write (#15718).
+pub fn observation_table_snapshot(
+    db_path: &Path,
+    tables: &[(&str, &str)],
+) -> std::collections::BTreeMap<String, String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open observation database read-only");
+    let mut state = std::collections::BTreeMap::new();
+    for (table, order) in tables {
+        let mut statement = connection
+            .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
+            .expect("prepare table snapshot");
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|index| {
+                        row.get::<_, rusqlite::types::Value>(index)
+                            .map(|value| format!("{value:?}"))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("query table snapshot")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read table snapshot");
+        for (index, row) in rows.into_iter().enumerate() {
+            state.insert(format!("db:{table}:{index:06}"), row.join("\u{1f}"));
+        }
+    }
+    state
+}
+
 pub fn durable_job_store_snapshot(path: &Path) -> Result<Vec<u8>> {
     JobStore::export_legacy_snapshot_at_path(path)
 }

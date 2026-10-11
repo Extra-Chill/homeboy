@@ -4518,18 +4518,16 @@ fn completed_generic_executor_outcome_preserves_runtime_evidence_without_provide
     });
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The stale terminal record is planted, repaired and re-read through
-/// the same injected store, so the idempotence assertion — a second status
-/// leaves `updated_at` and the lifecycle projection alone — compares two reads
-/// of the record this test actually planted.
-///
-/// `record_completed_run_in_store` reaches automatic artifact retention only
-/// when a task declares a workspace root that exists; `test_plan()` declares
-/// none, so the ambient retention pass this file's sibling test depends on is
-/// never entered here.
+/// The terminal aggregate projection owns the provider model (#9411): the
+/// write that commits the aggregate stamps the model each outcome ran onto the
+/// tasks, the lifecycle provider runtime (and its executor), and the matching
+/// succeeded provider execution, leaving a failed attempt's model alone. This
+/// used to be a status-time repair of a stale terminal record; reads never
+/// write now (#15718) and there are no pre-projection records to repair
+/// (#15742), so the same assertions are made against the record the terminal
+/// writer committed, followed by a status read that must leave it unchanged.
 #[test]
-fn status_repairs_terminal_provider_model_from_aggregate_idempotently() {
+fn terminal_aggregate_projection_owns_provider_models_and_status_leaves_them() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -4538,79 +4536,54 @@ fn status_repairs_terminal_provider_model_from_aggregate_idempotently() {
     plan.tasks[0].executor.model = None;
     let mut aggregate = succeeded_aggregate(&plan);
     aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
-    record_completed_run_in_store(
-        &lifecycle_store,
-        &plan,
-        &aggregate,
-        Some("terminal-model-repair"),
-    )
-    .expect("recorded");
-
-    let mut stale = lifecycle_store
-        .read_record("terminal-model-repair")
-        .expect("record loaded");
-    stale.tasks[0].model = None;
-    stale.lifecycle.provider_runtime[0].metadata["model"] = Value::Null;
-    stale.lifecycle.provider_runtime[0].metadata["executor"]["model"] = Value::Null;
-    stale.metadata["latest_promotion"] = json!({ "status": "applied" });
-    stale.metadata["provider_executions"] = json!([
-        {
-            "task_id": "task-a",
-            "state": "failed",
-            "model": "openai/failed-attempt"
-        },
-        {
-            "task_id": "task-a",
-            "state": "succeeded",
-            "model": null
-        }
-    ]);
+    let run_id = "terminal-model-repair";
     lifecycle_store
-        .write_record(&stale)
-        .expect("stale terminal record stored");
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    let mut running = lifecycle_store
+        .mutate_record(run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["latest_promotion"] = json!({ "status": "applied" });
+            record.metadata["provider_executions"] = json!([
+                { "task_id": "task-a", "state": "failed", "model": "openai/failed-attempt" },
+                { "task_id": "task-a", "state": "succeeded", "model": null }
+            ]);
+            true
+        })
+        .expect("running record")
+        .expect("record written");
 
-    let repaired = reconcile_status_in_store(
-        &lifecycle_store,
-        "terminal-model-repair",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status repaired model")
-    .record;
+    let terminal = record_aggregate_in_store(&lifecycle_store, &mut running, &plan, &aggregate)
+        .expect("terminal aggregate projection");
 
-    assert_eq!(repaired.state, AgentTaskRunState::Succeeded);
-    assert_eq!(repaired.metadata["latest_promotion"]["status"], "applied");
+    let committed = lifecycle_store.read_record(run_id).expect("committed");
+    assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
+    assert_eq!(committed.state, AgentTaskRunState::Succeeded);
+    assert_eq!(committed.metadata["latest_promotion"]["status"], "applied");
     assert_eq!(
-        repaired.tasks[0].model.as_deref(),
+        committed.tasks[0].model.as_deref(),
         Some("openai/gpt-5.6-terra")
     );
     assert_eq!(
-        repaired.lifecycle.provider_runtime[0].metadata["model"],
+        committed.lifecycle.provider_runtime[0].metadata["model"],
         "openai/gpt-5.6-terra"
     );
     assert_eq!(
-        repaired.lifecycle.provider_runtime[0].metadata["executor"]["model"],
+        committed.lifecycle.provider_runtime[0].metadata["executor"]["model"],
         "openai/gpt-5.6-terra"
     );
     assert_eq!(
-        repaired.metadata["provider_executions"][0]["model"],
+        committed.metadata["provider_executions"][0]["model"],
         "openai/failed-attempt"
     );
     assert_eq!(
-        repaired.metadata["provider_executions"][1]["model"],
+        committed.metadata["provider_executions"][1]["model"],
         "openai/gpt-5.6-terra"
     );
 
-    let repeated = reconcile_status_in_store(
-        &lifecycle_store,
-        "terminal-model-repair",
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("repeat status")
-    .record;
-    assert_eq!(repeated.updated_at, repaired.updated_at);
-    assert_eq!(repeated.lifecycle, repaired.lifecycle);
+    let observed = status_in_store(&lifecycle_store, run_id).expect("status");
+    assert_eq!(observed, lifecycle_store.read_record(run_id).unwrap());
+    assert_eq!(observed.revision, committed.revision);
 }
 
 #[test]
@@ -6266,12 +6239,15 @@ fn post_provider_transport_failure_preserves_the_succeeded_candidate() {
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The closing assertion is that the reprojection was *persisted*, so
-/// the record read back has to be the one `reconcile_status_in_store` just wrote — the
-/// same store the stale terminal state was planted in.
+/// The model a provider actually ran is aggregate evidence, so the terminal
+/// write that commits the aggregate projects it (#9411). It used to be repaired
+/// on a later status read for records that went terminal before that projection
+/// existed; under the no-legacy policy (#15742) there are no such records, and
+/// reads never write (#15718). The property finalize-pr relies on is asserted
+/// against the durable record directly after the terminal write, with no
+/// reconciling read in between.
 #[test]
-fn status_reconciles_terminal_provider_model_from_aggregate_when_durable_is_null() {
+fn terminal_write_persists_the_aggregate_provider_model() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -6283,67 +6259,26 @@ fn status_reconciles_terminal_provider_model_from_aggregate_when_durable_is_null
     aggregate.outcomes[0].metadata = json!({ "model": "openai/gpt-5.6-terra" });
 
     let run_id = "terminal-null-model-9411";
-    let mut record =
-        record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some(run_id))
-            .expect("terminal record");
-    assert!(record.state.is_terminal());
+    record_completed_run_in_store(&lifecycle_store, &plan, &aggregate, Some(run_id))
+        .expect("terminal record");
 
-    // Simulate a record that went terminal BEFORE the #9404/#9405 model
-    // repair: strip the durable model from the task and the lifecycle
-    // provider-runtime projection, then persist that stale terminal state.
-    record.tasks[0].model = None;
-    for runtime in &mut record.lifecycle.provider_runtime {
-        if let Some(object) = runtime.metadata.as_object_mut() {
-            object.insert("model".to_string(), Value::Null);
-            if let Some(executor) = object.get_mut("executor").and_then(Value::as_object_mut) {
-                executor.insert("model".to_string(), Value::Null);
-            }
-        }
-    }
-    lifecycle_store
-        .write_record(&record)
-        .expect("persist stale terminal record");
-
-    // Precondition: durable lifecycle model is null (finalize-pr would reject).
-    let stale = lifecycle_store.read_record(run_id).expect("stale record");
-    assert!(stale.state.is_terminal());
-    assert!(stale
-        .lifecycle
-        .provider_runtime
-        .iter()
-        .all(|runtime| runtime.metadata["model"].is_null()));
-
-    // Read-side reconciliation reprojects the authoritative aggregate model
-    // onto the terminal record and persists it.
-    let reconciled = reconcile_status_in_store(
-        &lifecycle_store,
-        run_id,
-        AgentTaskStatusOptions::default(),
-        false,
-    )
-    .expect("status reconciles terminal model")
-    .record;
-
-    assert!(reconciled.state.is_terminal(), "terminal state preserved");
+    let persisted = lifecycle_store
+        .read_record(run_id)
+        .expect("persisted record");
+    assert!(persisted.state.is_terminal(), "terminal state committed");
     assert_eq!(
-        reconciled.tasks[0].model.as_deref(),
+        persisted.tasks[0].model.as_deref(),
         Some("openai/gpt-5.6-terra")
     );
-    let runtime = reconciled
+    let runtime = persisted
         .lifecycle
         .provider_runtime
         .first()
         .expect("provider runtime");
     assert_eq!(runtime.metadata["model"], "openai/gpt-5.6-terra");
-
-    // Persisted, so finalize-pr's durable read now sees the concrete model.
-    let persisted = lifecycle_store
-        .read_record(run_id)
-        .expect("persisted record");
-    assert_eq!(
-        persisted.lifecycle.provider_runtime[0].metadata["model"],
-        "openai/gpt-5.6-terra"
-    );
+    for handle in &persisted.provider_handles {
+        assert_eq!(handle.metadata["model"], "openai/gpt-5.6-terra");
+    }
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

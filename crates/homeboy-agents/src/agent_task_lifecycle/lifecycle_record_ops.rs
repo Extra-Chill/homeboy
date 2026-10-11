@@ -123,7 +123,9 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
     };
 }
 
-pub(crate) fn reconcile_terminal_provider_models(
+/// Project the concrete model each aggregate outcome ran onto the record's
+/// tasks, provider handles, provider runtimes, and provider executions.
+pub(crate) fn project_outcome_models(
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> bool {

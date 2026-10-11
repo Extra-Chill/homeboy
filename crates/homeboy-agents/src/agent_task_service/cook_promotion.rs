@@ -252,7 +252,7 @@ pub fn promotion_replay_guidance(requested_id: &str) -> Value {
         Ok(run_id) => run_id,
         Err(error) => return promotion_replay_unavailable(requested_id, requested_id, &error),
     };
-    let record = lifecycle_store.read_record(&resolved).ok();
+    let record = lifecycle_store.read_record_bounded(&resolved).ok();
     let candidate = record
         .as_ref()
         .map(preserved_candidate_evidence)

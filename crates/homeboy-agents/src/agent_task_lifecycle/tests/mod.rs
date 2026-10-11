@@ -416,6 +416,7 @@ mod operation_claims;
 mod private_attachment;
 mod runner_exec;
 mod status_and_recovery;
+mod status_purity;
 mod submit_and_persist;
 mod terminal_and_reconcile;
 mod terminal_transitions;

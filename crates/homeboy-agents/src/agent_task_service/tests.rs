@@ -2363,37 +2363,26 @@ fn record_scoped_reconciliation_stays_with_its_explicit_lifecycle_store() {
     });
 }
 
-/// Every file under one run's durable directory, by relative path.
-fn run_dir_snapshot(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
-    fn walk(
-        root: &std::path::Path,
-        dir: &std::path::Path,
-        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
-    ) {
-        for entry in std::fs::read_dir(dir).expect("read run dir") {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                walk(root, &path, out);
-            } else {
-                out.insert(
-                    path.strip_prefix(root).expect("relative").to_path_buf(),
-                    std::fs::read(&path).expect("read file"),
-                );
-            }
-        }
-    }
-    let root = lifecycle_store.run_dir(run_id);
-    let mut out = std::collections::BTreeMap::new();
-    walk(&root, &root, &mut out);
-    out
+/// A candidate adoption whose owner process is gone. A reconciling read
+/// interrupts it (`reconcile_candidate_adoption`), so a preview that reconciles
+/// is caught by the durable state changing. (`plan_path` was the canary until
+/// #15718 stopped persisting that read-time projection.)
+fn orphaned_candidate_adoption() -> serde_json::Value {
+    serde_json::json!({
+        "candidate_sha": "preview-canary",
+        "ai_model": "test",
+        "state": "verification_running",
+        "phase": "verification",
+        "active_gate": "canary",
+        "started_at": "2000-01-01T00:00:00+00:00",
+        "updated_at": "2000-01-01T00:00:00+00:00",
+        "owner_pid": u32::MAX,
+        "heartbeat_at": "2000-01-01T00:00:00+00:00",
+    })
 }
 
-/// A stale queued record whose stored `plan_path` disagrees with its
-/// controller plan. Any reconciling read rewrites `plan_path`, so a preview
-/// that reconciles is caught by the run directory changing.
+/// A stale queued record carrying an orphaned candidate adoption that any
+/// reconciling read would interrupt and persist.
 fn stale_record_that_a_reconciling_read_would_rewrite(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -2404,7 +2393,8 @@ fn stale_record_that_a_reconciling_read_would_rewrite(
         .mutate_record(run_id, |record| {
             record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
             record.updated_at = None;
-            record.plan_path = "/stale/plan/path".to_string();
+            record.candidate_adoption =
+                Some(serde_json::from_value(orphaned_candidate_adoption()).expect("adoption"));
             true
         })
         .expect("stale record");
@@ -2418,14 +2408,14 @@ fn scoped_reconcile_preview_writes_nothing() {
             home.path().join("explicit-lifecycle"),
         );
         stale_record_that_a_reconciling_read_would_rewrite(&lifecycle_store, run_id);
-        let before = run_dir_snapshot(&lifecycle_store, run_id);
+        let before = agent_task_lifecycle::durable_state_for_test(&lifecycle_store);
 
         let preview = reconcile_run_in_store(&lifecycle_store, run_id, true).expect("preview");
 
         assert_eq!(preview.reconciled, 0, "{preview:?}");
         assert_eq!(preview.runs[0].action, "would-reconcile", "{preview:?}");
         assert_eq!(
-            run_dir_snapshot(&lifecycle_store, run_id),
+            agent_task_lifecycle::durable_state_for_test(&lifecycle_store),
             before,
             "a reconcile preview must leave the durable run untouched"
         );
@@ -2459,12 +2449,13 @@ fn active_reconcile_preview_writes_nothing() {
         lifecycle_store
             .mutate_record(run_id, |record| {
                 record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
-                record.plan_path = "/stale/plan/path".to_string();
+                record.candidate_adoption =
+                    Some(serde_json::from_value(orphaned_candidate_adoption()).expect("adoption"));
                 record.annotate_stale_running();
                 true
             })
             .expect("dead controller owner");
-        let before = run_dir_snapshot(&lifecycle_store, run_id);
+        let before = agent_task_lifecycle::durable_state_for_test(&lifecycle_store);
 
         let preview = reconcile_stale_active_runs(true).expect("preview");
 
@@ -2473,7 +2464,7 @@ fn active_reconcile_preview_writes_nothing() {
             "the dead-owner Lab run is a preview candidate: {preview:?}"
         );
         assert_eq!(
-            run_dir_snapshot(&lifecycle_store, run_id),
+            agent_task_lifecycle::durable_state_for_test(&lifecycle_store),
             before,
             "a reconcile preview must leave the durable run untouched"
         );
