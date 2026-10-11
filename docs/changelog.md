@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.0] - 2026-10-11
+
+### Added
+- move the durable job store from jobs.json to SQLite
+
+### Changed
+- expect blocked status for pre-child coordinator failure in CLI binary test
+- delete legacy on-disk layout migrations
+- delete deprecated aliases, flags and output mirrors
+- delete legacy lease and child-identity recovery
+
+### Fixed
+- keep readiness verdict on unread request; deflake cleanup-grace and service-observation tests
+- read stale_reason_code from compact daemon status so connect can replace a dead daemon
+- render runner-owned guard policy into the service unit; name the ceiling in the remedy
+- drop exited daemon candidates; pin load in Cook model-route test
+
 ## [0.417.20] - 2026-10-11
 
 ### Fixed
