@@ -1,9 +1,9 @@
 //! Trace-workload schema for rig specs — variant/profile/guardrail/experiment
-//! and public-preview declarations consumed by `homeboy trace`.
+//! and public-preview tunnel declarations consumed by `homeboy trace`.
 
 pub use homeboy_extension_contract::{
-    TraceDependencySpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
-    TracePublicPreviewSpec,
+    TraceDependencySpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
+    TracePublicPreviewMode, TracePublicPreviewSpec,
 };
 
 use serde::{Deserialize, Serialize};

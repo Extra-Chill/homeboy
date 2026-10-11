@@ -59,12 +59,20 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
     } else {
         homeboy_core::trace_secrets::empty_status()
     };
+    let tunnel_secret_env = if secret_env_sources.contains(&LabSecretEnvSource::Tunnel) {
+        hydrate_tunnel_secret_env(args, &mut env_delta)?
+    } else {
+        empty_tunnel_secret_env_metadata()
+    };
     let mut secret_env_names = Vec::new();
     if secret_env_sources.contains(&LabSecretEnvSource::AgentTask) {
         secret_env_names.extend(declared_agent_task_secret_env_for_handoff(args)?);
     }
     if secret_env_sources.contains(&LabSecretEnvSource::Trace) {
         secret_env_names.extend(declared_trace_secret_env(args));
+    }
+    if secret_env_sources.contains(&LabSecretEnvSource::Tunnel) {
+        secret_env_names.extend(declared_tunnel_secret_env(args));
     }
     secret_env_names.sort();
     secret_env_names.dedup();
@@ -91,6 +99,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
 
     let mut runner_deferred_secret_env = Vec::new();
     runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&agent_task_secret_env));
+    runner_deferred_secret_env.extend(runner_deferred_secret_env_names(&tunnel_secret_env));
     runner_deferred_secret_env.sort();
     runner_deferred_secret_env.dedup();
     // Preserve authority with the durable name-only plan. Only values resolved
@@ -118,6 +127,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         &runner_deferred_secret_env,
         &agent_task_secret_env,
         &trace_secret_env,
+        &tunnel_secret_env,
     );
 
     let diagnostics = serde_json::json!({
@@ -136,6 +146,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
             .collect::<Vec<_>>(),
         "agent_task_secret_env": agent_task_secret_env,
         "trace_secret_env": trace_secret_env,
+        "tunnel_secret_env": tunnel_secret_env,
     });
 
     Ok(LabSecretEnvHandoffPlan {
@@ -284,6 +295,13 @@ fn empty_agent_task_secret_env_metadata() -> serde_json::Value {
     })
 }
 
+fn empty_tunnel_secret_env_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/lab-tunnel-secret-env/v1",
+        "runner_deferred_secret_env": [],
+    })
+}
+
 fn materialized_lab_secret_env_plan(
     public_env: BTreeMap<String, String>,
     secret_env_names: Vec<String>,
@@ -361,6 +379,7 @@ fn lab_secret_env_handoff_entries(
     runner_deferred_secret_env: &[String],
     agent_task_secret_env: &serde_json::Value,
     trace_secret_env: &serde_json::Value,
+    tunnel_secret_env: &serde_json::Value,
 ) -> Vec<SecretEnvHandoffEntry> {
     let mut names = env_delta.keys().cloned().collect::<Vec<_>>();
     names.sort();
@@ -382,7 +401,7 @@ fn lab_secret_env_handoff_entries(
             continue;
         }
         entries.push(SecretEnvHandoffEntry {
-            source: secret_env_source_for_name(name, &[agent_task_secret_env])
+            source: secret_env_source_for_name(name, &[agent_task_secret_env, tunnel_secret_env])
                 .unwrap_or_else(|| "runner".to_string()),
             name: name.clone(),
             owner: "runner".to_string(),
@@ -507,6 +526,27 @@ pub(super) fn hydrate_trace_secret_env(
     }
 
     Ok(homeboy_core::trace_secrets::status_metadata(statuses))
+}
+
+pub(super) fn hydrate_tunnel_secret_env(
+    args: &[String],
+    _env: &mut HashMap<String, String>,
+) -> Result<serde_json::Value> {
+    let names = declared_tunnel_secret_env(args);
+    if names.is_empty() {
+        return Ok(empty_tunnel_secret_env_metadata());
+    }
+
+    Ok(serde_json::json!({
+        "schema": "homeboy/lab-tunnel-secret-env/v1",
+        "runner_deferred_secret_env": names
+            .into_iter()
+            .map(|name| serde_json::json!({
+                "name": name,
+                "source": "runner",
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 pub(crate) fn declared_agent_task_secret_env(args: &[String]) -> Vec<String> {
@@ -949,6 +989,73 @@ pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
     }
 
     declared_secret_env_args(args)
+}
+
+pub(crate) fn declared_tunnel_secret_env(args: &[String]) -> Vec<String> {
+    let Some(tunnel_index) = subcommand_index(args, "tunnel") else {
+        return Vec::new();
+    };
+
+    match (
+        args.get(tunnel_index + 1).map(String::as_str),
+        args.get(tunnel_index + 2).map(String::as_str),
+    ) {
+        (Some("preview-client"), Some("start")) => declared_tunnel_preview_client_token_env(args),
+        (Some("service"), Some("start")) if tunnel_service_start_uses_preview_client(args) => {
+            vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn declared_tunnel_preview_client_token_env(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--token-env" {
+            if let Some(name) = args.get(index + 1) {
+                names.push(name.clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--token-env=") {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+
+    if names.is_empty() {
+        names.push("HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn tunnel_service_start_uses_preview_client(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--public-tunnel-command" {
+            if args
+                .get(index + 1)
+                .is_some_and(|command| command.contains("preview-client start"))
+            {
+                return true;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(command) = arg.strip_prefix("--public-tunnel-command=") {
+            if command.contains("preview-client start") {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(super) fn trace_project_id_from_args(args: &[String]) -> Option<String> {

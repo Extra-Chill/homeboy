@@ -2,7 +2,7 @@
 
 Investigation for Extra-Chill/homeboy#7519. This document maps configuration concepts that appear in two or more schemas and records the current runtime precedence from the resolving code. Precedence here means the effective value used by Homeboy after all participating schemas have been loaded.
 
-> **Status.** This is a point-in-time investigation, not a maintained contract. It cites files rather than line ranges: the original `path.rs:LINE` citations all drifted and several files moved during crate extraction and later consolidation (component model and config to `crates/contracts/homeboy-component-contract/`, extension code back into `crates/homeboy-core/src/extension/`, deploy path roots to `crates/homeboy-release/`, rig spec to `crates/homeboy-rig/`, runner loading to `crates/homeboy-lab-runner/`). Only the consolidation in "Consolidation Shipped In This Slice" shipped; none of the six removals in "Simplification Proposal" have been implemented, and the five "Ambiguous Or Order-Dependent Areas" remain untraced. Treat both sections as an open backlog, and re-verify against the tree before relying on any claim here.
+> **Status.** This is a point-in-time investigation, not a maintained contract. It cites files rather than line ranges: the original `path.rs:LINE` citations all drifted and several files moved during crate extraction and later consolidation (component model and config to `crates/contracts/homeboy-component-contract/`, extension code back into `crates/homeboy-core/src/extension/`, deploy path roots to `crates/homeboy-release/`, rig spec to `crates/homeboy-rig/`, runner loading to `crates/homeboy-lab-runner/`, tunnel entity to `crates/homeboy-tunnel/`). Only the consolidation in "Consolidation Shipped In This Slice" shipped; none of the six removals in "Simplification Proposal" have been implemented, and the five "Ambiguous Or Order-Dependent Areas" remain untraced. Treat both sections as an open backlog, and re-verify against the tree before relying on any claim here.
 
 ## Source Schemas
 
@@ -13,7 +13,7 @@ Investigation for Extra-Chill/homeboy#7519. This document maps configuration con
 | Component registry and repo-local portable config | `Component` in `crates/contracts/homeboy-component-contract/src/model.rs`; portable read/write in `crates/homeboy-core/src/component/portable.rs` |
 | Rig spec | `RigSpec` and rig component fields in `crates/homeboy-rig/src/spec.rs` |
 | Extension manifest | `ExtensionManifest` in `crates/homeboy-core/src/extension/manifest.rs` |
-| Server / runner registry | `ConfigEntity` registry in `crates/homeboy-core/src/config.rs`; entity implementations in `crates/homeboy-core/src/server/mod.rs` and `crates/homeboy-lab-runner/src/lib.rs` |
+| Server / runner / tunnel registry | `ConfigEntity` registry in `crates/homeboy-core/src/config.rs`; entity implementations in `crates/homeboy-core/src/server/mod.rs`, `crates/homeboy-lab-runner/src/lib.rs`, and `crates/homeboy-tunnel/src/entity.rs` |
 
 ## Overlapping Concepts
 
@@ -33,7 +33,7 @@ Investigation for Extra-Chill/homeboy#7519. This document maps configuration con
 
 | Locations | Effective precedence | Resolving code path |
 | --- | --- | --- |
-| Component registry file stem / `id`; repo-local portable `id`; project component attachment `id`; rig component map key plus optional `component_id`; config entity aliases across project/server/component-like registries. | For entity files, the file path ID is authoritative after deserialize because `config::load()` sets the ID from the lookup key. For portable discovery, the repo-local `homeboy.json` must declare a non-empty `id`, which is slugified. For rig components, `component_id` is the registry fallback; when omitted, the map key is the implied component ID. Alias resolution is case-insensitive and happens only when direct entity path lookup misses. | Entity load sets ID and calls `post_load()` in `crates/homeboy-core/src/config.rs`. Alias fallback is implemented in `crates/homeboy-core/src/config.rs`. Portable ID validation and slugification are in `crates/homeboy-core/src/component/portable.rs`. Rig `component_id` semantics are declared in `crates/homeboy-rig/src/spec.rs`. |
+| Component registry file stem / `id`; repo-local portable `id`; project component attachment `id`; rig component map key plus optional `component_id`; config entity aliases across project/server/tunnel/component-like registries. | For entity files, the file path ID is authoritative after deserialize because `config::load()` sets the ID from the lookup key. For portable discovery, the repo-local `homeboy.json` must declare a non-empty `id`, which is slugified. For rig components, `component_id` is the registry fallback; when omitted, the map key is the implied component ID. Alias resolution is case-insensitive and happens only when direct entity path lookup misses. | Entity load sets ID and calls `post_load()` in `crates/homeboy-core/src/config.rs`. Alias fallback is implemented in `crates/homeboy-core/src/config.rs`. Portable ID validation and slugification are in `crates/homeboy-core/src/component/portable.rs`. Rig `component_id` semantics are declared in `crates/homeboy-rig/src/spec.rs`. |
 
 ### Deploy Target Path
 

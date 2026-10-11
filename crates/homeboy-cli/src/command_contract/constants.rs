@@ -18,6 +18,7 @@ use crate::command_contract::{
 };
 use crate::core::artifact_address::ARTIFACT_ADDRESS_SCHEMA;
 use crate::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA;
+use crate::core::artifact_dom_boxes::ARTIFACT_DOM_BOXES_SCHEMA;
 use crate::core::artifact_ref::{
     ARTIFACT_REF_SCHEMA, HOMEBOY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
 };
@@ -494,6 +495,7 @@ fn represented_artifact_schema_ids() -> Vec<String> {
         ARTIFACT_CONTRACT_SCHEMA.to_string(),
         ARTIFACT_REF_SCHEMA.to_string(),
         ARTIFACT_ADDRESS_SCHEMA.to_string(),
+        ARTIFACT_DOM_BOXES_SCHEMA.to_string(),
         ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
         ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
         ARTIFACT_POSTPROCESS_RESULT_SCHEMA.to_string(),

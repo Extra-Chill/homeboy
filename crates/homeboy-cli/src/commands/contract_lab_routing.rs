@@ -329,6 +329,7 @@ impl Commands {
             }
             Commands::Rig(args) => return args.portability_contract(),
             Commands::Trace(args) => return args.portability_contract(),
+            Commands::Tunnel(args) => return args.portability_contract(),
             _ => return CommandPortabilityContract::none(),
         };
         CommandPortabilityContract::lab(contract)

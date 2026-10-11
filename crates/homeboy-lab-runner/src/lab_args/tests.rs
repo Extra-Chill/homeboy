@@ -280,8 +280,9 @@ mod runner_resident_tests {
             "homeboy".to_string(),
             "--runner".to_string(),
             "homeboy-lab".to_string(),
-            "extension".to_string(),
-            "dev-run".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "start".to_string(),
             "preview".to_string(),
             "--cwd".to_string(),
             "/home/user/Developer/_lab_workspaces/site".to_string(),
@@ -293,8 +294,9 @@ mod runner_resident_tests {
             rewrite_runner_resident_lab_offload_args(&args, None),
             vec![
                 "homeboy".to_string(),
-                "extension".to_string(),
-                "dev-run".to_string(),
+                "tunnel".to_string(),
+                "service".to_string(),
+                "start".to_string(),
                 "preview".to_string(),
                 "--cwd".to_string(),
                 "/home/user/Developer/_lab_workspaces/site".to_string(),
@@ -302,6 +304,71 @@ mod runner_resident_tests {
                 "npm run dev".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn runner_resident_rewrite_expose_drops_server_and_marks_runner_local() {
+        // `tunnel service expose --runner homeboy-lab --server homeboy-lab`
+        // should not carry a server declaration to the runner: the runner is
+        // the server in that context, so the rewrite drops --server and marks
+        // the runner-side declaration runner-local (#4606/#4607).
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "expose".to_string(),
+            "preview".to_string(),
+            "--server".to_string(),
+            "homeboy-lab".to_string(),
+            "--remote-host".to_string(),
+            "127.0.0.1".to_string(),
+            "--remote-port".to_string(),
+            "7331".to_string(),
+            "--auth-mode".to_string(),
+            "ssh-only".to_string(),
+        ];
+
+        let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
+        assert_eq!(
+            rewritten,
+            vec![
+                "homeboy".to_string(),
+                "tunnel".to_string(),
+                "service".to_string(),
+                "expose".to_string(),
+                "preview".to_string(),
+                "--remote-host".to_string(),
+                "127.0.0.1".to_string(),
+                "--remote-port".to_string(),
+                "7331".to_string(),
+                "--auth-mode".to_string(),
+                "ssh-only".to_string(),
+                "--runner-local".to_string(),
+            ]
+        );
+        assert!(!rewritten.iter().any(|arg| arg == "--server"));
+        assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
+    }
+
+    #[test]
+    fn runner_resident_rewrite_expose_handles_inline_server_value() {
+        let args = vec![
+            "homeboy".to_string(),
+            "--runner=homeboy-lab".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "expose".to_string(),
+            "preview".to_string(),
+            "--server=homeboy-lab".to_string(),
+            "--remote-host".to_string(),
+            "127.0.0.1".to_string(),
+        ];
+
+        let rewritten = rewrite_runner_resident_lab_offload_args(&args, None);
+        assert!(!rewritten.iter().any(|arg| arg.starts_with("--server")));
+        assert!(rewritten.iter().any(|arg| arg == "--runner-local"));
     }
 }
 

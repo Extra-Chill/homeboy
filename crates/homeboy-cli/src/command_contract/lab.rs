@@ -240,6 +240,9 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["extension", "refresh"],
     &["extension", "dev-run"],
     &["extension", "show"],
+    &["tunnel", "preview-consumer", "run"],
+    &["tunnel", "service", "expose"],
+    &["tunnel", "service", "start"],
 ];
 
 fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {

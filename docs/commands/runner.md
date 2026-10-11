@@ -105,6 +105,8 @@ Lab offload support is intentionally command-specific:
 | `test` full workspace | Yes | Yes | Safe single-workspace replay with runner extension parity preflight. |
 | `test --changed-since` | No | No | Runs locally for now because changed-since test selection depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `trace` | Yes | Yes | Safe single-workspace replay with Playwright/browser capability gate. |
+| `tunnel preview-consumer run` | No | Yes | Runner-hosted preview consumer execution. |
+| `tunnel service expose` / `tunnel service start` | No | Yes | Runner-hosted private service tunnel lifecycle. |
 | `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
 
 Local-only resource-pressure commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.

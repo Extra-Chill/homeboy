@@ -480,6 +480,9 @@ pub(crate) fn runner_exec_secret_env_plan(
         names.extend(super::super::lab::secrets::declared_trace_secret_env(
             command,
         ));
+        names.extend(super::super::lab::secrets::declared_tunnel_secret_env(
+            command,
+        ));
     }
     names.extend(declared_runtime_provider_secret_env(env));
     let mut plan = SecretEnvPlan::from_secret_env_names(names);

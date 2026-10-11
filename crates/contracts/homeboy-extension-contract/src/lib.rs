@@ -210,8 +210,8 @@ pub mod update_output;
 pub mod version;
 
 pub use trace_spec::{
-    TraceDependencySpec, TracePreviewAssetFanoutSpec, TracePublicPreviewMode,
-    TracePublicPreviewSpec,
+    TraceDependencySpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
+    TracePublicPreviewMode, TracePublicPreviewSpec,
 };
 
 pub use core_compat::{

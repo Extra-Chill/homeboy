@@ -74,5 +74,16 @@ fn expand_trace_public_preview(
                 repeat_count: fanout.repeat_count,
                 expected_body_contains: fanout.expected_body_contains.as_deref().map(expand),
             }),
+        native: spec
+            .native
+            .as_ref()
+            .map(|native| rig::TraceNativePublicPreviewSpec {
+                public_host: native.public_host.as_deref().map(&expand),
+                operator_domain: native.operator_domain.as_deref().map(&expand),
+                session_id: native.session_id.as_deref().map(&expand),
+                ingress_url: native.ingress_url.as_deref().map(&expand),
+                token_env: native.token_env.clone(),
+                client_binary: native.client_binary.as_deref().map(&expand),
+            }),
     }
 }

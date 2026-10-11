@@ -216,6 +216,41 @@ fn renders_resource_summary_budget_findings_and_baseline_health() {
 }
 
 #[test]
+fn renders_managed_service_preview_url_artifact_metadata() {
+    let guard = tmp_dir("managed-preview");
+    let dir = guard.path();
+    write_fixture_file(dir, "resource-summary.json", r#"{}"#);
+    write_fixture_file(dir, "bench.json", r#"{}"#);
+    write_fixture_file(
+        dir,
+        "metadata.json",
+        &format!(
+            r#"{{"preview":{}}}"#,
+            include_str!("fixtures/output_contracts/tunnel/preview-artifact.json")
+        ),
+    );
+
+    let report = performance_digest_from_args(&args(dir)).expect("digest should render");
+
+    assert_eq!(
+        report.preview.get("schema"),
+        Some(&"homeboy/preview-url/v1".to_string())
+    );
+    assert_eq!(
+        report.preview.get("policy.mode"),
+        Some(&"keep_alive_until".to_string())
+    );
+    assert_eq!(
+        report.preview.get("cleanup.expires_at"),
+        Some(&"2026-06-07T13:00:00Z".to_string())
+    );
+    assert_eq!(
+        report.preview.get("source.run_id"),
+        Some(&"run-1".to_string())
+    );
+}
+
+#[test]
 fn reads_persisted_uuid_prefixed_artifacts() {
     let guard = tmp_dir("persisted");
     let dir = guard.path();

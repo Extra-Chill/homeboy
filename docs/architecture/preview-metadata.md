@@ -51,6 +51,57 @@ For the default external mode, Homeboy does not create tunnels, publish previews
 or know about product-specific runtimes. Public access is supplied by the
 caller/integration.
 
+## Trace Native Preview Tunnels
+
+Trace workloads can request a Homeboy-native preview lifecycle instead of an
+external provider command:
+
+```json
+{
+  "public_preview": {
+    "mode": "homeboy_native",
+    "local_origin": "http://127.0.0.1:49823",
+    "require_https": true,
+    "native": {
+      "operator_domain": "preview.example.test",
+      "session_id": "wc-stripe-real-wallet",
+      "ingress_url": "https://preview-broker.example.test",
+      "token_env": "HOMEBOY_PREVIEW_TUNNEL_TOKEN"
+    },
+    "required_asset_paths": [
+      "/assets/app.js"
+    ]
+  }
+}
+```
+
+`mode: "homeboy_native"` derives `https://{session_id}-tunnel.{operator_domain}`
+unless `native.public_host` or `public_origin` is supplied. Trace starts the
+native client with the minimal internal command contract:
+
+```sh
+homeboy tunnel preview-client start \
+  --public-host wc-stripe-real-wallet-tunnel.preview.example.test \
+  --local-origin http://127.0.0.1:49823 \
+  --session-id wc-stripe-real-wallet \
+  --ingress https://preview-broker.example.test \
+  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN \
+  --ready-stdout
+```
+
+The client must print the ready public HTTPS origin to stdout before trace
+collection starts. Trace then preflights required assets through the public URL,
+injects `HOMEBOY_PREVIEW_JSON`, `HOMEBOY_PREVIEW_PUBLIC_URL`, and
+`HOMEBOY_TRACE_PREVIEW_*` environment values into the workload, and terminates
+the client during cleanup on success or failure.
+
+Native trace metadata uses `schema: "homeboy/preview/v1"`,
+`provider: "homeboy-native"`, and includes `session_id`, `public_host`,
+`ingress_url`, `client_command`, and `log_paths` when available. The concrete
+ingress daemon and reverse client implementations are tracked by #4090 and
+#4092; this trace contract is intentionally limited to the lifecycle seam they
+must satisfy.
+
 ## Trace Public Preview Assets
 
 Trace workloads can declare public-preview assets that must be fetchable before

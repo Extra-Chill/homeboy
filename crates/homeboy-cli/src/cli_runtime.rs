@@ -967,6 +967,10 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     crate::core::paths::set_config_artifact_root_resolver(|| {
         crate::core::defaults::load_config().artifact_root
     });
+    // Register optional feature crates' config entities with core so their
+    // IDs/aliases participate in cross-entity collision detection. Core owns
+    // the collision invariant but must not depend on these optional features.
+    homeboy_tunnel::register();
     // Register the audit manifest provider so code_audit can read extension
     // manifests (detector rules, test mappings, provided extensions) without
     // depending on the extension layer's loader — the seam that lets audit

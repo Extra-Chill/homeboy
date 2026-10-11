@@ -7488,6 +7488,10 @@ pub(super) fn error_response(status_code: u16, err: Error) -> HttpResponse {
     }
 }
 
+pub(crate) fn artifact_response_for_path(path: &str) -> Option<HttpResponse> {
+    artifact_download::route(path)
+}
+
 fn config_paths_body() -> Result<serde_json::Value> {
     // Boundary: one `GET /config/paths` request is one unit of work, so the rig
     // directory is joined onto the same root this response already

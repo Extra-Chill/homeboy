@@ -23,6 +23,7 @@ const ENTITY_LIST_COMMANDS: &[&str] = &[
     "rig list",
     "runner list",
     "server list",
+    "tunnel service list",
 ];
 
 /// `list` subcommands deliberately left on their own payload shape.
@@ -108,6 +109,10 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     (
         "ssh list",
         "own versioned schema (homeboy/ssh-list/v1) with operator summary and truncation",
+    ),
+    (
+        "tunnel preview-ingress list",
+        "nested action-tagged payload under data.preview_ingress",
     ),
     (
         "worktree list",

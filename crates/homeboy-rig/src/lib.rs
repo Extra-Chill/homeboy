@@ -113,8 +113,8 @@ pub use spec::{
 pub use spec::{
     ArtifactPostprocessSpec, BenchSpec, ComponentSpec, LabStackPrSpec, LabStackRef, LabStackSpec,
     PipelineStep, RigResourcesSpec, RigSpec, TraceDependencySpec, TraceExperimentSpec,
-    TraceGuardrailSpec, TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewSpec,
-    TraceVariantSpec,
+    TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
+    TraceProfileSpec, TracePublicPreviewSpec, TraceVariantSpec,
 };
 pub use state::MaterializedRigState;
 pub use state::{ComponentSnapshot, RigStateSnapshot};

@@ -1,0 +1,977 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::env;
+use std::io::ErrorKind;
+use std::net::TcpListener;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::{artifact_origin, Error, Result};
+
+pub const ARTIFACT_DOM_BOXES_SCHEMA: &str = "homeboy/static-artifact-dom-boxes/v1";
+const DEFAULT_TEXT_SAMPLE_LIMIT: usize = 160;
+const MAX_DOM_BOX_EVIDENCE_BYTES: usize = 16 * 1024;
+const MAX_DOM_BOX_EVIDENCE_DEPTH: usize = 8;
+const MAX_DOM_BOX_EVIDENCE_KEYS: usize = 64;
+const MAX_DOM_BOX_EVIDENCE_STRING_BYTES: usize = 4 * 1024;
+const DOM_BOX_EVIDENCE_FIELDS: [&str; 5] = [
+    "computed_style",
+    "text_metrics",
+    "asset_state",
+    "visibility",
+    "source",
+];
+
+#[derive(Debug, Clone)]
+pub struct DomBoxCaptureSpec {
+    pub root: PathBuf,
+    pub entrypoints: Vec<PathBuf>,
+    pub report: Option<PathBuf>,
+    pub text_sample_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DomBoxReport {
+    pub schema: &'static str,
+    pub root: String,
+    pub entrypoints: Vec<DomBoxEntrypointReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DomBoxEntrypointReport {
+    pub page_path: String,
+    pub page_url: String,
+    pub viewport: DomBoxViewport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_css_loaded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_capture_valid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dom_capture_invalid_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stylesheet_status: Option<Value>,
+    pub elements: Vec<DomBoxElement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomBoxViewport {
+    pub width: u32,
+    pub height: u32,
+    pub device_scale_factor: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DomBoxElement {
+    pub node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+    pub selector: String,
+    pub tag: String,
+    pub text_sample: String,
+    #[serde(rename = "boundingClientRect")]
+    pub bounding_client_rect: DomRect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computed_style: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_metrics: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_state: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DomRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+    pub left: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BrowserReport {
+    entrypoints: Vec<BrowserEntrypointReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BrowserEntrypointReport {
+    page_path: String,
+    page_url: String,
+    viewport: DomBoxViewport,
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    stylesheet_status: Option<Value>,
+    elements: Vec<BrowserElement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BrowserElement {
+    node_id: String,
+    node_name: Option<String>,
+    selector: String,
+    tag: String,
+    text_sample: String,
+    #[serde(rename = "boundingClientRect")]
+    bounding_client_rect: DomRect,
+    computed_style: Option<Value>,
+    text_metrics: Option<Value>,
+    asset_state: Option<Value>,
+    visibility: Option<Value>,
+    source: Option<Value>,
+}
+
+impl Default for DomBoxCaptureSpec {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::new(),
+            entrypoints: Vec::new(),
+            report: None,
+            text_sample_limit: DEFAULT_TEXT_SAMPLE_LIMIT,
+        }
+    }
+}
+
+pub fn capture(spec: DomBoxCaptureSpec) -> Result<DomBoxReport> {
+    let plan = plan_capture(&spec.root, &spec.entrypoints)?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| {
+        Error::internal_io(err.to_string(), Some("bind artifact DOM server".into()))
+    })?;
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("read artifact DOM server address".into()),
+            )
+        })?
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let server_stop = Arc::clone(&stop);
+    let server_root = spec.root.clone();
+    listener.set_nonblocking(true).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some("configure artifact DOM server".into()),
+        )
+    })?;
+    let server = std::thread::spawn(move || {
+        while !server_stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let root = server_root.clone();
+                    std::thread::spawn(move || {
+                        let _ = artifact_origin::handle_stream(stream, &root);
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let result = run_browser_capture(&base_url, &plan, spec.text_sample_limit)
+        .and_then(|browser| shape_report(&spec.root, browser, spec.text_sample_limit));
+    stop.store(true, Ordering::Relaxed);
+    let _ = server.join();
+
+    let report = result?;
+    if let Some(path) = spec.report {
+        write_report(&path, &report)?;
+    }
+    Ok(report)
+}
+
+pub fn plan_capture(root: &Path, entrypoints: &[PathBuf]) -> Result<Vec<String>> {
+    if entrypoints.is_empty() {
+        return Err(Error::validation_missing_argument(vec![
+            "entrypoint".to_string()
+        ]));
+    }
+    entrypoints
+        .iter()
+        .map(|entrypoint| entrypoint_request_path(root, entrypoint))
+        .collect()
+}
+
+pub(crate) fn shape_report(
+    root: &Path,
+    browser: BrowserReport,
+    text_sample_limit: usize,
+) -> Result<DomBoxReport> {
+    validate_browser_evidence(&browser)?;
+    Ok(DomBoxReport {
+        schema: ARTIFACT_DOM_BOXES_SCHEMA,
+        root: root.display().to_string(),
+        entrypoints: browser
+            .entrypoints
+            .into_iter()
+            .map(|entrypoint| {
+                let diagnostics = normalize_capture_diagnostics(
+                    entrypoint.dom_css_loaded,
+                    entrypoint.dom_capture_valid,
+                    &entrypoint.stylesheet_status,
+                );
+                DomBoxEntrypointReport {
+                    page_path: entrypoint.page_path,
+                    page_url: entrypoint.page_url,
+                    viewport: entrypoint.viewport,
+                    dom_css_loaded: diagnostics.dom_css_loaded,
+                    dom_capture_valid: diagnostics.dom_capture_valid,
+                    dom_capture_invalid_reason: diagnostics.dom_capture_invalid_reason,
+                    stylesheet_status: entrypoint.stylesheet_status,
+                    elements: entrypoint
+                        .elements
+                        .into_iter()
+                        .map(|element| DomBoxElement {
+                            node_id: element.node_id,
+                            node_name: element.node_name,
+                            selector: element.selector,
+                            tag: element.tag,
+                            text_sample: truncate_text_sample(
+                                &element.text_sample,
+                                text_sample_limit,
+                            ),
+                            bounding_client_rect: element.bounding_client_rect,
+                            computed_style: evidence_object(element.computed_style),
+                            text_metrics: evidence_object(element.text_metrics),
+                            asset_state: evidence_object(element.asset_state),
+                            visibility: evidence_object(element.visibility),
+                            source: evidence_object(element.source),
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    })
+}
+
+fn evidence_object(value: Option<Value>) -> Option<Map<String, Value>> {
+    value.map(|value| {
+        value
+            .as_object()
+            .expect("validated DOM-box evidence must be an object")
+            .clone()
+    })
+}
+
+fn validate_browser_evidence(browser: &BrowserReport) -> Result<()> {
+    for (entrypoint_index, entrypoint) in browser.entrypoints.iter().enumerate() {
+        for (element_index, element) in entrypoint.elements.iter().enumerate() {
+            for field in DOM_BOX_EVIDENCE_FIELDS {
+                let value = match field {
+                    "computed_style" => element.computed_style.as_ref(),
+                    "text_metrics" => element.text_metrics.as_ref(),
+                    "asset_state" => element.asset_state.as_ref(),
+                    "visibility" => element.visibility.as_ref(),
+                    "source" => element.source.as_ref(),
+                    _ => unreachable!("DOM-box evidence field list is exhaustive"),
+                };
+                if let Some(value) = value {
+                    validate_evidence_object(value, field, entrypoint_index, element_index)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_evidence_object(
+    value: &Value,
+    field: &str,
+    entrypoint_index: usize,
+    element_index: usize,
+) -> Result<()> {
+    let location = format!("{field} at entrypoint {entrypoint_index}, element {element_index}");
+    if !value.is_object() {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} must be a JSON object"
+        )));
+    }
+    let serialized = serde_json::to_vec(value).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some("serialize DOM-box provider evidence".into()),
+        )
+    })?;
+    if serialized.len() > MAX_DOM_BOX_EVIDENCE_BYTES {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_BYTES}-byte limit"
+        )));
+    }
+
+    let mut key_count = 0;
+    validate_evidence_value(value, 1, &mut key_count, &location)
+}
+
+fn validate_evidence_value(
+    value: &Value,
+    depth: usize,
+    key_count: &mut usize,
+    location: &str,
+) -> Result<()> {
+    if depth > MAX_DOM_BOX_EVIDENCE_DEPTH {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_DEPTH}-level nesting limit"
+        )));
+    }
+    match value {
+        Value::Object(object) => {
+            *key_count += object.len();
+            if *key_count > MAX_DOM_BOX_EVIDENCE_KEYS {
+                return Err(dom_box_evidence_error(format!(
+                    "provider evidence {location} exceeds the {MAX_DOM_BOX_EVIDENCE_KEYS}-key limit"
+                )));
+            }
+            for (key, value) in object {
+                validate_evidence_string(key, location)?;
+                validate_evidence_value(value, depth + 1, key_count, location)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                validate_evidence_value(value, depth + 1, key_count, location)?;
+            }
+        }
+        Value::String(value) => validate_evidence_string(value, location)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_evidence_string(value: &str, location: &str) -> Result<()> {
+    if value.len() > MAX_DOM_BOX_EVIDENCE_STRING_BYTES {
+        return Err(dom_box_evidence_error(format!(
+            "provider evidence {location} contains a string exceeding the {MAX_DOM_BOX_EVIDENCE_STRING_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
+}
+
+fn dom_box_evidence_error(message: String) -> Error {
+    Error::validation_invalid_argument(
+        "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+        message,
+        None,
+        Some(vec![
+            "Provide bounded JSON object evidence: at most 16384 bytes, 8 nesting levels, 64 keys, and 4096 bytes per string.".to_string(),
+        ]),
+    )
+}
+
+struct NormalizedCaptureDiagnostics {
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    dom_capture_invalid_reason: Option<String>,
+}
+
+fn normalize_capture_diagnostics(
+    dom_css_loaded: Option<bool>,
+    dom_capture_valid: Option<bool>,
+    stylesheet_status: &Option<Value>,
+) -> NormalizedCaptureDiagnostics {
+    let mut problems = Vec::new();
+    if dom_css_loaded.is_none() {
+        problems.push("dom_css_loaded missing".to_string());
+    }
+    if dom_capture_valid.is_none() {
+        problems.push("dom_capture_valid missing".to_string());
+    }
+    match stylesheet_status {
+        Some(Value::Object(_)) => {}
+        Some(_) => problems.push("stylesheet_status must be an object".to_string()),
+        None => problems.push("stylesheet_status missing".to_string()),
+    }
+    if dom_css_loaded == Some(false) {
+        problems.push("provider reported CSS was not loaded".to_string());
+    }
+    if dom_capture_valid == Some(false) {
+        problems.push("provider reported DOM capture invalid".to_string());
+    }
+
+    if problems.is_empty() {
+        NormalizedCaptureDiagnostics {
+            dom_css_loaded,
+            dom_capture_valid,
+            dom_capture_invalid_reason: None,
+        }
+    } else {
+        NormalizedCaptureDiagnostics {
+            dom_css_loaded,
+            dom_capture_valid: Some(false),
+            dom_capture_invalid_reason: Some(format!(
+                "provider CSS diagnostics invalid: {}",
+                problems.join("; ")
+            )),
+        }
+    }
+}
+
+pub fn truncate_text_sample(input: &str, limit: usize) -> String {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(limit).collect()
+}
+
+fn entrypoint_request_path(root: &Path, entrypoint: &Path) -> Result<String> {
+    let relative = if entrypoint.is_absolute() {
+        entrypoint.strip_prefix(root).map_err(|_| {
+            Error::validation_invalid_argument(
+                "entrypoint",
+                format!(
+                    "absolute entrypoint {} is not inside artifact root {}",
+                    entrypoint.display(),
+                    root.display()
+                ),
+                None,
+                None,
+            )
+        })?
+    } else {
+        entrypoint
+    };
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(Error::validation_invalid_argument(
+            "entrypoint",
+            "entrypoint must stay inside the artifact root",
+            None,
+            None,
+        ));
+    }
+    let path = root.join(relative);
+    if !path.is_file() {
+        return Err(Error::validation_invalid_argument(
+            "entrypoint",
+            format!("entrypoint file not found: {}", path.display()),
+            None,
+            None,
+        ));
+    }
+    let request_path = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(format!("/{}", request_path.trim_start_matches('/')))
+}
+
+fn run_browser_capture(
+    base_url: &str,
+    page_paths: &[String],
+    text_sample_limit: usize,
+) -> Result<BrowserReport> {
+    let provider = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .ok_or_else(missing_browser_error)?;
+    let page_paths_json = serde_json::to_string(page_paths).map_err(|err| {
+        Error::internal_json(err.to_string(), Some("serialize DOM box page paths".into()))
+    })?;
+    let output = Command::new("sh")
+        .args(["-c", &provider])
+        .env("HOMEBOY_DOM_BOX_BASE_URL", base_url)
+        .env("HOMEBOY_DOM_BOX_PAGE_PATHS_JSON", page_paths_json)
+        .env(
+            "HOMEBOY_DOM_BOX_TEXT_SAMPLE_LIMIT",
+            text_sample_limit.to_string(),
+        )
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("run DOM box capture provider".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(Error::internal_unexpected(format!(
+            "DOM box capture provider failed: {}",
+            stderr.trim()
+        )));
+    }
+    let report = serde_json::from_slice(&output.stdout).map_err(|err| {
+        Error::internal_json(
+            err.to_string(),
+            Some(
+                String::from_utf8_lossy(&output.stdout)
+                    .chars()
+                    .take(500)
+                    .collect(),
+            ),
+        )
+    })?;
+    validate_browser_evidence(&report)?;
+    Ok(report)
+}
+
+fn missing_browser_error() -> Error {
+    Error::validation_invalid_argument(
+        "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+        "no DOM box capture provider configured",
+        None,
+        Some(vec![
+            "Set HOMEBOY_DOM_BOX_CAPTURE_COMMAND to a command that writes a browser DOM-box JSON payload to stdout.".to_string(),
+            "Provider commands receive HOMEBOY_DOM_BOX_BASE_URL, HOMEBOY_DOM_BOX_PAGE_PATHS_JSON, and HOMEBOY_DOM_BOX_TEXT_SAMPLE_LIMIT.".to_string(),
+        ]),
+    )
+}
+
+fn write_report(path: &Path, report: &DomBoxReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(parent.display().to_string()))
+        })?;
+    }
+    let json = serde_json::to_string_pretty(report).map_err(|err| {
+        Error::internal_json(err.to_string(), Some("serialize DOM box report".into()))
+    })?;
+    std::fs::write(path, format!("{json}\n"))
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    static PROVIDER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn rect() -> DomRect {
+        DomRect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+            top: 2.0,
+            right: 4.0,
+            bottom: 6.0,
+            left: 1.0,
+        }
+    }
+
+    fn provider_payload(evidence: Option<(&str, Value)>) -> Value {
+        let mut element = serde_json::json!({
+            "node_id": "12:34",
+            "node_name": "Hero",
+            "selector": "div[data-figma-node-id=\"12:34\"]",
+            "tag": "div",
+            "text_sample": "Hello world",
+            "boundingClientRect": {
+                "x": 1,
+                "y": 2,
+                "width": 3,
+                "height": 4,
+                "top": 2,
+                "right": 4,
+                "bottom": 6,
+                "left": 1
+            }
+        });
+        if let Some((field, value)) = evidence {
+            element
+                .as_object_mut()
+                .expect("provider element object")
+                .insert(field.to_string(), value);
+        }
+        serde_json::json!({
+            "entrypoints": [{
+                "page_path": "/index.html",
+                "page_url": "http://127.0.0.1/index.html",
+                "viewport": { "width": 1440, "height": 900, "device_scale_factor": 1 },
+                "elements": [element]
+            }]
+        })
+    }
+
+    fn capture_provider_payload(payload: Value) -> Result<BrowserReport> {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = dir.path().join("dom-provider");
+        let payload = serde_json::to_string(&payload).expect("provider payload");
+        std::fs::write(&provider, format!("#!/bin/sh\nprintf '%s' '{payload}'\n"))
+            .expect("provider");
+        let mut perms = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&provider, perms).expect("chmod");
+
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::set_var(
+            "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+            provider.display().to_string(),
+        );
+        let result = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160);
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+        result
+    }
+
+    #[test]
+    fn shapes_report_and_truncates_text_samples() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: Some(true),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!({ "body_margin": "0px" })),
+                    elements: vec![BrowserElement {
+                        node_id: "12:34".to_string(),
+                        node_name: Some("Footer text".to_string()),
+                        selector: "p[data-figma-node-id=\"12:34\"]".to_string(),
+                        tag: "p".to_string(),
+                        text_sample: "Footer\ntext with    extra words".to_string(),
+                        bounding_client_rect: rect(),
+                        computed_style: Some(serde_json::json!({ "display": "block" })),
+                        text_metrics: Some(serde_json::json!({ "line_count": 2 })),
+                        asset_state: Some(serde_json::json!({ "loaded": true })),
+                        visibility: Some(serde_json::json!({ "is_visible": true })),
+                        source: Some(serde_json::json!({ "kind": "generated" })),
+                    }],
+                }],
+            },
+            16,
+        )
+        .expect("shape");
+
+        assert_eq!(report.schema, ARTIFACT_DOM_BOXES_SCHEMA);
+        assert_eq!(
+            report.entrypoints[0].elements[0].text_sample,
+            "Footer text with"
+        );
+        assert_eq!(report.entrypoints[0].dom_css_loaded, Some(true));
+        assert_eq!(report.entrypoints[0].dom_capture_valid, Some(true));
+        assert_eq!(report.entrypoints[0].dom_capture_invalid_reason, None);
+        assert_eq!(
+            report.entrypoints[0]
+                .stylesheet_status
+                .as_ref()
+                .and_then(|status| status.get("body_margin"))
+                .and_then(|value| value.as_str()),
+            Some("0px")
+        );
+        assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+        let element = &report.entrypoints[0].elements[0];
+        assert_eq!(element.computed_style.as_ref().unwrap()["display"], "block");
+        assert_eq!(element.text_metrics.as_ref().unwrap()["line_count"], 2);
+        assert_eq!(element.asset_state.as_ref().unwrap()["loaded"], true);
+        assert_eq!(element.visibility.as_ref().unwrap()["is_visible"], true);
+        assert_eq!(element.source.as_ref().unwrap()["kind"], "generated");
+    }
+
+    #[test]
+    fn marks_missing_provider_css_diagnostics_invalid() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: None,
+                    dom_capture_valid: None,
+                    stylesheet_status: None,
+                    elements: Vec::new(),
+                }],
+            },
+            16,
+        )
+        .expect("shape");
+
+        let entrypoint = &report.entrypoints[0];
+        assert_eq!(entrypoint.dom_capture_valid, Some(false));
+        let reason = entrypoint
+            .dom_capture_invalid_reason
+            .as_deref()
+            .expect("invalid reason");
+        assert!(reason.contains("dom_css_loaded missing"));
+        assert!(reason.contains("dom_capture_valid missing"));
+        assert!(reason.contains("stylesheet_status missing"));
+    }
+
+    #[test]
+    fn marks_invalid_provider_css_diagnostics_invalid() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: Some(false),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!("not diagnostic object")),
+                    elements: Vec::new(),
+                }],
+            },
+            16,
+        )
+        .expect("shape");
+
+        let entrypoint = &report.entrypoints[0];
+        assert_eq!(entrypoint.dom_css_loaded, Some(false));
+        assert_eq!(entrypoint.dom_capture_valid, Some(false));
+        let reason = entrypoint
+            .dom_capture_invalid_reason
+            .as_deref()
+            .expect("invalid reason");
+        assert!(reason.contains("stylesheet_status must be an object"));
+        assert!(reason.contains("provider reported CSS was not loaded"));
+    }
+
+    #[test]
+    fn plans_multiple_entrypoint_paths_from_artifact_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("index.html");
+        let nested_dir = dir.path().join("nested");
+        std::fs::create_dir_all(&nested_dir).expect("nested");
+        let second = nested_dir.join("page.html");
+        std::fs::write(&first, "<html></html>").expect("first");
+        std::fs::write(&second, "<html></html>").expect("second");
+
+        let planned = plan_capture(
+            dir.path(),
+            &[
+                PathBuf::from("index.html"),
+                PathBuf::from("nested/page.html"),
+            ],
+        )
+        .expect("plan");
+
+        assert_eq!(planned, vec!["/index.html", "/nested/page.html"]);
+    }
+
+    #[test]
+    fn browser_capture_uses_configured_provider_command() {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = dir.path().join("dom-provider");
+        std::fs::write(
+            &provider,
+            r#"#!/bin/sh
+printf '%s' '{"entrypoints":[{"page_path":"/index.html","page_url":"http://127.0.0.1/index.html","viewport":{"width":1440,"height":900,"device_scale_factor":1},"elements":[{"node_id":"12:34","node_name":"Hero","selector":"div[data-figma-node-id=\"12:34\"]","tag":"div","text_sample":"Hello world","boundingClientRect":{"x":1,"y":2,"width":3,"height":4,"top":2,"right":4,"bottom":6,"left":1},"computed_style":{"display":"block"},"text_metrics":{"line_count":1},"asset_state":{"loaded":true},"visibility":{"is_visible":true},"source":{"kind":"fixture"}}]}]}'
+"#,
+        )
+        .expect("provider");
+        let mut perms = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&provider, perms).expect("chmod");
+
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::set_var(
+            "HOMEBOY_DOM_BOX_CAPTURE_COMMAND",
+            provider.display().to_string(),
+        );
+        let report = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160)
+            .expect("capture");
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+
+        assert_eq!(report.entrypoints.len(), 1);
+        assert_eq!(report.entrypoints[0].elements[0].node_id, "12:34");
+        let shaped = shape_report(Path::new("/artifact"), report, 160).expect("shape");
+        let element =
+            &serde_json::to_value(&shaped).expect("serialize")["entrypoints"][0]["elements"][0];
+        assert_eq!(
+            element["computed_style"],
+            serde_json::json!({ "display": "block" })
+        );
+        assert_eq!(
+            element["text_metrics"],
+            serde_json::json!({ "line_count": 1 })
+        );
+        assert_eq!(
+            element["asset_state"],
+            serde_json::json!({ "loaded": true })
+        );
+        assert_eq!(
+            element["visibility"],
+            serde_json::json!({ "is_visible": true })
+        );
+        assert_eq!(element["source"], serde_json::json!({ "kind": "fixture" }));
+    }
+
+    #[test]
+    fn browser_capture_accepts_legacy_provider_payload_without_evidence() {
+        let browser = capture_provider_payload(provider_payload(None)).expect("legacy capture");
+        let report = shape_report(Path::new("/artifact"), browser, 160).expect("shape");
+        let element =
+            &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];
+        for field in DOM_BOX_EVIDENCE_FIELDS {
+            assert!(element.get(field).is_none(), "{field} should be omitted");
+        }
+    }
+
+    #[test]
+    fn browser_capture_rejects_scalar_and_array_evidence() {
+        for value in [serde_json::json!("not an object"), serde_json::json!([])] {
+            let error = capture_provider_payload(provider_payload(Some(("computed_style", value))))
+                .expect_err("invalid evidence shape");
+            assert!(error.to_string().contains("computed_style"));
+            assert!(error.to_string().contains("must be a JSON object"));
+        }
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_nesting_limit() {
+        let mut value = serde_json::json!({});
+        for _ in 0..MAX_DOM_BOX_EVIDENCE_DEPTH {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let error = capture_provider_payload(provider_payload(Some(("source", value))))
+            .expect_err("excessive depth");
+        assert!(error.to_string().contains("source"));
+        assert!(error.to_string().contains("nesting limit"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_key_limit() {
+        let mut value = Map::new();
+        for index in 0..=MAX_DOM_BOX_EVIDENCE_KEYS {
+            value.insert(format!("key-{index}"), Value::Null);
+        }
+
+        let error = capture_provider_payload(provider_payload(Some((
+            "text_metrics",
+            Value::Object(value),
+        ))))
+        .expect_err("excessive keys");
+        assert!(error.to_string().contains("text_metrics"));
+        assert!(error.to_string().contains("key limit"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_string_limit() {
+        let value = serde_json::json!({
+            "data_url": "x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES + 1)
+        });
+
+        let error = capture_provider_payload(provider_payload(Some(("asset_state", value))))
+            .expect_err("excessive string");
+        assert!(error.to_string().contains("asset_state"));
+        assert!(error.to_string().contains("string exceeding"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_evidence_exceeding_byte_limit() {
+        let mut value = Map::new();
+        for index in 0..5 {
+            value.insert(
+                format!("data-{index}"),
+                Value::String("x".repeat(MAX_DOM_BOX_EVIDENCE_STRING_BYTES)),
+            );
+        }
+
+        let error =
+            capture_provider_payload(provider_payload(Some(("visibility", Value::Object(value)))))
+                .expect_err("excessive bytes");
+        assert!(error.to_string().contains("visibility"));
+        assert!(error.to_string().contains("byte limit"));
+    }
+
+    #[test]
+    fn omits_missing_optional_provider_evidence() {
+        let report = shape_report(
+            Path::new("/artifact"),
+            BrowserReport {
+                entrypoints: vec![BrowserEntrypointReport {
+                    page_path: "/page.html".to_string(),
+                    page_url: "http://127.0.0.1/page.html".to_string(),
+                    viewport: DomBoxViewport {
+                        width: 1440,
+                        height: 900,
+                        device_scale_factor: 1,
+                    },
+                    dom_css_loaded: Some(true),
+                    dom_capture_valid: Some(true),
+                    stylesheet_status: Some(serde_json::json!({})),
+                    elements: vec![BrowserElement {
+                        node_id: "12:34".to_string(),
+                        node_name: None,
+                        selector: "p".to_string(),
+                        tag: "p".to_string(),
+                        text_sample: "Hello".to_string(),
+                        bounding_client_rect: rect(),
+                        computed_style: None,
+                        text_metrics: None,
+                        asset_state: None,
+                        visibility: None,
+                        source: None,
+                    }],
+                }],
+            },
+            160,
+        )
+        .expect("shape");
+
+        let element =
+            &serde_json::to_value(&report).expect("serialize")["entrypoints"][0]["elements"][0];
+        for field in [
+            "computed_style",
+            "text_metrics",
+            "asset_state",
+            "visibility",
+            "source",
+        ] {
+            assert!(element.get(field).is_none(), "{field} should be omitted");
+        }
+    }
+
+    #[test]
+    fn browser_capture_reports_missing_provider_without_browser_assumption() {
+        let _guard = PROVIDER_ENV_LOCK.lock().expect("provider env lock");
+        let previous = env::var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND").ok();
+        env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND");
+        let error = run_browser_capture("http://127.0.0.1/", &["/index.html".to_string()], 160)
+            .expect_err("missing provider");
+        match previous {
+            Some(value) => env::set_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND", value),
+            None => env::remove_var("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"),
+        }
+
+        assert!(error
+            .to_string()
+            .contains("HOMEBOY_DOM_BOX_CAPTURE_COMMAND"));
+        assert!(error
+            .to_string()
+            .contains("no DOM box capture provider configured"));
+    }
+}

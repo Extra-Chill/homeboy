@@ -254,30 +254,68 @@ fn lab_secret_env_handoff_plan_consumes_declared_sources_only() {
     assert!(plan.runner_deferred_secret_env.is_empty());
 }
 
-fn runner_deferred_handoff(name: &str) -> LabSecretEnvHandoffPlan {
-    LabSecretEnvHandoffPlan {
-        env_delta: HashMap::new(),
-        diagnostics: serde_json::Value::Null,
-        entries: vec![SecretEnvHandoffEntry {
-            name: name.to_string(),
-            owner: "runner".to_string(),
-            source: "runner".to_string(),
-            destination: "runner".to_string(),
-            status: "deferred".to_string(),
-            remediation: Some(
-                "Configure the selected runner secret_env references for the declared names before Lab dispatch."
-                    .to_string(),
-            ),
-        }],
-        secret_env_plan: SecretEnvPlan::from_secret_env_names([name.to_string()]),
-        secret_env_names: vec![name.to_string()],
-        runner_deferred_secret_env: vec![name.to_string()],
-    }
+#[test]
+fn lab_secret_env_handoff_plan_reports_runner_deferred_requirements() {
+    let args = vec![
+        "homeboy".to_string(),
+        "tunnel".to_string(),
+        "preview-client".to_string(),
+        "start".to_string(),
+        "--ingress".to_string(),
+        "https://preview-broker.example.test".to_string(),
+        "--token-env=HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string(),
+    ];
+
+    let plan =
+        build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+            .expect("handoff plan");
+
+    assert!(plan.env_delta.is_empty());
+    assert_eq!(
+        plan.secret_env_names,
+        vec!["HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string()]
+    );
+    assert_eq!(
+        plan.runner_deferred_secret_env,
+        vec!["HOMEBOY_RUNNER_PREVIEW_TOKEN".to_string()]
+    );
+    assert_eq!(
+        plan.diagnostics["runner_deferred_secret_env"][0]["name"],
+        "HOMEBOY_RUNNER_PREVIEW_TOKEN"
+    );
+    assert_eq!(
+        plan.diagnostics["runner_deferred_secret_env"][0]["required"],
+        true
+    );
+    let entries: Vec<SecretEnvHandoffEntry> =
+        serde_json::from_value(plan.diagnostics["entries"].clone()).expect("typed entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "HOMEBOY_RUNNER_PREVIEW_TOKEN");
+    assert_eq!(entries[0].owner, "runner");
+    assert_eq!(entries[0].source, "runner");
+    assert_eq!(entries[0].destination, "runner");
+    assert_eq!(entries[0].status, "deferred");
+    assert!(entries[0]
+        .remediation
+        .as_deref()
+        .expect("remediation")
+        .contains("runner secret_env references"));
 }
 
 #[test]
 fn preflight_lab_secret_env_handoff_reports_missing_runner_deferred_secret() {
-    let handoff = runner_deferred_handoff("HOMEBOY_RUNNER_PREFLIGHT_TOKEN");
+    let args = vec![
+        "homeboy".to_string(),
+        "tunnel".to_string(),
+        "preview-client".to_string(),
+        "start".to_string(),
+        "--ingress".to_string(),
+        "https://preview-broker.example.test".to_string(),
+        "--token-env=HOMEBOY_RUNNER_PREFLIGHT_TOKEN".to_string(),
+    ];
+    let handoff =
+        build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+            .expect("handoff");
     let runner = fixture_runner(HashMap::new());
 
     let err = preflight_lab_secret_env_handoff("lab-a", Some(&runner), &HashMap::new(), &handoff)
@@ -321,7 +359,18 @@ fn preflight_lab_secret_env_handoff_accepts_declared_runner_provider_source() {
 
 #[test]
 fn preflight_lab_secret_env_handoff_preserves_unknown_runner_side_status() {
-    let handoff = runner_deferred_handoff("HOMEBOY_UNKNOWN_RUNNER_TOKEN");
+    let args = vec![
+        "homeboy".to_string(),
+        "tunnel".to_string(),
+        "preview-client".to_string(),
+        "start".to_string(),
+        "--ingress".to_string(),
+        "https://preview-broker.example.test".to_string(),
+        "--token-env=HOMEBOY_UNKNOWN_RUNNER_TOKEN".to_string(),
+    ];
+    let handoff =
+        build_lab_secret_env_handoff_plan(&[LabSecretEnvSource::Tunnel], &args, HashMap::new())
+            .expect("handoff");
 
     preflight_lab_secret_env_handoff("lab-a", None, &HashMap::new(), &handoff)
         .expect("unknown runner-side secret status should remain runner-deferred");
@@ -447,4 +496,76 @@ fn managed_service_secrets_are_required_by_lab_preflight_and_handoff() {
         handoff.diagnostics["managed_service_secret_env"],
         serde_json::json!(["HOMEBOY_SERVICE_RUNNER_SECRET"])
     );
+}
+
+#[test]
+fn declared_tunnel_secret_env_reads_preview_client_default_and_override() {
+    assert_eq!(
+        declared_tunnel_secret_env(&[
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--ingress".to_string(),
+            "https://preview-broker.example.test".to_string(),
+        ]),
+        vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]
+    );
+
+    assert_eq!(
+        declared_tunnel_secret_env(&[
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "preview-client".to_string(),
+            "start".to_string(),
+            "--token-env=RUNNER_PREVIEW_TOKEN".to_string(),
+        ]),
+        vec!["RUNNER_PREVIEW_TOKEN".to_string()]
+    );
+}
+
+#[test]
+fn declared_tunnel_secret_env_detects_service_preview_client_backend() {
+    let names = declared_tunnel_secret_env(&[
+        "homeboy".to_string(),
+        "--runner".to_string(),
+        "homeboy-lab".to_string(),
+        "tunnel".to_string(),
+        "service".to_string(),
+        "start".to_string(),
+        "runner-preview".to_string(),
+        "--command".to_string(),
+        "npm run dev".to_string(),
+        "--public-tunnel-backend".to_string(),
+        "command".to_string(),
+        "--public-tunnel-command".to_string(),
+        "homeboy tunnel preview-client start --ready-stdout".to_string(),
+    ]);
+
+    assert_eq!(names, vec!["HOMEBOY_PREVIEW_TUNNEL_TOKEN".to_string()]);
+}
+
+#[test]
+fn hydrate_tunnel_secret_env_reports_runner_deferred_names_without_values() {
+    let args = vec![
+        "homeboy".to_string(),
+        "tunnel".to_string(),
+        "preview-client".to_string(),
+        "start".to_string(),
+        "--ingress".to_string(),
+        "https://preview-broker.example.test".to_string(),
+        "--public-host".to_string(),
+        "preview.example.test".to_string(),
+        "--local-origin".to_string(),
+        "http://127.0.0.1:8888".to_string(),
+    ];
+    let mut env = std::collections::HashMap::new();
+
+    let diagnostics = hydrate_tunnel_secret_env(&args, &mut env).expect("hydrate tunnel secret");
+
+    assert!(env.is_empty());
+    let rendered = diagnostics.to_string();
+    assert!(rendered.contains("homeboy/lab-tunnel-secret-env/v1"));
+    assert!(rendered.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
+    assert!(rendered.contains("runner"));
 }

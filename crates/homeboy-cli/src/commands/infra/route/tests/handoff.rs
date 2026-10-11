@@ -741,6 +741,63 @@ fn agent_task_fanout_state_reads_are_runner_resident() {
 }
 
 #[test]
+fn tunnel_service_start_supports_explicit_runner_discovery() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "tunnel",
+        "service",
+        "start",
+        "preview",
+        "--cwd",
+        "/home/user/Developer/_lab_workspaces/site",
+        "--command",
+        "npm run dev",
+    ]);
+
+    let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    assert_eq!(command.hot_label, "tunnel service start");
+    assert!(command.is_portable());
+    assert!(!command.routing_policy.default_lab_offload);
+    assert_eq!(
+        command.source_path_mode,
+        runners::LabOffloadSourcePathMode::RunnerResident
+    );
+    assert_eq!(
+        command.workspace_mode_policy,
+        runners::LabOffloadWorkspaceModePolicy::RunnerResident
+    );
+    assert!(!command.routing_policy.requires_extension_parity);
+    assert!(command.required_extensions.is_empty());
+    assert!(!command.routing_policy.infer_source_path_tools);
+}
+
+#[test]
+fn tunnel_preview_consumer_run_keeps_explicit_runner_contract() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "tunnel",
+        "preview-consumer",
+        "run",
+        "--config",
+        "consumer.json",
+        "--preview-public-url",
+        "https://preview.example.test/run",
+    ]);
+
+    let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+    assert_eq!(command.hot_label, "tunnel preview-consumer run");
+    assert!(command.is_portable());
+    assert!(!command.routing_policy.default_lab_offload);
+}
+
+#[test]
 fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
     let cli = Cli::parse_from(["homeboy", "review", "audit", "--baseline"]);
 

@@ -1050,7 +1050,8 @@ fn retained_storage_filesystem_inventory_for(
     // The config root is a second Homeboy volume, not a second copy of the
     // first. It holds `rigs/{id}.state/logs/` (unbounded append), `backups/`,
     // `rig-packages/`, `agent-runtimes/`, `runner-sessions/`,
-    // `runner-lease-evidence/`, and `runner-job-execution-context/`. Before #11126 it was never probed, so this
+    // `runner-lease-evidence/`, `runner-job-execution-context/`, and
+    // `preview-ingress/routes/`. Before #11126 it was never probed, so this
     // report described a healthy system during the 2026-07-29 outage.
     //
     // Double-counting is a containment question, not a same-filesystem

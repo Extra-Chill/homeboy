@@ -144,7 +144,7 @@ pub struct ResidentServiceConfig {
     /// Stable identifier for the service, used in upgrade result reporting.
     pub id: String,
 
-    /// systemd unit name (e.g. `homeboy-runner`). When set and no
+    /// systemd unit name (e.g. `homeboy-preview-ingress`). When set and no
     /// `restart_command` is given, the service is restarted with
     /// `systemctl restart <unit>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

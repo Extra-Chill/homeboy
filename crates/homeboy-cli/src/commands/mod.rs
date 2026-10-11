@@ -266,6 +266,7 @@ pub mod ssh;
 pub mod status;
 pub mod test;
 pub mod trace;
+pub mod tunnel;
 pub mod undo;
 pub mod upgrade;
 pub mod utils;

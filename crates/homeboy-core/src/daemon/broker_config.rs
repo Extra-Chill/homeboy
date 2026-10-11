@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 
 /// Unix service identity (system user + group) that a managed daemon runs as.
 ///
-/// Shared across the broker install surfaces so the
+/// Shared across the broker and preview-ingress install surfaces so the
 /// `service_user` / `service_group` pair is defined once. Serialized flat via
 /// `#[serde(flatten)]` to preserve the historical top-level JSON keys.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

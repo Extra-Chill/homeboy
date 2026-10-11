@@ -1,0 +1,470 @@
+# `homeboy tunnel`
+
+## Synopsis
+
+```sh
+homeboy tunnel service <COMMAND>
+homeboy tunnel preview-client <COMMAND>
+homeboy tunnel preview-ingress <COMMAND>
+homeboy tunnel preview-consumer <COMMAND>
+homeboy tunnel artifact-origin <COMMAND>
+```
+
+`tunnel` manages Homeboy-native private service tunnel declarations, local managed service lifecycle, and the VPS-side public preview ingress used by generic preview URLs. Homeboy can start a long-running local command, record safe command/process/log evidence, report readiness, and stop the process group without relying on an external chat or tunnel wrapper.
+
+`preview-client` connects a local/lab preview origin to a Homeboy-owned preview ingress over an outbound authenticated reverse channel. It is the local side of native public browser preview tunnels and does not use external tunnel providers.
+
+## Artifact Origin
+
+`artifact-origin` serves the configured Homeboy artifact root as a static, CORS-enabled HTTP origin for browser/reviewer consumers. Public URLs map directly from the artifact-root-relative path:
+
+```text
+HOMEBOY_ARTIFACT_ROOT/workflow-bench/<bundle>/report.html
+  -> ${HOMEBOY_PUBLIC_ARTIFACT_BASE_URL}/workflow-bench/<bundle>/report.html
+```
+
+Inspect the configured root and URL mapping without starting or restarting the origin:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
+  homeboy tunnel artifact-origin status
+```
+
+Check one published Workflow Bench path locally before sharing a public URL:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com \
+  homeboy tunnel artifact-origin inspect \
+  workflow-bench/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export/report.html \
+  --fail-on-missing
+```
+
+`inspect` returns a concise handoff summary with the mapped request path,
+filesystem path, public URL, HTTP-style status, detected content type, byte size,
+and `reviewer_safe`. A result is reviewer-safe only when the mapped file exists,
+`HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` is set, and the derived public URL is not a
+local-only URL such as `localhost` or `127.0.0.1`. Treat filesystem paths and
+local-only URLs as operator notes; mirror the artifact root or route it through a
+reviewer-reachable tunnel before pasting links into PRs, issues, or reports.
+
+Run the artifact root and its outbound reverse connection as one long-lived service. This is the durable artifact-publication contract for a systemd unit or Homeboy-managed service:
+
+```sh
+HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://artifacts-tunnel.example.com \
+HOMEBOY_PREVIEW_TUNNEL_TOKEN='<configured-secret>' \
+  homeboy tunnel artifact-origin serve \
+  --root /srv/homeboy-artifacts \
+  --bind 127.0.0.1:7351 \
+  --ingress https://preview-ingress.example.com \
+  --public-host artifacts-tunnel.example.com \
+  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN
+```
+
+The process prints a structured `ready` record containing the artifact root, origin bind, ingress URL, exact public host, and token environment-variable name. It keeps serving while the reverse client reconnects with bounded backoff after a disconnected or restarted ingress. The default one-second long poll bounds service shutdown latency; `--poll-timeout` can tune it.
+
+### Publication Recovery And Verification
+
+A declared artifact service is not evidence that a process is listening. Recover a
+Lab-local origin with the declared service ID and the same persistent artifact
+root, then confirm the listener before relying on its public route:
+
+```sh
+homeboy tunnel service start homeboy-artifact-origin \
+  --runner homeboy-lab \
+  --host 127.0.0.1 \
+  --port 7351 \
+  --require-listener \
+  --command 'exec homeboy tunnel artifact-origin serve --root "$HOME/.local/share/homeboy/artifacts" --bind 127.0.0.1:7351'
+
+homeboy runner exec homeboy-lab -- \
+  homeboy tunnel service status homeboy-artifact-origin
+```
+
+If the public host is attached through an outbound preview client, restore that
+client in its supervisor with the configured ingress, public host, and
+`HOMEBOY_PREVIEW_TUNNEL_TOKEN`; `service start` only restores the loopback
+origin. Do not invent or expose a token value in a shell history or service
+unit.
+
+Verify a real persisted artifact from the reviewer-equivalent Lab network, not
+from the controller. Substitute values copied from `homeboy runs artifacts
+<run-id>`; the command follows redirects and fails unless the final response is
+exactly HTTP 200 and the final body has the expected length and SHA-256.
+
+```sh
+set -eu
+RUN_ID='<run-id>'
+ARTIFACT_ID='<artifact-id>'
+ARTIFACT_PATH="$HOME/.local/share/homeboy/artifacts/$RUN_ID/<artifact-file-name>"
+PUBLIC_BASE='https://<artifact-public-host>'
+EXPECTED_SIZE='<size_bytes from runs artifacts>'
+EXPECTED_SHA256='<sha256 from runs artifacts>'
+PUBLIC_URL="$PUBLIC_BASE/runs/$RUN_ID/artifacts/$ARTIFACT_ID"
+EXPECTED_FINAL_URL='<configured reviewer-facing URL after redirects>'
+BODY="$(mktemp "${TMPDIR:-/tmp}/homeboy-artifact.XXXXXX")"
+trap 'rm -f "$BODY"' 0 HUP INT TERM
+
+test "$(wc -c < "$ARTIFACT_PATH" | tr -d ' ')" = "$EXPECTED_SIZE"
+test "$(shasum -a 256 "$ARTIFACT_PATH" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
+METADATA="$(curl --connect-timeout 10 --max-time 30 --location --show-error --silent \
+  --dump-header - --output "$BODY" \
+  --write-out 'final_url=%{url_effective}\nstatus=%{http_code}\nredirects=%{num_redirects}\ncontent_type=%{content_type}\nsize_download=%{size_download}\n' \
+  "$PUBLIC_URL")"
+printf '%s\n' "$METADATA"
+test "$(printf '%s\n' "$METADATA" | awk -F= '$1 == "status" { print $2; exit }')" = 200
+test "$(printf '%s\n' "$METADATA" | awk -F= '$1 == "final_url" { sub(/^final_url=/, ""); print; exit }')" = "$EXPECTED_FINAL_URL"
+test "$(wc -c < "$BODY" | tr -d ' ')" = "$EXPECTED_SIZE"
+test "$(shasum -a 256 "$BODY" | cut -d ' ' -f 1)" = "$EXPECTED_SHA256"
+```
+
+The public check is successful only when `status=200`, the final URL is the
+intended reviewer URL after the configured redirects, and both byte checks
+pass. A 404 body must never be treated as artifact evidence, even if the public
+host itself is reachable.
+
+For Lab-generated Workflow Bench artifacts, publish the bundle under the configured artifact root first, then inspect, then serve:
+
+```sh
+# 1. Keep Lab output under the configured artifact root.
+export HOMEBOY_ARTIFACT_ROOT=/home/user/Developer/.tmp/homeboy-artifacts
+export HOMEBOY_PUBLIC_ARTIFACT_BASE_URL=https://homeboy-artifacts-tunnel.dev.example.com
+
+# 2. Publish/copy the Lab-generated replay bundle preserving its workflow-bench path.
+mkdir -p "$HOMEBOY_ARTIFACT_ROOT/workflow-bench"
+cp -R \
+  /home/user/Developer/studio-web-eval-runs/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export \
+  "$HOMEBOY_ARTIFACT_ROOT/workflow-bench/"
+
+# 3. Smoke-check the exact public path before handing it to reviewers.
+homeboy tunnel artifact-origin inspect \
+  workflow-bench/studio-web-plain-site-sample-plugin-live-20260615-r15-pr995-replay-export/report.html \
+  --fail-on-missing
+
+# 4. Serve the root through the long-running artifact origin process.
+homeboy tunnel artifact-origin serve --bind 127.0.0.1:7351
+```
+
+The same path convention covers `report.html`, `report.md`, `evidence.json`, compact Sample Runtime replay files such as `blueprint.after.json`, and external bundle files such as `files/runtime-snapshot.json`.
+
+`artifact-origin dom-boxes` reports mark each entrypoint with provider CSS diagnostics. When `dom_css_loaded`, `dom_capture_valid`, or an object-shaped `stylesheet_status` is missing or invalid, Homeboy writes `dom_capture_valid: false` and `dom_capture_invalid_reason` so operators can reject untrustworthy DOM evidence without inspecting provider internals.
+
+DOM-box providers may add the optional v1 evidence objects `computed_style`,
+`text_metrics`, `asset_state`, `visibility`, and `source` to each element.
+Homeboy preserves these generic objects without interpreting their product semantics.
+Every supplied evidence field must be a JSON object and is validated at the
+provider boundary before shaping or writing a report: at most 16,384 serialized
+bytes, 8 nesting levels, 64 total object keys, and 4,096 UTF-8 bytes per key or
+string value. Providers receive an actionable validation error when a limit is
+exceeded; omitted fields remain omitted for legacy providers.
+
+## Service Tunnels
+
+Declare a private service reachable from a configured SSH server:
+
+```sh
+homeboy tunnel service expose site-preview \
+  --server private-runtime \
+  --remote-host 127.0.0.1 \
+  --remote-port 7331 \
+  --auth-mode bearer-env \
+  --auth-env SITE_PREVIEW_TOKEN \
+  --auth-header Authorization \
+  --allow-client app-runtime \
+  --preview-policy always
+```
+
+The declaration requires an explicit auth mode and stores a private-loopback policy. It does not expose a public unauthenticated URL. `--preview-policy` defaults to `none`; workloads can opt into `always`, `on-failure`, `manual-approval`, or `keep-alive-until` when public preview artifacts are useful.
+
+Start a declared local service command and record lifecycle evidence:
+
+```sh
+homeboy tunnel service start site-preview \
+  --command 'serve-app --host 127.0.0.1 --port 7331' \
+  --cwd /workspace/app \
+  --host 127.0.0.1 \
+  --port 7331 \
+  --health-path / \
+  --public-tunnel-backend none \
+  --source-run-id run-123 \
+  --source-workflow-id workflow-abc
+```
+
+`--env KEY=VALUE` can be repeated to pass runtime environment values. Status records only env var names, not values. The managed service writes stdout/stderr logs under Homeboy's local data directory and includes those paths in `service status` output.
+
+Expose the managed service through a provider-neutral backend command:
+
+```sh
+homeboy tunnel service start context-example \
+  --command 'npm run dev -- --host 127.0.0.1 --port 7331' \
+  --cwd /path/to/workspace \
+  --host 127.0.0.1 \
+  --port 7331 \
+  --health-path / \
+  --public-tunnel-backend command \
+  --public-tunnel-command './tools/open-preview-tunnel.sh' \
+  --public-tunnel-public-url 'https://preview.example.test/run-123'
+```
+
+The `command` backend is a generic adapter seam. Homeboy starts and supervises the backend command, injects `HOMEBOY_SERVICE_ID`, `HOMEBOY_SERVICE_LOCAL_URL`, and `HOMEBOY_TUNNEL_PUBLIC_URL`, records backend PID/process/log evidence, and stops it with the managed service. Provider-specific behavior such as Traforo, Cloudflare, ngrok, or a Homeboy VPS broker belongs in the backend command or a future extension, not in Homeboy core semantics.
+
+Proof/preview workflows can opt into stricter readiness before Homeboy reports the service as ready:
+
+```sh
+homeboy tunnel service start site-preview \
+  --command './tools/start-held-preview.sh' \
+  --port 7331 \
+  --readiness-kind proof \
+  --require-listener \
+  --readiness-artifact artifacts/proof.json \
+  --readiness-artifact-json-pointer /status \
+  --readiness-artifact-json-equals ready \
+  --readiness-stdout-regex 'Preview ready:'
+```
+
+Without those opt-in checks, generic services keep the existing process/health readiness behavior. With them, `service start` and `service status` include `readiness.process_running`, `readiness.preview_ready`, and `readiness.proof_ready` so callers can distinguish wrapper liveness from usable preview/proof artifacts.
+
+When a service's preview policy is relevant, `service status` and `service start` include a structured `preview` artifact with schema `homeboy/preview-url/v1`. The artifact records the service ID, local URL, optional public URL, backend, policy, cleanup/expiry metadata, and owning run/workflow IDs when the start command supplied them.
+
+## Preview Consumer Orchestration
+
+`preview-consumer run` executes a configured command that needs a Homeboy-owned public preview URL. The consumer contract is configuration-based: Homeboy supplies `${preview_public_url}` and `${artifacts_dir}` template values, runs the configured command, and extracts a reviewer-clickable result URL using the configured stdout prefix or JSON pointer.
+
+Example `preview-consumer.json`:
+
+```json
+{
+  "id": "sample-preview-consumer",
+  "command": {
+    "program": "node",
+    "args": [
+      "tools/open-consumer.mjs",
+      "--public-url",
+      "${preview_public_url}",
+      "--artifacts",
+      "${artifacts_dir}"
+    ],
+    "cwd": "/workspace/project",
+    "artifacts_dir": "artifacts/sample-preview-consumer"
+  },
+  "output": {
+    "public_result_json_file": "summary.json",
+    "public_result_json_pointer": "/public_result_url",
+    "public_result_stdout_prefix": "Public result URL:"
+  }
+}
+```
+
+Use `--service-id` when `homeboy tunnel service start` has already recorded a `public_url` for the held preview service:
+
+```sh
+homeboy tunnel preview-consumer run \
+  --config ./preview-consumer.json \
+  --service-id site-preview
+```
+
+Use `--preview-public-url` when the orchestrating workload already has the public origin in hand:
+
+```sh
+homeboy tunnel preview-consumer run \
+  --config ./preview-consumer.json \
+  --preview-public-url https://run-123-tunnel.example.net
+```
+
+The output artifact uses schema `homeboy/preview-consumer-run/v1` and records the consumer ID, public preview URL, optional service ID, artifact directory, optional `public_result_url`, stdout, stderr, exit code, and artifact path. Preview interpretation stays in the configured consumer; Homeboy only owns public URL lifecycle, command execution, and durable evidence capture.
+
+## Preview Client
+
+Start a native outbound reverse preview client for one exact public host:
+
+```sh
+homeboy tunnel preview-client start \
+  --ingress https://preview-broker.example \
+  --public-host run42-tunnel.example.test \
+  --local-origin http://127.0.0.1:49822 \
+  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN
+```
+
+The client registers exactly one public host; wildcard public hosts are rejected so a lab runtime cannot implicitly claim a whole domain. `--local-origin` must be an HTTP(S) origin supplied by the caller, commonly a local development server or lab-managed preview service.
+
+The preview ingress contract is JSON-over-HTTP with bearer auth from `--token-env`. Registration returns an opaque `channel_id`; WebSocket operations require both that route-owned capability and the registered `public_host`:
+
+- `POST /preview/client/register`: register `{ public_host, local_origin }`.
+- `POST /preview/client/next`: long-poll for one HTTP request or WebSocket open record with `{ public_host, channel_id, timeout_secs }`.
+- `POST /preview/client/respond`: return `{ public_host, response }` for a request.
+- `POST /preview/client/respond-chunk`: append one streamed HTTP response chunk.
+- `POST /preview/client/websocket/open`: accept or reject a queued WebSocket session after the preview client attempts the local-origin handshake.
+- `POST /preview/client/websocket/next`: poll one public-client-to-local-origin WebSocket frame.
+- `POST /preview/client/websocket/frame`: send one local-origin-to-public-client WebSocket frame.
+- `POST /preview/client/close`: mark the public host session closed on shutdown.
+
+Ingress requests carry `request_id`, `method`, `path`, selected `headers`, and optional `body_base64`. Client responses carry `request_id`, `status`, response `headers`, `body_base64`, and optional structured `error`. Local-origin failures are returned as `502` responses with `error.kind` such as `local_origin_request_failed`, distinct from ingress/channel failures logged by the client process.
+
+Each claimed ingress request is forwarded on a worker thread so browser static asset fanout can be served concurrently. Hop-by-hop headers are filtered before forwarding to the local origin and before returning the local response to ingress.
+
+Public WebSocket upgrades use the same outbound reverse channel: public client -> preview ingress -> authenticated preview client -> local `ws://` origin. The ingress does not connect to route registration metadata or `upstream_origin`. It emits the public `101 Switching Protocols` response only after the preview client reports a successful local handshake, then incrementally relays text, binary, ping, pong, and close frames in both directions. Close code/reason, browser disconnect, client cancellation/re-registration, and failed local handshakes are explicit session transitions; setup failures return a deterministic HTTP diagnostic before upgrade.
+
+WebSocket protocol limits are 1 MiB per frame and assembled message, 16 concurrent sessions per registered route, 64 queued opens or frames per direction, a 10-second local-handshake deadline, and a 60-second idle lifetime. The ingress retains at most 50 recent diagnostics. A limit, timeout, disconnect, failed handshake, normal close, route close, or replacement registration removes the terminal WebSocket state.
+
+## Preview Ingress
+
+`preview-ingress` is the VPS-side HTTP and WebSocket daemon surface for Homeboy-native public preview tunnels. It is designed to run behind an operator-managed TLS/proxy layer such as Nginx, Caddy, or Cloudflare:
+
+```text
+Client
+  -> https://{id}-tunnel.<operator-domain>
+  -> TLS/proxy layer
+  -> homeboy tunnel preview-ingress serve --bind 127.0.0.1:7350
+  -> active Homeboy preview route
+  -> authenticated outbound preview-client channel
+  -> local HTTP or WebSocket origin
+```
+
+The core contract is generic HTTP and WebSocket ingress: public host/session routing, reverse-channel-compatible local origins, request/response streaming, bidirectional WebSocket frames, status, logs, and cleanup. Workload-specific behavior, asset health policy, and preview interpretation belongs in Homeboy Extensions or `homeboy-rigs`, not in Homeboy core.
+
+Render a non-destructive operator install plan for a wildcard preview ingress domain:
+
+```sh
+homeboy tunnel preview-ingress install \
+  --server example-server \
+  --domain example.com \
+  --public-host-pattern '*-tunnel.example.com' \
+  --service-name homeboy-preview-ingress
+```
+
+The install command is plan-first. It does not SSH to the server, write files, reload proxies, or deploy anything. It emits machine-readable JSON containing:
+
+- a systemd unit for the preview ingress service
+- Nginx and Caddy reverse proxy snippets for the supplied wildcard host pattern
+- DNS, loopback status, and public status smoke-check commands
+- systemd status, restart, and rollback commands
+- the exact operator configuration still required before the plan can be applied
+- a non-secret policy note for token/pairing material
+
+Render the install status contract without probing the live VPS:
+
+```sh
+homeboy tunnel preview-ingress install-status \
+  --server example-server \
+  --domain example.com \
+  --public-host-pattern '*-tunnel.example.com'
+```
+
+Install status output records planned checks so operators and future apply/probe flows can share one output shape. It includes `systemctl is-active`, `systemctl status`, loopback ingress status, wildcard DNS, and public ingress status commands.
+
+The required VPS/operator inputs are intentionally explicit and non-secret:
+
+- a configured Homeboy server ID with SSH access to the VPS
+- wildcard DNS for the host pattern pointing at the VPS public address
+- TLS certificate coverage for the wildcard preview host pattern
+- a Homeboy binary path on the VPS
+- a system user/group for the service
+- one reverse proxy choice, Nginx or Caddy
+
+Secrets are not rendered into the generated unit or proxy snippets. Pairing tokens/client credentials belong in Homeboy secret/config surfaces before enabling live routes.
+
+Register one active preview route:
+
+```sh
+homeboy tunnel preview-ingress route run-123 \
+  --public-host run-123.preview.example.net \
+  --upstream-origin http://127.0.0.1:7331 \
+  --expires-at 2026-06-12T03:30:00Z
+```
+
+Use `--inactive` to retain a route record for diagnostics while making the ingress return `410 disconnected_session`.
+
+Run the ingress daemon:
+
+```sh
+homeboy tunnel preview-ingress serve \
+  --domain preview.example.net \
+  --bind 127.0.0.1:7350 \
+  --public-host-pattern '*.preview.example.net'
+```
+
+The daemon routes by `Host`, handles concurrent preview requests in separate worker threads, streams reverse-channel response bodies, and preserves response status plus repeated non-hop-by-hop headers such as `content-type`, cache headers, and `set-cookie`. A live preview-client registration takes precedence over persisted route metadata. Persisted directly reachable HTTP routes retain their existing proxy behavior; reverse-channel WebSockets always travel through the authenticated preview client.
+
+Diagnostics are structured so generic preview workloads can distinguish ingress and upstream problems:
+
+- `404 missing_session`: no active route matched the requested host.
+- `410 expired_session`: the route's RFC3339 expiry has passed.
+- `410 disconnected_session`: the route is retained but marked inactive.
+- `502 upstream_error`: the upstream origin failed before response streaming.
+- `504 upstream_timeout`: the upstream origin timed out.
+
+Each request writes a JSON line to stderr with request ID, host, path, status, bytes, duration, and classification. `/_homeboy/preview-ingress/status` returns the current route status as JSON from the running daemon.
+
+This is the ingress side of #4089 and the first Homeboy-owned replacement path for #4062's current tunnel-provider blocker. Auth/pairing/token lifecycle and the authenticated reverse preview client remain generic surfaces; the ingress route's `upstream_origin` is the HTTP seam those clients attach to.
+
+## Native Preview Tunnel Auth Model
+
+Homeboy-native preview ingress uses a separate auth contract from reverse runner jobs. Runner broker auth proves which lab can claim and finish runner work; preview tunnel auth proves which client may claim a public preview host/session and forward requests over a reverse channel to a loopback origin.
+
+The native preview auth policy lives under `policy.native_preview_auth` on a service tunnel declaration. It stores only token metadata and SHA-256 token digests, never plaintext token material:
+
+```json
+{
+  "policy": {
+    "native_preview_auth": {
+      "require_client_token": true,
+      "default_session_ttl_secs": 900,
+      "max_session_ttl_secs": 3600,
+      "allowed_public_hosts": [ "*.preview.example.net" ],
+      "allowed_session_ids": [ "run-123" ],
+      "tokens": [
+        {
+          "id": "lab-client-1",
+          "token_sha256": "<sha256 digest>",
+          "allowed_clients": [ "local-lab" ],
+          "allowed_public_hosts": [ "run-123.preview.example.net" ],
+          "allowed_session_ids": [ "run-123" ],
+          "revoked": false,
+          "expires_at": "2026-06-07T13:00:00Z"
+        }
+      ]
+    }
+  }
+}
+```
+
+An ingress/client pairing request is valid only when all of these claims match:
+
+- `client_id` is allowed by the matched token.
+- `token` hashes to a configured, unrevoked, unexpired token digest.
+- `public_host` matches both the service policy and token host scopes. Exact hostnames and glob patterns are supported.
+- `session_id` matches both the service policy and token session scopes when scopes are configured.
+- `local_origin` is an `http://` loopback origin such as `http://127.0.0.1:7331`.
+- The granted lease expires at the requested TTL capped by `max_session_ttl_secs`.
+
+Auth failures return structured validation errors for the failing claim (`token`, `client_id`, `public_host`, `session_id`, or `local_origin`). Token values are request inputs only and are not serialized in declarations, status, preview artifacts, logs, or diagnostics.
+
+Safe operator setup for a VPS wildcard domain:
+
+1. Configure wildcard DNS and TLS for the preview ingress host, for example `*.preview.example.net`.
+2. Declare the preview service with `homeboy tunnel service expose` and keep `policy.require_auth=true`.
+3. Generate high-entropy client token material outside normal logs, store the token itself in Homeboy's keychain/secret/env surface for the preview client, and store only the SHA-256 digest in `policy.native_preview_auth.tokens`.
+4. Scope each token to the smallest useful client, host pattern, and session ID.
+5. Use short `expires_at` and session TTLs for short-lived preview sessions; revoke by removing the token entry or setting `revoked=true`.
+
+The current layer validates config, token, host, session, origin, and lease semantics. The actual VPS ingress route table and reverse-channel forwarding endpoints are the integration points for the native ingress/client work tracked separately from this command contract.
+
+## Subcommands
+
+- `service expose`: create or replace a private service tunnel declaration.
+- `service list`: list declarations.
+- `service show <id>`: show one declaration.
+- `service set <id> ...`: update fields using the standard dynamic set contract.
+- `service remove <id>`: delete a declaration.
+- `service url <id>`: print the declared loopback URL.
+- `service start <id>`: start and supervise a declared local service command and optional provider-neutral public tunnel backend.
+- `service status <id>`: report declaration, process, local URL, public URL when present, health, backend, and log evidence state.
+- `service stop <id>`: terminate the managed process group and remove runtime state while leaving log evidence files in place.
+- `preview-client start`: connect a local HTTP(S) preview origin to a Homeboy preview ingress for one public host.
+- `preview-ingress install`: render a non-destructive VPS preview ingress install plan.
+- `preview-ingress install-status`: render machine-readable VPS preview ingress install status checks.
+- `preview-ingress route <session-id>`: register or replace a host-routed preview session.
+- `preview-ingress unroute <session-id>`: remove a preview route.
+- `preview-ingress list`: list route records.
+- `preview-ingress status`: report route lifecycle metadata.
+- `preview-ingress serve`: run the blocking VPS-side HTTP ingress daemon.
+- `preview-consumer run`: execute a configured consumer command with a Homeboy-owned public preview URL and record durable evidence.

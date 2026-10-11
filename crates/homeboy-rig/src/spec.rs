@@ -36,8 +36,9 @@ pub use pipeline::{
 };
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
-    TraceExperimentSpec, TraceGuardrailSpec, TracePreviewAssetFanoutSpec, TraceProfileSpec,
-    TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantOverlaySpec, TraceVariantSpec,
+    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
+    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+    TraceVariantOverlaySpec, TraceVariantSpec,
 };
 
 /// A rig: components + services + pipelines.

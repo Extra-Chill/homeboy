@@ -53,7 +53,7 @@ It is deliberately **not** a generic "filesystem path with no database row"
 reaper. The artifact root is a shared namespace: `runner/`, `runner-attach/`,
 `runner-exec-attach/`, `agent-task/`, `agent-task-loop-controller/`,
 `controller-scratch-recovery/`, `recovered-runner-artifacts/`,
-`executor-finalized/`, and `_scratch/` are all owned by
+`executor-finalized/`, `preview-consumer/`, and `_scratch/` are all owned by
 other subsystems and carry no artifact row at those paths. Artifact bytes are
 also written *before* their row is inserted by design, so row absence is the
 normal state of a publication that is currently succeeding. Row absence
@@ -269,7 +269,7 @@ root, exposed as `filesystem.config_root` and as a `config_root` entry in
 `top_level`. It is usually a different volume from the data root and holds
 `rigs/{id}.state/logs/` (unbounded append), `rig-packages/`, `backups/`,
 `agent-runtimes/`, `runner-sessions/`, `runner-lease-evidence/`,
-and `runner-job-execution-context/`. It was never
+`runner-job-execution-context/`, and `preview-ingress/routes/`. It was never
 probed before, so during the 2026-07-29 outage this report described a healthy
 system while the volume it omitted was full. Like the artifact and Cargo roots,
 it is classified `managed/external` and excluded from the data-root

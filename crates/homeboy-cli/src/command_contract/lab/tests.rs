@@ -186,6 +186,31 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     // Manifest/cached-readiness inspection remains controller-local. The
     // explicit live probe is the only `extension show` shape that uses Lab.
     &["extension", "show", "extension-1", "--live-readiness"],
+    &["tunnel", "preview-consumer", "run", "--config", "config"],
+    // `--server` is `required_unless_present = "runner_local"`, so it does not
+    // appear in the usage line but clap still demands one of the pair.
+    &[
+        "tunnel",
+        "service",
+        "expose",
+        "--server",
+        "server-1",
+        "--remote-host",
+        "host",
+        "--remote-port",
+        "8080",
+        "--auth-mode",
+        "ssh-only",
+        "service-1",
+    ],
+    &[
+        "tunnel",
+        "service",
+        "start",
+        "--command",
+        "sleep",
+        "service-1",
+    ],
 ];
 
 fn owned(path: &[&str]) -> Vec<String> {

@@ -19,11 +19,12 @@
 //! that are both load-bearing:
 //!
 //! 1. **The artifact root is a shared namespace, not an artifact table
-//!    projection.** At least nine subsystems own top-level subtrees under it
+//!    projection.** At least ten subsystems own top-level subtrees under it
 //!    that are never registered as artifact rows at those paths — `runner/`,
 //!    `runner-attach/`, `runner-exec-attach/`, `agent-task/`,
 //!    `agent-task-loop-controller/`, `controller-scratch-recovery/`,
-//!    `recovered-runner-artifacts/`, `executor-finalized/`, and `_scratch/`. A row-join reaper would classify
+//!    `recovered-runner-artifacts/`, `executor-finalized/`,
+//!    `preview-consumer/`, and `_scratch/`. A row-join reaper would classify
 //!    all of them as orphans and delete live state.
 //! 2. **Artifact bytes are created before their row exists, by design.** The
 //!    window between `copy_artifact_file`/`copy_artifact_directory` and the
