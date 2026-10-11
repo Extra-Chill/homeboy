@@ -19,32 +19,38 @@ cat > "${BIN_DIR}/composer" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -e vendor/.incomplete || -e vendor/composer/installed.php ]]; then
+vendor="${COMPOSER_VENDOR_DIR:-vendor}"
+if [[ -e "${vendor}/.incomplete" || -e "${vendor}/composer/installed.php" ]]; then
     echo "stale vendor tree survived into composer install" >&2
     exit 91
 fi
 
 printf '%s\n' "$*" > "${FAKE_COMPOSER_ARGS}"
-mkdir -p vendor/composer vendor/bin vendor/wp-phpunit/wp-phpunit
+if [[ "${FAKE_COMPOSER_FAIL:-0}" == "1" ]]; then
+    mkdir -p "${vendor}/partial"
+    echo "network failure mid-install" >&2
+    exit 1
+fi
+mkdir -p "${vendor}/composer" "${vendor}/bin" "${vendor}/wp-phpunit/wp-phpunit"
 
-cat > vendor/composer/ClassLoader.php <<'PHP'
+cat > "${vendor}/composer/ClassLoader.php" <<'PHP'
 <?php
 namespace Composer\Autoload;
 class ClassLoader {}
 PHP
 
-cat > vendor/autoload.php <<'PHP'
+cat > "${vendor}/autoload.php" <<'PHP'
 <?php
 require __DIR__ . '/composer/ClassLoader.php';
 return new Composer\Autoload\ClassLoader();
 PHP
 
-cat > vendor/bin/phpcs <<'SH_BIN'
+cat > "${vendor}/bin/phpcs" <<'SH_BIN'
 #!/usr/bin/env bash
 echo "PHP_CodeSniffer fixture"
 SH_BIN
 
-cat > vendor/bin/phpstan <<'SH_BIN'
+cat > "${vendor}/bin/phpstan" <<'SH_BIN'
 #!/usr/bin/env bash
 if [[ "${FAKE_CORRUPT_PHPSTAN:-0}" == "1" ]]; then
     echo "corrupted phpstan.phar" >&2
@@ -53,8 +59,8 @@ fi
 echo "PHPStan fixture"
 SH_BIN
 
-chmod +x vendor/bin/phpcs vendor/bin/phpstan
-printf '%s\n' '<?php' > vendor/wp-phpunit/wp-phpunit/wp-tests-config.php
+chmod +x "${vendor}/bin/phpcs" "${vendor}/bin/phpstan"
+printf '%s\n' '<?php' > "${vendor}/wp-phpunit/wp-phpunit/wp-tests-config.php"
 SH
 chmod +x "${BIN_DIR}/composer"
 
@@ -77,6 +83,29 @@ if FAKE_COMPOSER_ARGS="${WORK_DIR}/composer-args.txt" \
     PATH="${BIN_DIR}:${PATH}" \
         bash "${EXTENSION_DIR}/scripts/build/install-composer-dependencies.sh" >/dev/null 2>&1; then
     echo "A corrupt PHPStan executable passed the vendor integrity check." >&2
+    exit 1
+fi
+
+if [[ ! -f "${EXTENSION_DIR}/vendor/wp-phpunit/wp-phpunit/wp-tests-config.php" ]]; then
+    echo "A corrupt PHPStan install replaced the previous working vendor tree." >&2
+    exit 1
+fi
+
+if FAKE_COMPOSER_ARGS="${WORK_DIR}/composer-args.txt" \
+    FAKE_COMPOSER_FAIL=1 \
+    PATH="${BIN_DIR}:${PATH}" \
+        bash "${EXTENSION_DIR}/scripts/build/install-composer-dependencies.sh" >/dev/null 2>&1; then
+    echo "A failed Composer install reported success." >&2
+    exit 1
+fi
+
+if [[ ! -f "${EXTENSION_DIR}/vendor/wp-phpunit/wp-phpunit/wp-tests-config.php" ]]; then
+    echo "A failed Composer install removed the previous working vendor tree." >&2
+    exit 1
+fi
+
+if compgen -G "${EXTENSION_DIR}/vendor.staging-*" >/dev/null || compgen -G "${EXTENSION_DIR}/vendor.retired-*" >/dev/null; then
+    echo "A failed Composer install left staging or retired vendor directories behind." >&2
     exit 1
 fi
 

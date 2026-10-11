@@ -10,3 +10,8 @@ vendor/
 # bench/test fixtures registered locally — varies per machine, not part of
 # the fixture contract.
 tests/fixtures/*/homeboy.json
+
+# install-composer-dependencies.sh staging, rollback and lock files
+vendor.staging-*/
+vendor.retired-*/
+.composer-install.lock
