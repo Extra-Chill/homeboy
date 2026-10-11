@@ -1304,7 +1304,11 @@ fn declared_failure_object(object: &Map<String, Value>) -> Option<DeclaredFailur
     let message = ["message", "problem", "summary"]
         .into_iter()
         .find_map(|key| object.get(key).and_then(Value::as_str))
-        .or_else(|| object.get("error").and_then(Value::as_str))?
+        .or_else(|| object.get("error").and_then(Value::as_str))
+        // `refresh-homeboy` reports a failed postcondition as `verification`
+        // text; without lifting it the summary falls back to "exited 1
+        // without reporting a failure cause" (#15768).
+        .or_else(|| object.get("verification").and_then(Value::as_str))?
         .trim();
     if message.is_empty() {
         return None;
@@ -3358,6 +3362,38 @@ mod tests {
 
         assert_eq!(value["success"], true);
         assert!(value["diagnostics"].is_null());
+    }
+
+    /// #15768: a refresh whose every phase succeeded but whose readiness
+    /// postcondition failed reports the cause as `failure.verification`; the
+    /// summary must carry it rather than the generic causeless-exit message.
+    #[test]
+    fn refresh_readiness_postcondition_failure_summarizes_verification_text() {
+        let verification = "runner `homeboy-lab` refresh completed every required step but did not converge: admission state is `Blocked` (accepting_jobs=false, daemon_fresh=true).";
+        for payload in [
+            json!({
+                "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+                "command": "runner.refresh_homeboy",
+                "exit_code": 1,
+                "failure": { "exit_code": 1, "verification": verification },
+            }),
+            json!({
+                "command": "runner.refresh_homeboy",
+                "failure": { "exit_code": 1, "failed_command": [], "verification": verification },
+            }),
+        ] {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload),
+                1,
+                &CommandIdentity::with_operation("runner", "refresh-homeboy"),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+
+            let summary = value["summary"].as_str().expect("summary");
+            assert!(summary.contains("did not converge"), "{summary}");
+            assert!(!summary.contains("without reporting a failure cause"));
+        }
     }
 
     #[test]

@@ -4,6 +4,24 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.2] - 2026-10-11
+
+### Changed
+- Share Lab workspace bundles across concurrent children
+- Report per-child phase in fanout progress
+- Add agent-task fanout cancel
+
+## [0.418.1] - 2026-10-11
+
+### Changed
+- delete legacy exec request decoding and unversioned admission
+- delete broker legacy replay, untyped broker adapters and v1 handoff/staging schemas
+
+### Fixed
+- cook homeboy
+- give Lab gates the runner's tool PATH
+- carry the immutable execution bundle through durable Lab dispatch
+
 ## [0.418.0] - 2026-10-11
 
 ### Added

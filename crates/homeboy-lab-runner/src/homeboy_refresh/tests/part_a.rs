@@ -463,6 +463,7 @@ fn refreshed_daemon_verification_accepts_the_post_start_health_window() {
     verify_refreshed_daemon_topology_with(
         "lab",
         "06bbf46013cf",
+        None,
         || Ok(statuses.next().expect("post-start status probe")),
         || retries += 1,
     )
@@ -487,6 +488,7 @@ fn refreshed_daemon_verification_converges_after_exact_identity_refresh() {
     verify_refreshed_daemon_topology_with(
         "lab",
         "19a41cd5102d",
+        None,
         || Ok(statuses.next().expect("refresh convergence status")),
         || retries += 1,
     )
@@ -507,6 +509,7 @@ fn refreshed_daemon_verification_retries_until_the_configured_job_binary_converg
     verify_refreshed_daemon_topology_with(
         "lab",
         "19a41cd5102d",
+        None,
         || Ok(statuses.next().expect("topology status probe")),
         || retries += 1,
     )
@@ -523,7 +526,7 @@ fn refreshed_daemon_verification_rejects_a_persisted_configured_binary_mismatch(
     let mut status = refreshed_daemon_status(true, Some("homeboy 0.294.0+19a41cd5102d"));
     status.configured_job_binary_build_identity = Some("homeboy 0.294.0+oldcommit".to_string());
 
-    let error = verify_refreshed_daemon_topology_status("lab", "19a41cd5102d", &status)
+    let error = verify_refreshed_daemon_topology_status("lab", "19a41cd5102d", None, &status)
         .expect_err("matching daemon alone must not certify refresh success");
 
     assert!(error.message.contains("retained configured job binary"));
@@ -533,9 +536,79 @@ fn refreshed_daemon_verification_rejects_a_persisted_configured_binary_mismatch(
 fn refreshed_daemon_verification_rejects_commit_substring_mismatch() {
     let status = refreshed_daemon_status(true, Some("homeboy 0.1.0+x06bbf46013cf"));
 
-    let error = verify_refreshed_daemon_topology_status("lab", "06bbf46013cf", &status)
+    let error = verify_refreshed_daemon_topology_status("lab", "06bbf46013cf", None, &status)
         .expect_err("the daemon commit component must match exactly");
     assert!(error.message.contains("expected commit `06bbf46013cf`"));
+}
+
+fn disconnect_report(disconnected: bool, partial: bool) -> crate::RunnerDisconnectReport {
+    crate::RunnerDisconnectReport {
+        runner_id: "lab".to_string(),
+        disconnected,
+        partial,
+        remote_error: partial.then(|| "remote daemon stop was not proven".to_string()),
+        local_recovery_command: partial
+            .then(|| "homeboy runner disconnect lab --local-recovery".to_string()),
+        session: None,
+        session_path: String::new(),
+    }
+}
+
+/// A partial disconnect retains the session and the old daemon. It must fail
+/// the `disconnect` phase instead of letting refresh reconnect onto that daemon.
+#[test]
+fn partial_disconnect_fails_the_disconnect_phase_with_the_remote_error() {
+    let session = refreshed_daemon_status(true, Some("homeboy 0.417.15+oldcommit"))
+        .session
+        .expect("connected status carries a session");
+
+    let error = disconnect_before_reconnect(Some(&session), |_| {
+        require_completed_disconnect("lab", &disconnect_report(false, true))
+    })
+    .expect_err("a partial disconnect did not retire the old daemon");
+
+    assert!(error.message.contains("did not retire the previous daemon"));
+    assert!(error.message.contains("remote daemon stop was not proven"));
+
+    disconnect_before_reconnect(Some(&session), |_| {
+        require_completed_disconnect("lab", &disconnect_report(true, false))
+    })
+    .expect("a completed disconnect lets the refresh proceed to reconnect");
+}
+
+/// Reattaching the pre-refresh lease must not certify the daemon refresh, even
+/// when the session reports the refreshed build identity.
+#[test]
+fn refreshed_daemon_verification_rejects_reattaching_the_pre_refresh_lease() {
+    let mut reattached = refreshed_daemon_status(true, Some("homeboy 0.417.15+19a41cd5102d"));
+    reattached
+        .session
+        .as_mut()
+        .expect("session")
+        .remote_daemon_lease_id = Some("lease-old".to_string());
+
+    let error = verify_refreshed_daemon_topology_with(
+        "lab",
+        "19a41cd5102d",
+        Some("lease-old"),
+        || Ok(reattached.clone()),
+        || std::thread::sleep(Duration::from_millis(50)),
+    );
+    // The retry loop ends once the verification window elapses; the failure
+    // must name the retained lease.
+    let error = error.expect_err("the old lease was reattached, not replaced");
+    assert!(error
+        .message
+        .contains("pre-refresh daemon lease `lease-old`"));
+
+    let mut replaced = reattached;
+    replaced
+        .session
+        .as_mut()
+        .expect("session")
+        .remote_daemon_lease_id = Some("lease-new".to_string());
+    verify_refreshed_daemon_topology_status("lab", "19a41cd5102d", Some("lease-old"), &replaced)
+        .expect("a new lease on the refreshed binary converges");
 }
 
 #[test]
