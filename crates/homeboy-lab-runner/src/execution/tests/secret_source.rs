@@ -54,6 +54,13 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
     assert!(!provisions[0]
         .env_names
         .contains(&"UNRELATED_SECRET".to_string()));
+    assert_eq!(
+        provisions[0].fields,
+        vec![
+            "tokens.access_token".to_string(),
+            "tokens.refresh_token".to_string(),
+        ]
+    );
     // Provisions carry only the path + env-name routing, never the resolved
     // secret values, so the credential bytes cannot leak through this grouping.
     let rendered = format!("{:?}", provisions);
@@ -447,6 +454,7 @@ fn provider_file_secret_source_error_is_early_clear_and_redacted() {
             "PROVIDER_ACCESS_TOKEN".to_string(),
             "PROVIDER_REFRESH_TOKEN".to_string(),
         ],
+        fields: vec!["tokens.access_token".to_string()],
     };
 
     let err = provider_file_secret_source_error(
@@ -469,4 +477,78 @@ fn provider_file_secret_source_error_is_early_clear_and_redacted() {
     let rendered = format!("{} {:?} {:?}", err.message, err.details, err.hints);
     assert!(!rendered.contains("access-secret-value"));
     assert!(!rendered.contains("refresh-secret-value"));
+}
+
+fn projection(controller: serde_json::Value, runner: &str, fields: &[&str]) -> serde_json::Value {
+    let fields = fields
+        .iter()
+        .map(|field| field.to_string())
+        .collect::<Vec<_>>();
+    let projected =
+        super::super::project_provider_file_secret_source(&controller.to_string(), runner, &fields)
+            .expect("projection");
+    serde_json::from_str(&projected).expect("projected json")
+}
+
+#[test]
+fn projection_withholds_an_undeclared_refresh_token() {
+    // #15783: the runner gets a usable access token but never the single-use
+    // refresh token, so it cannot rotate the controller's chain.
+    let projected = projection(
+        serde_json::json!({
+            "anthropic": {"type": "oauth", "access": "acc", "refresh": "controller-refresh", "expires": 42}
+        }),
+        "",
+        &["anthropic.access", "anthropic.expires"],
+    );
+
+    assert_eq!(
+        projected["anthropic"],
+        serde_json::json!({"type": "oauth", "access": "acc", "refresh": "", "expires": 42})
+    );
+    assert!(!projected.to_string().contains("controller-refresh"));
+}
+
+#[test]
+fn projection_delivers_a_declared_refresh_token() {
+    let projected = projection(
+        serde_json::json!({"tokens": {"access_token": "acc", "refresh_token": "rt"}}),
+        "",
+        &["tokens.access_token", "tokens.refresh_token"],
+    );
+
+    assert_eq!(projected["tokens"]["refresh_token"], "rt");
+}
+
+#[test]
+fn projection_keeps_runner_owned_entries_and_drops_undeclared_controller_entries() {
+    // The old whole-file upload overwrote every runner login. Only the
+    // declared account crosses now; the runner's own accounts survive.
+    let projected = projection(
+        serde_json::json!({
+            "anthropic": {"type": "oauth", "access": "new", "refresh": "r", "expires": 2},
+            "openai": {"type": "oauth", "access": "controller-openai", "refresh": "co", "expires": 3}
+        }),
+        r#"{"anthropic": {"type": "oauth", "access": "dead", "refresh": "dead", "expires": 1},
+            "openai": {"type": "oauth", "access": "runner-openai", "refresh": "ro", "expires": 9}}"#,
+        &["anthropic.access", "anthropic.expires"],
+    );
+
+    assert_eq!(projected["anthropic"]["access"], "new");
+    assert_eq!(projected["anthropic"]["refresh"], "");
+    assert_eq!(projected["openai"]["access"], "runner-openai");
+    assert_eq!(projected["openai"]["refresh"], "ro");
+    assert!(!projected.to_string().contains("controller-openai"));
+}
+
+#[test]
+fn projection_refuses_to_clobber_an_unparseable_runner_file() {
+    let err = super::super::project_provider_file_secret_source(
+        r#"{"anthropic": {"access": "a"}}"#,
+        "not json",
+        &["anthropic.access".to_string()],
+    )
+    .expect_err("unparseable runner file must not be overwritten");
+
+    assert!(err.contains("not a JSON object"), "{err}");
 }
