@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.8] - 2026-10-11
+
+### Changed
+- drop audit and refactor extension hooks (Extra-Chill/homeboy#15774)
+
 ## [3.7.7] - 2026-10-08
 
 ### Fixed
