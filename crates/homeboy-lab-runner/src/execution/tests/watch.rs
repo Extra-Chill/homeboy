@@ -94,12 +94,24 @@ fn submit_claimed_broker_job(client: &Client, daemon_url: &str) -> (String, Stri
             "api_version": { "major": 1 },
             "runner_id": "lab",
             "lease_ms": 60_000,
+            "execution_protocol": homeboy_runner_contract::RunnerJobExecutionProtocol::current(),
         }),
     );
     let claim_id = claim["response"]["outcome"]["claim"]["claim_id"]
         .as_str()
         .expect("claim id")
         .to_string();
+    // A worker consumes its execution receipt before it may finish the job.
+    post_broker(
+        client,
+        daemon_url,
+        &format!("/runner/jobs/{job_id}/consume"),
+        json!({
+            "runner_id": "lab",
+            "claim_id": claim_id,
+            "context_id": claim["response"]["outcome"]["claim"]["execution_context"]["id"],
+        }),
+    );
     (job_id, claim_id)
 }
 

@@ -732,7 +732,7 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         request.lease_ms.unwrap_or(30_000),
         concurrency_limit,
         crate::api_jobs::RemoteRunnerClaimProtocols {
-            execution: request.execution_protocol.as_ref(),
+            execution: &request.execution_protocol,
             workspace_claim: request.workspace_claim_protocol.as_ref(),
             workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
         },
@@ -1526,14 +1526,40 @@ mod auth_tests {
         }))
     }
 
-    /// A context-free Runner API claim body (no execution protocol).
+    /// A Runner API claim body advertising the current execution protocol.
     pub(super) fn claim_body(runner_id: &str) -> Value {
         json!({
             "schema": "homeboy/runner-api-claim-request/v1",
             "api_version": { "major": 1 },
             "runner_id": runner_id,
             "lease_ms": 30000,
+            "execution_protocol":
+                crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
         })
+    }
+
+    /// Consume the execution receipt of a claim response, as a worker does at
+    /// the provider boundary before it may finish the job.
+    pub(super) fn consume_claim_receipt(
+        claim: &Value,
+        job_id: &str,
+        runner_id: &str,
+        store: &JobStore,
+        auth: &BrokerAuthContext,
+    ) {
+        let claimed = &claim["body"]["response"]["outcome"]["claim"];
+        let consumed = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/consume"),
+            Some(json!({
+                "runner_id": runner_id,
+                "claim_id": claimed["claim_id"],
+                "context_id": claimed["execution_context"]["id"],
+            })),
+            store,
+            auth,
+        );
+        assert_eq!(consumed.status_code, 200, "consume body: {}", consumed.body);
     }
 
     fn canonical_claim_body(execution_protocol: Value) -> Value {
@@ -1609,6 +1635,13 @@ mod auth_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            runner_id,
+            store,
+            &BrokerAuthContext::trusted_local(),
+        );
         let finish = route(
             "POST",
             &format!("/runner/jobs/{job_id}/finish"),
@@ -2022,6 +2055,65 @@ mod auth_tests {
         }
     }
 
+    /// Workers that did not advertise an execution protocol were served a
+    /// context-free claim with a v1 request projection. Controller, broker
+    /// and worker upgrade together, so such claims are now refused at the
+    /// route, and a v1 protocol is rejected in-band, without claiming.
+    #[test]
+    fn context_free_and_v1_claims_are_refused_without_claiming() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = Uuid::parse_str(submit.body["body"]["job"]["id"].as_str().expect("job id"))
+            .expect("valid job id");
+
+        let mut context_free = claim_body("homeboy-lab");
+        context_free
+            .as_object_mut()
+            .expect("claim body")
+            .remove("execution_protocol");
+        let refused = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(context_free),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(refused.status_code, 400, "refused body: {}", refused.body);
+        assert_eq!(refused.body["error"], "validation.invalid_argument");
+        assert!(refused.body.to_string().contains("execution_protocol"));
+
+        let v1 = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(canonical_claim_body(json!({
+                "capability": "runner-job-execution-context", "version": 1
+            }))),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(v1.status_code, 200, "v1 body: {}", v1.body);
+        assert_eq!(v1.body["body"]["response"]["outcome"]["status"], "rejected");
+        assert!(v1.body["body"]["response"]["outcome"]
+            .get("claim")
+            .is_none());
+        assert_eq!(
+            store.get(job_id).expect("job remains queued").status,
+            crate::api_jobs::JobStatus::Queued
+        );
+        assert!(store
+            .events(job_id)
+            .expect("events")
+            .iter()
+            .all(|event| { event.message.as_deref() != Some("remote runner job claimed") }));
+    }
+
     #[test]
     fn heartbeat_canonical_wire_rejects_stale_claims() {
         let _home = HomeGuard::new();
@@ -2228,6 +2320,13 @@ mod auth_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            "homeboy-lab",
+            &store,
+            &enforcing_auth(Some(&work_token)),
+        );
 
         // Worker streams progress.
         let event = route(
@@ -2397,6 +2496,13 @@ mod auth_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            "homeboy-lab",
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
 
         let finish = route(
             "POST",
@@ -2492,6 +2598,13 @@ mod auth_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            "homeboy-lab",
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
         let artifacts = [
             ("direct-first", "ZGlyZWN0IGZpcnN0"),
             ("direct-second", "ZGlyZWN0IHNlY29uZA=="),
@@ -2654,7 +2767,7 @@ mod auth_tests {
 
 #[cfg(test)]
 mod watch_tests {
-    use super::auth_tests::{claim_body, submit_body_for};
+    use super::auth_tests::{claim_body, consume_claim_receipt, submit_body_for};
     use super::*;
     use crate::broker_auth::BrokerScope;
     use crate::test_support::HomeGuard;
@@ -2850,6 +2963,13 @@ mod watch_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            "homeboy-lab",
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
         let finish = route(
             "POST",
             &format!("/runner/jobs/{job_id}/finish"),
@@ -2948,6 +3068,13 @@ mod watch_tests {
             .as_str()
             .expect("claim id")
             .to_string();
+        consume_claim_receipt(
+            &claim.body,
+            &job_id,
+            "homeboy-lab",
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
         let finish = route(
             "POST",
             &format!("/runner/jobs/{job_id}/finish"),

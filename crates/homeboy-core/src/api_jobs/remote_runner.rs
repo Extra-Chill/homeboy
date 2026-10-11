@@ -99,7 +99,7 @@ pub enum RemoteRunnerSubmissionLookup {
 
 /// Protocol capabilities advertised by a remote runner before it claims work.
 pub struct RemoteRunnerClaimProtocols<'a> {
-    pub execution: Option<&'a crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
+    pub execution: &'a crate::runner_job_execution_context::RunnerJobExecutionProtocol,
     pub workspace_claim: Option<&'a crate::workspace_claim::WorkspaceClaimProtocol>,
     pub workspace_owner_lease: Option<&'a crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
 }
@@ -153,13 +153,6 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
-    /// Provider environment resolution accepts only authenticated execution
-    /// contexts. Older workers can still receive ordinary runner jobs, but
-    /// must never be handed a job that would make this boundary fail open.
-    pub fn requires_execution_context(&self) -> bool {
-        !self.extension_env_providers.is_empty()
-    }
-
     pub fn requires_workspace_claim_protocol(&self) -> bool {
         self.workspace_claim_binding.is_some()
     }
@@ -308,21 +301,6 @@ impl RemoteRunnerJobRequest {
         }
         envelope
     }
-
-    fn dispatch_request(&self) -> Self {
-        let mut request = self.clone();
-        let secret_names = request.secret_env_plan.secret_env_names();
-        for name in secret_names {
-            if request
-                .env
-                .get(&name)
-                .is_some_and(|value| value == "<redacted>")
-            {
-                request.env.remove(&name);
-            }
-        }
-        request
-    }
 }
 
 fn validate_command_assets(metadata: Option<&Value>) -> Result<()> {
@@ -440,22 +418,15 @@ fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
 pub struct RemoteRunnerJobClaim {
     pub job: Job,
     pub envelope: RunnerExecutionEnvelope,
-    /// Derived execution projection emitted only for workers that negotiated
-    /// the v1 claim protocol. It is never authoritative for v2 workers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<RemoteRunnerJobRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     /// Authenticated execution authority derived from this durable claim.
-    /// Older brokers omit it on the wire; workers refuse those claims rather
-    /// than reconstructing authority from environment or lifecycle projections.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_context: Option<crate::runner_job_execution_context::RunnerJobExecutionContext>,
-    /// Echoed by compatible workers and verified before they execute a claim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_protocol: Option<crate::runner_job_execution_context::RunnerJobExecutionProtocol>,
+    /// Workers verify it before materializing inputs or invoking a provider.
+    pub execution_context: crate::runner_job_execution_context::RunnerJobExecutionContext,
+    /// The protocol the worker advertised, echoed for the worker to verify.
+    pub execution_protocol: crate::runner_job_execution_context::RunnerJobExecutionProtocol,
     /// Echoed only for workspace-owning jobs. A worker must reject a missing or
     /// malformed value before it materializes the claimed workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,7 +439,6 @@ pub struct RemoteRunnerJobClaim {
 
 impl RemoteRunnerJobClaim {
     /// Project durable core claim state into the transport-neutral runner API.
-    /// The legacy core shape remains available only for the compatibility route.
     pub fn runner_api_claimed_execution(&self) -> Result<RunnerApiClaimedExecution> {
         Ok(RunnerApiClaimedExecution {
             job_id: self.job.id.to_string(),
@@ -479,23 +449,9 @@ impl RemoteRunnerJobClaim {
                 Error::internal_unexpected("claimed remote runner job is missing an expiry")
             })?,
             envelope: self.envelope.clone(),
-            legacy_request: self
-                .request
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some("serialize protocol-v1 claim projection".to_string()),
-                    )
-                })?,
             workspace_claim_binding: self.workspace_claim_binding.clone(),
             workspace_owner_lease: self.workspace_owner_lease.clone(),
-            execution_context: self
-                .execution_context
-                .as_ref()
-                .map(|context| context.assertion()),
+            execution_context: self.execution_context.assertion(),
             execution_protocol: self.execution_protocol.clone(),
             workspace_claim_protocol: self.workspace_claim_protocol.clone(),
             workspace_owner_lease_protocol: self.workspace_owner_lease_protocol.clone(),
@@ -628,16 +584,20 @@ impl RemoteRunnerJobResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// The only persisted shape of a reverse-runner job. Unknown fields are
+/// refused, so a record written in an older shape (for example the
+/// request-only representation) fails the store load with a typed JSON error
+/// naming the field instead of being reinterpreted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct StoredRemoteRunnerJob {
     pub(super) envelope: RunnerExecutionEnvelope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    /// Presence records that this claim carried an authenticated execution
-    /// context. Its absence is the persisted compatibility signal for legacy
-    /// context-free claims.
+    /// The authenticated execution context minted when the job was claimed.
+    /// Absent only while the job is unclaimed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) execution_context_id: Option<String>,
     /// One-time durable execution receipt. This is consumed only at the
@@ -648,76 +608,6 @@ pub(super) struct StoredRemoteRunnerJob {
     /// A selected job remains queued and retryable until direct adoption.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) direct_execution_selected: bool,
-}
-
-#[derive(Deserialize)]
-struct StoredRemoteRunnerJobCompat {
-    #[serde(default)]
-    envelope: Option<RunnerExecutionEnvelope>,
-    #[serde(default)]
-    request: Option<RemoteRunnerJobRequest>,
-    #[serde(default)]
-    workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
-    #[serde(default)]
-    workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    #[serde(default)]
-    execution_context_id: Option<String>,
-    #[serde(default)]
-    execution_receipt: Option<RemoteRunnerExecutionReceipt>,
-    #[serde(default)]
-    direct_execution_selected: bool,
-}
-
-impl<'de> Deserialize<'de> for StoredRemoteRunnerJob {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let stored = StoredRemoteRunnerJobCompat::deserialize(deserializer)?;
-        let (envelope, legacy_claim_binding, legacy_owner_lease) =
-            match (stored.envelope, stored.request) {
-                (Some(envelope), None) => (envelope, None, None),
-                (None, Some(request)) => {
-                    let claim_binding = request.workspace_claim_binding.clone();
-                    let owner_lease = request.workspace_owner_lease.clone();
-                    (request.execution_envelope(), claim_binding, owner_lease)
-                }
-                (Some(_), Some(_)) => {
-                    return Err(serde::de::Error::custom(
-                    "remote runner job has conflicting envelope and legacy request representations",
-                ));
-                }
-                (None, None) => {
-                    return Err(serde::de::Error::custom(
-                        "remote runner job has no execution representation",
-                    ));
-                }
-            };
-        if stored.workspace_claim_binding.is_some()
-            && legacy_claim_binding.is_some()
-            && stored.workspace_claim_binding != legacy_claim_binding
-        {
-            return Err(serde::de::Error::custom(
-                "legacy runner record has conflicting workspace claim authority",
-            ));
-        }
-        if stored.workspace_owner_lease.is_some()
-            && legacy_owner_lease.is_some()
-            && stored.workspace_owner_lease != legacy_owner_lease
-        {
-            return Err(serde::de::Error::custom(
-                "legacy runner record has conflicting workspace owner authority",
-            ));
-        }
-        Ok(Self {
-            envelope,
-            workspace_claim_binding: stored.workspace_claim_binding.or(legacy_claim_binding),
-            workspace_owner_lease: stored.workspace_owner_lease.or(legacy_owner_lease),
-            execution_context_id: stored.execution_context_id,
-            execution_receipt: stored.execution_receipt,
-            direct_execution_selected: stored.direct_execution_selected,
-        })
-    }
 }
 
 struct RemoteRunnerAdmission {
@@ -734,10 +624,6 @@ struct RemoteRunnerAdmission {
 }
 
 impl StoredRemoteRunnerJob {
-    pub(super) fn protocol_v1_request(&self) -> Result<RemoteRunnerJobRequest> {
-        legacy_request_from_envelope(&self.envelope)
-    }
-
     pub(super) fn workspace_owner_lease(
         &self,
     ) -> Option<crate::workspace_claim::WorkspaceOwnerLease> {
@@ -810,94 +696,10 @@ pub fn runner_api_submission_payload_fingerprint(
     Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
 }
 
-fn legacy_request_from_envelope(
-    envelope: &RunnerExecutionEnvelope,
-) -> Result<RemoteRunnerJobRequest> {
-    let dispatch = envelope.dispatch.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "envelope.dispatch",
-            "runner submission envelope requires dispatch",
-            None,
-            None,
-        )
-    })?;
-    let path_materialization_plan = envelope
-        .metadata
-        .get("path_materialization_plan")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode envelope path materialization plan".to_string()),
-            )
-        })?;
-    let lab_runner_workload = envelope
-        .runner_workload
-        .clone()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("decode envelope runner workload".to_string()),
-            )
-        })?;
-    Ok(RemoteRunnerJobRequest {
-        runner_id: dispatch.runner_id.clone(),
-        project_id: dispatch.project_id.clone(),
-        operation: dispatch.operation.clone(),
-        command: dispatch.command.clone(),
-        cwd: dispatch.cwd.clone(),
-        env: dispatch.env.clone(),
-        secret_env_names: envelope
-            .secret_env
-            .as_ref()
-            .map(SecretEnvPlan::secret_env_names)
-            .unwrap_or_default(),
-        secret_env_plan: envelope.secret_env.clone().unwrap_or_default(),
-        env_materialization: envelope.env_materialization.clone(),
-        capture_patch: envelope.mutation_policy.capture_patch,
-        source_snapshot: dispatch.source_snapshot.clone(),
-        path_materialization_plan,
-        require_paths: dispatch.require_paths.clone(),
-        extension_env_providers: dispatch.extension_env_providers.clone(),
-        lab_runner_workload,
-        lifecycle: envelope.lifecycle.clone(),
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        metadata: (!envelope.metadata.is_null()).then(|| envelope.metadata.clone()),
-    })
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct RemoteRunnerExecutionReceipt {
     pub(super) context_id: String,
     pub(super) consumed_at_ms: u64,
-}
-
-fn execution_context_id_from_evidence(stored: &StoredJob) -> Result<Option<String>> {
-    let mut context_ids = HashSet::new();
-    for evidence in stored.events.iter().filter_map(|event| {
-        event
-            .data
-            .as_ref()
-            .and_then(|data| data.get("runner_job_execution_context"))
-    }) {
-        let context =
-            crate::runner_job_execution_context::RunnerJobExecutionContext::from_evidence_record(
-                evidence,
-            )?;
-        context_ids.insert(context.id().to_string());
-    }
-    match context_ids.len() {
-        0 => Ok(None),
-        1 => Ok(context_ids.into_iter().next()),
-        _ => Err(crate::runner_job_execution_context::rejected(
-            "durable claim has conflicting execution-context evidence",
-        )),
-    }
 }
 
 /// Only the sealed staging pipeline may convert a reverse submission into a
@@ -1736,34 +1538,14 @@ impl JobStore {
         lease_ms: u64,
         concurrency_limit: Option<usize>,
     ) -> Result<Option<RemoteRunnerJobClaim>> {
-        self.claim_remote_runner_job_with_execution_protocol(
-            runner_id,
-            project_id,
-            lease_ms,
-            concurrency_limit,
-            Some(&crate::runner_job_execution_context::RunnerJobExecutionProtocol::current()),
-        )
-    }
-
-    /// Claim a reverse-runner job only after the worker has advertised support
-    /// for the context carried in the resulting claim.
-    pub fn claim_remote_runner_job_with_execution_protocol(
-        &self,
-        runner_id: &str,
-        project_id: Option<&str>,
-        lease_ms: u64,
-        concurrency_limit: Option<usize>,
-        execution_protocol: Option<
-            &crate::runner_job_execution_context::RunnerJobExecutionProtocol,
-        >,
-    ) -> Result<Option<RemoteRunnerJobClaim>> {
         self.claim_remote_runner_job_with_protocols(
             runner_id,
             project_id,
             lease_ms,
             concurrency_limit,
             RemoteRunnerClaimProtocols {
-                execution: execution_protocol,
+                execution:
+                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
                 workspace_claim: Some(&crate::workspace_claim::WorkspaceClaimProtocol::current()),
                 workspace_owner_lease: Some(
                     &crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
@@ -1801,6 +1583,14 @@ impl JobStore {
                 "remote runner claim concurrency_limit must be greater than zero",
                 Some(runner_id.to_string()),
                 None,
+            ));
+        }
+        // Every claim mints an authenticated execution context, so a worker
+        // that does not speak the current protocol is refused before any job
+        // is selected or its state touched.
+        if !execution_protocol.is_supported() {
+            return Err(crate::runner_job_execution_context::rejected(
+                "worker does not advertise the required execution-context protocol",
             ));
         }
 
@@ -1856,30 +1646,16 @@ impl JobStore {
                 .next()
                 .map(|candidate| candidate.job.id)
             {
-                let (request, envelope, workspace_claim_binding, workspace_owner_lease) = {
+                let (envelope, workspace_claim_binding, workspace_owner_lease) = {
                     let stored = inner.jobs.get(&job_id).expect("candidate exists");
                     let remote_runner = stored
                         .remote_runner
                         .as_ref()
                         .expect("filtered remote runner job has request");
-                    let envelope = remote_runner.envelope.clone();
-                    let workspace_claim_binding = remote_runner.workspace_claim_binding();
-                    let workspace_owner_lease = remote_runner.workspace_owner_lease();
-                    let request = execution_protocol
-                        .is_none_or(|protocol| !protocol.uses_envelope_only_claim())
-                        .then(|| {
-                            let mut request =
-                                remote_runner.protocol_v1_request()?.dispatch_request();
-                            request.workspace_claim_binding = workspace_claim_binding.clone();
-                            request.workspace_owner_lease = workspace_owner_lease.clone();
-                            Ok::<RemoteRunnerJobRequest, Error>(request)
-                        })
-                        .transpose()?;
                     (
-                        request,
-                        envelope,
-                        workspace_claim_binding,
-                        workspace_owner_lease,
+                        remote_runner.envelope.clone(),
+                        remote_runner.workspace_claim_binding(),
+                        remote_runner.workspace_owner_lease(),
                     )
                 };
                 let controller_owned = envelope
@@ -1911,25 +1687,6 @@ impl JobStore {
                     // poison later independent work for the same runner.
                     return Ok(None);
                 }
-                match execution_protocol {
-                    Some(protocol) => {
-                        if !protocol.is_supported() {
-                            return Err(crate::runner_job_execution_context::rejected(
-                                "worker does not advertise the required execution-context protocol",
-                            ));
-                        }
-                    }
-                    None if envelope
-                        .dispatch
-                        .as_ref()
-                        .is_some_and(|dispatch| !dispatch.extension_env_providers.is_empty()) =>
-                    {
-                        return Err(crate::runner_job_execution_context::rejected(
-                            "worker did not advertise the required execution-context protocol",
-                        ));
-                    }
-                    None => {}
-                }
                 if workspace_claim_binding.is_some() {
                     workspace_claim_protocol
                         .ok_or_else(|| {
@@ -1959,40 +1716,31 @@ impl JobStore {
                     stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
                     stored.job.clone()
                 };
-                let execution_context = execution_protocol
-                    .map(|_| {
-                        crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
-                            &job, &envelope,
-                        )
-                    })
-                    .transpose()?;
-                if let Some(context) = execution_context.as_ref() {
-                    inner
-                        .jobs
-                        .get_mut(&job_id)
-                        .expect("candidate exists")
-                        .remote_runner
-                        .as_mut()
-                        .expect("filtered remote runner job has request")
-                        .execution_context_id = Some(context.id().to_string());
-                }
+                let execution_context =
+                    crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
+                        &job, &envelope,
+                    )?;
+                inner
+                    .jobs
+                    .get_mut(&job_id)
+                    .expect("candidate exists")
+                    .remote_runner
+                    .as_mut()
+                    .expect("filtered remote runner job has request")
+                    .execution_context_id = Some(execution_context.id().to_string());
                 Self::append_event_already_locked(
                     self,
                     inner,
                     job_id,
                     JobEventKind::Status,
                     Some("remote runner job claimed".to_string()),
-                    Some(match execution_context.as_ref() {
-                        Some(context) => serde_json::json!({
-                            "status": JobStatus::Running,
-                            "runner_job_execution_context": context.evidence_record()?,
-                        }),
-                        None => serde_json::json!({ "status": JobStatus::Running }),
-                    }),
+                    Some(serde_json::json!({
+                        "status": JobStatus::Running,
+                        "runner_job_execution_context": execution_context.evidence_record()?,
+                    })),
                 )?;
                 return Ok(Some((
                     job,
-                    request,
                     envelope,
                     workspace_claim_binding,
                     workspace_owner_lease,
@@ -2004,7 +1752,6 @@ impl JobStore {
 
         let Some((
             job,
-            request,
             envelope,
             workspace_claim_binding,
             workspace_owner_lease,
@@ -2013,9 +1760,7 @@ impl JobStore {
         else {
             return Ok(None);
         };
-        let execution_protocol = execution_context
-            .as_ref()
-            .and_then(|_| execution_protocol.cloned());
+        let execution_protocol = execution_protocol.clone();
         let workspace_claim_protocol = workspace_claim_binding
             .is_some()
             .then(crate::workspace_claim::WorkspaceClaimProtocol::current);
@@ -2046,7 +1791,6 @@ impl JobStore {
         Ok(Some(RemoteRunnerJobClaim {
             job,
             envelope,
-            request,
             workspace_claim_binding,
             workspace_owner_lease,
             execution_context,
@@ -2158,12 +1902,12 @@ impl JobStore {
             .remote_runner
             .as_ref()
             .expect("finish only follows a validated remote runner claim");
-        let context_id = match remote_runner.execution_context_id.as_deref() {
-            Some(context_id) => Some(context_id.to_string()),
-            None => execution_context_id_from_evidence(stored)?,
-        };
-        let Some(context_id) = context_id else {
-            return Ok(());
+        // Every claim records its execution context. A claimed record without
+        // one was not written by this broker and cannot prove its receipt.
+        let Some(context_id) = remote_runner.execution_context_id.as_deref() else {
+            return Err(crate::runner_job_execution_context::rejected(
+                "durable runner claim has no execution context",
+            ));
         };
         let Some(receipt) = remote_runner.execution_receipt.as_ref() else {
             return Err(crate::runner_job_execution_context::rejected(
