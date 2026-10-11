@@ -64,7 +64,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "fuzz list",
         "per-component workload discovery report with diagnostics",
     ),
-    ("logs list", "LogsOutput shared with show/clear/search"),
     (
         "project components list",
         "nested sub-resource under data.components, shared with set/attach",
