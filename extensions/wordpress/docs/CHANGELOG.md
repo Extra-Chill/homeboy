@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.51.0] - 2026-10-11
+
+### Added
+- expose WordPress core source to standalone PHP smokes
+
 ## [3.50.7] - 2026-09-30
 
 ### Fixed
