@@ -47,7 +47,7 @@ Repeat `--command` to declare an ordered sequence. Steps run in order and **stop
 
 ```sh
 homeboy schedule add managed \
-  --command 'harvest production --check' \
+  --command 'status production --refresh' \
   --command 'fleet check production' \
   --every 24h
 ```
@@ -106,8 +106,8 @@ Scheduled commands execute as a subprocess of the homeboy binary and are read ba
 Scheduling the `schedule` command itself is refused.
 
 ```sh
-homeboy schedule add nightly-harvest \
-  --command 'harvest production --check' \
+homeboy schedule add nightly-status \
+  --command 'status production --refresh' \
   --every 24h \
   --notification-transport discord.run-completion \
   --notification-route 'discord:v1:channel:123456789012345678'
@@ -124,7 +124,7 @@ A running daemon fires due schedules itself — `homeboy daemon start` is all th
 
 ```sh
 homeboy daemon start
-homeboy schedule add nightly --command 'harvest production --check' --every 24h
+homeboy schedule add nightly --command 'status production --refresh' --every 24h
 ```
 
 The daemon polls every 30 seconds by default. That is the *polling* cadence, not a schedule's own cadence: it bounds how late a due schedule can fire, and polling more often than the shortest declared interval is harmless because a schedule that is not due is skipped. Override with `HOMEBOY_DAEMON_SCHEDULE_TICK_SECS`, or set it to `0` to turn daemon-driven scheduling off entirely.

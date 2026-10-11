@@ -144,8 +144,6 @@ homeboy project create my-site my-site.local \
 All commands execute locally when no `server_id` is configured:
 
 - **Extension CLI tools** (`homeboy wp`, `homeboy cargo`, or extension-provided verbs) - execute in local shell
-- **Database** (`homeboy db`) - uses extension templates, executes locally
-- **Logs** (`homeboy logs`) - reads files from `base_path`
 - **Files** (`homeboy file`) - browses/edits files at `base_path`
 - **Extension platform behaviors** - project discovery, version patterns, etc.
 
@@ -153,7 +151,6 @@ All commands execute locally when no `server_id` is configured:
 
 Only these commands require `server_id`:
 - `homeboy deploy` - uploads artifacts to remote server
-- `homeboy db tunnel` - creates SSH tunnel for database access
 
 ## Subcommands (continued)
 
@@ -358,10 +355,13 @@ Shows live server health and component versions for a project. Use
 homeboy project pin <COMMAND>
 ```
 
+Pins are frequently accessed remote files. Each subcommand returns a
+`project.pin.<action>` envelope with the project ID and a `pin` object.
+
 #### `pin list`
 
 ```sh
-homeboy project pin list <project_id> --type <file|log>
+homeboy project pin list <project_id>
 ```
 
 JSON output:
@@ -373,13 +373,11 @@ JSON output:
   "pin": {
     "action": "list",
     "project_id": "<project_id>",
-    "type": "file|log",
     "items": [
       {
         "path": "<path>",
         "label": "<label>|null",
-        "display_name": "<display-name>",
-        "tail_lines": 100
+        "display_name": "<display-name>"
       }
     ]
   }
@@ -389,44 +387,34 @@ JSON output:
 #### `pin add`
 
 ```sh
-homeboy project pin add <project_id> <path> --type <file|log> [--label <label>] [--tail <lines>]
+homeboy project pin add <project_id> <path> [--label <label>]
 ```
 
-JSON output:
-
-```json
-{
-  "command": "project.pin.add",
-  "project_id": "<project_id>",
-  "pin": {
-    "action": "add",
-    "project_id": "<project_id>",
-    "type": "file|log",
-    "added": { "path": "<path>", "type": "file|log" }
-  }
-}
-```
+Returns `pin.added: { "path": "<path>" }`.
 
 #### `pin remove`
 
 ```sh
-homeboy project pin remove <project_id> <path> --type <file|log>
+homeboy project pin remove <project_id> <path>
 ```
 
-JSON output:
+Returns `pin.removed: { "path": "<path>" }`.
 
-```json
-{
-  "command": "project.pin.remove",
-  "project_id": "<project_id>",
-  "pin": {
-    "action": "remove",
-    "project_id": "<project_id>",
-    "type": "file|log",
-    "removed": { "path": "<path>", "type": "file|log" }
-  }
-}
+#### `pin update`
+
+```sh
+homeboy project pin update <project_id> <path> --label <label>
 ```
+
+Returns the updated item as `pin.updated`.
+
+#### `pin rename`
+
+```sh
+homeboy project pin rename <project_id> <old_path> <new_path>
+```
+
+Returns `pin.removed`, `pin.added`, and the renamed item as `pin.updated`.
 
 ### `rename`
 

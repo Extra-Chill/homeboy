@@ -1383,18 +1383,17 @@ impl LintSniffArgs {
 
 /// How a command should render its result.
 ///
-/// `--json` means three unrelated things across the CLI today (#11138) and
+/// `--json` means two unrelated things across the CLI today (#11138) and
 /// this enum owns only the first of them — the *output format* sense:
 ///
 /// 1. **Output format** (a bool): `bench --json`, `runs show --json`,
 ///    `runs proof --json`, `runs dossier --json`.
-/// 2. **A JSON request body** (a string): `api http --json '<body>'`.
-/// 3. **A bulk input spec** (a string): `git --json`, `deploy --json`,
+/// 2. **A bulk input spec** (a string): `git --json`, `deploy --json`,
 ///    `build --json`, and `DynamicSetArgs --json` — *"JSON input spec for
 ///    bulk operations. Use `-` for stdin"*.
 ///
-/// Senses 2 and 3 are inputs, not presentation, so they are deliberately
-/// out of this group's scope. Renaming the input-spec flag to `--spec`
+/// Sense 2 is an input, not presentation, so it is deliberately out of this
+/// group's scope. Renaming the input-spec flag to `--spec`
 /// with `--json` kept as an alias is the natural follow-up, but it is a
 /// separate change: `--json` there takes a value, so it cannot be folded
 /// into a presentation flag without removing a spelling.

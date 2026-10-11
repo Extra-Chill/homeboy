@@ -37,9 +37,6 @@ pub enum HttpEndpoint {
     ComponentChanges {
         id: String,
     },
-    ResourceTopology {
-        root: homeboy_resource_topology_contract::ResourceTopologyResourceRef,
-    },
     Rigs,
     Rig {
         id: String,
@@ -222,7 +219,6 @@ impl HttpEndpoint {
             Self::Component { .. } => "components.show",
             Self::ComponentStatus { .. } => "components.status",
             Self::ComponentChanges { .. } => "components.changes",
-            Self::ResourceTopology { .. } => "resource_topology.show",
             Self::Rigs => "rigs.list",
             Self::Rig { .. } => "rigs.show",
             Self::RigCheck { .. } => "rigs.check",

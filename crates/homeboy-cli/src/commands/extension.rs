@@ -700,10 +700,6 @@ pub struct ActionDetail {
     #[serde(rename = "type")]
     pub action_type: extension_contract::action_types::ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<extension_contract::action_types::HttpMethod>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
 
@@ -1306,8 +1302,6 @@ fn show_extension(
             id: a.id.clone(),
             label: a.label.clone(),
             action_type: a.action_type.clone(),
-            endpoint: a.endpoint.clone(),
-            method: a.method.clone(),
             command: a.command.clone(),
         })
         .collect();

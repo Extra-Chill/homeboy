@@ -7,7 +7,7 @@
 
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandSpec;
-use crate::commands::{adapter, file, logs, review, runner, runtime, ssh, trace};
+use crate::commands::{adapter, file, review, runner, runtime, ssh, trace};
 
 use crate::command_contract::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
@@ -53,10 +53,6 @@ impl Commands {
                     output_file_mode,
                 )
             }
-            Commands::Logs(args) if logs::is_interactive(args) => raw_ops_descriptor(
-                CommandRawOutputMode::InteractivePassthrough,
-                output_file_mode,
-            ),
             Commands::File(args) if file::is_raw_read(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }

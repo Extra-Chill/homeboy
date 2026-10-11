@@ -94,27 +94,6 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: None,
     },
     PublicOutputVariantContract {
-        command: "db",
-        variant: "status",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("status"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "db",
-        variant: "query",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("query"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "db",
-        variant: "tunnel",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("tunnel"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
         command: "deploy",
         variant: "single",
         discriminator_field: Some("variant"),
@@ -175,13 +154,6 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         variant: "patch",
         discriminator_field: Some("variant"),
         discriminator_value: Some("patch"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "api",
-        variant: "response",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("response"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {

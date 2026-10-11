@@ -57,7 +57,6 @@
 //! Keep behavior here limited to interpreting the contract itself, so that
 //! deciding what a declaration means stays with the declaration.
 
-pub use action_types::HttpMethod;
 pub mod api;
 pub use ci_config::{
     CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,

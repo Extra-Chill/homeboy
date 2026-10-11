@@ -79,16 +79,7 @@ pub fn resolve_secret_env(names: &[String], project_id: Option<&str>) -> Result<
             format!("missing required trace secret env: {}", missing.join(", ")),
             None,
             Some(vec![
-                project_id
-                    .map(|project_id| {
-                        format!(
-                            "Store project secrets with `homeboy api auth set --project {project_id} <VARIABLE>`."
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        "Store project secrets with `homeboy api auth set --project <project> <VARIABLE>`.".to_string()
-                    }),
-                "Or configure a reusable mapping with `homeboy agent-task auth map-env` / `homeboy agent-task auth set-keychain`, or export the variable before running trace.".to_string(),
+                "Configure a reusable mapping with `homeboy agent-task auth map-env` / `homeboy agent-task auth set-keychain`, or export the variable before running trace.".to_string(),
             ]),
         ))
     }

@@ -234,5 +234,4 @@ This command returns `0` on success; failures are returned as errors.
 
 ## Related
 
-- [logs](logs.md)
 - [project](project.md)

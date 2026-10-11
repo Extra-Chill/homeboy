@@ -349,30 +349,6 @@ glob.
 
 - `pinned_files`
 
-### `RemoteLogConfig`
-
-- `pinned_logs`
-
-### `ApiConfig`
-
-- `enabled`
-- `base_url`
-- `auth`
-
-### `AuthConfig`
-
-- `header`
-- `variables`
-- `login`
-- `refresh`
-
-### `AuthFlowConfig`
-
-- `endpoint`
-- `method`
-- `body`
-- `store`
-
 ## Manifests
 
 ### `ExtensionManifest`

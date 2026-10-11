@@ -373,9 +373,6 @@ const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const API_REQUEST_DANGEROUS_FLAGS: &[&str] = &["--apply", "METHOD!=GET"];
-const API_HTTP_REQUEST_DANGEROUS_FLAGS: &[&str] =
-    &["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
 
 const fn mutating_safety() -> CommandSafetySpec {
     CommandSafetySpec {
@@ -466,15 +463,6 @@ const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
 const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
 const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
 const FLEET_CONFIG_PATHS: &[&str] = &["create", "set", "delete", "add", "remove"];
-const API_AUTH_PATHS: &[&str] = &[
-    "auth login",
-    "auth set",
-    "auth remove",
-    "auth logout",
-    "auth profile set-basic",
-    "auth profile set-bearer",
-    "auth profile remove",
-];
 const SERVER_OPERATOR_PATHS: &[&str] = &[
     "create",
     "set",
@@ -542,24 +530,6 @@ const FLEET_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         ),
     },
     paths_safety(FLEET_CONFIG_PATHS, mutating_safety(), "mutates local fleet configuration"),
-];
-
-const API_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["request"],
-        operator_safety(None, API_REQUEST_DANGEROUS_FLAGS),
-        "mutating API methods require --apply; GET is allowed without it",
-    ),
-    paths_safety(
-        &["http request"],
-        operator_safety(None, API_HTTP_REQUEST_DANGEROUS_FLAGS),
-        "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it",
-    ),
-    paths_safety(
-        API_AUTH_PATHS,
-        operator_safety(None, &[]),
-        "mutates keychain-backed authentication state",
-    ),
 ];
 
 const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
@@ -825,12 +795,6 @@ const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "deletes an undo snapshot without restoring it",
     ),
 ];
-
-const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
-    &["delete-row", "drop-table"],
-    operator_safety(None, &[]),
-    "default output is a non-mutating plan; pass --apply to mutate",
-)];
 
 /// `review audit-baseline` is the real clap path; `review audit baseline` only
 /// exists as a pre-parse argv rewrite in `commands::utils::args`, so declaring

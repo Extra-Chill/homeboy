@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 pub mod component;
 mod effective_remote_path;
 pub mod files;
-pub mod logs;
 mod path_resolution;
 pub mod pins;
 mod readiness;
@@ -38,7 +37,6 @@ pub use effective_remote_path::{
     component_remote_path, project_with_detected_path_roots, resolve_effective_remote_path,
 };
 pub use files::{FileEntry, GrepMatch, LineChange};
-pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};
 pub use path_resolution::resolve_project_remote_path;
 pub use pins::{
     add_pin, list_pins, remove_pin, rename_pin, update_pin, PinUpdateOptions, ProjectPinChange,
@@ -88,12 +86,6 @@ pub struct Project {
 
     #[serde(default)]
     pub remote_files: RemoteFileConfig,
-    #[serde(default)]
-    pub remote_logs: RemoteLogConfig,
-    #[serde(default)]
-    pub database: DatabaseConfig,
-    #[serde(default)]
-    pub api: ApiConfig,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changelog_next_section_label: Option<String>,
@@ -341,75 +333,41 @@ fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub fn pin(project_id: &str, pin_type: PinType, path: &str, options: PinOptions) -> Result<()> {
+pub fn pin(project_id: &str, path: &str, options: PinOptions) -> Result<()> {
     let mut project = load(project_id)?;
 
-    match pin_type {
-        PinType::File => {
-            if project
-                .remote_files
-                .pinned_files
-                .iter()
-                .any(|f| f.path == path)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    "File is already pinned",
-                    Some(project_id.to_string()),
-                    Some(vec![path.to_string()]),
-                ));
-            }
-            project.remote_files.pinned_files.push(PinnedRemoteFile {
-                path: path.to_string(),
-                label: options.label,
-            });
-        }
-        PinType::Log => {
-            if project
-                .remote_logs
-                .pinned_logs
-                .iter()
-                .any(|l| l.path == path)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    "Log is already pinned",
-                    Some(project_id.to_string()),
-                    Some(vec![path.to_string()]),
-                ));
-            }
-            project.remote_logs.pinned_logs.push(PinnedRemoteLog {
-                path: path.to_string(),
-                label: options.label,
-                tail_lines: options.tail_lines,
-            });
-        }
+    if project
+        .remote_files
+        .pinned_files
+        .iter()
+        .any(|f| f.path == path)
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "File is already pinned",
+            Some(project_id.to_string()),
+            Some(vec![path.to_string()]),
+        ));
     }
+    project.remote_files.pinned_files.push(PinnedRemoteFile {
+        path: path.to_string(),
+        label: options.label,
+    });
 
     save(&project)?;
     Ok(())
 }
 
-pub fn unpin(project_id: &str, pin_type: PinType, path: &str) -> Result<()> {
+pub fn unpin(project_id: &str, path: &str) -> Result<()> {
     let mut project = load(project_id)?;
 
-    let (before, after, type_name) = match pin_type {
-        PinType::File => {
-            let before = project.remote_files.pinned_files.len();
-            project.remote_files.pinned_files.retain(|f| f.path != path);
-            (before, project.remote_files.pinned_files.len(), "file")
-        }
-        PinType::Log => {
-            let before = project.remote_logs.pinned_logs.len();
-            project.remote_logs.pinned_logs.retain(|l| l.path != path);
-            (before, project.remote_logs.pinned_logs.len(), "log")
-        }
-    };
+    let before = project.remote_files.pinned_files.len();
+    project.remote_files.pinned_files.retain(|f| f.path != path);
 
-    if after == before {
+    if project.remote_files.pinned_files.len() == before {
         return Err(Error::validation_invalid_argument(
             "path",
-            format!("{} is not pinned", type_name),
+            "file is not pinned",
             Some(project_id.to_string()),
             Some(vec![path.to_string()]),
         ));
