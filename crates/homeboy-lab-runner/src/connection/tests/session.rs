@@ -1639,6 +1639,32 @@ fn remote_daemon_status_compact_unleased_producer_summary_allows_cold_start() {
 }
 
 #[test]
+fn remote_daemon_status_compact_dead_pid_lease_allows_replacement() {
+    // Compact daemon-status/v1 from a runner whose leased daemon was killed
+    // (#15768). The code lives under `recovery`, not `freshness`; missing it
+    // made connect refuse with "remote daemon is unreachable" forever.
+    let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
+        "schema":"homeboy/daemon-status/v1", "action":"status", "running":false,
+        "reachable":false, "fresh":false, "admits_work":false, "active_jobs":[],
+        "daemon":{"active_build":"homeboy fixture+source","active_version":"0.417.16",
+            "address":"127.0.0.1:38315","desired_build":"homeboy fixture+source",
+            "lease_id":"lease-dead","pid":859022},
+        "process_candidates":[],
+        "recovery":{"blocker":null,"replacement_blocked":false,"restartable":true,
+            "stale_reason_code":"pid_dead"}
+    }));
+    assert!(status.daemon.is_some());
+    assert_eq!(
+        status.stale_reason_code,
+        Some(DaemonStaleReasonCode::PidDead)
+    );
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action(None, &status).unwrap(),
+        remote_daemon::RemoteDaemonConnectAction::Start
+    );
+}
+
+#[test]
 fn remote_daemon_status_running_or_reachable_ambiguous_summary_retains_owner_and_refuses_start() {
     for (running, reachable) in [(true, false), (false, true), (true, true)] {
         let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
