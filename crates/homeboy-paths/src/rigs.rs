@@ -56,16 +56,6 @@ pub fn rig_source_metadata_in_root(config_root: &Path, id: &str) -> PathBuf {
     rig_sources_in_root(config_root).join(format!("{}.json", id))
 }
 
-/// Stack source metadata directory below an already-resolved config root.
-pub fn stack_sources_in_root(config_root: &Path) -> PathBuf {
-    rig_registry_root_in_root(config_root).join("stack-sources")
-}
-
-/// Stack source metadata file below an already-resolved config root.
-pub fn stack_source_metadata_in_root(config_root: &Path, id: &str) -> PathBuf {
-    stack_sources_in_root(config_root).join(format!("{}.json", id))
-}
-
 /// Rig state directory below an already-resolved config root.
 pub fn rig_state_dir_in_root(config_root: &Path, id: &str) -> PathBuf {
     rigs_in_root(config_root).join(format!("{}.state", id))
@@ -89,16 +79,6 @@ pub fn rig_baseline_root_in_root(config_root: &Path, id: &str) -> PathBuf {
 /// Active rig run leases below an already-resolved config root.
 pub fn rig_leases_dir_in_root(config_root: &Path) -> PathBuf {
     rig_registry_root_in_root(config_root).join("rig-leases")
-}
-
-/// Stacks directory below an already-resolved config root.
-pub fn stacks_in_root(config_root: &Path) -> PathBuf {
-    rig_registry_root_in_root(config_root).join("stacks")
-}
-
-/// Stack config file path below an already-resolved config root.
-pub fn stack_config_in_root(config_root: &Path, id: &str) -> PathBuf {
-    stacks_in_root(config_root).join(format!("{}.json", id))
 }
 
 #[cfg(test)]
@@ -147,16 +127,8 @@ mod tests {
             PathBuf::from("/runner/job-artifacts/rig-registry/rig-sources")
         );
         assert_eq!(
-            root.join("stack-sources"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/stack-sources")
-        );
-        assert_eq!(
             root.join("rig-leases"),
             PathBuf::from("/runner/job-artifacts/rig-registry/rig-leases")
-        );
-        assert_eq!(
-            root.join("stacks"),
-            PathBuf::from("/runner/job-artifacts/rig-registry/stacks")
         );
     }
 

@@ -305,7 +305,6 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
                 path_setting: None,
                 checkout_root: None,
                 remote_url: None,
-                stack: None,
                 lab_stack: None,
                 branch: None,
                 r#ref: None,

@@ -51,13 +51,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Post, ["rigs", id, "check"]) => Ok(HttpEndpoint::RigCheck {
             id: (*id).to_string(),
         }),
-        (HttpMethod::Get, ["stacks"]) => Ok(HttpEndpoint::Stacks),
-        (HttpMethod::Get, ["stacks", id]) => Ok(HttpEndpoint::Stack {
-            id: (*id).to_string(),
-        }),
-        (HttpMethod::Post, ["stacks", id, "status"]) => Ok(HttpEndpoint::StackStatus {
-            id: (*id).to_string(),
-        }),
         (HttpMethod::Get, ["runs"]) => Ok(HttpEndpoint::Runs),
         (HttpMethod::Get, ["runs", id]) => Ok(HttpEndpoint::Run {
             id: (*id).to_string(),
@@ -311,8 +304,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /components/:id/status".to_string(),
                 "GET /rigs".to_string(),
                 "POST /rigs/:id/check".to_string(),
-                "GET /stacks".to_string(),
-                "POST /stacks/:id/status".to_string(),
                 "GET /runs".to_string(),
                 "GET /runs/:id".to_string(),
                 "GET /runs/:id/artifacts".to_string(),
@@ -548,20 +539,6 @@ where
             json!({
                 "command": "api.rigs.check",
                 "report": crate::rig_provider::rig_check_json(id)?,
-            })
-        }
-        HttpEndpoint::Stacks => json!({
-            "command": "api.stacks.list",
-            "stacks": crate::stack_provider::stack_list_json()?,
-        }),
-        HttpEndpoint::Stack { id } => json!({
-            "command": "api.stacks.show",
-            "stack": crate::stack_provider::stack_show_json(id)?,
-        }),
-        HttpEndpoint::StackStatus { id } => {
-            json!({
-                "command": "api.stacks.status",
-                "report": crate::stack_provider::stack_status_json(id)?,
             })
         }
         HttpEndpoint::Runs => json!({

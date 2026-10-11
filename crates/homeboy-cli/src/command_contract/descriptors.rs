@@ -42,7 +42,6 @@ macro_rules! builtin_json_command_descriptors {
             (Worktree, $crate::commands::worktree::run, CommandSpec { subcommand_safety: WORKTREE_SUBCOMMAND_SAFETY, ..command_spec_with_representative_argv(&["homeboy", "worktree", "cleanup"], lab_command_spec_with_summary("worktree", CommandJsonFamily::Workspace, "Lab runner routing covers runner-resident task worktree cleanup", WORKTREE_LAB_SUPPORT)) }),
             (Runs, $crate::commands::runs::run, CommandSpec { subcommand_safety: RUNS_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes("runs", CommandJsonFamily::Workspace, "inspects persisted evidence, artifacts, typed report projections, artifact postprocessing, and finding reconciliation workflows") }),
             (SelfCmd, $crate::commands::self_cmd::run, CommandSpec { subcommand_safety: SELF_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") }),
-            (Stack, $crate::commands::stack::run, CommandSpec { subcommand_safety: STACK_SUBCOMMAND_SAFETY, ..command_spec("stack", CommandJsonFamily::Workspace) }),
             (Upgrade, $crate::commands::upgrade::run, CommandSpec { subcommand_safety: UPGRADE_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)) }),
         }
     };

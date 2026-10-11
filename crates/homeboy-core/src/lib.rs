@@ -172,7 +172,6 @@ pub mod runtime_package;
 pub mod runtime_promotion;
 pub mod schedule;
 pub mod scope;
-pub mod stack_provider;
 pub use homeboy_lab_contract::secret_env_plan;
 pub mod secret_env;
 

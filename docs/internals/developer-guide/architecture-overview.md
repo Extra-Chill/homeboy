@@ -71,7 +71,6 @@ Config entities:
 - **Servers**: SSH connection settings
 - **Fleets**: Named groups of projects for batch inspection and operations
 - **Rigs**: Reproducible local multi-component environments
-- **Stacks**: Combined-fixes branch specifications
 - **Extensions**: Domain-specific behaviors and tools
 
 ### Rig Boundaries

@@ -7,15 +7,15 @@
 //! Phase 1 scope:
 //! - Spec schema with components, services, symlinks, shared paths, and linear pipelines
 //! - Service kinds: `http-static`, `command`, `external` (adopted)
-//! - Pipeline step kinds: `service`, `build`, `extension`, `git`, `stack`,
-//!   `command`, `symlink`, `shared-path`, `patch`, `check`
+//! - Pipeline step kinds: `service`, `build`, `extension`, `git`, `command`,
+//!   `symlink`, `shared-path`, `patch`, `check`
 //! - Check probes: `http`, `file` (+ `contains`), `command`, `newer_than`
 //!   (mtime / process-start staleness)
 //! - State file at `~/.config/homeboy/rigs/{id}.state/state.json`
 //! - CLI verbs: `list`, `show`, `up`, `check`, `down`, `status`
 //!
-//! Deferred to later phases (see example-org/homeboy#1462+): deeper stack
-//! lifecycle automation, extension-registered service kinds, spec sharing.
+//! Deferred to later phases (see example-org/homeboy#1462+): extension-registered
+//! service kinds, spec sharing.
 
 pub mod app;
 mod artifact_index;
@@ -37,7 +37,6 @@ mod runner;
 mod service;
 mod source;
 pub mod spec;
-mod stack;
 mod state;
 pub mod trace_experiment;
 mod workloads;
@@ -62,10 +61,7 @@ pub use install::{
     materialize_rig_spec, materialize_rig_spec_with_default_source_root, read_source_metadata,
     read_source_metadata_in_root,
 };
-pub use install::{
-    discover_stacks, package_content_hash, read_stack_source_metadata_in_root, DiscoveredRig,
-    DiscoveredStack, InstalledStack, RigInstallResult, RigSourceMetadata, StackSourceMetadata,
-};
+pub use install::{package_content_hash, DiscoveredRig, RigInstallResult, RigSourceMetadata};
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
 pub(crate) use lease::{
     acquire_active_run_lease, acquire_active_run_lease_with_settings, RigRunLease,
@@ -95,9 +91,8 @@ pub use source::{
     RigSourceListResult, RigSourceRemoveResult, RigSourceUpdateResult,
 };
 pub use source::{
-    InvalidRigSourceMetadata, OrphanedRigSourceStack, RemovedRigSourceRig, RemovedRigSourceStack,
-    RigSourceGroup, RigSourceRecoveryAction, RigSourceRig, RigSourceStack, RigSourceUpdatedRig,
-    RigSourceUpdatedStack, SkippedRigSourceRig, SkippedRigSourceStack, SkippedRigSourceUpdate,
+    InvalidRigSourceMetadata, RemovedRigSourceRig, RigSourceGroup, RigSourceRig,
+    RigSourceUpdatedRig, SkippedRigSourceRig, SkippedRigSourceUpdate,
 };
 pub use spec::{
     normalize_dependency_materialization_steps, validate_dependency_materialization_steps,
@@ -109,8 +104,8 @@ pub use spec::{
     LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus,
     LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadKind, LifecycleWorkloadRef,
     NewerThanSpec, NormalizedDependencyMaterializationStep, PatchOp, RigRequirementsSpec,
-    RigResourceRetentionSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
-    SymlinkSpec, TimeSource, TraceConfig, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
+    RigResourceRetentionSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec,
+    TimeSource, TraceConfig, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TracePublicPreviewMode, WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
     RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
     RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
@@ -121,10 +116,6 @@ pub use spec::{
     TraceGuardrailSpec, TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewSpec,
     TraceVariantSpec,
 };
-pub use stack::RigStackSyncEntry;
-#[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
-pub(crate) use stack::{plan_stack_sync, run_component_sync};
-pub use stack::{run_sync, RigStackSyncReport};
 pub use state::MaterializedRigState;
 pub use state::{ComponentSnapshot, RigStateSnapshot};
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root

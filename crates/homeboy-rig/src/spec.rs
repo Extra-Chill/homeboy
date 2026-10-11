@@ -32,7 +32,7 @@ pub use dependencies::{
 };
 pub use pipeline::{
     GitOp, HostMutationOp, LifecycleWorkloadKind, LifecycleWorkloadRef, PatchOp, PipelineStep,
-    ServiceOp, SharedPathOp, StackOp, SymlinkOp,
+    ServiceOp, SharedPathOp, SymlinkOp,
 };
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
@@ -1248,14 +1248,7 @@ pub struct ComponentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
 
-    /// Stack ID this component should track. `homeboy rig sync` and explicit
-    /// `stack` pipeline steps use this to delegate combined-fixes upkeep to
-    /// the stack primitive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stack: Option<String>,
-
-    /// Immutable Git stack source materialized directly by a Lab runner. This
-    /// is distinct from `stack`, which names a local stack-sync configuration.
+    /// Immutable Git stack source materialized directly by a Lab runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab_stack: Option<LabStackSpec>,
 

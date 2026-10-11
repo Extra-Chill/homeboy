@@ -49,7 +49,7 @@ const OPTIONAL_REGISTRIES: &[OptionalRegistry] = &[OptionalRegistry {
 /// A registry that must exist in the inventory for this test to mean anything.
 /// The inventory is collected at link time; a collection that silently yielded
 /// nothing would make the completeness assertion vacuously true.
-const SENTINEL_REGISTRY: &str = "homeboy_core::stack_provider::register_stack_provider";
+const SENTINEL_REGISTRY: &str = "homeboy_core::rig_provider::register_rig_provider";
 
 /// Floor on the number of declared registries. Deliberately far below the real
 /// count so crate extraction does not churn it — this only has to catch an

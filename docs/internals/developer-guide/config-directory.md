@@ -2,7 +2,7 @@
 
 > **Important:** Portable component configuration can live in a repo-level
 > `homeboy.json`. Reusable machine-local configuration, state, installed
-> extensions, projects, servers, fleets, rigs, and stacks live in
+> extensions, projects, servers, fleets, and rigs live in
 > `~/.config/homeboy/`. There is no repo-local dotfile or hidden Homeboy config
 > directory.
 

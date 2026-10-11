@@ -1466,7 +1466,6 @@ mod tests {
         for args in [
             ["homeboy", "rig", "install", "./rig-package"].as_slice(),
             ["homeboy", "rig", "update", "demo-rig"].as_slice(),
-            ["homeboy", "rig", "sync", "demo-rig"].as_slice(),
             ["homeboy", "rig", "sources"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
@@ -1730,7 +1729,6 @@ mod tests {
             .as_slice(),
             ["homeboy", "rig", "update"].as_slice(),
             ["homeboy", "rig", "update", "--all"].as_slice(),
-            ["homeboy", "rig", "sync", "example-rig"].as_slice(),
             ["homeboy", "rig", "sources"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);

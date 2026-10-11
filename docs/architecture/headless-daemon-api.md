@@ -15,7 +15,7 @@ exposure remains blocked until the broker auth/pairing work in
 The daemon owns a loopback-only HTTP contract for:
 
 - local client discovery and health checks
-- read-only component, rig, stack, run, artifact, and finding inspection
+- read-only component, rig, run, artifact, and finding inspection
 - long-running lint, test, audit, and bench jobs
 - typed, allowlisted sandbox-agent Homeboy tool jobs
 - structured job events and final results
@@ -90,8 +90,6 @@ A useful headless UI can be built from this read/query surface:
   `GET /components/:id/changes` for source checkout selection
 - `GET /rigs`, `GET /rigs/:id`, and `POST /rigs/:id/check` for environment
   readiness
-- `GET /stacks`, `GET /stacks/:id`, and `POST /stacks/:id/status` for stacked
-  branch inspection
 - `GET /runs`, `GET /runs/:id`, `GET /runs/:id/artifacts`,
   `GET /runs/:id/artifacts/sync`, `GET /runs/:id/artifacts/:artifact_id`,
   `GET /runs/:id/artifacts/:artifact_id/content`, and `GET /runs/:id/findings`
@@ -167,7 +165,7 @@ A useful headless UI can be built from this read/query surface:
   that need typed Homeboy tool execution without arbitrary shell access
 
 This is enough for a dashboard that lists components, shows selected checkout
-state, displays rigs/stacks, starts analysis jobs, streams progress, and renders
+state, displays rigs, starts analysis jobs, streams progress, and renders
 structured final results.
 
 Artifact evidence is intentionally explicit about byte availability. Artifact
@@ -258,7 +256,7 @@ Restart behavior:
 Headless clients should replace shell-out flows in low-risk order:
 
 1. Discovery: `daemon status`, `health`, and `version`.
-2. Dashboard reads: components, status, changes, rigs, stacks, runs, artifacts,
+2. Dashboard reads: components, status, changes, rigs, runs, artifacts,
    and findings.
 3. Analysis jobs: lint, test, audit, and bench with event polling.
 4. Safe cancellation: `POST /jobs/:id/cancel` for daemon-owned queued/running
@@ -282,7 +280,6 @@ Suggested capability names:
 - `write:files`
 - `write:git`
 - `write:rig`
-- `write:stack`
 - `operator:ssh`
 - `operator:deploy`
 - `operator:release`
@@ -290,9 +287,9 @@ Suggested capability names:
 Risk categories:
 
 - Read-only: status, inventory, persisted runs, artifacts, findings.
-- Bounded local run: lint, test, audit, bench, rig check, stack status.
+- Bounded local run: lint, test, audit, bench, rig check.
 - Local write: file edits, refactor fixes, generated patches.
-- Git write: commit, tag, push, stack apply/sync/push.
+- Git write: commit, tag, push.
 - Environment write: rig up/down/service operations.
 - Operator write: SSH execution, deploy, release, transfer, DB operations.
 

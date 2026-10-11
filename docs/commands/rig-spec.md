@@ -12,7 +12,6 @@ single-rig-package/
 
 multi-rig-package/
   rigs/<rig-id>/rig.json
-  stacks/<stack-id>.json
 ```
 
 Install with:
@@ -179,7 +178,6 @@ Components are local checkouts used by pipeline steps. Portable package rigs can
 | `component_id` | string | Optional Homeboy component registry ID to resolve when `path` is omitted or expands to an empty value. Defaults to the component map key. |
 | `path_setting` | string | Optional environment variable name whose value supplies the path when explicit `path` and registry lookup are unavailable. |
 | `remote_url` | string | Optional source repository URL. |
-| `stack` | string | Stack ID synced by `homeboy rig sync` and by explicit `stack` pipeline steps. The component `path` must resolve to the same checkout as the stack's `component_path`. |
 | `lab_stack` | object | Immutable repository stack for Lab materialization without a controller checkout. It declares `repository`, a `base` `{ reference, sha }`, and ordered PR entries with `{ number, head: { reference, sha }, merge_mainline? }`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |
 | `ref` | string | Explicit pinned ref for Lab dependency materialization. |
@@ -193,7 +191,6 @@ Example:
   "components": {
     "studio": {
       "path": "~/Developer/studio",
-      "stack": "studio-combined",
       "branch": "dev/combined-fixes"
     }
   }
@@ -227,8 +224,7 @@ or SSH repository URLs, uses only runner-owned Git credentials, and rejects
 configured private/proxied hosts that require controller-routed sync. The
 materialization proof and durable workspace mapping record the immutable base,
 PR heads, merge-mainline selections, stack digest, and resulting revision. A
-mutable, unresolved, or ambiguous ref fails closed. `lab_stack` does not replace
-the path-backed `stack` contract used by local `rig sync`.
+mutable, unresolved, or ambiguous ref fails closed.
 
 Registry-backed example with an env path fallback:
 
@@ -451,14 +447,6 @@ Delegates a supported component lifecycle operation through extension infrastruc
 
 Runs git in the component checkout. Supported operations are `status`, `pull`, `push`, `fetch`, `checkout`, `current-branch`, `rebase`, and `cherry-pick`. `args` are appended after the operation's base arguments and support variable expansion.
 
-### `stack`
-
-```jsonc
-{ "kind": "stack", "component": "studio", "op": "sync", "dry_run": true }
-```
-
-Delegates to `homeboy stack sync <stack-id>` for the named component. The component must declare `stack`, and the rig component `path` must match the stack spec's `component_path`. `homeboy rig sync <id>` runs this for every stacked component without needing a pipeline step.
-
 ### `requirement`
 
 ```jsonc
@@ -653,7 +641,7 @@ reap an environment whose run died before its `teardown` phase. See
 
 Runs via the platform shell. `cwd`, `command`, and `env` values support variable expansion. Command steps bootstrap common developer-tool PATH entries unless `env.PATH` is set explicitly.
 
-Prefer typed `build`, `git`, `stack`, `check`, and `service` steps when they fit; generic commands are the escape hatch.
+Prefer typed `build`, `git`, `check`, and `service` steps when they fit; generic commands are the escape hatch.
 
 ### `command-if-missing`
 
@@ -901,16 +889,14 @@ Unknown `${...}` patterns are left literal so the eventual command or file check
 - `check` runs every step in the `check` pipeline and reports all failures.
 - `down` runs the `down` pipeline, then stops declared services and cleans rig-owned shared paths as a safety net.
 - Dependency edges from `depends_on` are resolved before execution; the executor still runs one ordered list, not parallel jobs.
-- Stack synchronization is explicit through `homeboy rig sync` or `kind: "stack"` steps. `rig up` does not sync stacks unless the spec author adds that step.
 - Lifecycle phases are explicit too: a `kind: "lifecycle"` step runs only the phase it declares. `rig down` does not tear down a captured environment unless the spec author adds a `teardown` step to the `down` pipeline.
 
 ## Future Work
 
-The shipped rig lifecycle is local/package/source/stack/app capable. The remaining design work is matrix/axis composition and build DAG caching for derived rig variants, tracked separately from the core rig command reference.
+The shipped rig lifecycle is local/package/source/app capable. The remaining design work is matrix/axis composition and build DAG caching for derived rig variants, tracked separately from the core rig command reference.
 
 ## See Also
 
 - [rig.md](./rig.md) - command lifecycle and examples.
-- [stack.md](./stack.md) - stack specs consumed by `rig sync`.
 - [bench.md](./bench.md) - benchmark command behavior for rig-pinned runs.
 - [rig-matrix-axis-composition.md](../architecture/rig-matrix-axis-composition.md) - future matrix/axis design.

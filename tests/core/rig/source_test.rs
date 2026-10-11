@@ -9,8 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::rig_test_support::{
-    bare_source_path, clone_bare, commit_all, init_main, minimal_rig, minimal_stack, push_main,
-    run_git, write_rig, write_stack,
+    bare_source_path, clone_bare, commit_all, init_main, minimal_rig, push_main, run_git, write_rig,
 };
 
 /// The isolated home each test below installs, named as a config root.
@@ -115,78 +114,6 @@ fn linked_package_provenance_tracks_execution_time_content_and_dirty_state() {
 }
 
 #[test]
-fn list_sources_reports_stack_specs_from_package() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    write_stack(package.path(), "alpha-combined", "alpha");
-
-    install(
-        &test_config_root(),
-        package.path().to_str().unwrap(),
-        None,
-        false,
-    )
-    .expect("install");
-
-    let result = list_sources(&test_config_root()).expect("sources");
-    assert_eq!(result.sources.len(), 1);
-    assert_eq!(result.sources[0].stacks.len(), 1);
-    assert_eq!(result.sources[0].stacks[0].id, "alpha-combined");
-    assert!(result.sources[0].stacks[0].config_present);
-    assert!(result.sources[0].stacks[0].config_owned);
-    assert!(result.sources[0].source_content_hash.is_some());
-    assert!(result.orphaned_stacks.is_empty());
-}
-
-#[test]
-fn sources_list_reports_legacy_stack_without_inferring_or_mutating_provenance() {
-    let _home = HomeGuard::new();
-    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "legacy");
-    fs::create_dir_all(config.parent().expect("stacks dir")).expect("stacks dir");
-    let content = minimal_stack("legacy", "legacy")
-        .replace("${env.DEV_ROOT}/legacy", "/definitely/missing/legacy");
-    fs::write(&config, &content).expect("legacy stack");
-
-    let result = list_sources(&test_config_root()).expect("sources");
-
-    assert!(result.sources.is_empty());
-    assert_eq!(result.orphaned_stacks.len(), 1);
-    let legacy = &result.orphaned_stacks[0];
-    assert_eq!(legacy.id, "legacy");
-    assert_eq!(legacy.source_status, "legacy_missing_metadata");
-    assert_eq!(
-        legacy.component_path.as_deref(),
-        Some("/definitely/missing/legacy")
-    );
-    assert_eq!(legacy.component_path_present, Some(false));
-    assert!(legacy.content_identity.starts_with("sha256:"));
-    assert_eq!(
-        legacy
-            .recovery_actions
-            .iter()
-            .map(|action| action.kind)
-            .collect::<Vec<_>>(),
-        vec!["adopt_package_source"]
-    );
-    assert_eq!(
-        legacy.recovery_actions[0].command,
-        "homeboy rig install <authoritative-package-source> --all --reinstall"
-    );
-    assert_eq!(
-        legacy.recovery_actions[0].required_parameters,
-        vec!["authoritative-package-source"]
-    );
-    assert_eq!(
-        fs::read_to_string(&config).expect("legacy stack unchanged"),
-        content
-    );
-    assert!(
-        !homeboy_core::paths::stack_source_metadata_in_root(&test_config_root(), "legacy").exists()
-    );
-}
-
-#[test]
 fn test_remove_source() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
@@ -245,37 +172,6 @@ fn remove_source_preserves_replaced_config_but_drops_metadata() {
     assert!(
         !homeboy_core::paths::rig_source_metadata_in_root(&test_config_root(), "alpha").exists()
     );
-}
-
-#[test]
-fn remove_source_preserves_replaced_stack_config_but_drops_metadata() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    write_stack(package.path(), "alpha-combined", "alpha");
-
-    install(
-        &test_config_root(),
-        package.path().to_str().unwrap(),
-        None,
-        false,
-    )
-    .expect("install");
-    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "alpha-combined");
-    fs::remove_file(&config).expect("remove symlink");
-    fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("replacement stack");
-
-    let result = remove_source(&test_config_root(), &package.path().to_string_lossy())
-        .expect("remove source");
-
-    assert!(result.removed_stacks.is_empty());
-    assert_eq!(result.skipped_stacks.len(), 1);
-    assert!(config.exists());
-    assert!(!homeboy_core::paths::stack_source_metadata_in_root(
-        &test_config_root(),
-        "alpha-combined"
-    )
-    .exists());
 }
 
 #[test]
@@ -407,45 +303,6 @@ fn missing_linked_source_gets_rig_source_diagnostic_not_not_found_hint() {
 }
 
 #[test]
-fn sources_list_skips_non_json_and_collects_invalid_stack_metadata() {
-    let _home = HomeGuard::new();
-    fs::create_dir_all(homeboy_core::paths::rig_sources_in_root(&test_config_root()))
-        .expect("rig sources dir");
-    fs::create_dir_all(homeboy_core::paths::stack_sources_in_root(
-        &test_config_root(),
-    ))
-    .expect("stack sources dir");
-    fs::write(
-        homeboy_core::paths::rig_sources_in_root(&test_config_root()).join("ignored.txt"),
-        "not json",
-    )
-    .expect("non-json metadata");
-    fs::write(
-        homeboy_core::paths::stack_source_metadata_in_root(&test_config_root(), "broken-stack"),
-        "not json",
-    )
-    .expect("broken stack metadata");
-    fs::create_dir_all(homeboy_core::paths::stacks_in_root(&test_config_root()))
-        .expect("stacks dir");
-    fs::write(
-        homeboy_core::paths::stack_config_in_root(&test_config_root(), "broken-stack"),
-        minimal_stack("broken-stack", "broken"),
-    )
-    .expect("installed stack");
-
-    let result = list_sources(&test_config_root()).expect("sources");
-
-    assert!(result.sources.is_empty());
-    assert_eq!(result.invalid.len(), 1);
-    assert_eq!(result.invalid[0].id, "broken-stack");
-    assert_eq!(result.orphaned_stacks.len(), 1);
-    assert_eq!(result.orphaned_stacks[0].id, "broken-stack");
-    assert!(result.invalid[0]
-        .metadata_path
-        .ends_with("stack-sources/broken-stack.json"));
-}
-
-#[test]
 fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
@@ -485,51 +342,6 @@ fn update_git_source_fast_forwards_package_and_refreshes_metadata() {
             .source_revision,
         result.updated[0].source_revision
     );
-}
-
-#[test]
-fn update_git_source_refreshes_owned_stack_specs() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
-    let bare = create_bare_source(package.path());
-    let source = bare_source_path(&bare).to_string_lossy().to_string();
-
-    install(&test_config_root(), &source, None, false).expect("install");
-    let installed_metadata =
-        crate::read_stack_source_metadata_in_root(&test_config_root(), "alpha-combined")
-            .expect("stack metadata");
-    let before = installed_metadata.source_revision;
-    fs::write(
-        Path::new(&installed_metadata.package_path).join("local-untracked"),
-        "preserve dirty provenance",
-    )
-    .expect("dirty installed package");
-
-    fs::write(
-        &source_stack,
-        minimal_stack("alpha-combined", "alpha").replace("alpha-combined stack", "updated stack"),
-    )
-    .expect("update stack");
-    commit_package(package.path(), "update alpha stack");
-    push_main(package.path(), &source);
-
-    let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
-
-    assert_eq!(result.updated_stacks.len(), 1);
-    assert_eq!(result.updated_stacks[0].id, "alpha-combined");
-    assert_ne!(result.updated_stacks[0].source_revision, before);
-    let installed = fs::read_to_string(homeboy_core::paths::stack_config_in_root(
-        &test_config_root(),
-        "alpha-combined",
-    ))
-    .expect("installed stack");
-    assert!(installed.contains("updated stack"));
-    let metadata = crate::read_stack_source_metadata_in_root(&test_config_root(), "alpha-combined")
-        .expect("refreshed stack metadata");
-    assert_eq!(metadata.source_ref.as_deref(), Some("main"));
-    assert!(metadata.source_dirty);
 }
 
 #[test]
@@ -686,38 +498,6 @@ fn refresh_without_selector_updates_all_sources() {
 }
 
 #[test]
-fn update_git_source_skips_user_replaced_stack_specs() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    let source_stack = write_stack(package.path(), "alpha-combined", "alpha");
-    let bare = create_bare_source(package.path());
-    let source = bare_source_path(&bare).to_string_lossy().to_string();
-
-    install(&test_config_root(), &source, None, false).expect("install");
-    let config = homeboy_core::paths::stack_config_in_root(&test_config_root(), "alpha-combined");
-    fs::remove_file(&config).expect("remove symlink");
-    fs::write(&config, minimal_stack("alpha-combined", "manual")).expect("manual stack");
-    fs::write(
-        &source_stack,
-        minimal_stack("alpha-combined", "alpha").replace("alpha-combined stack", "updated stack"),
-    )
-    .expect("update source stack");
-    commit_package(package.path(), "update alpha stack");
-    push_main(package.path(), &source);
-
-    let result = update_source_for_rig(&test_config_root(), "alpha").expect("update rig source");
-
-    assert!(result.updated_stacks.is_empty());
-    assert_eq!(result.skipped.len(), 1);
-    assert_eq!(result.skipped[0].id, "alpha-combined");
-    assert!(result.skipped[0].reason.contains("stack source"));
-    let installed = fs::read_to_string(config).expect("manual stack");
-    assert!(installed.contains("manual"));
-    assert!(!installed.contains("updated stack"));
-}
-
-#[test]
 fn update_all_skips_linked_local_sources() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");
@@ -736,31 +516,6 @@ fn update_all_skips_linked_local_sources() {
     assert_eq!(result.skipped.len(), 1);
     assert_eq!(result.skipped[0].id, "alpha");
     assert!(result.skipped[0].reason.contains("linked local sources"));
-}
-
-#[test]
-fn update_all_skips_linked_local_stack_sources() {
-    let _home = HomeGuard::new();
-    let package = tempfile::tempdir().expect("package");
-    write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-    write_stack(package.path(), "alpha-combined", "alpha");
-
-    install(
-        &test_config_root(),
-        package.path().to_str().unwrap(),
-        None,
-        false,
-    )
-    .expect("install linked");
-    let result = update_all_sources(&test_config_root()).expect("update all");
-
-    assert!(result.updated.is_empty());
-    assert!(result.updated_stacks.is_empty());
-    assert_eq!(result.skipped.len(), 2);
-    assert!(result
-        .skipped
-        .iter()
-        .any(|skipped| skipped.id == "alpha-combined"));
 }
 
 #[test]

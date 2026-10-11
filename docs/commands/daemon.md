@@ -234,9 +234,6 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /rigs`
 - `GET /rigs/:id`
 - `POST /rigs/:id/check`
-- `GET /stacks`
-- `GET /stacks/:id`
-- `POST /stacks/:id/status`
 - `GET /runs?kind=bench|audit&component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /runs/:id`
 - `GET /runs/:id/artifacts`
@@ -260,7 +257,7 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `POST /runner/jobs/:id/finish`
 
 The run readers expose persisted observation-store evidence from previous
-analysis runs. They do not start audit, lint, test, bench, rig, or stack work.
+analysis runs. They do not start audit, lint, test, bench, or rig work.
 Run summaries include `status_note` when a running record appears stale or
 cannot be verified with owner metadata, matching the CLI run-history output.
 
@@ -293,7 +290,7 @@ Sandbox agents should prefer the typed tool surface over command-shaped routes:
 - Tool IDs that are not in the allowlist, including deploy, release, SSH, auth,
   keychain, and DB operations, are rejected before execution.
 
-Mutating operations such as deploy, release, rig up/down, stack apply, git
+Mutating operations such as deploy, release, rig up/down, git
 writes, and SSH execution are not exposed by this daemon slice.
 
 See [Headless Daemon API Contract](../architecture/headless-daemon-api.md) for

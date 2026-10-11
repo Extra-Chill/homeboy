@@ -270,13 +270,6 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "rig",
-        variant: "sync",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("sync"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "rig",
         variant: "status",
         discriminator_field: Some("variant"),
         discriminator_value: Some("status"),

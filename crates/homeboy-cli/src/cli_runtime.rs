@@ -998,7 +998,6 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // Register the rig toolchain provider so core's extension exec-env
     // builder can prepend the rig toolchain PATH.
     crate::rig::provider::register();
-    crate::stack::provider::register();
     crate::refactor::audit_fixability_provider::register();
     // Register the refactor transform provider so core's extension
     // test-drift auto-fixer can apply generated transform rules.

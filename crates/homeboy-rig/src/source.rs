@@ -3,22 +3,17 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::paths;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::install::{
-    discover_stacks, link_or_copy_file, write_rig_config_from_source, write_source_metadata,
-    write_stack_source_metadata, RigSourceMetadata, StackSourceMetadata,
-};
+use super::install::{write_rig_config_from_source, write_source_metadata, RigSourceMetadata};
 
 mod types;
 pub use types::{
-    FailedRigSourceUpdate, InvalidRigSourceMetadata, OrphanedRigSourceStack, RemovedRigSourceRig,
-    RemovedRigSourceStack, RigSourceGroup, RigSourceListResult, RigSourceRecoveryAction,
-    RigSourceRemoveResult, RigSourceRig, RigSourceStack, RigSourceUpdateResult,
-    RigSourceUpdatedRig, RigSourceUpdatedStack, SkippedRigSourceRig, SkippedRigSourceStack,
-    SkippedRigSourceUpdate,
+    FailedRigSourceUpdate, InvalidRigSourceMetadata, RemovedRigSourceRig, RigSourceGroup,
+    RigSourceListResult, RigSourceRemoveResult, RigSourceRig, RigSourceUpdateResult,
+    RigSourceUpdatedRig, SkippedRigSourceRig, SkippedRigSourceUpdate,
 };
 
 pub fn list_sources(config_root: &Path) -> Result<RigSourceListResult> {
@@ -60,9 +55,7 @@ pub fn remove_source(config_root: &Path, selector: &str) -> Result<RigSourceRemo
 
     let source = matches.into_iter().next().expect("checked non-empty");
     let mut removed = Vec::new();
-    let mut removed_stacks = Vec::new();
     let mut skipped = Vec::new();
-    let mut skipped_stacks = Vec::new();
     for rig in &source.rigs {
         let metadata_path = paths::rig_source_metadata_in_root(config_root, &rig.id);
         let config_path = PathBuf::from(&rig.config_path);
@@ -83,32 +76,6 @@ pub fn remove_source(config_root: &Path, selector: &str) -> Result<RigSourceRemo
             });
         }
     }
-    for stack in &source.stacks {
-        let metadata_path = paths::stack_source_metadata_in_root(config_root, &stack.id);
-        let config_path = PathBuf::from(&stack.config_path);
-        let remove_config = stack.config_present && stack.config_owned;
-        if remove_config {
-            fs::remove_file(&config_path).map_err(|e| {
-                Error::internal_io(e.to_string(), Some("remove stack config".into()))
-            })?;
-        }
-
-        remove_source_metadata(&metadata_path)?;
-        if remove_config || !stack.config_present {
-            removed_stacks.push(RemovedRigSourceStack {
-                id: stack.id.clone(),
-                config_path: stack.config_path.clone(),
-                metadata_path: metadata_path.to_string_lossy().to_string(),
-            });
-        } else {
-            skipped_stacks.push(SkippedRigSourceStack {
-                id: stack.id.clone(),
-                config_path: stack.config_path.clone(),
-                reason: "config file no longer points at the recorded stack source".to_string(),
-            });
-        }
-    }
-
     let removed_package_path = if !source.linked {
         let source_root = PathBuf::from(&source.source_root);
         if source_root.exists() {
@@ -127,9 +94,7 @@ pub fn remove_source(config_root: &Path, selector: &str) -> Result<RigSourceRemo
         selector: selector.to_string(),
         source,
         removed,
-        removed_stacks,
         skipped,
-        skipped_stacks,
         removed_package_path,
     })
 }
@@ -173,7 +138,6 @@ pub fn update_source_for_rig(config_root: &Path, id: &str) -> Result<RigSourceUp
 pub fn update_all_sources(config_root: &Path) -> Result<RigSourceUpdateResult> {
     let mut aggregate = RigSourceUpdateResult {
         updated: Vec::new(),
-        updated_stacks: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),
     };
@@ -186,19 +150,11 @@ pub fn update_all_sources(config_root: &Path) -> Result<RigSourceUpdateResult> {
                     reason: "linked local sources are updated in place outside homeboy".to_string(),
                 });
             }
-            for stack in source.stacks {
-                aggregate.skipped.push(SkippedRigSourceUpdate {
-                    id: stack.id,
-                    source: source.source.clone(),
-                    reason: "linked local sources are updated in place outside homeboy".to_string(),
-                });
-            }
             continue;
         }
         match update_group(config_root, source.clone()) {
             Ok(result) => {
                 aggregate.updated.extend(result.updated);
-                aggregate.updated_stacks.extend(result.updated_stacks);
                 aggregate.skipped.extend(result.skipped);
                 aggregate.failed.extend(result.failed);
             }
@@ -260,16 +216,8 @@ pub fn update_source(config_root: &Path, selector: Option<&str>) -> Result<RigSo
                 reason: "linked local sources are updated in place outside homeboy".to_string(),
             });
         }
-        for stack in source.stacks {
-            skipped.push(SkippedRigSourceUpdate {
-                id: stack.id,
-                source: source.source.clone(),
-                reason: "linked local sources are updated in place outside homeboy".to_string(),
-            });
-        }
         return Ok(RigSourceUpdateResult {
             updated: Vec::new(),
-            updated_stacks: Vec::new(),
             skipped,
             failed: Vec::new(),
         });
@@ -314,7 +262,6 @@ fn update_group(config_root: &Path, source: RigSourceGroup) -> Result<RigSourceU
         git::status_porcelain_bytes(&source_root).is_some_and(|status| !status.is_empty());
 
     let mut updated = Vec::new();
-    let mut updated_stacks = Vec::new();
     let mut skipped = Vec::new();
     for rig in source.rigs {
         let rig_path = PathBuf::from(&rig.rig_path);
@@ -372,54 +319,8 @@ fn update_group(config_root: &Path, source: RigSourceGroup) -> Result<RigSourceU
         });
     }
 
-    let current_stacks = discover_stacks(Path::new(&source.discovery_path))?;
-    let source_content_hash =
-        super::install::package_content_hash(Path::new(&source.package_path))?;
-    for stack in current_stacks {
-        let existing = source.stacks.iter().find(|entry| entry.id == stack.id);
-        let config_path = paths::stack_config_in_root(config_root, &stack.id);
-        if config_path.exists() || fs::symlink_metadata(&config_path).is_ok() {
-            if existing.is_none_or(|entry| !entry.config_owned) {
-                skipped.push(SkippedRigSourceUpdate {
-                    id: stack.id,
-                    source: source.source.clone(),
-                    reason: "config file no longer points at the recorded stack source".to_string(),
-                });
-                continue;
-            }
-            fs::remove_file(&config_path).map_err(|e| {
-                Error::internal_io(e.to_string(), Some("replace stack config link".into()))
-            })?;
-        }
-        link_or_copy_file(&stack.stack_path, &config_path)?;
-
-        let metadata = StackSourceMetadata {
-            source: source.source.clone(),
-            source_root: Some(source.source_root.clone()),
-            package_path: source.package_path.clone(),
-            stack_path: stack.stack_path.to_string_lossy().to_string(),
-            discovery_path: source.discovery_path.clone(),
-            linked: false,
-            source_revision: source_revision.clone(),
-            source_ref: source_ref.clone(),
-            source_dirty,
-            source_content_hash: Some(source_content_hash.clone()),
-        };
-        write_stack_source_metadata(config_root, &stack.id, &metadata)?;
-
-        updated_stacks.push(RigSourceUpdatedStack {
-            id: stack.id,
-            source: source.source.clone(),
-            path: config_path.to_string_lossy().to_string(),
-            spec_path: stack.stack_path.to_string_lossy().to_string(),
-            previous_revision: previous_revision.clone(),
-            source_revision: source_revision.clone(),
-        });
-    }
-
     Ok(RigSourceUpdateResult {
         updated,
-        updated_stacks,
         skipped,
         failed: Vec::new(),
     })
@@ -447,20 +348,7 @@ struct RigSourceEntry {
 #[derive(Debug)]
 struct SourceEntries {
     valid: Vec<RigSourceEntry>,
-    valid_stacks: Vec<StackSourceEntry>,
     invalid: Vec<InvalidRigSourceMetadata>,
-}
-
-#[derive(Debug)]
-struct InstalledStack {
-    id: String,
-    path: PathBuf,
-}
-
-#[derive(Debug)]
-struct StackSourceEntry {
-    id: String,
-    metadata: StackSourceMetadata,
 }
 
 fn read_source_entries(config_root: &Path) -> Result<SourceEntries> {
@@ -484,34 +372,8 @@ fn read_source_entries(config_root: &Path) -> Result<SourceEntries> {
         })
         .collect::<Vec<_>>();
 
-    let valid_stacks = read_stack_source_entries(config_root, &mut invalid)?;
     invalid.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(SourceEntries {
-        valid,
-        valid_stacks,
-        invalid,
-    })
-}
-
-fn read_stack_source_entries(
-    config_root: &Path,
-    invalid: &mut Vec<InvalidRigSourceMetadata>,
-) -> Result<Vec<StackSourceEntry>> {
-    let dir = paths::stack_sources_in_root(config_root);
-    let entries = super::json_config::read_json_configs::<StackSourceMetadata>(
-        &dir,
-        "read stack sources dir",
-        "read stack source entry",
-    )?;
-    invalid.extend(entries.invalid.into_iter().map(invalid_source_metadata));
-    Ok(entries
-        .valid
-        .into_iter()
-        .map(|entry| StackSourceEntry {
-            id: entry.id,
-            metadata: entry.value,
-        })
-        .collect())
+    Ok(SourceEntries { valid, invalid })
 }
 
 fn invalid_source_metadata(
@@ -525,11 +387,6 @@ fn invalid_source_metadata(
 }
 
 fn group_source_entries(config_root: &Path, entries: SourceEntries) -> Result<RigSourceListResult> {
-    let managed_stack_ids = entries
-        .valid_stacks
-        .iter()
-        .map(|entry| entry.id.clone())
-        .collect::<HashSet<_>>();
     let mut groups: BTreeMap<String, RigSourceGroup> = BTreeMap::new();
     for entry in entries.valid {
         let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
@@ -546,39 +403,13 @@ fn group_source_entries(config_root: &Path, entries: SourceEntries) -> Result<Ri
             .push(source_rig(entry, config_path, config_present, config_owned));
     }
 
-    for entry in entries.valid_stacks {
-        let key = format!("{}\0{}", entry.metadata.source, entry.metadata.package_path);
-        let config_path = Some(paths::stack_config_in_root(config_root, &entry.id));
-        let config_present = config_path.as_ref().is_some_and(|path| path.exists());
-        let config_owned = config_path
-            .as_ref()
-            .is_some_and(|path| rig_config_matches_source(path, &entry.metadata.stack_path));
-
-        groups
-            .entry(key)
-            .or_insert_with(|| new_stack_source_group(&entry.metadata))
-            .stacks
-            .push(source_stack(
-                config_root,
-                entry,
-                config_path,
-                config_present,
-                config_owned,
-            ));
-    }
-
     let mut sources = groups.into_values().collect::<Vec<_>>();
     for source in &mut sources {
         source.rigs.sort_by(|a, b| a.id.cmp(&b.id));
-        source.stacks.sort_by(|a, b| a.id.cmp(&b.id));
     }
-
-    let orphaned_stacks =
-        installed_stacks_without_source_metadata(config_root, &managed_stack_ids)?;
 
     Ok(RigSourceListResult {
         sources,
-        orphaned_stacks,
         invalid: entries.invalid,
     })
 }
@@ -606,7 +437,6 @@ fn new_source_group(
         source_content_hash,
         stale_reason: stale_source_reason(linked, package_present),
         rigs: Vec::new(),
-        stacks: Vec::new(),
     }
 }
 
@@ -641,22 +471,6 @@ fn validated_rig_discovery_path(metadata: &RigSourceMetadata) -> Option<String> 
         .then(|| metadata.package_path.clone())
 }
 
-fn new_stack_source_group(metadata: &StackSourceMetadata) -> RigSourceGroup {
-    let source_root = metadata
-        .source_root
-        .as_deref()
-        .unwrap_or(&metadata.package_path);
-    new_source_group(
-        &metadata.source,
-        source_root,
-        &metadata.package_path,
-        metadata.discovery_path.clone(),
-        metadata.linked,
-        metadata.source_revision.clone(),
-        metadata.source_content_hash.clone(),
-    )
-}
-
 fn source_rig(
     entry: RigSourceEntry,
     config_path: Option<PathBuf>,
@@ -673,90 +487,6 @@ fn source_rig(
         config_owned,
         stale_reason: stale_config_reason(rig_present, config_present),
     }
-}
-
-fn source_stack(
-    config_root: &Path,
-    entry: StackSourceEntry,
-    config_path: Option<PathBuf>,
-    config_present: bool,
-    config_owned: bool,
-) -> RigSourceStack {
-    let stack_present = Path::new(&entry.metadata.stack_path).is_file();
-    let (component_path, component_path_present) = stack_component_path(config_root, &entry.id);
-    RigSourceStack {
-        id: entry.id,
-        stack_path: entry.metadata.stack_path,
-        stack_present,
-        config_path: source_config_path(config_path),
-        config_present,
-        config_owned,
-        component_path,
-        component_path_present,
-        stale_reason: stale_config_reason(stack_present, config_present),
-    }
-}
-
-fn installed_stacks_without_source_metadata(
-    config_root: &Path,
-    managed_stack_ids: &HashSet<String>,
-) -> Result<Vec<OrphanedRigSourceStack>> {
-    let dir = paths::stacks_in_root(config_root);
-    let entries = super::json_config::sorted_json_config_entries(
-        &dir,
-        "read stacks dir",
-        "read stack entry",
-        |error, context| Error::internal_io(error.to_string(), Some(context.into())),
-    )?;
-
-    Ok(entries
-        .into_iter()
-        .filter(|entry| !managed_stack_ids.contains(&entry.id))
-        .map(|entry| {
-            orphaned_stack(
-                config_root,
-                InstalledStack {
-                    id: entry.id,
-                    path: entry.path,
-                },
-            )
-        })
-        .collect())
-}
-
-fn orphaned_stack(config_root: &Path, stack: InstalledStack) -> OrphanedRigSourceStack {
-    let (component_path, component_path_present) = stack_component_path(config_root, &stack.id);
-    let content_identity = fs::read(&stack.path)
-        .map(|content| {
-            format!(
-                "sha256:{}",
-                homeboy_engine_primitives::content_hash::sha256_hex(&content)
-            )
-        })
-        .unwrap_or_else(|_| "unavailable".to_string());
-    OrphanedRigSourceStack {
-        id: stack.id,
-        config_path: stack.path.to_string_lossy().to_string(),
-        content_identity,
-        component_path,
-        component_path_present,
-        source_status: "legacy_missing_metadata",
-        recovery_actions: vec![RigSourceRecoveryAction {
-            kind: "adopt_package_source",
-            description: "Install the authoritative package source to record managed provenance.",
-            command: "homeboy rig install <authoritative-package-source> --all --reinstall",
-            required_parameters: vec!["authoritative-package-source"],
-        }],
-    }
-}
-
-fn stack_component_path(config_root: &Path, id: &str) -> (Option<String>, Option<bool>) {
-    let Ok(spec) = homeboy_stack::stack::load(config_root, id) else {
-        return (None, None);
-    };
-    let component_path = homeboy_stack::stack::expand_path(&spec.component_path);
-    let component_path_present = Path::new(&component_path).exists();
-    (Some(component_path), Some(component_path_present))
 }
 
 fn stale_source_reason(linked: bool, package_present: bool) -> Option<String> {

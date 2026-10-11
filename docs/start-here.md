@@ -85,6 +85,6 @@ Read by task, not by command name:
 - Add [Set up Lab runners](workflows/set-up-lab-runners.md) when the runner itself needs to be configured or proven ready.
 - Add [Set up extensions](workflows/set-up-extensions.md) when a repo needs platform behavior beyond Homeboy core.
 - Add [Run agent task loops](workflows/run-agent-task-loops.md) when work needs durable controller state, retries, events, or human handoffs.
-- Add [Manage local environments](workflows/manage-local-environments.md) when work spans rigs, stacks, or task worktrees.
+- Add [Manage local environments](workflows/manage-local-environments.md) when work spans rigs or task worktrees.
 - Add [Release a component](workflows/release-a-component.md) only after the review/evidence loop is clear.
 - Add [Deploy and operate fleets](workflows/deploy-and-operate-fleets.md) when you are operating configured targets.

@@ -127,8 +127,6 @@ pub enum ErrorCode {
     RigResourceConflict,
     RigSchemaUnsupported,
     RunnerLabTransportFailure,
-    StackNotFound,
-    StackApplyConflict,
     RunnerControllerDisconnected,
     RuntimePromotionContended,
     RuntimePromotionWaitTimeout,
@@ -202,8 +200,6 @@ impl ErrorCode {
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
             ErrorCode::RigSchemaUnsupported => "rig.schema_unsupported",
             ErrorCode::RunnerLabTransportFailure => "runner.lab_transport_failure",
-            ErrorCode::StackNotFound => "stack.not_found",
-            ErrorCode::StackApplyConflict => "stack.apply_conflict",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
             ErrorCode::RuntimePromotionWaitTimeout => "runtime_promotion.wait_timeout",
@@ -270,8 +266,6 @@ impl ErrorCode {
             "rig.resource_conflict" => Self::RigResourceConflict,
             "rig.schema_unsupported" => Self::RigSchemaUnsupported,
             "runner.lab_transport_failure" => Self::RunnerLabTransportFailure,
-            "stack.not_found" => Self::StackNotFound,
-            "stack.apply_conflict" => Self::StackApplyConflict,
             "runner.controller_disconnected" => Self::RunnerControllerDisconnected,
             "runtime_promotion.contended" => Self::RuntimePromotionContended,
             "runtime_promotion.wait_timeout" => Self::RuntimePromotionWaitTimeout,
@@ -1294,37 +1288,6 @@ impl Error {
 
     pub fn schedule_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::ScheduleNotFound, "Schedule", id, suggestions)
-    }
-
-    pub fn stack_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
-        Self::entity_not_found(ErrorCode::StackNotFound, "Stack", id, suggestions)
-    }
-
-    /// Cherry-pick conflict during `stack apply`. Carries the offending PR
-    /// number so callers can surface a "resume from here" message without
-    /// re-walking the spec.
-    pub fn stack_apply_conflict(
-        stack_id: impl Into<String>,
-        pr_number: u64,
-        repo: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        let stack_id = stack_id.into();
-        let repo = repo.into();
-        let message = message.into();
-        Self::new(
-            ErrorCode::StackApplyConflict,
-            format!(
-                "Cherry-pick conflict in stack '{}' at PR {}#{}: {}",
-                stack_id, repo, pr_number, message
-            ),
-            serde_json::json!({
-                "stack_id": stack_id,
-                "pr_number": pr_number,
-                "repo": repo,
-                "message": message,
-            }),
-        )
     }
 
     pub fn rig_pipeline_failed(

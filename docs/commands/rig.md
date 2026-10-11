@@ -1,6 +1,6 @@
 # `homeboy rig`
 
-Manage local dev **rigs**: reproducible multi-component environments that can start services, prepare checkouts, sync combined-fixes stacks, run health checks, and install desktop launchers.
+Manage local dev **rigs**: reproducible multi-component environments that can start services, prepare checkouts, run health checks, and install desktop launchers.
 
 ## Synopsis
 
@@ -20,7 +20,6 @@ rig package / local spec
         v
 ~/.config/homeboy/rigs/<id>.json
         |
-        +-- rig sync   -> declared component stacks
         +-- rig up     -> services, git/build/patch/check steps, symlinks
         +-- rig check  -> health/preflight report
         +-- rig down   -> teardown
@@ -40,8 +39,7 @@ rig package / local spec
 | `package <target>` | Validate rig package artifacts without touching the environment. |
 | `down <id>` | Run the rig's `down` pipeline and stop managed services. |
 | `repair <id>` | Repair safe declared drift without running the full `up` pipeline. |
-| `sync <id>` | Sync every stack declared by the rig's components. |
-| `run <id>` | Refresh, sync, check, and benchmark a rig profile end-to-end. |
+| `run <id>` | Refresh, check, and benchmark a rig profile end-to-end. |
 | `status <id>` | Show running services and last `up` / `check` state. |
 | `runs <id>` | List persisted observation runs for the rig. |
 | `release-lock <id>` | Release a stuck active-run rig lease after verifying no owner is active. |
@@ -131,7 +129,7 @@ The plan emits equivalent `homeboy runner exec <runner-id> ...` commands for eac
 symlinks, shared paths, or typed pipeline steps so local service stacks still stay
 on the local `rig up` path.
 
-The pipeline can start services, run typed `git` / `build` / `extension` / `stack` steps, apply idempotent local patches, create symlinks/shared paths, run declared `lifecycle` phases, and run checks.
+The pipeline can start services, run typed `git` / `build` / `extension` steps, apply idempotent local patches, create symlinks/shared paths, run declared `lifecycle` phases, and run checks.
 
 A `kind: "lifecycle"` step executes one phase of a declared
 `homeboy/lifecycle-contract/v1` — that is how a rig provisions a disposable
@@ -231,9 +229,9 @@ homeboy rig install ./packages/studio --reinstall
 homeboy rig install https://github.com/example-org/homeboy-rigs.git//packages --all
 ```
 
-Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`. If the selected package also contains `stacks/*.json`, those stack specs are installed alongside the rig. Existing stack specs with different content are treated as user-owned config and are left in place instead of being overwritten.
+Installs rigs from a local directory or git-backed package. Package discovery accepts either a single `rig.json` or a package layout with `rigs/<id>/rig.json`.
 
-Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID or an existing stack spec with different content. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--placement local` remains a separate global resource-policy choice and does not control install replacement behavior.
+Use `--reinstall` when the intent is to explicitly refresh an existing matching rig install from the same package source. `rig install` still refuses user-owned conflicts, such as an existing rig config that declares a different ID. `--force` is accepted as a reinstall alias for users who reach for overwrite wording; `--placement local` remains a separate global resource-policy choice and does not control install replacement behavior.
 
 Git sources may include a Terraform-style `repo.git//subpath` selector. Homeboy clones the package root, records source metadata, and discovers rigs from the selected subpath. Local package sources are linked in place and are updated outside Homeboy.
 
@@ -244,7 +242,7 @@ homeboy rig update studio
 homeboy rig update --all
 ```
 
-Updates git-backed package sources with `git pull`, then refreshes the installed rig and stack config links. Local linked sources are skipped by `--all` and error for single-rig updates because the source is already the editable checkout.
+Updates git-backed package sources with `git pull`, then refreshes the installed rig config links. Local linked sources are skipped by `--all` and error for single-rig updates because the source is already the editable checkout.
 
 If the user replaced an installed config file with their own file, update preserves that user-owned config and reports it as skipped instead of overwriting it.
 
@@ -254,13 +252,9 @@ If the user replaced an installed config file with their own file, update preser
 
 Validates rig package artifacts without touching the live environment.
 
-### `sync`
-
-Synchronizes the stacks declared by a rig's components.
-
 ### `run`
 
-Refreshes, synchronizes, checks, and benchmarks a rig profile end-to-end.
+Refreshes, checks, and benchmarks a rig profile end-to-end.
 
 ### `release-lock`
 
@@ -281,46 +275,9 @@ homeboy rig sources refresh example-org-homeboy-rigs
 homeboy rig sources remove example-org-homeboy-rigs
 ```
 
-`sources list` groups managed rigs and stacks by package source, package path, revision, content identity, and ownership. Managed groups carry `source_status: "managed"`; `package_present` and stack `component_path_present` are independent availability observations. The JSON report also includes `orphaned_stacks` for installed stack configs that have no source metadata. These rows are reported as `legacy_missing_metadata`, include a content identity and the `adopt_package_source` recovery action (`homeboy rig install <authoritative-package-source> --all --reinstall`), and never infer provenance from filenames or modify the spec during inspection.
+`sources list` groups managed rigs by package source, package path, revision, content identity, and ownership. Managed groups carry `source_status: "managed"` and a `package_present` availability observation. Invalid source metadata files are reported separately under `invalid`.
 
-`sources refresh` pulls recorded git-backed package paths, refreshes Homeboy-owned installed rig and stack specs, and reports source, before/after revisions, installed config path, and source spec path. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
-
-## Stack Sync
-
-```sh
-homeboy rig sync studio
-homeboy rig sync studio --dry-run
-```
-
-`rig sync` finds every component with a `stack` field and delegates to `homeboy stack sync <stack-id>`. This is the rig-level entry point for keeping combined-fixes branches current before a local environment is brought up. The rig component `path` must resolve to the same checkout as the referenced stack's `component_path`; mismatches fail before branch rewriting starts.
-
-```jsonc
-{
-  "components": {
-    "studio": {
-      "path": "~/Developer/studio",
-      "stack": "studio-combined"
-    },
-    "playground": {
-      "path": "~/Developer/wordpress-playground",
-      "stack": "playground-combined"
-    }
-  }
-}
-```
-
-`rig up` does not sync stacks implicitly. If stack sync should be part of an `up` pipeline, add an explicit `stack` pipeline step.
-
-```jsonc
-{
-  "pipeline": {
-    "up": [
-      { "kind": "stack", "component": "studio", "op": "sync" },
-      { "kind": "stack", "component": "playground", "op": "sync" }
-    ]
-  }
-}
-```
+`sources refresh` pulls recorded git-backed package paths, refreshes Homeboy-owned installed rig specs, and reports source, before/after revisions, installed config path, and source spec path. `sources remove` removes Homeboy-owned config links and metadata for one source package; it also removes cloned git packages, while linked local package directories are left in place.
 
 ## Active-Run Locks
 
@@ -350,8 +307,7 @@ homeboy rig app uninstall studio
   "description": "Studio + Playground dev environment",
   "components": {
     "studio": {
-      "path": "~/Developer/studio",
-      "stack": "studio-combined"
+      "path": "~/Developer/studio"
     }
   },
   "resources": {
@@ -401,14 +357,13 @@ Rig runtime state lives at `~/.config/homeboy/rigs/<id>.state/`:
 - `state.json` records service PIDs, shared-path ownership markers, and last `up` / `check` timestamps.
 - `logs/<service-id>.log` captures stdout/stderr for rig-managed services.
 
-Package source metadata lives next to Homeboy's rig and stack config directories so `rig update` and `rig sources` can tell which files are Homeboy-owned.
+Package source metadata lives next to Homeboy's rig config directory so `rig update` and `rig sources` can tell which files are Homeboy-owned.
 
 State is ephemeral. Deleting it makes the next command re-probe the environment; it is not the source of truth for the rig spec.
 
 ## See Also
 
 - [rig-spec.md](./rig-spec.md) - full spec schema reference.
-- [stack.md](./stack.md) - combined-fixes branch specs used by `rig sync`.
 - [bench.md](./bench.md) - rig-pinned benchmark runs.
 - [rig-matrix-axis-composition.md](../architecture/rig-matrix-axis-composition.md) - future design for derived rig variants.
 - [fleet.md](./fleet.md) - remote multi-project equivalent; rigs are local, fleets are remote.

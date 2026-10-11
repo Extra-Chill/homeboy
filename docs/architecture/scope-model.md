@@ -19,7 +19,7 @@ Commands should describe which scope class they accept:
 
 - **Component commands** operate on source code and should work with component IDs, paths, and CWD discovery without project registration.
 - **Target commands** operate on a runtime/deploy destination and should require a project or fleet when the command writes to a site/server.
-- **Environment commands** operate on rigs or stacks and should not require project ownership.
+- **Environment commands** operate on rigs and should not require project ownership.
 - **Workspace commands** aggregate evidence across scopes and should expose filters instead of silently inheriting active project state.
 
 ## Design Rules

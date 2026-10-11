@@ -173,7 +173,6 @@ fn step_id(step: &PipelineStep) -> Option<&str> {
         | PipelineStep::Build { step_id, .. }
         | PipelineStep::Extension { step_id, .. }
         | PipelineStep::Git { step_id, .. }
-        | PipelineStep::Stack { step_id, .. }
         | PipelineStep::Command { step_id, .. }
         | PipelineStep::CommandIfMissing { step_id, .. }
         | PipelineStep::Requirement { step_id, .. }
@@ -192,7 +191,6 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
         | PipelineStep::Build { depends_on, .. }
         | PipelineStep::Extension { depends_on, .. }
         | PipelineStep::Git { depends_on, .. }
-        | PipelineStep::Stack { depends_on, .. }
         | PipelineStep::Command { depends_on, .. }
         | PipelineStep::CommandIfMissing { depends_on, .. }
         | PipelineStep::Requirement { depends_on, .. }

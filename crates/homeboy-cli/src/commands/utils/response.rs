@@ -483,7 +483,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RigNotFound
         | ErrorCode::RunnerNotFound
         | ErrorCode::ScheduleNotFound
-        | ErrorCode::StackNotFound
         | ErrorCode::ProjectNoActive => 4,
 
         ErrorCode::RigPipelineFailed
@@ -497,7 +496,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RunnerControllerDisconnected
         | ErrorCode::RuntimePromotionContended
         | ErrorCode::RuntimePromotionWaitTimeout
-        | ErrorCode::StackApplyConflict
         | ErrorCode::DependencyStepFailed
         | ErrorCode::DependencyOutputMissing => 20,
 

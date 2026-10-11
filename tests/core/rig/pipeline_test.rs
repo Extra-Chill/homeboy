@@ -856,7 +856,7 @@ mod dag {
     use std::fs;
 
     use crate::pipeline::run_pipeline;
-    use crate::spec::{ComponentSpec, PipelineStep, RigSpec, StackOp};
+    use crate::spec::{ComponentSpec, PipelineStep, RigSpec};
 
     fn command(id: &str, depends_on: &[&str], cmd: String, cwd: Option<String>) -> PipelineStep {
         PipelineStep::Command {
@@ -871,20 +871,6 @@ mod dag {
             provides_providers: Vec::new(),
             label: Some(id.to_string()),
         }
-    }
-
-    fn stack(id: &str, component: &str, stack_id: &str) -> (String, PipelineStep) {
-        (
-            stack_id.to_string(),
-            PipelineStep::Stack {
-                step_id: Some(id.to_string()),
-                depends_on: Vec::new(),
-                component: component.to_string(),
-                op: StackOp::Sync,
-                dry_run: true,
-                label: Some(id.to_string()),
-            },
-        )
     }
 
     fn rig_with_steps(
@@ -1031,46 +1017,28 @@ mod dag {
     }
 
     #[test]
-    fn test_stack_failure_skips_later_steps_when_fail_fast() {
+    fn test_failure_skips_later_steps_when_fail_fast() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let marker = tmp.path().join("marker.txt");
         let marker_arg = marker.to_string_lossy();
-        let (stack_id, stack_step) = stack("sync-stack", "studio", "missing-stack-for-test");
-        let mut components = HashMap::new();
-        components.insert(
-            "studio".to_string(),
-            ComponentSpec {
-                path: tmp.path().to_string_lossy().into_owned(),
-                component_id: None,
-                path_setting: None,
-                checkout_root: None,
-                remote_url: None,
-                stack: Some(stack_id),
-                lab_stack: None,
-                branch: None,
-                r#ref: None,
-                default_ref: None,
-                extensions: None,
-            },
-        );
         let rig = rig_with_steps(
             vec![
-                stack_step,
+                command("fail-first", &[], "exit 1".to_string(), None),
                 command(
-                    "build-after-stack",
+                    "build-after-failure",
                     &[],
                     format!("printf 'should-not-run' > {}", marker_arg),
                     None,
                 ),
             ],
-            components,
+            HashMap::new(),
         );
 
         let out = run_pipeline(&crate::state::test_state_store(), &rig, "up", true)
             .expect("pipeline report");
         assert!(!out.is_success());
         assert_eq!(out.failed, 1);
-        assert_eq!(out.steps[0].kind, "stack");
+        assert_eq!(out.steps[0].kind, "command");
         assert_eq!(out.steps[0].status, "fail");
         assert_eq!(out.steps[1].status, "skip");
         assert!(!marker.exists());
@@ -1093,7 +1061,6 @@ mod dag {
                 path_setting: None,
                 checkout_root: None,
                 remote_url: None,
-                stack: None,
                 lab_stack: None,
                 branch: None,
                 r#ref: None,
@@ -1109,7 +1076,6 @@ mod dag {
                 path_setting: None,
                 checkout_root: None,
                 remote_url: None,
-                stack: None,
                 lab_stack: None,
                 branch: None,
                 r#ref: None,
@@ -1172,7 +1138,6 @@ mod git_steps {
                 path_setting: None,
                 checkout_root: None,
                 remote_url: None,
-                stack: None,
                 lab_stack: None,
                 branch: None,
                 r#ref: None,
@@ -1302,7 +1267,6 @@ mod extension_lifecycle {
                 path_setting: None,
                 checkout_root: None,
                 remote_url: None,
-                stack: None,
                 lab_stack: None,
                 branch: None,
                 r#ref: None,

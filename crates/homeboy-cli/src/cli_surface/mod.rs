@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
     deferred_workload, deploy, extension, file, fleet, fuzz, git, project, refactor, release,
-    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack, status,
-    trace, upgrade, worktree,
+    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace,
+    upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -240,8 +240,6 @@ pub enum Commands {
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity
     #[command(name = "self")]
     SelfCmd(self_cmd::SelfArgs),
-    /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
-    Stack(stack::StackArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
 }

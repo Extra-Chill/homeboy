@@ -263,7 +263,6 @@ pub mod self_cmd;
 pub mod server;
 pub mod source;
 pub mod ssh;
-pub mod stack;
 pub mod status;
 pub mod test;
 pub mod trace;

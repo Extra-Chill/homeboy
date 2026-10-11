@@ -4,8 +4,7 @@ use crate::{
     declared_id, default_materialize_source_root, discover_rigs, install,
     install_with_local_source_copy, list, list_ids, load, load_local_source,
     materialize_rig_resource, materialize_rig_spec, materialize_rig_spec_with_default_source_root,
-    read_source_metadata_in_root, read_stack_source_metadata_in_root, run_check, run_lint,
-    MATERIALIZED_RIG_RESOURCE_SCHEMA,
+    read_source_metadata_in_root, run_check, run_lint, MATERIALIZED_RIG_RESOURCE_SCHEMA,
 };
 use homeboy_core::test_support::HomeGuard;
 use homeboy_core::ErrorCode;
@@ -24,9 +23,7 @@ fn test_config_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-use crate::rig_test_support::{
-    clone_bare, commit_all, init_main, minimal_rig, minimal_stack, write_rig, write_stack,
-};
+use crate::rig_test_support::{clone_bare, commit_all, init_main, minimal_rig, write_rig};
 
 fn write_single_rig(dir: &Path, id: &str, body: &str) -> std::path::PathBuf {
     fs::create_dir_all(dir).expect("single rig dir");
@@ -408,97 +405,6 @@ mod materialization {
 
 mod install_flows {
     use super::*;
-
-    #[test]
-    fn install_package_with_sibling_stacks_installs_stack_specs() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "studio", &minimal_rig("studio"));
-        let stack_path = write_stack(package.path(), "studio-combined", "studio");
-
-        let result = install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            None,
-            false,
-        )
-        .expect("install");
-
-        assert_eq!(result.installed.len(), 1);
-        assert_eq!(result.installed_stacks.len(), 1);
-        assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        let installed =
-            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
-        assert!(installed.exists());
-        #[cfg(unix)]
-        assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        assert_eq!(
-            homeboy_stack::stack::list(&homeboy_core::paths::homeboy().expect("config root"))
-                .expect("stack list")
-                .len(),
-            1
-        );
-        assert_eq!(
-            homeboy_stack::stack::load(
-                &homeboy_core::paths::homeboy().expect("config root"),
-                "studio-combined",
-            )
-            .expect("load stack")
-            .component,
-            "studio"
-        );
-        let metadata = read_stack_source_metadata_in_root(&test_config_root(), "studio-combined")
-            .expect("stack metadata");
-        assert!(metadata.linked);
-        assert_eq!(metadata.stack_path, stack_path.to_string_lossy());
-    }
-
-    #[test]
-    fn reinstall_replaces_owned_stack_links() {
-        for remove_original_source in [true, false] {
-            let _home = HomeGuard::new();
-            let first_package = tempfile::tempdir().expect("first package");
-            write_rig(first_package.path(), "studio", &minimal_rig("studio"));
-            write_stack(first_package.path(), "studio-combined", "studio");
-            install(
-                &test_config_root(),
-                first_package.path().to_str().unwrap(),
-                None,
-                false,
-            )
-            .expect("install first");
-            if remove_original_source {
-                fs::remove_dir_all(first_package.path()).expect("remove stale source");
-            }
-
-            let second_package = tempfile::tempdir().expect("second package");
-            write_rig(second_package.path(), "studio", &minimal_rig("studio"));
-            let stack_path = write_stack(second_package.path(), "studio-combined", "studio");
-            if !remove_original_source {
-                fs::write(
-                    &stack_path,
-                    minimal_stack("studio-combined", "studio")
-                        .replace("studio-combined stack", "updated stack"),
-                )
-                .expect("update stack content");
-            }
-
-            let result = install(
-                &test_config_root(),
-                second_package.path().to_str().unwrap(),
-                None,
-                false,
-            )
-            .expect("reinstall replaces owned stack link");
-
-            assert_eq!(result.installed_stacks.len(), 1);
-            let installed =
-                homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
-            assert!(installed.exists());
-            #[cfg(unix)]
-            assert_eq!(fs::read_link(&installed).expect("symlink"), stack_path);
-        }
-    }
 
     #[test]
     fn installed_rig_check_reports_package_lint_failures() {
@@ -1213,50 +1119,6 @@ mod multi_rig {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn install_id_skips_stacks_from_stale_unrelated_installed_sources() {
-        let _home = HomeGuard::new();
-        let stale_source = tempfile::tempdir().expect("stale source");
-        write_rig(stale_source.path(), "stale-rig", &minimal_rig("stale-rig"));
-        let stale_stack = write_stack(stale_source.path(), "stale-stack", "stale-component");
-        install(
-            &test_config_root(),
-            stale_source.path().to_str().unwrap(),
-            None,
-            false,
-        )
-        .expect("install stale source");
-        fs::remove_dir_all(stale_source.path()).expect("remove stale source");
-
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "alpha", &minimal_rig("alpha"));
-        write_rig(package.path(), "beta", &minimal_rig("beta"));
-        write_stack(package.path(), "stale-stack", "other-component");
-
-        let result = install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            Some("alpha"),
-            false,
-        )
-        .expect("install requested rig despite stale unrelated stack source");
-
-        assert_eq!(result.installed.len(), 1);
-        assert_eq!(result.installed[0].id, "alpha");
-        assert!(result.installed_stacks.is_empty());
-        assert!(homeboy_core::paths::rig_config_in_root(&test_config_root(), "alpha").exists());
-        assert!(!homeboy_core::paths::rig_config_in_root(&test_config_root(), "beta").exists());
-        assert_eq!(
-            fs::read_link(homeboy_core::paths::stack_config_in_root(
-                &test_config_root(),
-                "stale-stack"
-            ))
-            .expect("stale stack symlink remains reported by sources list"),
-            stale_stack
-        );
-    }
-
-    #[test]
     fn install_id_skips_invalid_unrelated_rigs_in_package() {
         let _home = HomeGuard::new();
         let package = tempfile::tempdir().expect("package");
@@ -1454,64 +1316,6 @@ mod refresh_and_identity {
     }
 
     #[test]
-    fn install_refreshes_existing_matching_stack_without_metadata() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "studio", &minimal_rig("studio"));
-        let stack_path = write_stack(package.path(), "studio-combined", "studio");
-
-        fs::create_dir_all(homeboy_core::paths::stacks_in_root(&test_config_root()))
-            .expect("stacks dir");
-        fs::write(
-            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined"),
-            fs::read_to_string(&stack_path).expect("package stack"),
-        )
-        .expect("existing stack");
-
-        let result = install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            None,
-            false,
-        )
-        .expect("refresh");
-
-        assert_eq!(result.installed_stacks.len(), 1);
-        assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        let metadata = read_stack_source_metadata_in_root(&test_config_root(), "studio-combined")
-            .expect("stack metadata");
-        assert_eq!(metadata.stack_path, stack_path.to_string_lossy());
-    }
-
-    #[test]
-    fn install_rejects_existing_stack_with_different_content() {
-        let _home = HomeGuard::new();
-        let package = tempfile::tempdir().expect("package");
-        write_rig(package.path(), "studio", &minimal_rig("studio"));
-        write_stack(package.path(), "studio-combined", "studio");
-        let manual_stack = minimal_stack("studio-combined", "other");
-
-        fs::create_dir_all(homeboy_core::paths::stacks_in_root(&test_config_root()))
-            .expect("stacks dir");
-        let stack_config =
-            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined");
-        fs::write(&stack_config, &manual_stack).expect("conflicting stack");
-
-        let err = install(
-            &test_config_root(),
-            package.path().to_str().unwrap(),
-            None,
-            false,
-        )
-        .expect_err("stack collision");
-        assert!(err.message.contains("different content"));
-        assert_eq!(
-            fs::read_to_string(stack_config).expect("manual stack preserved"),
-            manual_stack
-        );
-    }
-
-    #[test]
     fn installed_filename_is_runtime_identity_when_declared_id_differs() {
         let _home = HomeGuard::new();
         fs::create_dir_all(homeboy_core::paths::rigs_in_root(&test_config_root()))
@@ -1590,9 +1394,7 @@ mod git_url {
             "studio",
             include_str!("../../fixtures/rig-package-subpath/packages/studio/rig.json"),
         );
-        write_stack(&subdir, "studio-combined", "studio");
         write_rig(package.path(), "other", &minimal_rig("other"));
-        write_stack(package.path(), "root-combined", "root");
         let bare = bare_package(package.path());
 
         let root_source = bare.path().join("rig-package.git");
@@ -1608,16 +1410,6 @@ mod git_url {
             .ends_with("packages/studio/rig.json"));
         assert!(homeboy_core::paths::rig_config_in_root(&test_config_root(), "studio").exists());
         assert!(!homeboy_core::paths::rig_config_in_root(&test_config_root(), "other").exists());
-        assert_eq!(result.installed_stacks.len(), 1);
-        assert_eq!(result.installed_stacks[0].id, "studio-combined");
-        assert!(
-            homeboy_core::paths::stack_config_in_root(&test_config_root(), "studio-combined")
-                .exists()
-        );
-        assert!(
-            !homeboy_core::paths::stack_config_in_root(&test_config_root(), "root-combined")
-                .exists()
-        );
 
         let metadata =
             read_source_metadata_in_root(&test_config_root(), "studio").expect("metadata");

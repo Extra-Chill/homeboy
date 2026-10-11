@@ -104,22 +104,6 @@ fn routes_rig_and_stack_endpoints() {
             id: "studio".to_string()
         }
     );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/stacks").expect("route"),
-        HttpEndpoint::Stacks
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/stacks/studio").expect("route"),
-        HttpEndpoint::Stack {
-            id: "studio".to_string()
-        }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Post, "/stacks/studio/status").expect("route"),
-        HttpEndpoint::StackStatus {
-            id: "studio".to_string()
-        }
-    );
 }
 
 #[test]

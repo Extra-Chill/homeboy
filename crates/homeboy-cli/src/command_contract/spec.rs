@@ -496,7 +496,7 @@ const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename",
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
 const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
 const RIG_RUNTIME_MUTATING_PATHS: &[&str] = &["down", "repair", "install", "update"];
-const RIG_MANAGED_FILE_PATHS: &[&str] = &["sync", "app install", "app update", "app uninstall"];
+const RIG_MANAGED_FILE_PATHS: &[&str] = &["app install", "app update", "app uninstall"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -636,35 +636,6 @@ const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         &["reclaim"],
         operator_safety(None, &["--apply"]),
         "default output is a non-mutating reclaim plan naming claimed workspaces, released stale owner leases, and reclaimable bytes; pass --apply to remove reclaimable completed-loop workspaces (every removal is reaping-audited)",
-    ),
-];
-
-const STACK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["create", "add-pr", "remove-pr"],
-        mutating_safety(),
-        "mutates persisted stack specification metadata",
-    ),
-    paths_safety(
-        &["apply", "rebase"],
-        with_risk_exemption(
-            operator_safety(None, &[]),
-            "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
-        ),
-        "mutates the configured stack target branch",
-    ),
-    paths_safety(
-        &["sync"],
-        operator_safety(Some("--dry-run"), &[]),
-        "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed",
-    ),
-    paths_safety(
-        &["push"],
-        with_risk_exemption(
-            operator_safety(None, &[]),
-            "push is the explicit remote publication action; no dry-run contract exists yet",
-        ),
-        "pushes the configured stack target branch to its remote",
     ),
 ];
 

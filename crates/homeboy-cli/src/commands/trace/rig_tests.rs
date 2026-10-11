@@ -94,7 +94,6 @@ fn rig_component_path_and_trace_env_are_threaded() {
             path_setting: None,
             checkout_root: None,
             remote_url: Some("https://github.com/example-org/studio".to_string()),
-            stack: None,
             lab_stack: None,
             branch: None,
             r#ref: None,

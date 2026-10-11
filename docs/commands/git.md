@@ -450,5 +450,4 @@ homeboy git pr comment homeboy --number 123 --key docs-check --body-file /tmp/co
 
 ## Related
 
-- [stack](stack.md)
 - [release](release.md)

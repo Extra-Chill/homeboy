@@ -158,7 +158,6 @@ pub enum PlanKind {
     Ci,
     Refactor,
     LabOffload,
-    StackSync,
     Fleet,
     Trace,
     Review,
@@ -183,7 +182,6 @@ impl PlanKind {
             Self::Ci => "ci",
             Self::Refactor => "refactor",
             Self::LabOffload => "lab_offload",
-            Self::StackSync => "stack_sync",
             Self::Fleet => "fleet",
             Self::Trace => "trace",
             Self::Review => "review",
@@ -832,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_policy_value() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::StackSync, "fixture")
+        let plan = HomeboyPlan::builder_for_component(PlanKind::Refactor, "fixture")
             .policy_value("blocked", serde_json::json!(false))
             .build();
 

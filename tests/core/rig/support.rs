@@ -27,29 +27,6 @@ pub(crate) fn minimal_rig(id: &str) -> String {
     )
 }
 
-pub(crate) fn minimal_stack(id: &str, component: &str) -> String {
-    format!(
-        r#"{{
-            "id": "{}",
-            "description": "{} stack",
-            "component": "{}",
-            "component_path": "${{env.DEV_ROOT}}/{}",
-            "base": {{ "remote": "origin", "branch": "main" }},
-            "target": {{ "remote": "origin", "branch": "dev/combined-fixes" }},
-            "prs": []
-        }}"#,
-        id, id, component, component
-    )
-}
-
-pub(crate) fn write_stack(package: &Path, id: &str, component: &str) -> PathBuf {
-    let stacks_dir = package.join("stacks");
-    fs::create_dir_all(&stacks_dir).expect("stacks dir");
-    let stack_path = stacks_dir.join(format!("{}.json", id));
-    fs::write(&stack_path, minimal_stack(id, component)).expect("stack json");
-    stack_path
-}
-
 pub(crate) fn run_git(dir: &Path, args: &[&str]) {
     let output = GitFixture::new(dir).execute(args);
     assert!(

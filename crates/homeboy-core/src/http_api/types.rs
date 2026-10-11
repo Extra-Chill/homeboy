@@ -44,13 +44,6 @@ pub enum HttpEndpoint {
     RigCheck {
         id: String,
     },
-    Stacks,
-    Stack {
-        id: String,
-    },
-    StackStatus {
-        id: String,
-    },
     Runs,
     Run {
         id: String,
@@ -222,9 +215,6 @@ impl HttpEndpoint {
             Self::Rigs => "rigs.list",
             Self::Rig { .. } => "rigs.show",
             Self::RigCheck { .. } => "rigs.check",
-            Self::Stacks => "stacks.list",
-            Self::Stack { .. } => "stacks.show",
-            Self::StackStatus { .. } => "stacks.status",
             Self::Runs => "runs.list",
             Self::Run { .. } => "runs.show",
             Self::RunArtifacts { .. } => "runs.artifacts",
