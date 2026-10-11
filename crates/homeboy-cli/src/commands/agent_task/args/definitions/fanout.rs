@@ -60,6 +60,8 @@ pub enum AgentTaskFanoutCommand {
     Status(AgentTaskFanoutBatchStatusArgs),
     /// Resume a durable fanout batch after coordinator loss: idempotently harvest terminal children through gates, commit, push, and PR finalization.
     Resume(AgentTaskFanoutBatchStatusArgs),
+    /// Stop a durable fanout coordinator and cancel every non-terminal child.
+    Cancel(AgentTaskFanoutBatchStatusArgs),
     /// List artifacts recorded by a durable batch's child runs.
     Artifacts(AgentTaskFanoutBatchStatusArgs),
     /// Execute each cook in a batch-cook plan through the cook-loop service and

@@ -129,7 +129,7 @@ fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<Detachable
             }))
         }
         // Resume has no durable coordinator handoff yet; complete it synchronously.
-        AgentTaskFanoutCommand::Resume(_) => Ok(None),
+        AgentTaskFanoutCommand::Resume(_) | AgentTaskFanoutCommand::Cancel(_) => Ok(None),
         // These commands plan, submit, or read records without owning a running
         // coordinator. Their ordinary synchronous result remains meaningful.
         AgentTaskFanoutCommand::Plan(_)
