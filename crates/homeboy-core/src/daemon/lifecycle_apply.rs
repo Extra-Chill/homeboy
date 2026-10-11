@@ -4,8 +4,8 @@
 //! carried out by the existing recovery executor. This module applies the
 //! outcomes that executor has no step for, so a plan never dead-ends:
 //!
-//! - [`Step::StartDaemon`] and [`Step::ClaimAdmission`] when the legacy plan
-//!   authorizes nothing;
+//! - [`Step::StartDaemon`] and [`Step::ClaimAdmission`] when the direct recovery
+//!   plan authorizes nothing;
 //! - [`Plan::NeedsAttestation`]: the one operator confirmation, applied to
 //!   the generation's complete job set.
 //!
@@ -67,7 +67,7 @@ fn ensure_mutation_allowed_with(entry_point: &str, replan: impl FnOnce() -> Plan
     Err(error)
 }
 
-/// Whether this module can apply `planned` (as opposed to the legacy
+/// Whether this module can apply `planned` (as opposed to the direct
 /// recovery executor).
 pub fn applies(planned: &Plan) -> bool {
     matches!(
@@ -343,7 +343,7 @@ mod tests {
             },
             Plan::Blocked {
                 cause: BlockCause::Unreadable,
-                reason: "legacy lease".to_string(),
+                reason: "corrupt lease".to_string(),
             },
             Plan::Blocked {
                 cause: BlockCause::UnknownSupervision,
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_the_legacy_executor_owns_are_not_applied_here() {
+    fn plans_the_direct_executor_owns_are_not_applied_here() {
         for planned in [
             Plan::Converged,
             Plan::Wait {

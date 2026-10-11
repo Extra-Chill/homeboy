@@ -100,10 +100,9 @@ produces the read-only `daemon_diagnose` step and `blocked_on`, stating in the
 evidence's own words why no mutation was resolved.
 
 The explicit subcommands below remain available as escape hatches for cases the
-dispatcher cannot resolve — notably `recover-missing-lease-state` and
-`recover-missing-child-identity`, whose required values (a recorded endpoint, a
-`/proc` child start-tick) are precisely the ones that no longer exist in any
-report by the time they are needed.
+dispatcher cannot resolve — notably `recover-missing-lease-state`, whose
+required values (a recorded lease ID, PID, and endpoint) are precisely the ones
+that no longer exist in any report by the time they are needed.
 
 `--confirm-workload-processes-absent` is never supplied automatically. When the
 resolved plan is a dead-lease reconciliation, `recover` reports it under
@@ -141,21 +140,6 @@ and `linked_durable_run_id` plus `linked_durable_run_state` (`terminal`,
 `active`, or `unresolved`). Active and unresolved linked runs are reported as
 blocking evidence. Status is read-only: it never reconciles or changes durable
 jobs.
-
-For a legacy job without persisted child identity, use the exact-evidence
-recovery command. It validates the persisted daemon lease, recorded daemon PID,
-recorded endpoint, job ID, child PID, and Linux child starttime ticks before it
-can mutate the one selected job:
-
-```sh
-homeboy daemon recover-missing-child-identity \
-  --lease-id <expected-lease> \
-  --recorded-daemon-pid <recorded-daemon-pid> \
-  --recorded-daemon-endpoint <recorded-daemon-endpoint> \
-  --job-id <job-id> \
-  --child-pid <child-pid> \
-  --child-starttime-ticks <child-starttime-ticks>
-```
 
 For a proven unexpected daemon exit where exact active jobs have no persisted
 child identity, use the explicit all-active-job-set recovery command. It requires

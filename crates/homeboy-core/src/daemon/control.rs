@@ -33,10 +33,9 @@ use super::acquire_daemon_job_admission_fence;
 use super::generation_store::{self, DAEMON_ROUTER_BYPASS_ENV, DAEMON_ROUTER_DIR_ENV};
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, repair_legacy_lease_for_start, stop_unlocked, try_acquire_daemon_owner_lock,
-    DaemonCandidateReconciliationResult, DaemonExactOrphanRecoveryResult,
-    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonProcessCandidate,
-    DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
+    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonCandidateReconciliationResult,
+    DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult,
+    DaemonProcessCandidate, DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
     DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
 };
 
@@ -2116,75 +2115,6 @@ where
     })
 }
 
-/// Recover one legacy durable job only after an operator supplies the exact
-/// child PID and Linux start ticks recovered from trustworthy run evidence.
-pub fn recover_missing_child_identity(
-    expected_lease_id: &str,
-    recorded_daemon_pid: u32,
-    recorded_daemon_endpoint: &str,
-    job_id: uuid::Uuid,
-    child_pid: u32,
-    child_starttime_ticks: u64,
-) -> Result<crate::api_jobs::Job> {
-    let endpoint = parse_recorded_daemon_endpoint(recorded_daemon_endpoint)?;
-    let _operation_lock = acquire_daemon_operation_lock()?;
-    let status = read_status()?;
-    let state = status.state.as_ref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "legacy child recovery requires the persisted daemon lease record",
-            Some(expected_lease_id.to_string()),
-            None,
-        )
-    })?;
-    if state.lease_id != expected_lease_id
-        || state.pid != recorded_daemon_pid
-        // Compare the persisted spelling as well as parsing the endpoint below.
-        // Accepting a normalized equivalent would weaken the operator's exact
-        // recovery proof against a changed daemon endpoint.
-        || state.address != recorded_daemon_endpoint
-    {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "recorded daemon lease, PID, or endpoint does not match current daemon state",
-            Some(expected_lease_id.to_string()),
-            None,
-        ));
-    }
-    if pid_is_running(recorded_daemon_pid) {
-        return Err(Error::validation_invalid_argument(
-            "recorded_daemon_pid",
-            "recorded daemon PID is live; refusing legacy job recovery",
-            Some(recorded_daemon_pid.to_string()),
-            None,
-        ));
-    }
-    probe_recorded_daemon_endpoint(endpoint)?;
-    let _owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "daemon owner lock is held; refusing legacy job recovery",
-            Some(expected_lease_id.to_string()),
-            None,
-        )
-    })?;
-    if pid_is_running(recorded_daemon_pid) {
-        return Err(Error::validation_invalid_argument(
-            "recorded_daemon_pid",
-            "recorded daemon PID became live or was reused during recovery",
-            Some(recorded_daemon_pid.to_string()),
-            None,
-        ));
-    }
-    let store = super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
-    store.recover_missing_child_identity_with_linux_evidence(
-        expected_lease_id,
-        job_id,
-        child_pid,
-        child_starttime_ticks,
-    )
-}
-
 fn adopt_orphaned_lease_with_operations<
     Status,
     PidIsRunning,
@@ -2888,7 +2818,6 @@ fn start_or_return_live_unlocked_with_idle_timeout(
     default_idle_timeout: u64,
 ) -> Result<DaemonStartResult> {
     let idle_timeout = super::lifetime::launch_idle_timeout(default_idle_timeout)?;
-    let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     reattach_exact_live_owner()?;
     refuse_unleased_process_conflict()?;
     start_or_return_live_with_operations(
