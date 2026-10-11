@@ -61,6 +61,7 @@ pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
     find_resource_guard_stop, ResourceGuardStop, RunnerCgroupMemoryEvidence,
     RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+    PROCESS_COUNT_CEILING_ENV, PROCESS_COUNT_LIMIT_ENV,
 };
 pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,

@@ -110,7 +110,23 @@ pub struct RunnerResourceGuardViolation {
     pub rss_limit_bytes: u64,
     pub process_count: u64,
     pub process_count_limit: u64,
+    /// How the process-count limit was chosen (`default`, `runner_override`,
+    /// `job_override`, `job_override_capped`, ...). Absent on records written
+    /// before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count_limit_source: Option<String>,
+    /// The runner-owned ceiling a job-requested process-count limit is clamped
+    /// to (`HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT` in the daemon env).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count_limit_ceiling: Option<u64>,
 }
+
+/// Runner-owned ceiling on a job-requested process-count limit. It is read
+/// from the runner daemon's own environment, so it is set in the runner's
+/// `env` and rendered into the runner service unit.
+pub const PROCESS_COUNT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
+/// Per-job (or runner-default) process-count limit request.
+pub const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
 
 impl RunnerResourceGuardViolation {
     pub fn blocker_code(&self) -> String {
@@ -141,12 +157,33 @@ impl RunnerResourceGuardViolation {
                 "raise HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES above {} (limit {}); do not resume into the same guard",
                 self.rss_bytes, self.rss_limit_bytes
             )
+        } else if self.process_count_limit_is_ceiling() {
+            let ceiling = self
+                .process_count_limit_ceiling
+                .unwrap_or(self.process_count_limit);
+            format!(
+                "raise the runner-owned ceiling {PROCESS_COUNT_CEILING_ENV} above {} (ceiling {ceiling}) in the runner's env, then reinstall or upgrade the runner service so the daemon picks it up; {PROCESS_COUNT_LIMIT_ENV} is clamped to that ceiling. Do not resume into the same guard",
+                self.process_count
+            )
         } else {
             format!(
-                "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above {} (limit {}); do not resume into the same guard",
-                self.process_count, self.process_count_limit
+                "raise {PROCESS_COUNT_LIMIT_ENV} above {} (limit {}{}); do not resume into the same guard",
+                self.process_count,
+                self.process_count_limit,
+                self.process_count_limit_ceiling
+                    .map(|ceiling| format!(", runner ceiling {ceiling}"))
+                    .unwrap_or_default()
             )
         }
+    }
+
+    /// The limit that tripped is the runner-owned ceiling, so raising the
+    /// job-level request cannot help.
+    fn process_count_limit_is_ceiling(&self) -> bool {
+        self.process_count_limit_source.as_deref() == Some("job_override_capped")
+            || self
+                .process_count_limit_ceiling
+                .is_some_and(|ceiling| self.process_count_limit >= ceiling)
     }
 }
 
@@ -345,5 +382,63 @@ mod tests {
             .violation
             .remedy()
             .contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"));
+    }
+
+    fn process_violation(
+        limit: u64,
+        source: Option<&str>,
+        ceiling: Option<u64>,
+    ) -> RunnerResourceGuardViolation {
+        RunnerResourceGuardViolation {
+            reason: "process_count_limit_exceeded".to_string(),
+            message: String::new(),
+            rss_bytes: 0,
+            rss_limit_bytes: 0,
+            process_count: 291,
+            process_count_limit: limit,
+            process_count_limit_source: source.map(str::to_string),
+            process_count_limit_ceiling: ceiling,
+        }
+    }
+
+    #[test]
+    fn capped_job_request_remedy_names_the_runner_owned_ceiling() {
+        let remedy = process_violation(256, Some("job_override_capped"), Some(256)).remedy();
+        assert!(remedy.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT above 291"));
+        assert!(remedy.contains("ceiling 256"));
+        assert!(remedy.contains("runner service"));
+    }
+
+    #[test]
+    fn default_limit_at_the_ceiling_still_points_at_the_ceiling() {
+        let remedy = process_violation(256, Some("default"), Some(256)).remedy();
+        assert!(remedy.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT"));
+    }
+
+    #[test]
+    fn limit_below_the_ceiling_points_at_the_job_request_and_reports_the_ceiling() {
+        let remedy = process_violation(128, Some("default"), Some(256)).remedy();
+        assert!(remedy.starts_with("raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 291"));
+        assert!(remedy.contains("runner ceiling 256"));
+    }
+
+    #[test]
+    fn legacy_violation_without_ceiling_keeps_the_original_remedy_and_round_trips() {
+        let legacy: RunnerResourceGuardViolation = serde_json::from_value(serde_json::json!({
+            "reason": "process_count_limit_exceeded",
+            "message": "",
+            "rss_bytes": 0,
+            "rss_limit_bytes": 0,
+            "process_count": 141,
+            "process_count_limit": 128,
+        }))
+        .expect("legacy record");
+        assert_eq!(legacy.process_count_limit_ceiling, None);
+        assert_eq!(
+            legacy.remedy(),
+            "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 141 (limit 128); do not resume into the same guard"
+        );
+        let encoded = serde_json::to_value(&legacy).expect("encode");
+        assert!(encoded.get("process_count_limit_ceiling").is_none());
     }
 }

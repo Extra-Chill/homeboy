@@ -92,7 +92,48 @@ pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> Strin
     render_service_unit_for(runner_id, &controller_id(), startup_token)
 }
 
+#[cfg(test)]
 fn render_service_unit_for(runner_id: &str, controller_id: &str, startup_token: &str) -> String {
+    render_service_unit_with_env(runner_id, controller_id, startup_token, &[])
+}
+
+/// Runner-owned daemon policy that the runner daemon reads from its own
+/// process environment, never from a job's env. Setting these in the
+/// runner's `env` (`homeboy runner set <id> --json '{"env":{...}}'`) renders
+/// them into the service unit on the next install or repoint (#15751).
+const DAEMON_POLICY_ENV_KEYS: &[&str] = &[
+    homeboy_runner_contract::PROCESS_COUNT_CEILING_ENV,
+    "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES",
+];
+
+/// The runner-owned daemon policy entries from a runner's `env`, sorted.
+/// Only allowlisted keys with plain non-negative integer values are rendered,
+/// so nothing a runner config holds can inject into a systemd unit line.
+pub(crate) fn daemon_policy_env(
+    env: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = DAEMON_POLICY_ENV_KEYS
+        .iter()
+        .filter_map(|key| {
+            let value = env.get(*key)?.trim();
+            (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| ((*key).to_string(), value.to_string()))
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+fn render_service_unit_with_env(
+    runner_id: &str,
+    controller_id: &str,
+    startup_token: &str,
+    daemon_env: &[(String, String)],
+) -> String {
+    let policy_env: String = daemon_env
+        .iter()
+        .map(|(key, value)| format!("Environment={key}={value}\n"))
+        .collect();
     format!(
         r#"[Unit]
 Description=Homeboy runner daemon ({runner_id})
@@ -103,7 +144,7 @@ Type=simple
 Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{state_dir}
 Environment={token_env}={startup_token}
 Environment=PATH={path}
-ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
+{policy_env}ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
 Restart=always
 RestartSec=2s
 TimeoutStopSec=30s
@@ -145,7 +186,17 @@ fn write_unit_script(runner_id: &str, startup_token: &str) -> String {
     write_unit_script_for(runner_id, &controller_id(), startup_token)
 }
 
+#[cfg(test)]
 fn write_unit_script_for(runner_id: &str, controller_id: &str, startup_token: &str) -> String {
+    write_unit_script_with_env(runner_id, controller_id, startup_token, &[])
+}
+
+fn write_unit_script_with_env(
+    runner_id: &str,
+    controller_id: &str,
+    startup_token: &str,
+    daemon_env: &[(String, String)],
+) -> String {
     let unit = service_unit_name_for(runner_id, controller_id);
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
@@ -156,7 +207,8 @@ cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 sed -i "s|{placeholder}|$service_path|" "$unit_dir/{unit}.tmp"
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
 systemctl --user daemon-reload"#,
-        unit_text = render_service_unit_for(runner_id, controller_id, startup_token),
+        unit_text =
+            render_service_unit_with_env(runner_id, controller_id, startup_token, daemon_env),
         resolve_path = resolve_service_path_script(),
         placeholder = SERVICE_PATH_PLACEHOLDER,
     )
@@ -177,15 +229,27 @@ esac"#,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn install_script(runner_id: &str, binary: &str, startup_token: &str) -> String {
     install_script_for(runner_id, &controller_id(), binary, startup_token)
 }
 
+#[cfg(test)]
 fn install_script_for(
     runner_id: &str,
     controller_id: &str,
     binary: &str,
     startup_token: &str,
+) -> String {
+    install_script_with_env(runner_id, controller_id, binary, startup_token, &[])
+}
+
+fn install_script_with_env(
+    runner_id: &str,
+    controller_id: &str,
+    binary: &str,
+    startup_token: &str,
+    daemon_env: &[(String, String)],
 ) -> String {
     let unit = service_unit_name_for(runner_id, controller_id);
     format!(
@@ -194,21 +258,33 @@ fn install_script_for(
 {write_unit}
 systemctl --user enable {unit}"#,
         point = point_binary_script_for(runner_id, controller_id, binary),
-        write_unit = write_unit_script_for(runner_id, controller_id, startup_token),
+        write_unit =
+            write_unit_script_with_env(runner_id, controller_id, startup_token, daemon_env),
     )
 }
 
+#[cfg(test)]
 fn repoint_script_for(
     runner_id: &str,
     controller_id: &str,
     binary: &str,
     startup_token: &str,
 ) -> String {
+    repoint_script_with_env(runner_id, controller_id, binary, startup_token, &[])
+}
+
+fn repoint_script_with_env(
+    runner_id: &str,
+    controller_id: &str,
+    binary: &str,
+    startup_token: &str,
+    daemon_env: &[(String, String)],
+) -> String {
     let unit = service_unit_name_for(runner_id, controller_id);
     format!(
         "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}",
         point = point_binary_script_for(runner_id, controller_id, binary),
-        write_unit = write_unit_script_for(runner_id, controller_id, startup_token),
+        write_unit = write_unit_script_with_env(runner_id, controller_id, startup_token, daemon_env),
     )
 }
 
@@ -355,7 +431,13 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
 
     run_remote(
         client,
-        &install_script(runner_id, homeboy, &uuid::Uuid::new_v4().to_string()),
+        &install_script_with_env(
+            runner_id,
+            &controller_id(),
+            homeboy,
+            &uuid::Uuid::new_v4().to_string(),
+            &daemon_policy_env(&target.runner.env),
+        ),
         "writing the runner service unit",
     )?;
     let retired_generations = run_remote(
@@ -422,7 +504,13 @@ pub(crate) fn repoint_and_restart(
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
-        &repoint_script_for(runner_id, &controller_id(), binary, &startup_token),
+        &repoint_script_with_env(
+            runner_id,
+            &controller_id(),
+            binary,
+            &startup_token,
+            &daemon_policy_env(&target.runner.env),
+        ),
         "restarting the runner service",
     )?;
     Ok(())
@@ -756,6 +844,83 @@ mod tests {
                 controller_segment()
             )
         );
+    }
+
+    #[test]
+    fn unit_renders_runner_owned_guard_policy_from_runner_env() {
+        let env: std::collections::HashMap<String, String> = [
+            ("HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT", " 1024 "),
+            ("HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES", "68719476736"),
+            ("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT", "512"),
+            ("HOMEBOY_COMMAND", "/opt/homeboy"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        let policy = daemon_policy_env(&env);
+        assert_eq!(
+            policy,
+            vec![
+                (
+                    "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT".to_string(),
+                    "1024".to_string()
+                ),
+                (
+                    "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES".to_string(),
+                    "68719476736".to_string()
+                ),
+            ],
+            "only allowlisted runner-owned policy keys are rendered"
+        );
+
+        let unit = render_service_unit_with_env("homeboy-lab", "controller-a", "t", &policy);
+        assert!(
+            unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT=1024\n")
+        );
+        assert!(
+            unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES=68719476736\n")
+        );
+        assert!(!unit.contains("HOMEBOY_COMMAND"));
+        assert!(!unit.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT="));
+        assert!(unit.contains(
+            "Environment=HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES=68719476736\nExecStart="
+        ));
+        assert_eq!(
+            render_service_unit_with_env("homeboy-lab", "controller-a", "t", &[]),
+            render_service_unit_for("homeboy-lab", "controller-a", "t"),
+            "a runner without policy env renders the unit unchanged"
+        );
+    }
+
+    #[test]
+    fn daemon_policy_env_rejects_values_that_could_inject_into_the_unit() {
+        let env: std::collections::HashMap<String, String> = [
+            (
+                "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT",
+                "1024\nExecStartPre=/bin/evil",
+            ),
+            ("HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES", "-1"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        assert!(daemon_policy_env(&env).is_empty());
+    }
+
+    #[test]
+    fn repoint_and_install_scripts_carry_runner_policy_env() {
+        let policy = vec![(
+            "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT".to_string(),
+            "1024".to_string(),
+        )];
+        for script in [
+            install_script_with_env("homeboy-lab", "controller-a", "/opt/homeboy", "t", &policy),
+            repoint_script_with_env("homeboy-lab", "controller-a", "/opt/homeboy", "t", &policy),
+        ] {
+            assert!(
+                script.contains("Environment=HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT=1024")
+            );
+        }
     }
 
     /// The service-owned daemon must publish an attributable startup token in
