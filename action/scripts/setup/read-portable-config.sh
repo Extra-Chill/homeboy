@@ -70,12 +70,12 @@ echo "  id:        ${PORTABLE_ID}"
 echo "  extension: ${PORTABLE_EXTENSION:-none}"
 echo "  dir:       ${CONFIG_DIR}"
 
-# ── Homeboy config dir (project/server/fleet config for operations commands) ──
-# Operations commands (deploy/fleet) need a Homeboy project and server, which
+# ── Homeboy config dir (project/server config for operations commands) ──
+# Operations commands (deploy) need a Homeboy project and server, which
 # live in Homeboy's config root and are absent on a fresh runner. When the
 # caller sets `config-dir`, it names the repo-relative directory that IS the
-# config root — it contains projects/, servers/, and optionally components/
-# and fleets/ — and this step exports HOMEBOY_CONFIG_ROOT so every later
+# config root — it contains projects/, servers/, and optionally components/ —
+# and this step exports HOMEBOY_CONFIG_ROOT so every later
 # homeboy invocation in the run resolves from it (homeboy#14783). Nothing is
 # copied and the runner user's real config is never read or touched.
 

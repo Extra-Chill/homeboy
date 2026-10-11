@@ -46,18 +46,18 @@ run_operation() {
   printf '%s\n' "${exit_code}"
 }
 
-for command in 'fleet status fixture' 'deploy fixture --all' 'release fixture'; do
+for command in 'deploy fixture --all' 'git subtree publish --prefix fixture' 'release fixture'; do
   output_file="${TMP_DIR}/$(printf '%s' "${command}" | tr ' ' '-')"
   if [ "$(run_operation "${command}" valid "${output_file}")" -ne 0 ] || ! grep -Fq "\"${command}\":\"pass\"" "${output_file}"; then
     printf 'FAIL: valid %s operation did not pass exact envelope validation\n' "${command}"
     exit 1
   fi
 done
-printf 'PASS: fleet, deploy, and release operations validate exact v3 envelopes\n'
+printf 'PASS: deploy, git, and release operations validate exact v3 envelopes\n'
 
 for mode in missing malformed wrong-command; do
   output_file="${TMP_DIR}/${mode}"
-  if [ "$(run_operation 'fleet status fixture' "${mode}" "${output_file}")" -ne 1 ] || ! grep -q '"fleet status fixture":"fail"' "${output_file}" || ! grep -q 'did not write valid structured output' "${output_file}.log"; then
+  if [ "$(run_operation 'release fixture' "${mode}" "${output_file}")" -ne 1 ] || ! grep -q '"release fixture":"fail"' "${output_file}" || ! grep -q 'did not write valid structured output' "${output_file}.log"; then
     printf 'FAIL: zero-exit %s operation envelope did not fail closed\n' "${mode}"
     exit 1
   fi
@@ -65,7 +65,7 @@ done
 printf 'PASS: missing, malformed, and wrong-command operation envelopes fail closed with retained logs\n'
 
 output_file="${TMP_DIR}/timeout"
-if [ "$(run_operation 'fleet status fixture' timeout "${output_file}")" -ne 1 ] || ! grep -q '"fleet status fixture":"timeout"' "${output_file}" || ! grep -q 'operations output retained' "${output_file}.log"; then
+if [ "$(run_operation 'release fixture' timeout "${output_file}")" -ne 1 ] || ! grep -q '"release fixture":"timeout"' "${output_file}" || ! grep -q 'operations output retained' "${output_file}.log"; then
   printf 'FAIL: timed out operation did not retain logs and classify timeout\n'
   exit 1
 fi

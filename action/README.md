@@ -462,10 +462,10 @@ Use these outputs to gate downstream jobs:
 | `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `review audit,review lint,review test`). Set this on every invocation when a workflow splits review audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
-| `ssh-key` | No | | SSH private key for `deploy`/`fleet` operations commands. Starts an agent and loads it; if empty, SSH is assumed pre-configured. |
+| `ssh-key` | No | | SSH private key for `deploy` operations commands. Starts an agent and loads it; if empty, SSH is assumed pre-configured. |
 | `ssh-known-hosts` | No | | Extra `known_hosts` entries for the servers those commands reach. |
 | `ssh-require-known-hosts` | No | `false` | Require pinned `ssh-known-hosts` and strict host verification; used by the reusable publisher credential handoff. |
-| `config-dir` | No | | Repo-relative Homeboy config root (`projects/`, `servers/`, `components/`, `fleets/`), exported as `HOMEBOY_CONFIG_ROOT` so operations commands can resolve checked-in targets. See [Deploy from CI](#deploy-from-ci). |
+| `config-dir` | No | | Repo-relative Homeboy config root (`projects/`, `servers/`, `components/`), exported as `HOMEBOY_CONFIG_ROOT` so operations commands can resolve checked-in targets. See [Deploy from CI](#deploy-from-ci). |
 | `rig` | No | | Bench rig pair/list passed to `homeboy bench --rig` |
 | `scenario` | No | | Bench scenario ID passed to `homeboy bench --scenario` |
 | `runs` | No | | Bench run count passed to `homeboy bench --runs` |
@@ -774,7 +774,7 @@ jobs:
 
 ### Deploy from CI
 
-Operations commands (`deploy`, `fleet`) need a Homeboy **project** (server id,
+Operations commands (`deploy`) need a Homeboy **project** (server id,
 base path, component attachments) and a **server** (host, user, port), which a
 fresh runner does not have. Check a Homeboy config root into the repository
 and point `config-dir` at it; the action exports `HOMEBOY_CONFIG_ROOT`

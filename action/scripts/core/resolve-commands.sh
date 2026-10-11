@@ -11,7 +11,7 @@
 #      These run in canonical order with component/workspace/scope handling.
 #   2. Release command: release
 #      This is handled by the dedicated release workflow step.
-#   3. Operations commands: fleet, deploy, git
+#   3. Operations commands: deploy, git
 #      These are passthrough commands that talk to remote servers or perform
 #      native Git composition through Homeboy.
 #      They're never auto-inferred — must be explicitly specified.
@@ -76,7 +76,7 @@ for _cmd in "${_ALL_ARRAY[@]}"; do
     release)
       RELEASE_COMMANDS+=("${_cmd}")
       ;;
-    fleet|deploy|git)
+    deploy|git)
       OPS_COMMANDS+=("${_cmd}")
       ;;
     *)

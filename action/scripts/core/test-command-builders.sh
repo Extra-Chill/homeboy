@@ -367,12 +367,12 @@ assert_equals \
   "$(build_observation_import_command "/tmp/workspace/homeboy-observations-import/job")" \
   "observation import uses downloaded bundle directory"
 
-# ── Canonicalize: fleet/deploy commands are filtered out ──
+# ── Canonicalize: deploy/git commands are filtered out ──
 
 assert_equals \
   "review audit,review lint,review test" \
-  "$(canonicalize_commands "review audit,review lint,review test,fleet exec my-fleet -- homeboy upgrade")" \
-  "canonicalize strips fleet commands"
+  "$(canonicalize_commands "review audit,review lint,review test,git subtree publish --prefix packages/engine")" \
+  "canonicalize strips git commands"
 
 assert_equals \
   "review audit,review lint,review test" \
@@ -381,7 +381,7 @@ assert_equals \
 
 assert_equals \
   "review audit,review lint,review test,refactor --all" \
-  "$(canonicalize_commands "deploy --fleet prod data-machine,review audit,review lint,review test,fleet status my-fleet,refactor --all")" \
+  "$(canonicalize_commands "deploy data-machine --all,review audit,review lint,review test,git subtree publish --prefix packages/engine,refactor --all")" \
   "canonicalize strips all operations and preserves order"
 
 assert_equals \
@@ -396,7 +396,7 @@ assert_equals \
 
 assert_equals \
   "" \
-  "$(canonicalize_commands "fleet exec my-fleet -- homeboy upgrade,deploy my-project --all")" \
+  "$(canonicalize_commands "git subtree publish --prefix packages/engine,deploy my-project --all")" \
   "canonicalize returns empty when only operations commands"
 
 assert_equals \

@@ -189,9 +189,9 @@ inputs:
     required: false
     default: 'squash'
 
-  # ── SSH (for fleet/deploy/publish) ──
+  # ── SSH (for deploy/publish) ──
   ssh-key:
-    description: 'SSH private key for fleet/deploy commands. Writes to ~/.ssh, starts ssh-agent, configures known_hosts. If empty, assumes SSH is pre-configured.'
+    description: 'SSH private key for deploy commands. Writes to ~/.ssh, starts ssh-agent, configures known_hosts. If empty, assumes SSH is pre-configured.'
     required: false
     default: ''
   ssh-known-hosts:
@@ -204,7 +204,7 @@ inputs:
     default: 'false'
 
   config-dir:
-    description: 'Repo-relative directory that IS a Homeboy config root — it contains projects/, servers/, and optionally components/ and fleets/. When set, HOMEBOY_CONFIG_ROOT is exported for every homeboy invocation in the run (homeboy#14783) so operations commands (deploy/fleet) resolve their target from checked-in config. Nothing is copied; the runner user''s real config is never read. Leave identity_file null in servers/*.json and supply the key via ssh-key. If empty, no config is injected.'
+    description: 'Repo-relative directory that IS a Homeboy config root — it contains projects/, servers/, and optionally components/. When set, HOMEBOY_CONFIG_ROOT is exported for every homeboy invocation in the run (homeboy#14783) so operations commands (deploy) resolve their target from checked-in config. Nothing is copied; the runner user''s real config is never read. Leave identity_file null in servers/*.json and supply the key via ssh-key. If empty, no config is injected.'
     required: false
     default: ''
 
@@ -268,7 +268,7 @@ outputs:
     description: 'Whether the PR is from a fork (true/false)'
     value: ${{ steps.resolve-scope.outputs.scope-is-fork }}
   operations-results:
-    description: 'JSON object with pass/fail results for each fleet/deploy command'
+    description: 'JSON object with pass/fail results for each deploy/git operations command'
     value: ${{ steps.run-operations.outputs.results }}
   released:
     description: 'Whether a release was created (true/false)'
@@ -545,7 +545,7 @@ runs:
       shell: bash
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh end dependency_build_setup
 
-    # ── Phase 4b: SSH setup (for fleet/deploy) ──
+    # ── Phase 4b: SSH setup (for deploy) ──
 
     - name: Setup SSH
       id: setup-ssh
@@ -633,7 +633,7 @@ runs:
         # can distinguish one invocation from another has to be in the suffix.
         #
         # `resolved-commands` alone is not enough: operations commands
-        # (deploy/fleet) are routed to `operations-commands` and leave it
+        # (deploy/git) are routed to `operations-commands` and leave it
         # empty, so two operations invocations in one job — the documented
         # "deploy then verify" shape — produced byte-identical suffixes and
         # the second upload failed with a 409 (#483). The job reported failure
@@ -803,12 +803,12 @@ runs:
         NPM_CONFIG_PROVENANCE: ${{ inputs.release-dry-run != 'true' && inputs.npm-token == '' && 'true' || '' }}
       run: bash ${{ github.action_path }}/scripts/release/run-release-with-liveness.sh
 
-    # ── Phase 7b: Operations (fleet/deploy) ──
+    # ── Phase 7b: Operations (deploy/git) ──
     # Runs after quality gates and release — the primary use case is
-    # "release then deploy" or "release then fleet exec upgrade".
+    # "release then deploy".
     # Only runs when operations commands are present.
 
-    - name: Run operations (fleet/deploy)
+    - name: Run operations (deploy/git)
       id: run-operations
       if: steps.resolve-commands.outputs.operations-commands != ''
       continue-on-error: true

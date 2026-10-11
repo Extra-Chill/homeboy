@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Configure SSH for fleet/deploy commands and optional publishers.
+# Configure SSH for deploy commands and optional publishers.
 #
 # Supports two modes:
 #   1. SSH_KEY provided: writes the key, starts ssh-agent, adds known_hosts
@@ -67,7 +67,7 @@ if [ -n "${SSH_KEY}" ]; then
   chmod 644 "${KNOWN_HOSTS_FILE}"
 
   if [ "${SSH_REQUIRE_KNOWN_HOSTS}" != "true" ]; then
-    # Add GitHub's SSH keys for legacy deploy/fleet callers.
+    # Add GitHub's SSH keys for legacy deploy callers.
     ssh-keyscan -t ed25519,rsa github.com >> "${KNOWN_HOSTS_FILE}" 2>/dev/null || true
   fi
 
@@ -87,7 +87,7 @@ if [ -n "${SSH_KEY}" ]; then
   if [ ! -f "${SSH_CONFIG_FILE}" ] || ! grep -q "StrictHostKeyChecking" "${SSH_CONFIG_FILE}" 2>/dev/null; then
     cat >> "${SSH_CONFIG_FILE}" << 'SSHCONFIG'
 
-# Added by homeboy-action for fleet/deploy commands
+# Added by homeboy-action for deploy commands
 Host *
   StrictHostKeyChecking accept-new
   ServerAliveInterval 60
@@ -115,7 +115,7 @@ elif [ -n "${SSH_AUTH_SOCK:-}" ]; then
 
 else
   echo "No SSH key provided and no SSH agent detected"
-  echo "Fleet/deploy commands requiring SSH will fail unless SSH is configured by a prior step"
+  echo "Deploy commands requiring SSH will fail unless SSH is configured by a prior step"
   echo "ssh-configured=false" >> "${GITHUB_OUTPUT}"
   echo "ssh-key-owned=false" >> "${GITHUB_OUTPUT}"
 fi

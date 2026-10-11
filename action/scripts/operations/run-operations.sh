@@ -9,12 +9,8 @@
 #
 # Commands are specified as the full homeboy invocation after the base
 # command, e.g.:
-#   fleet exec my-fleet -- homeboy upgrade
 #   deploy my-project --all
-#   deploy data-machine --fleet production
-#   fleet check my-fleet
 #   git subtree publish --prefix packages/engine
-#   fleet status my-fleet
 #
 # Env vars:
 #   OPERATIONS_COMMANDS — newline or comma-separated list of commands

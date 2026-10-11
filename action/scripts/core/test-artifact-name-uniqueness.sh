@@ -10,7 +10,7 @@
 #
 # and reported the whole job as failed even though every command in it
 # succeeded. The cause was that `resolved-commands` — the only field meant to
-# distinguish invocations — is empty for deploy/fleet, which route to
+# distinguish invocations — is empty for deploy/git, which route to
 # `operations-commands` instead. This asserts the suffix distinguishes
 # invocations by operations commands AND by the step's own instance id, so
 # even two identical command lists in one job cannot collide.
@@ -43,8 +43,8 @@ differs "deploy and verify invocations get distinct suffixes" "$a" "$b"
 
 # Two invocations of the *same* command list must still differ: the instance
 # id is what guarantees it, not the command text.
-c="$(suffix extrachill-network '' 'fleet check prod' ops __run Linux '' '')"
-d="$(suffix extrachill-network '' 'fleet check prod' ops __run_2 Linux '' '')"
+c="$(suffix extrachill-network '' 'deploy prod --check' ops __run Linux '' '')"
+d="$(suffix extrachill-network '' 'deploy prod --check' ops __run_2 Linux '' '')"
 differs "identical command lists in one job still differ by instance id" "$c" "$d"
 
 # Quality invocations keep distinguishing on resolved-commands.
