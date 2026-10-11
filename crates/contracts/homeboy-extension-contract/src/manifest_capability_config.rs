@@ -3,31 +3,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Rules for extracting context around a detected feature.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeatureContextRule {
-    /// Extract doc comments above the feature (///, /**, #, etc.).
-    #[serde(default)]
-    pub doc_comment: bool,
-    /// Extract fields/items from the block following the feature (struct fields, enum variants).
-    #[serde(default)]
-    pub block_fields: bool,
-}
-
-/// Where a feature category should be rendered in documentation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocTarget {
-    /// Relative path within the docs directory (e.g., "api-reference.md").
-    pub file: String,
-    /// Heading under which features are listed (e.g., "## Endpoints").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heading: Option<String>,
-    /// Template for rendering each feature. Uses `{name}`, `{source_file}`, `{line}`.
-    /// Default: `- \`{name}\` ({source_file}:{line})`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
-}
-
 /// Component environment detection supplied by an extension.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentEnvConfig {
@@ -88,31 +63,12 @@ pub struct DiscoveryMarkerConfig {
 /// therefore a review obligation, not something the type system does here.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScriptsConfig {
-    /// Script that extracts structural fingerprints from source files.
-    /// Receives file content on stdin, outputs FileFingerprint JSON on stdout.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<String>,
-    /// Script that applies refactoring edits to source files.
-    /// Receives edit instructions on stdin, outputs transformed content on stdout.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refactor: Option<String>,
     /// Script that formats source code after automated writes.
     /// Runs from the project root. Exit 0 on success, non-zero on failure.
     /// Formatting failure is non-fatal — it logs a warning but never rolls back.
     ///
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-    /// Script that collects compiler warnings.
-    /// Runs from the project root and receives `{root}` JSON on stdin.
-    /// Outputs `{warnings:[...]}` JSON using Homeboy's generic warning envelope.
-    /// Split lint runners may use step selectors supplied by the extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiler_warnings: Option<String>,
-    /// Script that converts compiler warnings into machine-applicable fixes.
-    /// Runs from the project root and receives `{root, findings}` JSON on stdin.
-    /// Outputs `{fixes:[...]}` JSON using Homeboy's generic fix envelope.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiler_warning_fixes: Option<String>,
 }
 
 /// Extension-declared release preflight.

@@ -313,16 +313,14 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             ))
         }
         SelfCommand::Docs(args) => {
-            let (output, exit_code) = docs::run(args)?;
-            let json = serde_json::to_value(output)
-                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
-            Ok((json, exit_code))
+            let (markdown, exit_code) = docs::run_markdown(args)?;
+            Ok((serde_json::json!({ "markdown": markdown }), exit_code))
         }
     }
 }
 
 pub(crate) fn is_docs_markdown(args: &SelfArgs) -> bool {
-    matches!(&args.command, SelfCommand::Docs(docs_args) if !docs::is_json_mode(docs_args))
+    matches!(&args.command, SelfCommand::Docs(_))
 }
 
 pub(crate) fn run_docs_markdown(args: SelfArgs) -> CmdResult<String> {

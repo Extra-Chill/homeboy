@@ -49,7 +49,7 @@ use crate::commands::utils::response::{
     CommandActionableMetadata, CommandArtifactRef, CommandNextAction, CommandNextActionKind,
     CommandResultRefs, CommandRunRef,
 };
-use crate::commands::{artifact_postprocess, issues};
+use crate::commands::artifact_postprocess;
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
@@ -293,7 +293,6 @@ pub enum RunsOutput {
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
     ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessCommandOutput),
     Findings(RunsFindingsOutput),
-    FindingsReconcile(issues::IssuesCommandOutput),
     Finding(RunsFindingOutput),
     LatestFinding(RunsLatestFindingOutput),
     BenchCompare(BenchCompareOutput),

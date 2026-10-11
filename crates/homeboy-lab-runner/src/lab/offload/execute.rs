@@ -509,8 +509,8 @@ pub(crate) fn unsupported_runner_hints(
 
     if let Some(commands) = review_lab_fallback_commands(runner_id, normalized_args) {
         hints.push(format!(
-            "Scoped `homeboy review` cannot offload yet. Run these full-workspace Lab gates instead: {}; {}; {}.",
-            commands.audit, commands.lint, commands.test
+            "Scoped `homeboy review` cannot offload yet. Run these full-workspace Lab gates instead: {}; {}.",
+            commands.lint, commands.test
         ));
     }
 

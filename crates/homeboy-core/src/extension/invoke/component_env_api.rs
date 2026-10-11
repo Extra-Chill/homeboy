@@ -12,7 +12,7 @@ use homeboy_extension_contract::manifest_capability_config::RuntimeRequirementsC
 
 use crate::extension::catalog::{load_extension, resolve_api, validate_operation_request};
 
-use super::api::{execute_capability_process, process_evidence};
+use super::capability_process::{execute_capability_process, process_evidence};
 
 /// Runtime-only inputs that must not enter the serialized Extension API request.
 pub struct ComponentEnvDetectionContext<'a> {
@@ -100,14 +100,7 @@ pub fn detect_component_env_api(
     }
 
     let working_directory = context.component_path.to_string_lossy();
-    let output = match execute_capability_process(
-        &script_path,
-        &working_directory,
-        None,
-        &[],
-        &request.extension_id,
-        COMPONENT_ENV_CAPABILITY_ID,
-    ) {
+    let output = match execute_capability_process(&script_path, &working_directory, &[]) {
         Ok(output) => output,
         Err(error) => {
             return failure(

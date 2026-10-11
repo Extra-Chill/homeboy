@@ -436,24 +436,23 @@ fn quality_error_with_evidence(field: &str, message: String, evidence: CommandEv
 ///
 /// A failing gate should point operators at `--skip-checks=<gate>` (which keeps
 /// every other safety gate enabled) rather than the bare `--skip-checks` that
-/// disables audit, lint, AND test. This matters most for autonomous agents,
+/// disables both lint AND test. This matters most for autonomous agents,
 /// which should preserve every green gate while making an explicit decision
 /// about the single known baseline failure.
 ///
 /// The `field` is the failing gate identity ("lint"/"test"). Unknown gates fall
 /// back to the scoped-then-broad ordering without a specific gate name.
 fn scoped_skip_guidance(field: &str) -> Vec<String> {
-    // Only audit/lint/test are valid `--skip-checks=<check>` values.
+    // Only lint/test are valid `--skip-checks=<check>` values.
     let gate = match field.to_ascii_lowercase().as_str() {
         "lint" => Some("lint"),
         "test" | "tests" => Some("test"),
-        "audit" => Some("audit"),
         _ => None,
     };
 
     match gate {
         Some(gate) => {
-            let remaining: Vec<&str> = ["audit", "lint", "test"]
+            let remaining: Vec<&str> = ["lint", "test"]
                 .into_iter()
                 .filter(|check| *check != gate)
                 .collect();
@@ -462,12 +461,12 @@ fn scoped_skip_guidance(field: &str) -> Vec<String> {
                     "To skip only this gate: homeboy release <component> --skip-checks={gate} (keeps {} enabled)",
                     remaining.join(", ")
                 ),
-                "Last resort — bare `--skip-checks` disables ALL audit/lint/test gates: homeboy release <component> --skip-checks".to_string(),
+                "Last resort — bare `--skip-checks` disables ALL lint/test gates: homeboy release <component> --skip-checks".to_string(),
             ]
         }
         None => vec![
-            "To skip only the failing gate: homeboy release <component> --skip-checks=<audit|lint|test>".to_string(),
-            "Last resort — bare `--skip-checks` disables ALL audit/lint/test gates: homeboy release <component> --skip-checks".to_string(),
+            "To skip only the failing gate: homeboy release <component> --skip-checks=<lint|test>".to_string(),
+            "Last resort — bare `--skip-checks` disables ALL lint/test gates: homeboy release <component> --skip-checks".to_string(),
         ],
     }
 }
@@ -1520,7 +1519,7 @@ exit 1
             .find(|h| h.contains("--skip-checks=lint"))
             .expect("lint failure must recommend --skip-checks=lint");
         assert!(
-            scoped.contains("audit") && scoped.contains("test"),
+            scoped.contains("keeps test enabled"),
             "scoped hint must name the gates that stay enabled: {scoped}"
         );
         let last_resort = hints
@@ -1548,20 +1547,7 @@ exit 1
             .find(|h| h.contains("--skip-checks=test"))
             .expect("test failure must recommend --skip-checks=test");
         assert!(
-            scoped.contains("audit") && scoped.contains("lint"),
-            "scoped hint must name the gates that stay enabled: {scoped}"
-        );
-    }
-
-    #[test]
-    fn audit_failure_recommends_scoped_skip_checks_audit() {
-        let hints = super::scoped_skip_guidance("audit");
-        let scoped = hints
-            .iter()
-            .find(|h| h.contains("--skip-checks=audit"))
-            .expect("audit failure must recommend --skip-checks=audit");
-        assert!(
-            scoped.contains("lint") && scoped.contains("test"),
+            scoped.contains("keeps lint enabled"),
             "scoped hint must name the gates that stay enabled: {scoped}"
         );
     }
@@ -1572,7 +1558,7 @@ exit 1
         assert!(
             hints
                 .iter()
-                .any(|h| h.contains("--skip-checks=<audit|lint|test>")),
+                .any(|h| h.contains("--skip-checks=<lint|test>")),
             "unknown gate should still steer toward a scoped bypass: {hints:?}"
         );
         assert!(

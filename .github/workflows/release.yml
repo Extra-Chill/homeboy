@@ -188,7 +188,7 @@ jobs:
           source-build-profile: dev
           commands: release
           expected-commands: review lint,review test
-          args: --skip-checks=audit,lint,test
+          args: --skip-checks=lint,test
           release-dry-run: 'true'
 
       - name: Validate existing release tag
@@ -582,7 +582,7 @@ jobs:
           binary-path: .homeboy-bin/homeboy
           commands: release
           expected-commands: review lint,review test
-          args: --skip-checks=audit,lint,test
+          args: --skip-checks=lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           release-branch: ${{ needs.check.outputs['verified-release-branch'] }}
           release-skip-publish: 'true'

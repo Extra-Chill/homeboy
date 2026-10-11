@@ -1,4 +1,4 @@
-//! Catalog, capability-resolution, readiness, and read-only invocation envelopes.
+//! Catalog, capability-resolution, and readiness envelopes.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,6 @@ mod deployment;
 mod environment;
 mod execute;
 mod external_check_detail;
-mod invocation;
 mod recipe_run;
 pub use action::*;
 pub use agent_task_executor::*;
@@ -23,7 +22,6 @@ pub use deployment::*;
 pub use environment::*;
 pub use execute::*;
 pub use external_check_detail::*;
-pub use invocation::*;
 pub use recipe_run::*;
 
 pub const EXTENSION_API_CATALOG_REQUEST_SCHEMA: &str = "homeboy/extension-api-catalog-request/v1";
@@ -34,6 +32,19 @@ pub const EXTENSION_API_READINESS_REQUEST_SCHEMA: &str =
     "homeboy/extension-api-readiness-request/v1";
 pub const EXTENSION_API_READINESS_RESPONSE_SCHEMA: &str =
     "homeboy/extension-api-readiness-response/v1";
+
+/// Bounded evidence from a synchronous capability process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiInvocationProcessEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_output: Option<serde_json::Value>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionApiCatalogRequest {

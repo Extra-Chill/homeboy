@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, control_plane, daemon,
     db, deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project,
-    refactor, release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
-    stack, status, topology, trace, tunnel, upgrade, worktree,
+    release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
+    status, topology, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -227,10 +227,8 @@ pub enum Commands {
     Git(git::GitArgs),
     /// Plan release workflows
     Release(release::ReleaseArgs),
-    /// Run scoped audit + lint + test umbrella against PR-style changes
+    /// Run scoped lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
-    /// Structural refactoring (rename terms across codebase)
-    Refactor(refactor::RefactorArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners
@@ -1052,11 +1050,10 @@ mod tests {
     /// clap-derived command surface.
     ///
     /// This is the structural guard for the class of bug in #10313: safety was
-    /// declared for `review audit baseline refresh`, a spelling that only
-    /// exists in pre-parse argv rewriting, while clap exposes
-    /// `review audit-baseline refresh`. The declaration could never match, so
-    /// the manifest reported a command that mutates persisted baseline data as
-    /// non-mutating. A declared path that clap does not expose is always a bug.
+    /// declared for a spelling that only existed in pre-parse argv rewriting,
+    /// so the declaration could never match and the manifest reported a
+    /// mutating command as non-mutating. A declared path that clap does not
+    /// expose is always a bug.
     #[test]
     fn command_path_safety_specs_resolve_to_clap_surface_nodes() {
         fn resolves(entries: &[CommandSurfaceEntry], path: &[&str]) -> bool {
@@ -1093,13 +1090,9 @@ mod tests {
     #[test]
     fn generated_quality_remediation_commands_parse() {
         for argv in [
-            ["homeboy", "review", "audit", "fixture"].as_slice(),
             ["homeboy", "review", "lint", "fixture"].as_slice(),
             ["homeboy", "review", "test", "fixture"].as_slice(),
-            [
-                "homeboy", "refactor", "fixture", "--from", "lint", "--write",
-            ]
-            .as_slice(),
+            ["homeboy", "review", "lint", "fixture", "--fix"].as_slice(),
         ] {
             Cli::try_parse_from(argv).unwrap_or_else(|error| {
                 panic!("generated quality remediation failed to parse: {argv:?}\n{error}")
@@ -1521,7 +1514,6 @@ mod tests {
     #[test]
     fn documented_command_forms_parse() {
         for args in [
-            ["homeboy", "refactor", "homeboy", "--all"].as_slice(),
             [
                 "homeboy",
                 "runs",

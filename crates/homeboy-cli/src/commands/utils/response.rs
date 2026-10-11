@@ -1916,7 +1916,6 @@ fn release_gate_repro_action(
     let review_gate = match gate_name.as_str() {
         "lint" => Some("lint"),
         "test" => Some("test"),
-        "audit" => Some("audit"),
         // Package and build-structure validation are reproduced by the local
         // build quality gate rather than by re-running the release.
         "package" | "build" => Some("build"),

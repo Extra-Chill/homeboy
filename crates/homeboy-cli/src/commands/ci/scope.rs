@@ -1,7 +1,7 @@
 //! CI scope resolution.
 //!
 //! Translates a continuous-integration event into the Homeboy scope that
-//! gated commands (audit, lint, test, review, refactor) should operate on.
+//! gated commands (lint, test, review) should operate on.
 //! Homeboy already owns the `--changed-since` semantics; this module owns the
 //! *event-context → scope* translation so provider-specific automation (the
 //! GitHub Actions runner, for example) calls into Homeboy instead of
@@ -29,7 +29,7 @@ use homeboy::core::git;
 /// Commands that accept a `--changed-since` scope. Everything else always runs
 /// at full scope. Typed here instead of a shell `case` statement so the
 /// exception set is auditable and testable.
-pub const SCOPED_COMMANDS: &[&str] = &["audit", "lint", "test", "review", "refactor"];
+pub const SCOPED_COMMANDS: &[&str] = &["lint", "test", "review"];
 
 /// The kind of CI event that triggered the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -123,7 +123,7 @@ impl ResolvedScope {
     /// scope. Returns an empty vec for full scope or for commands that are not
     /// in [`SCOPED_COMMANDS`].
     ///
-    /// `command` may be a compound invocation (e.g. `"refactor --from all"`);
+    /// `command` may be a compound invocation (e.g. `"lint --summary"`);
     /// only the leading base command is inspected.
     pub(crate) fn command_flags(&self, command: &str) -> Vec<String> {
         let base_cmd = command.split_whitespace().next().unwrap_or("");
@@ -331,7 +331,7 @@ mod tests {
 
         // Compound invocations only inspect the base command.
         assert_eq!(
-            resolved.command_flags("refactor --from all --write"),
+            resolved.command_flags("lint --summary --errors-only"),
             vec!["--changed-since".to_string(), "base123".to_string()]
         );
 

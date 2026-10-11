@@ -710,10 +710,9 @@ pub struct InstallMethodsConfig {
 }
 
 /// Known ecosystem key used as a secondary install-method discriminant in
-/// extension-provided defaults. Pending externalization into the defaults asset;
-/// allowed by `core-agnostic-source` audit allowlist (tech-debt burndown Wave A, #18).
+/// extension-provided defaults. Pending externalization into the defaults asset.
 pub fn secondary_install_method_key() -> String {
-    "cargo".to_string() // audit-allow-cargo-secondary-key
+    "cargo".to_string()
 }
 
 impl Serialize for InstallMethodsConfig {

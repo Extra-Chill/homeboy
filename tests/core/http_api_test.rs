@@ -158,12 +158,6 @@ fn routes_rig_and_stack_endpoints() {
 #[test]
 fn routes_job_ready_analysis_endpoints_without_executing_them() {
     assert_eq!(
-        http_api::route(HttpMethod::Post, "/audit").expect("route"),
-        HttpEndpoint::JobReadyRun {
-            kind: JobReadyRunKind::Audit
-        }
-    );
-    assert_eq!(
         http_api::route(HttpMethod::Post, "/lint").expect("route"),
         HttpEndpoint::JobReadyRun {
             kind: JobReadyRunKind::Lint
@@ -190,9 +184,9 @@ fn routes_sandbox_tool_endpoints() {
         HttpEndpoint::SandboxTools
     );
     assert_eq!(
-        http_api::route(HttpMethod::Get, "/tools/homeboy.audit").expect("route"),
+        http_api::route(HttpMethod::Get, "/tools/homeboy.lint").expect("route"),
         HttpEndpoint::SandboxTool {
-            id: "homeboy.audit".to_string()
+            id: "homeboy.lint".to_string()
         }
     );
     assert_eq!(
@@ -226,10 +220,6 @@ fn routes_observation_run_readers() {
         HttpEndpoint::RunFindings {
             id: "run-123".to_string()
         }
-    );
-    assert_eq!(
-        http_api::route(HttpMethod::Get, "/audit/runs").expect("route"),
-        HttpEndpoint::AuditRuns
     );
     assert_eq!(
         http_api::route(HttpMethod::Get, "/bench/runs").expect("route"),
@@ -1693,13 +1683,13 @@ fn activity_endpoint_exposes_activity_report_and_show() {
 #[test]
 fn test_handle_with_jobs() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
     store.start(job.id).expect("job starts");
     store
         .append_event(
             job.id,
             crate::api_jobs::JobEventKind::Stdout,
-            Some("audit output".to_string()),
+            Some("lint output".to_string()),
             None,
         )
         .expect("stdout event");
@@ -1727,7 +1717,7 @@ fn test_handle_with_jobs() {
     )
     .expect("show job");
     assert_eq!(show.endpoint, "jobs.show");
-    assert_eq!(show.body["job"]["operation"], "audit");
+    assert_eq!(show.body["job"]["operation"], "lint");
 
     let events = http_api::handle_with_jobs(
         HttpApiRequest {
@@ -1865,7 +1855,7 @@ fn strict_projection_cancel_refuses_wrong_durable_run_without_mutation() {
 #[test]
 fn strict_projection_cancel_refuses_local_only_and_legacy_jobs_without_mutation() {
     let store = JobStore::default();
-    let local_only = store.create("audit");
+    let local_only = store.create("lint");
     let legacy = queued_local_runner_job(&store, None);
     let initial_active_count = store.active_runner_jobs().len();
 
@@ -1886,7 +1876,7 @@ fn strict_projection_cancel_refuses_local_only_and_legacy_jobs_without_mutation(
 #[test]
 fn generic_job_cancel_remains_unscoped_for_operator_compatibility() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
 
     let response = http_api::handle_with_jobs(
         HttpApiRequest {
@@ -1904,7 +1894,7 @@ fn generic_job_cancel_remains_unscoped_for_operator_compatibility() {
 #[test]
 fn generic_job_cancel_is_idempotent_without_duplicating_events() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
     let path = format!("/jobs/{}/cancel", job.id);
 
     let first = http_api::handle_with_jobs(
@@ -1938,7 +1928,7 @@ fn generic_job_cancel_is_idempotent_without_duplicating_events() {
         "repeated cancellation must preserve the original event log"
     );
 
-    let completed = store.create("completed-audit");
+    let completed = store.create("completed-lint");
     store.start(completed.id).expect("job starts");
     store.complete(completed.id, None).expect("job completes");
     let completed_error = http_api::handle_with_jobs(
@@ -2144,12 +2134,6 @@ fn test_handle() {
         store
             .finish_run(&bench.id, RunStatus::Pass, None)
             .expect("finish bench");
-        let audit = store
-            .start_run(sample_run("audit", "homeboy", "studio"))
-            .expect("audit run");
-        store
-            .finish_run(&audit.id, RunStatus::Fail, None)
-            .expect("finish audit");
         let artifact_path = home.path().join("bench-results.json");
         std::fs::write(&artifact_path, b"{}").expect("artifact");
         store
@@ -2160,7 +2144,7 @@ fn test_handle() {
         store
             .record_findings(&[
                 sample_finding(&lint.id, "lint", "style", "src/main.rs"),
-                sample_finding(&lint.id, "audit", "security", "src/lib.rs"),
+                sample_finding(&lint.id, "phpstan", "security", "src/lib.rs"),
             ])
             .expect("record findings");
 
@@ -2186,16 +2170,6 @@ fn test_handle() {
             response.body["run"]["artifacts"][0]["kind"],
             "bench_results"
         );
-
-        let response = http_api::handle(HttpApiRequest {
-            method: HttpMethod::Get,
-            path: "/audit/runs?component=homeboy".to_string(),
-            body: None,
-        })
-        .expect("audit runs");
-        assert_eq!(response.endpoint, "audit.runs");
-        assert_eq!(response.body["runs"].as_array().unwrap().len(), 1);
-        assert_eq!(response.body["runs"][0]["id"], audit.id);
 
         let response = http_api::handle(HttpApiRequest {
             method: HttpMethod::Get,
@@ -2697,7 +2671,7 @@ fn job_ready_endpoint_enqueues_daemon_job() {
     let response = http_api::handle_with_jobs(
         HttpApiRequest {
             method: HttpMethod::Post,
-            path: "/audit".to_string(),
+            path: "/lint".to_string(),
             body: Some(serde_json::json!({
                 "component": "missing-component",
                 "path": "/tmp/homeboy-missing-component",
@@ -2707,10 +2681,10 @@ fn job_ready_endpoint_enqueues_daemon_job() {
         },
         &store,
     )
-    .expect("audit job enqueued");
+    .expect("lint job enqueued");
 
     assert_eq!(response.endpoint, "jobs.required");
-    assert_eq!(response.body["command"], "api.audit.enqueue");
+    assert_eq!(response.body["command"], "api.lint.enqueue");
     let job_id = response.body["job"]["id"].as_str().expect("job id");
     assert_eq!(response.body["poll"]["job"], format!("/jobs/{job_id}"));
     assert_eq!(store.list().len(), 1);

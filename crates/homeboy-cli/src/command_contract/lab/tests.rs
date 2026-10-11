@@ -166,13 +166,9 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["fuzz", "plan"],
     &["fuzz", "doctor", "--extension", "rust"],
     &["review"],
-    &["review", "audit"],
     &["review", "lint"],
     &["review", "test"],
     &["trace"],
-    // A bare `refactor` is not a hot resource command; `--all` is the shape
-    // that offloads.
-    &["refactor", "--all"],
     &["rig", "check", "target"],
     &["rig", "run", "--profile", "profile", "rig-1"],
     &["runtime", "refresh", "--source", "source", "runtime-1"],

@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::extension::resolve::{self, ExtensionExecutionContext};
-use homeboy_audit_contract::ExtensionPhaseTiming;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_core::artifact_inputs::{self, ResolvedArtifactInput};
 use homeboy_core::component::{self, Component};
 use homeboy_core::config::{is_json_input, parse_bulk_ids};

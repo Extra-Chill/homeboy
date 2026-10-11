@@ -1,9 +1,9 @@
 //! Runner workload schema carried by Lab offload requests.
 
 use super::labels::{
-    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
-    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
-    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL,
+    TRACE_LAB_LABEL,
 };
 
 pub const LAB_RUNNER_WORKLOAD_SCHEMA: &str = "homeboy/runner-workload/v1";
@@ -165,19 +165,18 @@ impl LabRunnerWorkloadCommandFamily {
     pub fn from_command_label(label: &str) -> Self {
         match label {
             label if label.starts_with("agent-task") => Self::AgentTask,
-            "review audit" | "review lint" | "review test" | "review build" | "review ci" => {
+            "review lint" | "review test" | "review build" | "review ci" => {
                 Self::Quality
             }
             LINT_LAB_LABEL
             | TEST_LAB_LABEL
-            | AUDIT_LAB_LABEL
             | REVIEW_LAB_LABEL
             | BENCH_LAB_LABEL
             | FUZZ_LAB_LABEL
             | FUZZ_DOCTOR_LAB_LABEL
             | TRACE_LAB_LABEL
             | RIG_RUN_LAB_LABEL => Self::Quality,
-            REFACTOR_LAB_LABEL | RIG_CHECK_LAB_LABEL | RUNTIME_REFRESH_LAB_LABEL => Self::Workspace,
+            RIG_CHECK_LAB_LABEL | RUNTIME_REFRESH_LAB_LABEL => Self::Workspace,
             label if label.starts_with("tunnel") => Self::Service,
             _ => Self::Unknown,
         }

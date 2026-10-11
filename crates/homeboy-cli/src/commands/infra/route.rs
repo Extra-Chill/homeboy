@@ -5326,16 +5326,12 @@ fn command_prefers_controller_source_path(command: &Commands) -> bool {
 ///
 /// Returns `None` (leaving args untouched) when there is nothing to rewrite:
 /// no component target, an explicit `--path` is already present, the component
-/// cannot be resolved, or the command is not a component-targeted lint/refactor.
+/// cannot be resolved, or the command is not a component-targeted lint.
 fn rewrite_component_target_to_path(
     command: &Commands,
     normalized_args: &[String],
 ) -> Option<Vec<String>> {
     let (component_id, has_path_override) = match command {
-        Commands::Refactor(args) if args.is_hot_resource_command() => (
-            args.lab_offload_positional_component(),
-            args.lab_offload_has_path_override(),
-        ),
         Commands::Review(args) => match &args.command {
             Some(crate::commands::review::ReviewCommand::Lint(lint_args)) => (
                 lint_args.lab_offload_positional_component(),

@@ -47,14 +47,6 @@ path = "src/lib.rs"
 name = "homeboy"
 path = "src/main.rs"
 
-# Bench binaries follow the homeboy-extensions/rust convention:
-# any [[bin]] whose name starts with `bench-` is discoverable by
-# `homeboy bench homeboy`. See src/bin/bench-*.rs for the workload
-# contract (reads HOMEBOY_BENCH_ITERATIONS, emits timings plus optional memory evidence).
-[[bin]]
-name = "bench-audit-self"
-path = "src/bin/bench-audit-self.rs"
-
 [dependencies]
 homeboy-product-identity = { path = "crates/homeboy-product-identity" }
 homeboy-cli = { path = "crates/homeboy-cli" }

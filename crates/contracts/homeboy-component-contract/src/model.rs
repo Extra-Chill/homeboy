@@ -7,7 +7,6 @@ use crate::config::{
     DeploymentProviderAttachment, GitDeployConfig, GithubConfig, PackageArtifact, ScopeConfig,
     ScopedExtensionConfig, VersionTarget,
 };
-use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::canonical_json::canonical_json;
 
 /// Lifecycle state of a component.
@@ -201,8 +200,6 @@ pub struct Component {
     /// capability runs for this component. Per-run env overrides win on conflict.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_stack: Vec<DependencyStackEdge>,
     /// Component IDs that must be deployed in the same operation as this component.
@@ -227,7 +224,7 @@ pub struct Component {
     /// generated SDK file regenerated on every release. Component entries
     /// are additive only; they cannot remove extension-declared drift.
     ///
-    /// Paths are repo-root-relative. The audit baseline (`homeboy.json`)
+    /// Paths are repo-root-relative. The baseline file (`homeboy.json`)
     /// is always drift and does not need to be listed here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_drift_files: Vec<String>,
@@ -238,9 +235,6 @@ pub struct Component {
     /// Subsystem-owned baseline snapshots stored in repo-local portable config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baselines: Option<HashMap<String, serde_json::Value>>,
-    /// Subsystem-owned architecture audit rule config stored in repo-local portable config.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit_rules: Option<serde_json::Value>,
     /// Declarative reviewer-body policy for agent-task PR finalization.
     ///
     /// Carried opaquely as JSON so the core component model does not depend on
@@ -317,7 +311,6 @@ impl Component {
             scripts: None,
             managed_execution: ComponentManagedExecution::default(),
             env: BTreeMap::new(),
-            audit: None,
             dependency_stack: Vec::new(),
             deploy_together: Vec::new(),
             artifact_inputs: Vec::new(),
@@ -326,7 +319,6 @@ impl Component {
             extra_drift_files: Vec::new(),
             cleanup_artifacts: Vec::new(),
             baselines: None,
-            audit_rules: None,
             review_profile: None,
         }
     }
@@ -408,13 +400,6 @@ impl Component {
         &self,
         capability: homeboy_extension_contract::ExtensionCapability,
     ) -> &[String] {
-        // Audit reference setup is extension-owned: it resolves the extension's
-        // own dependency directories, so there is no component-level
-        // `scripts.audit` override to fall back to.
-        if capability == homeboy_extension_contract::ExtensionCapability::Audit {
-            return &[];
-        }
-
         if let Some(scripts) = self.scripts.as_ref() {
             let commands = match capability {
                 homeboy_extension_contract::ExtensionCapability::Lint => &scripts.lint,
@@ -424,9 +409,6 @@ impl Component {
                 homeboy_extension_contract::ExtensionCapability::Fuzz => &scripts.fuzz,
                 homeboy_extension_contract::ExtensionCapability::Trace => &scripts.trace,
                 homeboy_extension_contract::ExtensionCapability::Deps => &scripts.deps,
-                homeboy_extension_contract::ExtensionCapability::Audit => unreachable!(
-                    "Audit returns early: no component-level scripts.audit override exists"
-                ),
             };
             if !commands.is_empty() {
                 return commands;
@@ -640,8 +622,7 @@ mod tests {
             "deploy_together": ["agents-theme"],
             "cli_path": "lando wp",
             "extra_drift_files": ["sdk/generated.ts"],
-            "baselines": { "audit": { "findings": 0 } },
-            "audit_rules": { "deny": ["core_boundary_leak"] },
+            "baselines": { "lint": { "findings": 0 } },
             "review_profile": { "reviewers": ["chubes"] }
         });
 

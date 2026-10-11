@@ -77,9 +77,7 @@ pub struct HotPathCoverage {
     pub scenarios: Vec<String>,
 }
 
-const HOT_COMMANDS: &[&str] = &[
-    "audit", "bench", "lint", "test", "trace", "refactor", "runner", "offload",
-];
+const HOT_COMMANDS: &[&str] = &["bench", "lint", "test", "trace", "runner", "offload"];
 
 pub fn run(args: &BenchCoverageArgs) -> homeboy::core::Result<BenchCoverageReport> {
     let components = if args.all {
@@ -408,18 +406,18 @@ mod tests {
     }
 
     #[test]
-    fn audit_self_covers_audit_and_leaves_other_hot_paths_missing() {
+    fn lint_scenario_covers_lint_and_leaves_other_hot_paths_missing() {
         let report =
-            build_component_report("homeboy".to_string(), true, &[scenario("audit-self")], None);
+            build_component_report("homeboy".to_string(), true, &[scenario("lint-self")], None);
 
         assert!(report
             .hot_paths
             .iter()
-            .any(|path| path.command == "audit" && path.covered));
+            .any(|path| path.command == "lint" && path.covered));
         assert!(report
             .hot_paths
             .iter()
-            .any(|path| path.command == "lint" && !path.covered));
+            .any(|path| path.command == "test" && !path.covered));
     }
 
     #[test]

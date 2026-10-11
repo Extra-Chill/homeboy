@@ -1379,7 +1379,6 @@ mod tests {
     #[test]
     fn lab_runner_workload_validation_accepts_nested_review_quality_labels() {
         for label in [
-            "review audit",
             "review lint",
             "review test",
             "review build",

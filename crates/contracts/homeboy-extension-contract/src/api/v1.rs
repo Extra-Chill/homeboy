@@ -15,9 +15,7 @@ pub const EXTENSION_API_HANDSHAKE_REQUEST_SCHEMA: &str =
 pub const EXTENSION_API_HANDSHAKE_RESPONSE_SCHEMA: &str =
     "homeboy/extension-api-handshake-response/v1";
 pub const EXTENSION_API_V1: ExtensionApiVersion = ExtensionApiVersion { major: 1 };
-pub const FINGERPRINT_FILE_CAPABILITY_PREFIX: &str = "fingerprint.";
 pub const FORMAT_FILE_CAPABILITY_PREFIX: &str = "format.";
-pub const REFACTOR_FILE_CAPABILITY_PREFIX: &str = "refactor.";
 
 /// A transport-neutral Extension API major version.
 ///
@@ -289,26 +287,6 @@ mod tests {
                     "timeout_ms": 30_000,
                     "follow_up_command": "homeboy extension show fixture --live-readiness"
                 }
-            })
-        );
-    }
-
-    #[test]
-    fn read_only_invoke_wire_shape_is_typed() {
-        let response = ExtensionApiInvokeResponse {
-            schema: EXTENSION_API_INVOKE_RESPONSE_SCHEMA.to_string(),
-            api_version: EXTENSION_API_V1,
-            output: Some(serde_json::json!({ "warnings": [] })),
-            failure: None,
-            process: None,
-        };
-
-        assert_eq!(
-            serde_json::to_value(response).expect("invoke response JSON"),
-            serde_json::json!({
-                "schema": EXTENSION_API_INVOKE_RESPONSE_SCHEMA,
-                "api_version": { "major": 1 },
-                "output": { "warnings": [] }
             })
         );
     }

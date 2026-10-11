@@ -34,8 +34,6 @@ mod output_errors;
 mod product_identity_test;
 #[path = "cli_binary/promotion_provider_stdin.rs"]
 mod promotion_provider_stdin;
-#[path = "cli_binary/refactor_transform_test.rs"]
-mod refactor_transform_test;
 #[path = "cli_binary/review_dirty_preflight.rs"]
 mod review_dirty_preflight;
 #[path = "cli_binary/review_option_order.rs"]

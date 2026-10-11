@@ -3,8 +3,8 @@
 //! "Drift files" are repo-relative paths whose changes on the base branch
 //! after a merge are bookkeeping, not authored changes:
 //!
-//! - The audit baseline (`homeboy.json`) — refreshed by `homeboy audit
-//!   --baseline` when the audit signal shifts.
+//! - The component baseline file (`homeboy.json`) — refreshed by a gate's
+//!   `--baseline` ratchet when its signal shifts.
 //! - Extension-declared generated dependency metadata, refreshed by the
 //!   extension's own build or install process after a release version bump.
 //!
@@ -15,7 +15,7 @@
 //!
 //! ## Sources
 //!
-//! 1. **Always:** the component's `homeboy.json` (the audit baseline file).
+//! 1. **Always:** the component's `homeboy.json` (the baseline file).
 //! 2. **Extension-declared:** `build.lockfile_paths` from each extension
 //!    enabled on the component.
 //! 3. **Component-declared:** `extra_drift_files` on the component config.
@@ -39,7 +39,7 @@ use std::path::Path;
 /// Resolve the merge-aftermath drift file list for a component.
 ///
 /// Returns repo-root-relative paths in deterministic (sorted) order. The
-/// audit baseline (`homeboy.json`) is always first; remaining entries are
+/// baseline file (`homeboy.json`) is always first; remaining entries are
 /// the union of extension-declared lockfiles and component-declared extras.
 ///
 /// Extension manifests are loaded via [`crate::extension::catalog::load_extension`].

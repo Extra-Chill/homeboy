@@ -17,7 +17,7 @@ use catalog_resolution::CapabilityCatalog;
 
 pub use requirements::{validate_extension_requirements, validate_required_extensions};
 pub use surface::{
-    find_installed_capability_provider, resolve_file_capability_provider, FILE_EXTENSIONS_SURFACE,
+    find_installed_capability_provider, FILE_EXTENSIONS_SURFACE,
     REMOTE_PATH_SURFACE, SINCE_TAG_SURFACE,
 };
 
@@ -795,73 +795,17 @@ mod tests {
         std::fs::write(
             extension_dir.join(format!("{extension_id}.json")),
             format!(
-                r#"{{"name":"{extension_id}","version":"1.0.0","provides":{{"file_extensions":["js"],"capabilities":["fingerprint"]}},"scripts":{{"fingerprint":"fingerprint.sh"}},"composition":{{"includes":[{includes_json}]}}}}"#
+                r#"{{"name":"{extension_id}","version":"1.0.0","provides":{{"file_extensions":["js"]}},"scripts":{{"format":"format.sh"}},"composition":{{"includes":[{includes_json}]}}}}"#
             ),
         )
         .expect("extension manifest");
     }
 
-    fn fingerprint_capability(file_extension: &str) -> String {
+    fn format_capability(file_extension: &str) -> String {
         format!(
             "{}{file_extension}",
-            homeboy_extension_contract::api::v1::FINGERPRINT_FILE_CAPABILITY_PREFIX
+            homeboy_extension_contract::api::v1::FORMAT_FILE_CAPABILITY_PREFIX
         )
-    }
-
-    #[test]
-    fn component_file_resolution_considers_only_linked_extensions() {
-        crate::test_support::with_isolated_home(|home| {
-            write_file_extension_manifest(home.path(), "alpha", &[]);
-            write_file_extension_manifest(home.path(), "zulu", &[]);
-
-            let component = component_with_extensions(&["zulu"]);
-            let resolved =
-                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
-                    .expect("linked provider resolution")
-                    .expect("linked provider");
-
-            assert_eq!(resolved, "zulu");
-        });
-    }
-
-    #[test]
-    fn component_file_resolution_uses_composition_and_explicit_ownership() {
-        crate::test_support::with_isolated_home(|home| {
-            write_file_extension_manifest(home.path(), "wordpress", &["nodejs"]);
-            write_file_extension_manifest(home.path(), "nodejs", &[]);
-
-            let mut component = component_with_extensions(&["wordpress", "nodejs"]);
-            let composed =
-                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
-                    .expect("composition resolution")
-                    .expect("composition owner");
-            assert_eq!(composed, "wordpress");
-
-            component
-                .capability_extensions
-                .insert(FILE_EXTENSIONS_SURFACE.to_string(), "nodejs".to_string());
-            let explicit =
-                resolve_file_capability_provider(&component, &fingerprint_capability("js"))
-                    .expect("explicit resolution")
-                    .expect("explicit owner");
-            assert_eq!(explicit, "nodejs");
-        });
-    }
-
-    #[test]
-    fn component_file_resolution_rejects_genuine_ambiguity() {
-        crate::test_support::with_isolated_home(|home| {
-            write_file_extension_manifest(home.path(), "alpha", &[]);
-            write_file_extension_manifest(home.path(), "zulu", &[]);
-
-            let component = component_with_extensions(&["zulu", "alpha"]);
-            let error = resolve_file_capability_provider(&component, &fingerprint_capability("js"))
-                .expect_err("unowned providers must remain ambiguous");
-
-            assert!(error
-                .message
-                .contains("multiple linked extensions providing 'provides.file_extensions'"));
-        });
     }
 
     #[test]
@@ -870,7 +814,7 @@ mod tests {
             write_file_extension_manifest(home.path(), "zulu", &[]);
             write_file_extension_manifest(home.path(), "alpha", &[]);
 
-            let resolved = find_installed_capability_provider(&fingerprint_capability("js"))
+            let resolved = find_installed_capability_provider(&format_capability("js"))
                 .expect("installed fallback");
 
             assert_eq!(resolved, "alpha");

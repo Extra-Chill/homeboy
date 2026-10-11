@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use homeboy_audit_contract::ExtensionPhaseTiming;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::CommandOutput;

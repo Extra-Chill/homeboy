@@ -201,7 +201,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
     ))
 }
 
-const PORTABLE_SUBSYSTEM_KEYS: &[&str] = &["baselines", "audit_rules"];
+const PORTABLE_SUBSYSTEM_KEYS: &[&str] = &["baselines"];
 
 /// Merge component fields with the explicit non-component portable owners.
 fn merge_portable_config(existing: Value, component: Value) -> Value {

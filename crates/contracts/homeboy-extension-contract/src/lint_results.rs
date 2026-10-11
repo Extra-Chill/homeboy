@@ -1,17 +1,51 @@
 //! Top-level lint result aggregate contract type.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use homeboy_finding::HomeboyFinding;
 
 use homeboy_engine_primitives::baseline::Comparison as BaselineComparison;
 use homeboy_finding::FindingProducerSummary;
-use homeboy_refactor_contract::AppliedRefactor;
 
 use crate::ci_context::CiContext;
 use crate::lint_result::{LintSummaryOutput, SelfCheckCaptureMetadata};
 use crate::runner_contract::{PhaseFailure, PhaseReport};
+
+/// Changes applied by `homeboy review lint --fix`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedLintFix {
+    pub files_modified: usize,
+    pub rerun_recommended: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_summary: Option<FixResultsSummary>,
+}
+
+/// Aggregated summary of the fixes a lint fixer reported.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixResultsSummary {
+    pub fixes_applied: usize,
+    pub files_modified: usize,
+    pub rules: Vec<RuleFixCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primitives: Vec<PrimitiveFixCount>,
+}
+
+/// Count of fixes applied for a single rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleFixCount {
+    pub rule: String,
+    pub count: usize,
+}
+
+/// Count of fixes applied for a single fix primitive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrimitiveFixCount {
+    pub primitive: String,
+    pub count: usize,
+}
 
 /// Unified output envelope for the lint command.
 ///
@@ -27,7 +61,7 @@ pub struct LintCommandOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<PhaseFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub autofix: Option<AppliedRefactor>,
+    pub autofix: Option<AppliedLintFix>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hints: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
