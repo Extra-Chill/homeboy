@@ -57,6 +57,16 @@ pub(crate) fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Resu
             }
         }
     }
+    // The job store lives in SQLite; its commit counter stands in for the
+    // document bytes so the identity still changes with every job mutation.
+    hasher.update(b"daemon-jobs-generation\0");
+    match crate::api_jobs::JobStore::store_generation_at_path(jobs_path)? {
+        Some(generation) => {
+            hasher.update([1]);
+            hasher.update(generation.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 

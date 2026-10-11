@@ -15,7 +15,7 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
         return Ok(None);
     };
     let path = paths::daemon_jobs_file()?;
-    if !path.exists() {
+    if !api_jobs::JobStore::exists_at_path(&path) {
         return Ok(None);
     }
     let store = api_jobs::JobStore::open_without_reconciliation(path)?;
@@ -27,7 +27,7 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
 
 pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter) -> Result<()> {
     let path = paths::daemon_jobs_file()?;
-    if !path.exists() {
+    if !api_jobs::JobStore::exists_at_path(&path) {
         return Ok(());
     }
     let store = api_jobs::JobStore::open_without_reconciliation(path)?;

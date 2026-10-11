@@ -1070,9 +1070,10 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
         store
             .submit_runner_api_fixture(request)
             .expect("submit job");
-        assert!(!std::fs::read_to_string(&path)
-            .expect("read durable job")
-            .contains("secret-b"));
+        // The durable store is the SQLite file next to the legacy document path.
+        let durable = std::fs::read(path.with_file_name("jobs.json.replay-tombstones.sqlite"))
+            .expect("read durable job store");
+        assert!(!String::from_utf8_lossy(&durable).contains("secret-b"));
         drop(store);
         let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
         let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);

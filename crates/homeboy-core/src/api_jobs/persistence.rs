@@ -72,7 +72,7 @@ fn tombstone_kind_name(kind: ReplayTombstoneKind) -> &'static str {
     }
 }
 
-fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Error) -> Error {
+pub(super) fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Error) -> Error {
     Error::internal_io(
         error.to_string(),
         Some(format!("{operation} {}", path.display())),
@@ -94,6 +94,21 @@ pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|error| tombstone_error(&journal, "configure replay tombstone index", error))?;
+    // Retention deletes rows constantly, so a database created now reclaims
+    // freed pages instead of keeping its high-water mark. The mode can only be
+    // chosen before the first table exists (and re-asserting it rewrites the
+    // header on every open); an older database is converted once, when the job
+    // store moves into it.
+    let is_new: i64 = connection
+        .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
+        .map_err(|error| tombstone_error(&journal, "inspect replay tombstone index", error))?;
+    if is_new == 0 {
+        connection
+            .execute_batch("PRAGMA auto_vacuum=FULL;")
+            .map_err(|error| {
+                tombstone_error(&journal, "configure replay tombstone index", error)
+            })?;
+    }
     connection
         .execute_batch(
             "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
@@ -110,13 +125,45 @@ pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
                CREATE TABLE IF NOT EXISTS controller_completions (
                   job_id TEXT PRIMARY KEY NOT NULL,
                   payload TEXT NOT NULL
-              );",
+              );
+               CREATE TABLE IF NOT EXISTS daemon_store_state (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  generation INTEGER NOT NULL,
+                  compaction TEXT,
+                  legacy_import_pending INTEGER NOT NULL DEFAULT 0
+              );
+               CREATE TABLE IF NOT EXISTS daemon_jobs (
+                  job_id TEXT PRIMARY KEY NOT NULL,
+                  status TEXT NOT NULL,
+                  active INTEGER NOT NULL,
+                  created_at_ms INTEGER NOT NULL,
+                  updated_at_ms INTEGER NOT NULL,
+                  body TEXT NOT NULL
+              );
+               CREATE INDEX IF NOT EXISTS daemon_jobs_active ON daemon_jobs (active);
+               CREATE TABLE IF NOT EXISTS daemon_job_events (
+                  job_id TEXT NOT NULL,
+                  sequence INTEGER NOT NULL,
+                  body TEXT NOT NULL,
+                  PRIMARY KEY (job_id, sequence)
+              ) WITHOUT ROWID;
+               CREATE INDEX IF NOT EXISTS daemon_job_events_sequence
+                  ON daemon_job_events (sequence);
+               CREATE TABLE IF NOT EXISTS daemon_job_submissions (
+                  kind TEXT NOT NULL,
+                  key TEXT NOT NULL,
+                  job_id TEXT NOT NULL,
+                  body TEXT NOT NULL,
+                  PRIMARY KEY (kind, key)
+              );
+               CREATE INDEX IF NOT EXISTS daemon_job_submissions_job
+                  ON daemon_job_submissions (kind, job_id);",
         )
         .map_err(|error| tombstone_error(&journal, "initialize replay tombstone index", error))?;
     Ok(connection)
 }
 
-fn insert_tombstone(
+pub(super) fn insert_tombstone(
     connection: &Connection,
     path: &Path,
     tombstone: &ReplayTombstone,
@@ -391,64 +438,6 @@ pub(super) fn tombstone_store_report(path: &Path) -> Result<(usize, u64)> {
     Ok((count, bytes))
 }
 
-/// The indexed tombstone transaction commits before the compacted primary store
-/// is atomically replaced. A crash can retain an extra rejection, but can never
-/// forget an accepted key and replay it as new work.
-pub(super) fn write_durable_store_with_tombstones(
-    path: &Path,
-    durable: &mut DurableJobStore,
-) -> Result<()> {
-    let mut tombstones = Vec::new();
-    for (key, submission) in std::mem::take(&mut durable.expired_submission_keys) {
-        tombstones.push(ReplayTombstone {
-            kind: ReplayTombstoneKind::RemoteRunner,
-            key,
-            fingerprint: submission.fingerprint,
-            job_id: submission.job_id,
-            terminal_job: None,
-        });
-    }
-    for (key, submission) in std::mem::take(&mut durable.expired_controller_submissions) {
-        tombstones.push(ReplayTombstone {
-            kind: ReplayTombstoneKind::Controller,
-            key,
-            fingerprint: submission.fingerprint,
-            job_id: submission.job_id,
-            terminal_job: submission.terminal_job,
-        });
-    }
-    if !tombstones.is_empty() {
-        if let Some(parent) = tombstone_path(path).parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("create {}", parent.display())),
-                )
-            })?;
-        }
-        prepare_tombstone_store(path)?;
-        let connection = open_tombstone_store(path)?;
-        let transaction = connection.unchecked_transaction().map_err(|error| {
-            tombstone_error(
-                &tombstone_path(path),
-                "begin replay tombstone commit",
-                error,
-            )
-        })?;
-        for tombstone in tombstones {
-            insert_tombstone(&transaction, path, &tombstone)?;
-        }
-        transaction.commit().map_err(|error| {
-            tombstone_error(
-                &tombstone_path(path),
-                "commit replay tombstone index",
-                error,
-            )
-        })?;
-    }
-    write_durable_store(path, durable)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct JobStoreCompactionEvidence {
     pub(super) timestamp_ms: u64,
@@ -457,98 +446,6 @@ pub(super) struct JobStoreCompactionEvidence {
     #[serde(default)]
     pub(super) retained_terminal_bytes: usize,
     pub(super) active_jobs: usize,
-}
-
-pub(super) fn read_durable_store(path: &Path) -> Result<DurableJobStore> {
-    if !path.exists() {
-        return Ok(DurableJobStore::default());
-    }
-
-    let content = fs::read_to_string(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("read {}", path.display()))))?;
-    match serde_json::from_str::<DurableJobStore>(&content) {
-        Ok(store) => Ok(store),
-        Err(err) => {
-            let quarantine_path = path.with_file_name(format!(
-                "{}.corrupt-{}",
-                path.file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("jobs.json"),
-                timestamp_ms()
-            ));
-            fs::rename(path, &quarantine_path).map_err(|rename_err| {
-                Error::config_invalid_json(path.display().to_string(), err).with_hint(format!(
-                    "Homeboy could not quarantine the corrupt durable job store to {}: {}",
-                    quarantine_path.display(),
-                    rename_err
-                ))
-            })?;
-            eprintln!(
-                "Homeboy quarantined corrupt daemon job store {} to {} and started with an empty queue",
-                path.display(),
-                quarantine_path.display()
-            );
-            Ok(DurableJobStore::default())
-        }
-    }
-}
-
-pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
-        })?;
-    }
-
-    let body = serde_json::to_string_pretty(durable).map_err(|e| {
-        Error::internal_json(
-            e.to_string(),
-            Some("serialize daemon job store".to_string()),
-        )
-    })?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_path = parent.join(format!(
-        ".{}.tmp-{}-{}",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("jobs.json"),
-        std::process::id(),
-        Uuid::new_v4()
-    ));
-    fs::write(&temp_path, body).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("write {}", temp_path.display())),
-        )
-    })?;
-    if let Ok(file) = fs::File::open(&temp_path) {
-        file.sync_all().map_err(|e| {
-            Error::internal_io(e.to_string(), Some(format!("sync {}", temp_path.display())))
-        })?;
-    }
-    fs::rename(&temp_path, path).map_err(|e| {
-        let _ = fs::remove_file(&temp_path);
-        Error::internal_io(
-            e.to_string(),
-            Some(format!(
-                "rename {} to {}",
-                temp_path.display(),
-                path.display()
-            )),
-        )
-    })?;
-    // The file contents are synced above; syncing the directory makes the
-    // rename itself durable across a power loss on filesystems that require it.
-    #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync {}", parent.display())),
-            )
-        })?;
-    Ok(())
 }
 
 pub(super) fn compact_terminal_jobs(

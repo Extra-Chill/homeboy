@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::sync::{Arc, Barrier};
 
 use serde_json::json;
@@ -1174,9 +1173,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
     drop(store);
 
     // This is the durable shape written before execution_context_id was added.
-    let mut persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("read durable store"))
-            .expect("decode durable store");
+    let mut persisted = super::durable_snapshot(&path);
     let stored = persisted["jobs"]
         .as_array_mut()
         .expect("persisted jobs")
@@ -1190,11 +1187,7 @@ fn old_persisted_context_claim_without_context_id_rejects_direct_finish() {
         .as_object_mut()
         .expect("remote runner state")
         .remove("execution_context_id");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&persisted).expect("encode old durable store"),
-    )
-    .expect("write old durable store");
+    super::install_legacy_store(&path, &persisted);
 
     let reopened = JobStore::open_without_reconciliation(&path).expect("reopen old durable store");
     let error = reopened

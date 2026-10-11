@@ -167,7 +167,9 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     let active_job = first_jobs.create("controller-a-active-job");
     let active_job = first_jobs.start(active_job.id).expect("start durable job");
     assert_eq!(active_job.status, JobStatus::Running);
-    let first_jobs_before = fs::read(&first_jobs_path).expect("controller A jobs store exists");
+    // The durable job store lives in SQLite next to the legacy document path.
+    let first_jobs_db = first_dir.join("jobs.json.replay-tombstones.sqlite");
+    let first_jobs_before = fs::read(&first_jobs_db).expect("controller A jobs store exists");
 
     let mut second_ensure = context.command(TestBinary::HomeboyFixture);
     second_ensure
@@ -202,7 +204,7 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
         first_state_bytes,
     );
     assert_eq!(
-        fs::read(&first_jobs_path).expect("controller A jobs store remains"),
+        fs::read(&first_jobs_db).expect("controller A jobs store remains"),
         first_jobs_before,
         "controller B startup must not reconcile or rewrite controller A's jobs"
     );

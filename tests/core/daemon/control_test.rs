@@ -799,7 +799,7 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
             .with_daemon_lease("lease-dead".to_string());
         let job = store.create("runner.exec");
         store.start(job.id).expect("start job");
-        let before = std::fs::read(&jobs_path).expect("store bytes");
+        let before = JobStore::store_generation_at_path(&jobs_path).expect("generation");
         let owner = super::super::try_acquire_daemon_owner_lock()
             .expect("owner lock")
             .expect("owner acquired");
@@ -807,7 +807,10 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
         let error = super::adopt_orphaned_lease("lease-dead", &[], "127.0.0.1:0")
             .expect_err("owner lock blocks adoption");
         assert!(error.message.contains("owner lock is held"));
-        assert_eq!(std::fs::read(&jobs_path).expect("store bytes"), before);
+        assert_eq!(
+            JobStore::store_generation_at_path(&jobs_path).expect("generation"),
+            before
+        );
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
         drop(owner);
     });

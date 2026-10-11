@@ -2,6 +2,7 @@ pub mod agent_task_terminal_recovery;
 mod persistence;
 mod remote_runner;
 mod runner_job_preparation;
+mod sql_store;
 mod store;
 mod summary;
 // The pure job-model data types (Job/JobStatus/JobEvent + companions) were
