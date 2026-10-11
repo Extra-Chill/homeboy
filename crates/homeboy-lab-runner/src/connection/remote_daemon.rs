@@ -1508,8 +1508,12 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         .get("stale_reason")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // Full status nests the code under `freshness`; the compact projection
+    // (the default) omits `freshness` and reports it under `recovery`.
     let stale_reason_code = data
         .pointer("/freshness/stale_reason_code")
+        .filter(|code| !code.is_null())
+        .or_else(|| data.pointer("/recovery/stale_reason_code"))
         .cloned()
         .and_then(|code| serde_json::from_value(code).ok());
     let termination_evidence = data
