@@ -3148,11 +3148,14 @@ fn runner_api_submit(dispatch: Value) -> Value {
     serde_json::to_value(request.into_runner_api_fixture()).expect("Runner API submit JSON")
 }
 
-/// A context-free Runner API claim document carrying the given fields.
+/// A Runner API claim document advertising the current execution protocol
+/// and carrying the given fields.
 fn runner_api_claim(fields: Value) -> Value {
     let mut claim = serde_json::json!({
         "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
         "api_version": { "major": 1 },
+        "execution_protocol":
+            crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
     });
     claim
         .as_object_mut()
@@ -3258,6 +3261,18 @@ fn routes_remote_runner_job_broker_lifecycle() {
     assert_eq!(event.status_code, 200);
     assert_eq!(event.body["endpoint"], "runner.jobs.events.append");
     assert_eq!(event.body["body"]["event"]["kind"], "progress");
+
+    let consume = route_with_job_store_and_body(
+        "POST",
+        &format!("/runner/jobs/{job_id}/consume"),
+        Some(serde_json::json!({
+            "runner_id": "homeboy-lab",
+            "claim_id": claim_id.clone(),
+            "context_id": claim.body["body"]["response"]["outcome"]["claim"]["execution_context"]["id"],
+        })),
+        &store,
+    );
+    assert_eq!(consume.status_code, 200, "consume body: {}", consume.body);
 
     let finish = route_with_job_store_and_body(
         "POST",

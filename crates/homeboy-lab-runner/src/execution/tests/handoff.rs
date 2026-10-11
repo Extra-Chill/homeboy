@@ -1795,6 +1795,8 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
                         "api_version": { "major": 1 },
                         "runner_id": "lab",
                         "lease_ms": 30_000,
+                        "execution_protocol":
+                            homeboy_runner_contract::RunnerJobExecutionProtocol::current(),
                     }))
                     .send()
                     .expect("claim response")
@@ -1809,6 +1811,20 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             };
             let job_id = claim["job_id"].as_str().expect("job id").to_string();
             let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
+            client
+                .post(format!(
+                    "{}/runner/jobs/{job_id}/consume",
+                    worker_broker_url
+                ))
+                .json(&json!({
+                    "runner_id": "lab",
+                    "claim_id": claim_id.clone(),
+                    "context_id": claim["execution_context"]["id"],
+                }))
+                .send()
+                .expect("consume response")
+                .error_for_status()
+                .expect("consume execution receipt");
             client
                 .post(format!("{}/runner/jobs/{job_id}/events", worker_broker_url))
                 .json(&json!({

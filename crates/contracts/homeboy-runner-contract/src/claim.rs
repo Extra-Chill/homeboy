@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     RunnerApiOperationFailure, RunnerApiVersion, RunnerExecutionEnvelope,
@@ -32,8 +31,9 @@ pub struct RunnerApiClaimRequest {
     pub lease_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_protocol: Option<RunnerJobExecutionProtocol>,
+    /// Every claim carries an authenticated execution context, so a worker
+    /// must advertise the execution-context protocol it verifies.
+    pub execution_protocol: RunnerJobExecutionProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_claim_protocol: Option<WorkspaceClaimProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,18 +64,12 @@ pub struct RunnerApiClaimedExecution {
     pub claim_id: String,
     pub claim_expires_at_ms: u64,
     pub envelope: RunnerExecutionEnvelope,
-    /// The established protocol-v1 request projection. It is opaque only at
-    /// this boundary because its legacy shape remains implementation-owned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_request: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_claim_binding: Option<WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_owner_lease: Option<WorkspaceOwnerLease>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_context: Option<RunnerJobExecutionContextAssertion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_protocol: Option<RunnerJobExecutionProtocol>,
+    pub execution_context: RunnerJobExecutionContextAssertion,
+    pub execution_protocol: RunnerJobExecutionProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_claim_protocol: Option<WorkspaceClaimProtocol>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +81,28 @@ pub struct RunnerApiClaimedExecution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RunnerApiVersion, RunnerExecutionEnvelope, RUNNER_API_V1};
+    use crate::{
+        RunnerApiVersion, RunnerExecutionEnvelope, RunnerJobExecutionVerification, RUNNER_API_V1,
+    };
+
+    fn execution_context_assertion() -> RunnerJobExecutionContextAssertion {
+        RunnerJobExecutionContextAssertion {
+            schema: crate::RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA.to_string(),
+            id: "context-1".to_string(),
+            controller_run_id: "run-1".to_string(),
+            controller_attempt_id: "attempt-1".to_string(),
+            runner_id: "lab-1".to_string(),
+            runner_job_id: "job-1".to_string(),
+            accepted_handoff_id: "handoff-1".to_string(),
+            runtime_id: "runtime-1".to_string(),
+            claim_ref: "claim-1".to_string(),
+            dispatch_receipt: "sha256:receipt".to_string(),
+            verification: RunnerJobExecutionVerification {
+                state: "verified".to_string(),
+                verified_at_ms: 1,
+            },
+        }
+    }
 
     #[test]
     fn claim_request_is_strict_and_versioned() {
@@ -98,13 +113,21 @@ mod tests {
             project_id: None,
             lease_ms: Some(30_000),
             concurrency_limit: None,
-            execution_protocol: Some(RunnerJobExecutionProtocol::current()),
+            execution_protocol: RunnerJobExecutionProtocol::current(),
             workspace_claim_protocol: None,
             workspace_owner_lease_protocol: None,
         };
         let value = serde_json::to_value(&request).expect("claim request JSON");
         assert_eq!(value["schema"], RUNNER_API_CLAIM_REQUEST_SCHEMA);
-        assert!(serde_json::from_value::<RunnerApiClaimRequest>(value).is_ok());
+        assert!(serde_json::from_value::<RunnerApiClaimRequest>(value.clone()).is_ok());
+        let mut context_free = value;
+        context_free
+            .as_object_mut()
+            .expect("claim request object")
+            .remove("execution_protocol");
+        let error = serde_json::from_value::<RunnerApiClaimRequest>(context_free)
+            .expect_err("a claim without an execution protocol is refused");
+        assert!(error.to_string().contains("execution_protocol"), "{error}");
         assert!(
             serde_json::from_value::<RunnerApiClaimRequest>(serde_json::json!({
                 "schema": RUNNER_API_CLAIM_REQUEST_SCHEMA,
@@ -125,11 +148,10 @@ mod tests {
                     claim_id: "claim-1".to_string(),
                     claim_expires_at_ms: 10,
                     envelope: RunnerExecutionEnvelope::planned("run-1", "test"),
-                    legacy_request: None,
                     workspace_claim_binding: None,
                     workspace_owner_lease: None,
-                    execution_context: None,
-                    execution_protocol: Some(RunnerJobExecutionProtocol::current()),
+                    execution_context: execution_context_assertion(),
+                    execution_protocol: RunnerJobExecutionProtocol::current(),
                     workspace_claim_protocol: None,
                     workspace_owner_lease_protocol: None,
                     credential_delivery: None,
@@ -138,7 +160,17 @@ mod tests {
         };
         let encoded = serde_json::to_value(claimed).expect("claimed JSON");
         assert_eq!(encoded["outcome"]["status"], "claimed");
-        assert!(encoded["outcome"]["claim"].get("legacy_request").is_none());
+        let mut with_request_projection = encoded["outcome"]["claim"].clone();
+        with_request_projection["legacy_request"] = serde_json::json!({ "command": ["true"] });
+        assert!(
+            serde_json::from_value::<RunnerApiClaimedExecution>(with_request_projection).is_err()
+        );
+        let mut context_free = encoded["outcome"]["claim"].clone();
+        context_free
+            .as_object_mut()
+            .expect("claim object")
+            .remove("execution_context");
+        assert!(serde_json::from_value::<RunnerApiClaimedExecution>(context_free).is_err());
         let empty = RunnerApiClaimResponse {
             schema: RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
             api_version: RUNNER_API_V1,
