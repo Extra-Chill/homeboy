@@ -1001,6 +1001,8 @@ pub fn refresh_homeboy_binary_in_roots(
             ));
             let followup_commands = readiness.continuation.clone().into_iter().collect();
             let next_actions = controller_continuation_actions(&plan, &identity, Vec::new())?;
+            let failure =
+                unconverged_refresh_failure(&plan, &exec_output, converged, Some(&readiness));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     variant: "refresh_homeboy",
@@ -1022,7 +1024,7 @@ pub fn refresh_homeboy_binary_in_roots(
                     followup_commands,
                     readiness: Some(readiness),
                     reconnect_deferred: None,
-                    failure: None,
+                    failure,
                     bootstrap_provenance: None,
                     rollback: rollback.clone(),
                     build_transcript: Some(refresh_build_transcript(&exec_output)),
@@ -1112,7 +1114,7 @@ pub fn refresh_homeboy_binary_in_roots(
                 Some(session),
                 options.force,
             )
-            .map(|_| ())
+            .and_then(|report| require_completed_disconnect(&plan.runner_id, &report))
         }) {
             return rollback_refresh_error_with(error, || {
                 restore_runner_homeboy_path_if_selected_in_roots(
@@ -1192,7 +1194,14 @@ pub fn refresh_homeboy_binary_in_roots(
                 }
             };
         let daemon_identity_verification = (connect_exit_code == 0)
-            .then(|| verify_refreshed_daemon_topology(&plan.runner_id, &identity))
+            .then(|| {
+                verify_refreshed_daemon_topology(
+                    roots,
+                    &plan.runner_id,
+                    &identity,
+                    refresh_owned_lease.as_deref(),
+                )
+            })
             .transpose()
             .map_err(|error| error.message);
         daemon_refreshed = daemon_identity_verification.is_ok();
@@ -1541,6 +1550,34 @@ fn disconnect_before_reconnect(
     Ok(())
 }
 
+/// A disconnect that could not prove the remote daemon stopped returns `Ok`
+/// with `partial: true` and retains the session and generation ledger. Treating
+/// that report as a completed `disconnect` phase let refresh reconnect onto the
+/// very daemon it was meant to retire.
+fn require_completed_disconnect(
+    runner_id: &str,
+    report: &super::RunnerDisconnectReport,
+) -> Result<()> {
+    if report.disconnected && !report.partial {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "disconnect",
+        format!(
+            "runner `{runner_id}` disconnect did not retire the previous daemon: {}",
+            report
+                .remote_error
+                .as_deref()
+                .unwrap_or("the remote daemon stop was not proven"),
+        ),
+        Some(runner_id.to_string()),
+        report
+            .local_recovery_command
+            .clone()
+            .map(|command| vec![command]),
+    ))
+}
+
 /// Evaluate refresh completion from the admission authority, not from daemon
 /// process startup. This is intentionally shared with `runner status`'s status
 /// and generation projections so refresh cannot certify a state status rejects.
@@ -1728,7 +1765,12 @@ fn refresh_verification_failure(
     failure
 }
 
-fn verify_refreshed_daemon_topology(runner_id: &str, identity: &Value) -> Result<()> {
+fn verify_refreshed_daemon_topology(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    identity: &Value,
+    previous_lease_id: Option<&str>,
+) -> Result<()> {
     let expected_commit = identity
         .get("data")
         .unwrap_or(identity)
@@ -1742,7 +1784,8 @@ fn verify_refreshed_daemon_topology(runner_id: &str, identity: &Value) -> Result
     verify_refreshed_daemon_topology_with(
         runner_id,
         expected_commit,
-        || super::status(runner_id),
+        previous_lease_id,
+        || super::connection::status_in_roots(roots, runner_id),
         || std::thread::sleep(RECONNECT_VERIFICATION_RETRY_INTERVAL),
     )
 }
@@ -1750,6 +1793,7 @@ fn verify_refreshed_daemon_topology(runner_id: &str, identity: &Value) -> Result
 fn verify_refreshed_daemon_topology_with<Status, Wait>(
     runner_id: &str,
     expected_commit: &str,
+    previous_lease_id: Option<&str>,
     mut status: Status,
     mut wait: Wait,
 ) -> Result<()>
@@ -1759,7 +1803,12 @@ where
 {
     let deadline = Instant::now() + RECONNECT_VERIFICATION_WINDOW;
     loop {
-        match verify_refreshed_daemon_topology_status(runner_id, expected_commit, &status()?) {
+        match verify_refreshed_daemon_topology_status(
+            runner_id,
+            expected_commit,
+            previous_lease_id,
+            &status()?,
+        ) {
             Ok(()) => return Ok(()),
             Err(_) if Instant::now() < deadline => wait(),
             Err(error) => return Err(error),
@@ -1770,12 +1819,29 @@ where
 fn verify_refreshed_daemon_topology_status(
     runner_id: &str,
     expected_commit: &str,
+    previous_lease_id: Option<&str>,
     status: &super::RunnerStatusReport,
 ) -> Result<()> {
     if !status.is_connected() {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner_id}` reconnect did not persist an active daemon session"
         )));
+    }
+    // A refresh replaces the daemon it observed. A session still bound to the
+    // pre-refresh lease means the old generation was reattached, whatever
+    // identity the session claims.
+    if let (Some(previous), Some(current)) = (
+        previous_lease_id,
+        status
+            .session
+            .as_ref()
+            .and_then(|session| session.remote_daemon_lease_id.as_deref()),
+    ) {
+        if previous == current {
+            return Err(Error::internal_unexpected(format!(
+                "runner `{runner_id}` reconnect reattached the pre-refresh daemon lease `{previous}` instead of starting a daemon on the refreshed binary"
+            )));
+        }
     }
     // A refresh must prove convergence. An observed mismatch and a failed probe
     // both fail that proof; only a runner with no verification path at all is
