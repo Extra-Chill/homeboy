@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.51.3] - 2026-10-11
+
+### Changed
+- drop platform database and pinned-log manifest fields
+- drop audit and refactor extension hooks (Extra-Chill/homeboy#15774)
+
 ## [3.51.2] - 2026-10-11
 
 ### Fixed
