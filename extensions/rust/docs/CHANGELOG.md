@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.8] - 2026-10-11
+
+### Changed
+- drop audit and refactor extension hooks (Extra-Chill/homeboy#15774)
+
 ## [1.37.7] - 2026-09-08
 
 ### Fixed
