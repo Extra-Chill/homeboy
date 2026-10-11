@@ -63,7 +63,7 @@ fn controller_terminal_winner_stops_stale_success_worker_with_owned_deadline() {
             }
             _ => unreachable!(),
         }
-        let before = fs::read(&path).unwrap();
+        let before = JobStore::store_generation_at_path(&path).unwrap();
         let handle = store.handle(id);
         let (sender, receiver) = mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -94,7 +94,7 @@ fn controller_terminal_winner_stops_stale_success_worker_with_owned_deadline() {
         );
         assert_eq!(store.get(id).unwrap().status, status);
         assert_eq!(
-            fs::read(&path).unwrap(),
+            JobStore::store_generation_at_path(&path).unwrap(),
             before,
             "loser cannot overwrite evidence or append events"
         );
@@ -111,7 +111,7 @@ fn controller_terminal_duplicate_observes_other_store_without_rewriting_snapshot
     winner
         .complete_controller_success(id, json!({"original": "x".repeat(64 * 1024)}))
         .unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = JobStore::store_generation_at_path(&path).unwrap();
     for _ in 0..64 {
         assert_eq!(
             store
@@ -128,6 +128,6 @@ fn controller_terminal_duplicate_observes_other_store_without_rewriting_snapshot
             JobStatus::Succeeded
         );
     }
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(JobStore::store_generation_at_path(&path).unwrap(), before);
     assert_eq!(store.events(id).unwrap().len(), 3);
 }

@@ -1320,11 +1320,14 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
         .with_daemon_lease(state.lease_id.clone());
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
-    let before = std::fs::read(&path).expect("store bytes");
+    let before = JobStore::store_generation_at_path(&path).expect("generation");
 
     let status = read_status().expect("status");
 
-    assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+    assert_eq!(
+        JobStore::store_generation_at_path(&path).expect("generation"),
+        before
+    );
     assert_eq!(status.active_job_recovery_evidence.len(), 1);
     let evidence = &status.active_job_recovery_evidence[0];
     assert_eq!(evidence.job_id, job.id);

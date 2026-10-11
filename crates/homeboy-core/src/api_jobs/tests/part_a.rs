@@ -509,15 +509,18 @@ fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
     first
         .append_event(job.id, JobEventKind::Stdout, Some("one".to_string()), None)
         .expect("first writer appends");
-    let committed = super::store::StoreFileIdentity::of(&path).expect("store exists");
+    let committed = JobStore::store_generation_at_path(&path)
+        .expect("generation reads")
+        .expect("store is migrated");
     let synced = |store: &JobStore| {
-        *store
+        store
             .persistence
             .as_ref()
             .expect("durable store")
             .synced
             .lock()
             .unwrap()
+            .generation
     };
     assert_eq!(synced(&first), Some(committed));
 
@@ -525,9 +528,9 @@ fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
         .append_event(job.id, JobEventKind::Stdout, Some("two".to_string()), None)
         .expect("second writer reloads the first writer's job and appends");
     assert_ne!(
-        super::store::StoreFileIdentity::of(&path),
+        JobStore::store_generation_at_path(&path).expect("generation reads"),
         Some(committed),
-        "every commit replaces the store file"
+        "every commit advances the store generation"
     );
 
     first
@@ -586,7 +589,20 @@ fn open_quarantines_corrupt_durable_store() {
 
     let store = JobStore::open(&path).expect("corrupt store is quarantined");
     assert!(store.list().is_empty());
-    assert!(path.exists());
+    assert!(
+        !path.exists(),
+        "the corrupt document is moved aside, not left in place or re-imported"
+    );
+    assert!(!path.with_file_name("jobs.json.migrated").exists());
+    let job = store.create("after-quarantine");
+    assert_eq!(
+        JobStore::open(&path)
+            .expect("store reopens from SQLite")
+            .get(job.id)
+            .expect("job persists")
+            .id,
+        job.id
+    );
 
     let quarantined = fs::read_dir(temp.path())
         .expect("read temp dir")
@@ -875,7 +891,7 @@ fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting()
         store
             .start_with_child_identity(linked_job.id, 4242, "dead-child".to_string())
             .expect("record child");
-        let before = std::fs::read(&path).expect("store bytes");
+        let before = super::durable_snapshot(&path);
 
         let result = store
             .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
@@ -902,7 +918,7 @@ fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting()
                 .contains("cannot be safely resolved")),
             _ => unreachable!(),
         }
-        assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+        assert_eq!(super::durable_snapshot(&path), before);
     }
 }
 
@@ -925,7 +941,7 @@ fn confirmed_pidless_job_with_unselected_live_child_returns_diagnostics_without_
             Some(json!({ "process": { "root_pid": 4242 } })),
         )
         .expect("record live child");
-    let before = std::fs::read(&path).expect("store bytes");
+    let before = super::durable_snapshot(&path);
 
     let diagnostics = store
         .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
@@ -937,7 +953,7 @@ fn confirmed_pidless_job_with_unselected_live_child_returns_diagnostics_without_
         .expect("live child returns protected diagnostics");
 
     assert_eq!(diagnostics.protected_job_ids, vec![live_child.id]);
-    assert_eq!(std::fs::read(&path).expect("store bytes"), before);
+    assert_eq!(super::durable_snapshot(&path), before);
 }
 
 #[test]

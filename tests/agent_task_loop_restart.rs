@@ -4,6 +4,7 @@ use std::process::{Child, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 use serde_json::{json, Value};
 
@@ -237,10 +238,10 @@ fn get_json(port: u16, path: &str) -> Value {
 }
 
 fn count_work_jobs(context: &HermeticTestContext) -> usize {
-    let jobs =
-        std::fs::read_to_string(context.daemon_dir().join("jobs.json")).expect("durable jobs");
-    let value: Value = serde_json::from_str(&jobs).expect("jobs JSON");
-    value["jobs"].as_array().expect("jobs array").len()
+    // The store is read without migrating or reconciling it.
+    let report = JobStore::retained_owner_report_at_path(context.daemon_dir().join("jobs.json"))
+        .expect("durable jobs");
+    report["jobs"]["count"].as_u64().expect("job count") as usize
 }
 
 fn stdout_json(output: &Output) -> Value {

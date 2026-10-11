@@ -210,7 +210,7 @@ fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
         .with_daemon_lease("lease-dead".to_string());
     let selected = store.create("runner.exec");
     store.start(selected.id).expect("start selected");
-    let before = std::fs::read(&path).expect("store bytes");
+    let before = super::durable_snapshot(&path);
 
     let diagnostics = store
         .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
@@ -233,7 +233,7 @@ fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
         store.get(selected.id).expect("job").status,
         JobStatus::Succeeded
     );
-    assert_ne!(std::fs::read(&path).expect("store bytes"), before);
+    assert_ne!(super::durable_snapshot(&path), before);
 }
 
 #[test]
@@ -1536,10 +1536,18 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
     assert!(compacted.get(terminal[2]).is_ok());
     assert!(compacted.get(terminal[3]).is_ok());
 
-    let persisted = fs::read_to_string(&path).expect("compacted store persists");
-    assert_eq!(persisted.matches("\"operation\": \"terminal\"").count(), 2);
-    assert!(persisted.contains("\"removed_terminal_jobs\": 2"));
-    assert!(persisted.contains("\"active_jobs\": 2"));
+    let persisted = super::durable_snapshot(&path);
+    assert_eq!(
+        persisted["jobs"]
+            .as_array()
+            .expect("persisted jobs")
+            .iter()
+            .filter(|stored| stored["job"]["operation"] == "terminal")
+            .count(),
+        2
+    );
+    assert_eq!(persisted["compaction"]["removed_terminal_jobs"], 2);
+    assert_eq!(persisted["compaction"]["active_jobs"], 2);
 
     let restarted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
         .expect("compacted store restarts");
@@ -1570,20 +1578,14 @@ fn legacy_compaction_evidence_without_retained_bytes_reopens() {
         .complete(job.id, None)
         .expect("terminal job completes");
 
-    let mut durable: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("durable store is readable"))
-            .expect("durable store is valid JSON");
+    let mut durable = super::durable_snapshot(&path);
     durable["compaction"] = json!({
         "timestamp_ms": 100,
         "removed_terminal_jobs": 1,
         "retained_terminal_jobs": 1,
         "active_jobs": 0
     });
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&durable).expect("legacy store serializes"),
-    )
-    .expect("legacy store persists");
+    super::install_legacy_store(&path, &durable);
 
     let reopened = JobStore::open_without_reconciliation(&path)
         .expect("legacy compaction evidence remains readable");
@@ -1658,7 +1660,10 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
         .get(*terminal.last().expect("terminal jobs"))
         .is_ok());
     assert!(
-        fs::metadata(&path).expect("compacted store metadata").len() < 80_000,
+        fs::metadata(super::super::persistence::tombstone_path(&path))
+            .expect("compacted store metadata")
+            .len()
+            < 160_000,
         "the persisted store remains bounded despite high-payload terminal events"
     );
 
@@ -1673,10 +1678,10 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
             .as_ref()
             .is_some_and(|data| data["phase"] == "spawned")));
     assert!(
-        fs::metadata(&path)
+        fs::metadata(super::super::persistence::tombstone_path(&path))
             .expect("reserved child store metadata")
             .len()
-            < 80_000,
+            < 160_000,
         "reservation and PID persistence do not rewrite historical payloads"
     );
 }
@@ -1925,11 +1930,10 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
         .expect("duplicate wake")
         .is_none());
 
-    let persisted = fs::read_to_string(path).expect("read durable store");
-    assert!(!persisted.contains("never-persist"));
-    assert!(persisted.contains("RUNNER_SECRET_TOKEN"));
-    let persisted: serde_json::Value =
-        serde_json::from_str(&persisted).expect("parse durable store");
+    let persisted = super::durable_snapshot(&path);
+    let persisted_text = persisted.to_string();
+    assert!(!persisted_text.contains("never-persist"));
+    assert!(persisted_text.contains("RUNNER_SECRET_TOKEN"));
     assert!(persisted["jobs"][0]["remote_runner"]
         .get("envelope")
         .is_some());
@@ -1994,9 +1998,7 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
             .is_err(),
         "redacted secret placeholders cannot reach a worker as inline values"
     );
-    let persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("durable JSON"))
-            .expect("parse durable JSON");
+    let persisted = super::durable_snapshot(&path);
     let remote = &persisted["jobs"][0]["remote_runner"];
     assert!(remote.get("envelope").is_some());
     assert!(remote.get("request").is_none());
@@ -2037,9 +2039,7 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
     store
         .submit_remote_runner_job(request.clone())
         .expect("legacy submit");
-    let mut dual: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("store JSON"))
-            .expect("parse store JSON");
+    let mut dual = super::durable_snapshot(&path);
     dual["jobs"][0]["remote_runner"]["request"] =
         serde_json::to_value(&request).expect("request JSON");
     assert!(JobStore::open_without_reconciliation_from_bytes(
@@ -2087,9 +2087,7 @@ fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
         .expect("legacy submit");
     drop(store);
 
-    let mut persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&path).expect("persisted JSON"))
-            .expect("parse persisted JSON");
+    let mut persisted = super::durable_snapshot(&path);
     let remote = persisted["jobs"][0]["remote_runner"]
         .as_object_mut()
         .expect("remote runner state");
@@ -2109,11 +2107,7 @@ fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
         &serde_json::to_vec(&conflicting).expect("conflicting store JSON"),
     )
     .is_err());
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&persisted).expect("encode old durable store"),
-    )
-    .expect("write old durable store");
+    super::install_legacy_store(&path, &persisted);
 
     let store = JobStore::open_without_reconciliation(&path).expect("reopen legacy record");
     let protocol = crate::runner_job_execution_context::RunnerJobExecutionProtocol {
@@ -2160,9 +2154,7 @@ fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
             .expect("owner lease"),
         Some(renewed)
     );
-    let persisted: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(path).expect("persisted JSON"))
-            .expect("parse persisted JSON");
+    let persisted = super::durable_snapshot(&path);
     let remote = &persisted["jobs"][0]["remote_runner"];
     assert!(remote.get("envelope").is_some());
     assert!(remote.get("request").is_none());
@@ -2544,12 +2536,12 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
         .expect("store")
         .expired_submission_keys
         .is_empty());
-    assert!(fs::metadata(&path).expect("jobs metadata").len() < 40_000);
+    assert!(super::durable_snapshot(&path).to_string().len() < 40_000);
     assert!(
         fs::metadata(super::super::persistence::tombstone_path(&path))
             .expect("tombstone index metadata")
             .len()
-            < 128_000,
+            < 256_000,
         "128 compacted 32 KiB requests retain identity records, not 4 MiB of payloads"
     );
 
@@ -2606,10 +2598,22 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
         "not json\n",
     )
     .expect("corrupt journal");
-    let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.metadata = Some(json!({ "submission_key": "agent-task:v1:any-key" }));
-    assert!(restarted.submit_runner_api_fixture(request).is_err());
+    // The job rows share this database, so a damaged index fails the whole
+    // store closed at open instead of admitting a key as absent.
+    assert!(
+        JobStore::open_with_retention(&path, 3, 1).is_err(),
+        "a corrupt replay index must never open as an empty store"
+    );
+    assert!(
+        store
+            .submit_runner_api_fixture({
+                let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+                request.metadata = Some(json!({ "submission_key": "agent-task:v1:any-key" }));
+                request
+            })
+            .is_err(),
+        "a live handle also refuses to admit against a corrupt index"
+    );
 }
 
 #[test]

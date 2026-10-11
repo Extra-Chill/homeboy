@@ -1176,7 +1176,7 @@ mod tests {
                 .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
                 .unwrap();
             let restarted = harness.reopen(&path, "replacement-lease").unwrap();
-            let before = std::fs::read(&path).unwrap();
+            let before = homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap();
             let controller_before =
                 serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
                     .unwrap();
@@ -1188,7 +1188,10 @@ mod tests {
                 .active_daemon_job_recovery_evidence(None, |_| false);
             assert_eq!(evidence[0].child_pid, Some(child.pid()));
             assert_eq!(evidence[0].disposition, Disposition::ProtectedLive);
-            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(),
+                before
+            );
             assert_eq!(
                 serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
                     .unwrap(),
@@ -1341,7 +1344,7 @@ mod tests {
             );
             assert_eq!(evidence[0].child_pid, Some(root.pid()));
             root.stop();
-            let job_bytes = std::fs::read(&path).unwrap();
+            let job_bytes = homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap();
             let evidence = harness
                 .store()
                 .active_daemon_job_recovery_evidence(None, |_| true);
@@ -1350,7 +1353,10 @@ mod tests {
                 evidence[0].linked_durable_run_terminal_status,
                 Some(JobStatus::Failed)
             );
-            assert_eq!(std::fs::read(&path).unwrap(), job_bytes);
+            assert_eq!(
+                homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(),
+                job_bytes
+            );
             assert_eq!(
                 serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
                     .unwrap(),

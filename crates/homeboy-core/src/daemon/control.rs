@@ -2868,15 +2868,12 @@ fn pid_is_proven_dead(pid: u32, is_running: impl FnOnce(u32) -> bool) -> bool {
     !is_running(pid)
 }
 
+/// The durable job store as a legacy-shaped document for the evidence
+/// snapshot. The store lives in SQLite; an export reads it without migrating
+/// or reconciling anything, and a store that has not been migrated yet is
+/// still read from its `jobs.json`.
 fn read_job_store_bytes(path: &Path) -> Result<Vec<u8>> {
-    match std::fs::read(path) {
-        Ok(raw) => Ok(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(b"{\"jobs\":[]}".to_vec()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("read {}", path.display())),
-        )),
-    }
+    super::JobStore::export_legacy_snapshot_at_path(path)
 }
 
 fn snapshot_job_store(path: &Path, raw: &[u8]) -> Result<PathBuf> {
