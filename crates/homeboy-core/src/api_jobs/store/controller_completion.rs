@@ -101,9 +101,13 @@ mod tests {
             restarted.reconcile_controller_completions().unwrap();
             assert_eq!(restarted.get(id).unwrap().status, status);
             assert!(!restarted.controller_completion_pending(id).unwrap());
-            let before = fs::read(&path).unwrap();
+            let before = JobStore::store_generation_at_path(&path).unwrap();
             restarted.reconcile_controller_completions().unwrap();
-            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(
+                JobStore::store_generation_at_path(&path).unwrap(),
+                before,
+                "a repeated observation commits nothing"
+            );
         }
     }
 
@@ -167,9 +171,15 @@ mod tests {
                 .complete_controller_success(id, serde_json::json!({"finished": true}))
                 .is_err());
         }
-        // Restore an older primary snapshot, as in store-loss recovery. The
-        // committed completions must remain protected, not inferred absent.
-        fs::write(&path, br#"{"jobs":[]}"#).unwrap();
+        // Lose the job rows, as in store-loss recovery. The committed
+        // completions must remain protected, not inferred absent.
+        let connection = super::super::super::persistence::open_tombstone_store(&path).unwrap();
+        connection
+            .execute_batch(
+                "DELETE FROM daemon_jobs; DELETE FROM daemon_job_events; DELETE FROM daemon_job_submissions;",
+            )
+            .unwrap();
+        drop(connection);
         let restarted = JobStore::open_without_reconciliation(&path).unwrap();
         let healthy = running(&restarted);
         restarted.fail_next_durable_writes(1);
@@ -229,7 +239,6 @@ mod tests {
             .is_none());
         store.archive_terminal_controller_jobs(&archive).unwrap();
         // Archive custody is independent of the retired source store and index.
-        fs::remove_file(&path).unwrap();
         fs::remove_file(super::super::super::persistence::tombstone_path(&path)).unwrap();
         let retained = JobStore::open_without_reconciliation(&archive).unwrap();
         assert!(retained.list().is_empty());
@@ -297,7 +306,6 @@ mod tests {
         store
             .complete_controller_success(another, serde_json::json!({}))
             .unwrap();
-        let json_before = fs::read(&path).unwrap();
         let tombstones = super::super::super::persistence::tombstone_path(&path);
         let index_before = fs::read(&tombstones).unwrap();
         assert!(JobStore::terminal_controller_job_at(&path, id)
@@ -305,7 +313,6 @@ mod tests {
             .unwrap()
             .status
             .is_terminal());
-        assert_eq!(fs::read(&path).unwrap(), json_before);
         assert_eq!(fs::read(&tombstones).unwrap(), index_before);
     }
 }

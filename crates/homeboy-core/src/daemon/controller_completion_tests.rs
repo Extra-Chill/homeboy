@@ -13,7 +13,7 @@ fn controller_completion_permanent_rejection_stops_without_retrying_or_rewriting
     let store = JobStore::open_without_reconciliation(&path).unwrap();
     let job = store.create("not-a-controller");
     store.start(job.id).unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = JobStore::store_generation_at_path(&path).unwrap();
     let calls = AtomicUsize::new(0);
     assert!(persist_controller_completion(
         &store.handle(job.id),
@@ -24,7 +24,7 @@ fn controller_completion_permanent_rejection_stops_without_retrying_or_rewriting
         }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(JobStore::store_generation_at_path(&path).unwrap(), before);
 }
 
 #[test]
@@ -137,16 +137,19 @@ fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_e
         assert_eq!(store.get(id).unwrap().status, JobStatus::Succeeded);
         assert!(!store.controller_completion_pending(id).unwrap());
         assert!(!controller_job_runtimes().lock().unwrap().contains_key(&key));
-        let before = fs::read(&path).unwrap();
+        let before = JobStore::store_generation_at_path(&path).unwrap();
         for _ in 0..16 {
             assert!(persist_controller_success_or_uncertainty(
                 &store.handle(id),
                 json!({"duplicate": true})
             ));
         }
-        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(JobStore::store_generation_at_path(&path).unwrap(), before);
         assert!(
-            before.len() < 80 * 1024,
+            JobStore::export_legacy_snapshot_at_path(&path)
+                .unwrap()
+                .len()
+                < 80 * 1024,
             "primary queue stays bounded independently of completed history"
         );
     }
@@ -161,7 +164,7 @@ fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_e
     #[cfg(target_os = "linux")]
     {
         let growth = rss_bytes().saturating_sub(initial_rss);
-        eprintln!("15327 soak: 50 completions, 800 duplicate observations; RSS growth {growth} bytes; queue bytes {}", fs::metadata(&path).unwrap().len());
+        eprintln!("15327 soak: 50 completions, 800 duplicate observations; RSS growth {growth} bytes; queue bytes {}", JobStore::export_legacy_snapshot_at_path(&path).unwrap().len());
         assert!(
             growth < 64 * 1024 * 1024,
             "bounded completion soak cannot retain historical snapshots"

@@ -13,18 +13,18 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::persistence::read_durable_store;
 #[cfg(test)]
 use super::persistence::reconcile_stale_jobs;
 use super::persistence::{
     apply_event_retention, compact_terminal_jobs, expire_submission_keys, job_not_found,
     lookup_tombstone, prepare_tombstone_store, recovered_terminal_from_result, timestamp_ms,
-    tombstone_store_report, validate_transition, write_durable_store_with_tombstones,
-    JobStoreCompactionEvidence, ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT,
-    DEFAULT_TERMINAL_JOB_RETENTION_BYTES, DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+    tombstone_store_report, validate_transition, JobStoreCompactionEvidence, ReplayTombstoneKind,
+    DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+    DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
+use super::sql_store::{self, SqlSyncState};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobProjection};
 use crate::error::{Error, Result};
 use crate::runner_execution_envelope::PathMaterializationPlan;
@@ -188,43 +188,11 @@ pub(super) struct JobStorePersistence {
     pub(super) event_retention_limit: usize,
     pub(super) terminal_job_retention_limit: usize,
     pub(super) terminal_job_retention_bytes: usize,
-    /// Identity of the durable file this process last read or wrote while
-    /// holding the transaction lock. When the file still has that identity,
-    /// the in-memory snapshot is already authoritative and the reload is
-    /// skipped, so a transaction no longer re-parses the whole store.
-    pub(super) synced: Mutex<Option<StoreFileIdentity>>,
-}
-
-/// Every commit replaces the store by atomic rename, so a new inode, size and
-/// modification time identify each committed snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct StoreFileIdentity {
-    len: u64,
-    modified_ns: Option<u128>,
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-}
-
-impl StoreFileIdentity {
-    pub(super) fn of(path: &Path) -> Option<Self> {
-        let metadata = fs::metadata(path).ok()?;
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
-        Some(Self {
-            len: metadata.len(),
-            modified_ns: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_nanos()),
-            #[cfg(unix)]
-            dev: metadata.dev(),
-            #[cfg(unix)]
-            ino: metadata.ino(),
-        })
-    }
+    /// What this process last read from or wrote to the SQL store, kept under
+    /// the transaction lock. While the database still reports the recorded
+    /// generation the in-memory snapshot is authoritative and the reload is
+    /// skipped; the per-job digests let a commit write only changed rows.
+    pub(super) synced: Mutex<SqlSyncState>,
 }
 
 impl JobStorePersistence {
@@ -239,16 +207,23 @@ impl JobStorePersistence {
             event_retention_limit,
             terminal_job_retention_limit,
             terminal_job_retention_bytes,
-            synced: Mutex::new(None),
+            synced: Mutex::new(SqlSyncState::default()),
         }
     }
 
-    fn synced_identity(&self) -> Option<StoreFileIdentity> {
-        *self.synced.lock().expect("store identity mutex poisoned")
+    fn synced_generation(&self) -> Option<i64> {
+        self.synced
+            .lock()
+            .expect("store sync mutex poisoned")
+            .generation
     }
 
-    fn record_synced_identity(&self, identity: Option<StoreFileIdentity>) {
-        *self.synced.lock().expect("store identity mutex poisoned") = identity;
+    fn forget_synced_state(&self) {
+        *self.synced.lock().expect("store sync mutex poisoned") = SqlSyncState::default();
+    }
+
+    fn record_synced_state(&self, state: SqlSyncState) {
+        *self.synced.lock().expect("store sync mutex poisoned") = state;
     }
 }
 
@@ -328,6 +303,9 @@ pub(super) struct ControllerJobSubmission {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredJob {
     pub(super) job: Job,
+    /// Rows of their own in the SQL store, so a job row deserializes without
+    /// them.
+    #[serde(default)]
     pub(super) events: Vec<JobEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) admission_idempotency_key: Option<String>,
@@ -501,26 +479,42 @@ impl JobStore {
             .persistence
             .as_ref()
             .filter(|persistence| persistence.path == path);
-        let current = StoreFileIdentity::of(path);
-        if let (Some(persistence), Some(current)) = (persistence, current) {
-            if persistence.synced_identity() == Some(current) {
+        let connection = match sql_store::open_sql_store(path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if let Some(persistence) = persistence {
+                    persistence.forget_synced_state();
+                }
+                return Err(error);
+            }
+        };
+        let generation = sql_store::read_store_generation(&connection).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "read daemon job store generation {}",
+                    path.display()
+                )),
+            )
+        })?;
+        if let (Some(persistence), Some(generation)) = (persistence, generation) {
+            if persistence.synced_generation() == Some(generation) {
                 return Ok(());
             }
         }
-        let durable = match read_durable_store(path) {
-            Ok(durable) => durable,
+        // The caller holds the transaction lock, so no writer can commit
+        // between the generation read above and this load.
+        let (durable, state) = match sql_store::load_sql_store(&connection, path) {
+            Ok(loaded) => loaded,
             Err(error) => {
                 if let Some(persistence) = persistence {
-                    persistence.record_synced_identity(None);
+                    persistence.forget_synced_state();
                 }
                 return Err(error);
             }
         };
         if let Some(persistence) = persistence {
-            // The caller holds the transaction lock, so no writer can replace
-            // the file between the identity read above and this parse. A
-            // quarantined (renamed) store no longer matches and reloads.
-            persistence.record_synced_identity(current.filter(|_| path.exists()));
+            persistence.record_synced_state(state);
         }
         let next_sequence = durable
             .jobs
@@ -600,13 +594,18 @@ impl JobStore {
                 None,
             ));
         }
+        // Move the view out instead of cloning it: compaction and the commit
+        // work on the owned snapshot, and it is moved back whatever happens.
+        // Callers restore their pre-mutation copy when this returns an error.
         let mut durable = DurableJobStore {
-            jobs: inner.jobs.values().cloned().collect(),
-            submission_keys: inner.submission_keys.clone(),
-            expired_submission_keys: inner.expired_submission_keys.clone(),
-            controller_submissions: inner.controller_submissions.clone(),
-            expired_controller_submissions: inner.expired_controller_submissions.clone(),
-            compaction: inner.compaction.clone(),
+            jobs: std::mem::take(&mut inner.jobs).into_values().collect(),
+            submission_keys: std::mem::take(&mut inner.submission_keys),
+            expired_submission_keys: std::mem::take(&mut inner.expired_submission_keys),
+            controller_submissions: std::mem::take(&mut inner.controller_submissions),
+            expired_controller_submissions: std::mem::take(
+                &mut inner.expired_controller_submissions,
+            ),
+            compaction: inner.compaction.take(),
         };
         compact_terminal_jobs(
             &mut durable,
@@ -614,11 +613,8 @@ impl JobStore {
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
         );
-        if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable) {
-            persistence.record_synced_identity(None);
-            return Err(error);
-        }
-        persistence.record_synced_identity(StoreFileIdentity::of(&persistence.path));
+        let committed =
+            sql_store::commit_sql_store(&persistence.path, &mut durable, &persistence.synced);
         inner.jobs = durable
             .jobs
             .into_iter()
@@ -629,7 +625,26 @@ impl JobStore {
         inner.controller_submissions = durable.controller_submissions;
         inner.expired_controller_submissions = durable.expired_controller_submissions;
         inner.compaction = durable.compaction;
-        Ok(())
+        committed
+    }
+
+    /// Whether a durable job store exists for `path`: either the SQL store or
+    /// a legacy `jobs.json` that has not been migrated yet. Never creates one.
+    pub fn exists_at_path(path: &Path) -> bool {
+        path.exists() || sql_store::sql_store_initialized(path).unwrap_or(false)
+    }
+
+    /// Commit counter of the SQL job store at `path`: it advances on every
+    /// committed mutation and is `None` before the store has been migrated.
+    pub(crate) fn store_generation_at_path(path: &Path) -> Result<Option<i64>> {
+        sql_store::store_generation_at_path(path)
+    }
+
+    /// The durable store rendered in the legacy `jobs.json` document shape,
+    /// without opening, migrating or reconciling it. Used for operator
+    /// evidence snapshots; it is not a persistence format.
+    pub(crate) fn export_legacy_snapshot_at_path(path: &Path) -> Result<Vec<u8>> {
+        sql_store::export_legacy_snapshot(path)
     }
 
     /// Count non-terminal jobs without opening or reconciling the durable store.
@@ -638,17 +653,11 @@ impl JobStore {
     /// here would reconcile live jobs as though the daemon had restarted.
     pub(crate) fn active_count_at_path(path: impl Into<PathBuf>) -> Result<usize> {
         let path = path.into();
-        if !path.exists() {
+        let Some(active) = sql_store::read_active_jobs_readonly(&path)? else {
             return Ok(0);
-        }
-        let content = fs::read_to_string(&path).map_err(|err| {
-            Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        let durable: DurableJobStore = serde_json::from_str(&content)
-            .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
+        };
         let now = timestamp_ms();
-        Ok(durable
-            .jobs
+        Ok(active
             .into_iter()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
             // Status commands run outside the daemon and must not persist a
@@ -670,19 +679,14 @@ impl JobStore {
     /// from resident owner counts.
     pub fn retained_owner_report_at_path(path: impl Into<PathBuf>) -> Result<Value> {
         let path = path.into();
-        if !path.exists() {
+        let Some(durable) = sql_store::read_durable_store_readonly(&path)? else {
             return Ok(serde_json::json!({
                 "jobs": { "count": 0, "bytes": 0, "active_count": 0, "terminal_count": 0 },
                 "live_submission_keys": { "count": 0, "bytes": 0 },
                 "legacy_expired_submission_keys": { "count": 0, "bytes": 0 },
                 "replay_tombstone_journal": { "count": 0, "bytes": 0, "resident": false },
             }));
-        }
-        let content = fs::read_to_string(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        let durable: DurableJobStore = serde_json::from_str(&content)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        };
         let job_bytes = durable
             .jobs
             .iter()
@@ -768,32 +772,12 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
-        prepare_tombstone_store(&path)?;
-        let mut durable = read_durable_store(&path)?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
-        let next_sequence = reconcile_stale_jobs(&mut durable, event_retention_limit);
-        compact_terminal_jobs(
-            &mut durable,
-            event_retention_limit,
-            terminal_job_retention_limit,
-            terminal_job_retention_bytes,
-        );
         let store = Self {
-            inner: Arc::new(Mutex::new(JobStoreInner {
-                jobs: durable
-                    .jobs
-                    .into_iter()
-                    .map(|stored| (stored.job.id, stored))
-                    .collect(),
-                submission_keys: durable.submission_keys,
-                expired_submission_keys: durable.expired_submission_keys,
-                controller_submissions: durable.controller_submissions,
-                expired_controller_submissions: durable.expired_controller_submissions,
-                compaction: durable.compaction,
-            })),
-            next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
+            inner: Arc::new(Mutex::new(JobStoreInner::default())),
+            next_event_sequence: Arc::new(AtomicU64::new(0)),
             persistence: Some(Arc::new(JobStorePersistence::new(
                 path,
                 event_retention_limit,
@@ -843,9 +827,21 @@ impl JobStore {
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         prepare_tombstone_store(&path)?;
-        let raw = fs::read(&path).unwrap_or_else(|error| {
+        let raw = Self::legacy_open_bytes(&path)?;
+        Self::open_without_reconciliation_from_bytes(path, &raw)
+    }
+
+    /// The legacy-shaped bytes an open validates before the transaction. Once
+    /// the store has moved into SQLite the SQL store is authoritative and no
+    /// file at the legacy path is read.
+    fn legacy_open_bytes(path: &Path) -> Result<Vec<u8>> {
+        const EMPTY: &[u8] = b"{\"jobs\":[]}";
+        if sql_store::sql_store_initialized(path)? {
+            return Ok(EMPTY.to_vec());
+        }
+        let raw = fs::read(path).unwrap_or_else(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                b"{\"jobs\":[]}".to_vec()
+                EMPTY.to_vec()
             } else {
                 Vec::new()
             }
@@ -856,7 +852,7 @@ impl JobStore {
                 Some(path.display().to_string()),
             ));
         }
-        Self::open_without_reconciliation_from_bytes(path, &raw)
+        Ok(raw)
     }
 
     pub fn open_without_reconciliation_from_bytes(
@@ -894,19 +890,7 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
-        let raw = fs::read(&path).unwrap_or_else(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                b"{\"jobs\":[]}".to_vec()
-            } else {
-                Vec::new()
-            }
-        });
-        if raw.is_empty() && path.exists() {
-            return Err(Error::internal_io(
-                "read durable job store",
-                Some(path.display().to_string()),
-            ));
-        }
+        let raw = Self::legacy_open_bytes(&path)?;
         Self::open_without_reconciliation_from_bytes_with_retention(
             path,
             &raw,
@@ -924,38 +908,18 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
-        prepare_tombstone_store(&path)?;
-        let mut durable: DurableJobStore = serde_json::from_slice(raw)
+        // The caller's bytes are a legacy-shaped snapshot read from this path.
+        // They are validated here so an unreadable store still fails closed;
+        // the SQL store is the only source of truth the transaction below
+        // reads, importing a not-yet-migrated `jobs.json` exactly once.
+        serde_json::from_slice::<DurableJobStore>(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
-        compact_terminal_jobs(
-            &mut durable,
-            event_retention_limit,
-            terminal_job_retention_limit,
-            terminal_job_retention_bytes,
-        );
-        let next_sequence = durable
-            .jobs
-            .iter()
-            .flat_map(|stored| stored.events.iter().map(|event| event.sequence))
-            .max()
-            .unwrap_or(0);
         let store = Self {
-            inner: Arc::new(Mutex::new(JobStoreInner {
-                jobs: durable
-                    .jobs
-                    .into_iter()
-                    .map(|stored| (stored.job.id, stored))
-                    .collect(),
-                submission_keys: durable.submission_keys,
-                expired_submission_keys: durable.expired_submission_keys,
-                controller_submissions: durable.controller_submissions,
-                expired_controller_submissions: durable.expired_controller_submissions,
-                compaction: durable.compaction,
-            })),
-            next_event_sequence: Arc::new(AtomicU64::new(next_sequence)),
+            inner: Arc::new(Mutex::new(JobStoreInner::default())),
+            next_event_sequence: Arc::new(AtomicU64::new(0)),
             persistence: Some(Arc::new(JobStorePersistence::new(
                 path,
                 event_retention_limit,
@@ -1707,6 +1671,25 @@ impl JobStore {
     /// Read an immutable terminal controller projection, including configured
     /// pruning's replay tombstones. `None` is unknown custody, never terminality.
     pub fn terminal_controller_job_at(path: &Path, job_id: Uuid) -> Result<Option<Job>> {
+        if let Some((stored, submissions)) =
+            sql_store::read_job_and_controller_submissions(path, job_id)?
+        {
+            if let Some(stored) = stored {
+                if stored.controller_job.is_some() && stored.job.status.is_terminal() {
+                    super::persistence::validate_terminal_controller_identity(&stored.job, job_id)?;
+                    return Ok(Some(stored.job));
+                }
+                return Ok(None);
+            }
+            for submission in submissions {
+                if let Some(job) = &submission.terminal_job {
+                    super::persistence::validate_terminal_controller_identity(job, job_id)?;
+                    return Ok(Some(job.clone()));
+                }
+            }
+            return super::persistence::lookup_terminal_controller_job(path, job_id);
+        }
+        // Not yet migrated: read the legacy document without importing it.
         let raw = match fs::read(path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

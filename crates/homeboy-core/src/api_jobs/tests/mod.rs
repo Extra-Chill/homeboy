@@ -3,6 +3,7 @@
 mod part_a;
 mod part_b;
 mod part_c;
+mod part_d;
 
 use std::collections::HashMap;
 
@@ -10,6 +11,25 @@ use serde_json::json;
 
 use super::*;
 use uuid::Uuid;
+
+/// The durable store in its legacy document shape, read from the SQL store.
+pub(super) fn durable_snapshot(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(
+        &JobStore::export_legacy_snapshot_at_path(path).expect("export durable store"),
+    )
+    .expect("exported snapshot is JSON")
+}
+
+/// Replace the durable store with a pre-SQLite `jobs.json` document, as an
+/// older daemon would have left it. The next open imports it.
+pub(super) fn install_legacy_store(path: &std::path::Path, snapshot: &serde_json::Value) {
+    let _ = std::fs::remove_file(super::persistence::tombstone_path(path));
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(snapshot).expect("encode legacy store"),
+    )
+    .expect("write legacy store");
+}
 
 pub(super) fn record_test_local_child(store: &JobStore, job_id: Uuid, pid: u32) {
     store
