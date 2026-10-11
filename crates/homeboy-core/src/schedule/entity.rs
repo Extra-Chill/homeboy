@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn declaring_both_a_command_and_a_program_is_rejected() {
         let invalid = Schedule {
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             ..exec_schedule()
         };
         assert!(invalid.validate_in_root(unused_root()).is_err());
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn declaring_both_a_single_command_and_steps_is_rejected() {
         let invalid = Schedule {
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: vec![super::super::types::ScheduleStep {
                 command: Some(vec!["fleet".to_string(), "check".to_string()]),
@@ -414,7 +414,7 @@ mod tests {
             exec: None,
             steps: vec![
                 super::super::types::ScheduleStep {
-                    command: Some(vec!["triage".to_string()]),
+                    command: Some(vec!["status".to_string()]),
                     exec: None,
                 },
                 super::super::types::ScheduleStep {

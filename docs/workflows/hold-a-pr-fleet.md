@@ -1,6 +1,6 @@
 # Hold A PR Fleet
 
-Use worktree, triage, review, and runs commands when you are holding many PR branches at once and need a concise operator view. This workflow is for local PR-fleet orchestration before merge or cleanup, not deployment.
+Use worktree, git, review, and runs commands when you are holding many PR branches at once and need a concise operator view. This workflow is for local PR-fleet orchestration before merge or cleanup, not deployment.
 
 ## Use This When
 
@@ -34,42 +34,14 @@ Use the JSON output as the orchestration ledger. The useful fleet-holding fields
 - `run_id` - persisted Homeboy run that produced or verified the branch.
 - `cleanup_policy` and `state` - cleanup intent and lifecycle state.
 
-## 2. Check Remote PR Landing State
-
-Use `triage landing` when you have explicit PR refs. It classifies mergeability, checks, draft state, and review blockers in one read-only dashboard.
-
-```bash
-homeboy triage landing \
-  'owner/repo#123' \
-  'owner/repo#124' \
-  --drilldown
-```
-
-For one repo, bare numbers are acceptable when the repo is explicit:
-
-```bash
-homeboy triage landing --repo owner/repo 123 124 --drilldown
-```
-
-Persist the remote dashboard next to the local worktree ledger:
-
-```bash
-homeboy --output homeboy-results/landing.json triage landing --repo owner/repo --drilldown
-```
-
-Use `triage --watch` only for a small number of PRs that are actively moving. The snapshot commands above are better for broad fleet handoffs.
-
-## 3. Run The Compact Landing Loop
+## 2. Run The Compact Landing Loop
 
 When a fleet is close to landing, repeat this loop until every PR is either landed or has one concrete blocker. Keep the PR order explicit when there are dependent branches.
 
 ```bash
-homeboy triage landing --repo owner/repo --ordered 123 124 125 --drilldown --output homeboy-results/landing.json
 homeboy git pr readiness <component-id> --number 123 --output homeboy-results/123-readiness.json
 homeboy git pr land owner/repo 123 124 125 --dry-run --output homeboy-results/land-dry-run.json
 ```
-
-Use the landing snapshot first. It gives the fleet-wide view: PR state, check state, mergeability, review state, suggested next command, and matching local worktree records when Homeboy can find them.
 
 Use readiness for the first PR you intend to merge next. It gives a narrow merge/no-merge answer without probing by attempting a merge.
 
@@ -78,12 +50,12 @@ Use `git pr land --dry-run` before any merge train. The dry run confirms the seq
 Recommended next actions:
 
 - `ready`: clean local worktree, pushed branch, non-draft PR, mergeable state, terminal green required checks, no blocking review decision. Include in the next `git pr land` ready prefix.
-- `waiting`: pending or missing checks on the current head. Re-run `triage landing` or `git pr readiness` after checks report; do not merge based on stale proof.
+- `waiting`: pending or missing checks on the current head. Re-run `git pr readiness` after checks report; do not merge based on stale proof.
 - `refresh`: base is stale, mergeability is dirty/behind, or an ordered landing report shows a dependent branch needs a rebase after an earlier PR lands. Use `homeboy git pr refresh <component-id> <number-or-url> --strategy rebase --push` from a clean checkout.
-- `local-cleanup`: landing output reports dirty or unpushed matching local worktrees. Inspect `homeboy worktree status <worktree-id>` and either commit/push, discard only intentional scratch changes, or stop and hand off the blocker.
+- `local-cleanup`: the worktree ledger shows dirty or unpushed matching local worktrees. Inspect `homeboy worktree status <worktree-id>` and either commit/push, discard only intentional scratch changes, or stop and hand off the blocker.
 - `blocked`: failed checks, requested changes, unresolved conflicts, unknown mergeability after retry, missing evidence, or an external dependency. Capture the blocker in the fleet handoff instead of leaving it implicit.
 
-## 4. Refresh Evidence Only Where Needed
+## 3. Refresh Evidence Only Where Needed
 
 Run review from the worktree path so the evidence matches the branch being held:
 
@@ -102,7 +74,7 @@ homeboy runs artifacts <run-id>
 
 Attach or link the durable artifact/evidence refs in the PR. Treat local-only paths as operator notes, not reviewer-facing evidence.
 
-## 5. Classify Each Branch
+## 4. Classify Each Branch
 
 Keep the handoff small by assigning one state per branch:
 
@@ -122,7 +94,7 @@ Example handoff row:
 | `owner/repo#124` | `feature/b` | clean/pushed | behind after `#123` | `run_...` | refresh after `#123` lands |
 | `owner/repo#125` | `feature/c` | dirty-local | checks failed | missing | fix blocker before sequencing |
 
-## 6. Clean Up Deliberately
+## 5. Clean Up Deliberately
 
 Preview cleanup first:
 
@@ -146,7 +118,6 @@ homeboy worktree cleanup --apply
 ## Reference
 
 - [worktree command](../commands/worktree.md)
-- [triage command](../commands/triage.md)
 - [review command](../commands/review.md)
 - [runs command](../commands/runs.md)
 - [Capture evidence](capture-evidence.md)

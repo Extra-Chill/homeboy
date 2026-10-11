@@ -10,7 +10,7 @@ Homeboy commands operate on different kinds of things. The shared scope model ma
 | `project` | A runtime target: site, server, domain, base path, database/API context, and deploy destination. | `wp`, `db`, `logs`, `api`, `auth`, `deploy` |
 | `rig` | A reproducible local environment composed from component paths, services, symlinks, and pipelines. | `rig up`, `rig check`, `rig down`, rig-pinned `bench`/`trace` |
 | `fleet` | A group of projects/targets. | fleet status/check/exec, multi-target deploy |
-| `workspace` | Everything Homeboy can discover locally across projects, rigs, standalone components, and the current checkout. | `triage workspace`, `runs`, global reports |
+| `workspace` | Everything Homeboy can discover locally across projects, rigs, standalone components, and the current checkout. | `status`, `runs`, global reports |
 | `path` | An unregistered checkout operated on directly. | ad-hoc component/source workflows |
 
 ## Command Classes
@@ -45,4 +45,4 @@ enum Scope {
 }
 ```
 
-Use `resolve_scope_components()` when a feature needs to turn any supported scope into component references. Triage is the first consumer; additional commands can adopt the same resolver as they clarify their accepted scopes.
+Use `resolve_scope_component_records()` when a feature needs to turn any supported scope into full component records.

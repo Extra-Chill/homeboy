@@ -493,7 +493,6 @@ pub struct CommandSurfaceDoctorReport {
 #[serde(rename_all = "snake_case")]
 pub enum CommandSurfaceRegistry {
     Core,
-    Descriptor,
     Extension,
     DocsIndex,
     Help,
@@ -971,7 +970,7 @@ mod tests {
     #[test]
     fn doctor_reports_actual_missing_docs_with_registry_provenance() {
         let report = command_surface_doctor_report(
-            vec![provenance("composed", CommandSurfaceRegistry::Descriptor)],
+            vec![provenance("composed", CommandSurfaceRegistry::Core)],
             BTreeSet::new(),
             BTreeSet::from(["composed".to_string()]),
             BTreeSet::new(),
@@ -984,7 +983,7 @@ mod tests {
             [CommandSurfaceDriftEvidence {
                 command: "composed".to_string(),
                 drift: "missing_from_docs_index".to_string(),
-                registry: CommandSurfaceRegistry::Descriptor,
+                registry: CommandSurfaceRegistry::Core,
             }]
         );
     }

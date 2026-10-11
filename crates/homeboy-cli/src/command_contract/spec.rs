@@ -1123,10 +1123,6 @@ pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
         kind: CommandDocKind::RuntimeExtensionCommand,
     },
     CommandDocSpec {
-        slug: "triage",
-        kind: CommandDocKind::RuntimeExtensionCommand,
-    },
-    CommandDocSpec {
         slug: "commands-index",
         kind: CommandDocKind::Support,
     },

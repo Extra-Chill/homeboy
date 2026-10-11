@@ -12,7 +12,6 @@ mod findings;
 mod helpers;
 mod runs;
 mod schema;
-mod triage_items;
 mod work_intents;
 
 use super::context::RunContext;
@@ -23,9 +22,8 @@ pub use super::context::{
 use super::records::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, FindingListFilter,
     FindingRecord, MissionCursor, MissionPage, MissionRecord, NewFindingRecord, NewRunRecord,
-    NewTraceRunRecord, NewTraceSpanRecord, NewTriageItemRecord, RunCursor, RunListFilter, RunPage,
-    RunRecord, RunStatus, TraceRunRecord, TraceSpanRecord, TriageItemRecord,
-    TriagePullRequestSignals,
+    NewTraceRunRecord, NewTraceSpanRecord, RunCursor, RunListFilter, RunPage, RunRecord, RunStatus,
+    TraceRunRecord, TraceSpanRecord,
 };
 use crate::{Error, Result};
 pub use artifacts::directory_tree_sha256;

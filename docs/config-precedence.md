@@ -87,19 +87,13 @@ Investigation for Extra-Chill/homeboy#7519. This document maps configuration con
 
 | Locations | Effective precedence | Resolving code path |
 | --- | --- | --- |
-| Component `remote_url`; component `triage_remote_url`; rig component `remote_url`, `triage_remote_url`, `branch`, `ref`, `default_ref`, `stack`; project attachment local path; standalone component registry fallback. | Component portable/registry `remote_url` is effective for normal component operations. For project-attached components, standalone registry `remote_url` fills in only when the portable component lacks it. Rig component Git metadata is used by rig triage/status/materialization paths and is not merged into the component registry. Portable discovery auto-detects `remote_url` from git origin only when absent. `triage_remote_url` is reporting-only by field documentation. | Project standalone fallback for `remote_url` is in `crates/homeboy-core/src/project/component/resolution.rs`. Portable auto-detection is in `crates/homeboy-core/src/component/portable.rs`. Component remote fields are declared in `crates/contracts/homeboy-component-contract/src/model.rs`. Rig component Git fields are declared in `crates/homeboy-rig/src/spec.rs`. |
+| Component `remote_url`; rig component `remote_url`, `branch`, `ref`, `default_ref`, `stack`; project attachment local path; standalone component registry fallback. | Component portable/registry `remote_url` is effective for normal component operations. For project-attached components, standalone registry `remote_url` fills in only when the portable component lacks it. Rig component Git metadata is used by rig status/materialization paths and is not merged into the component registry. Portable discovery auto-detects `remote_url` from git origin only when absent. | Project standalone fallback for `remote_url` is in `crates/homeboy-core/src/project/component/resolution.rs`. Portable auto-detection is in `crates/homeboy-core/src/component/portable.rs`. Component remote fields are declared in `crates/contracts/homeboy-component-contract/src/model.rs`. Rig component Git fields are declared in `crates/homeboy-rig/src/spec.rs`. |
 
 ### Runner And Server Runner Settings
 
 | Locations | Effective precedence | Resolving code path |
 | --- | --- | --- |
 | Standalone runner config; server-embedded runner config; built-in `local` runner; global lab preferred runner; runner env/settings/resources/security. | The `local` runner ID is built in and wins for `runner load local`. For other IDs, standalone local runner config is used only when its kind is `Local`; otherwise loading falls through to a server-embedded runner with the same ID. Runner listing includes the built-in local runner, standalone local runners, then server-embedded runners. Global `lab.preferred_runner` influences default lab runner selection from the listed SSH runners but does not merge runner settings. | Runner load order is in `crates/homeboy-lab-runner/src/lib.rs`. Built-in local runner is in `crates/homeboy-lab-runner/src/lib.rs`. Runner listing composition is in `crates/homeboy-lab-runner/src/lib.rs`. Global lab preferred runner selection begins in `crates/homeboy-lab-runner/src/lib.rs`. Shared runner settings/security structs are declared in `crates/homeboy-core/src/server/mod.rs`. |
-
-### Priority Labels
-
-| Locations | Effective precedence | Resolving code path |
-| --- | --- | --- |
-| Global `triage.priority_labels`; component `priority_labels`; fleet `priority_labels`. | The schemas expose three places, but the actual effective merge order was not fully traced in this investigation window. The global field exists as an optional triage default; component and fleet fields are independent optional labels. Treat precedence as ambiguous until the triage collector paths are audited. | Global triage labels are declared in `crates/homeboy-core/src/defaults.rs`. Component labels are declared in `crates/contracts/homeboy-component-contract/src/model.rs`. Fleet labels are declared in `crates/homeboy-core/src/fleet/mod.rs`. |
 
 ### Lifecycle Hooks
 
@@ -119,7 +113,6 @@ Investigation for Extra-Chill/homeboy#7519. This document maps configuration con
 | --- | --- |
 | Fleet override selection | `resolve_fleet_overrides()` returns the first matching fleet from `fleet::list()` in `crates/homeboy-core/src/project/component/overrides.rs`. `config::list()` sorts entities by ID in `crates/homeboy-core/src/config.rs`, so the winner is deterministic but ID-order-dependent when a project belongs to multiple fleets with matching component overrides. |
 | Extension capability ownership | `resolve_extension_for_capability()` errors when multiple linked extensions support the same capability in `crates/homeboy-core/src/extension/capability.rs`; there is no precedence tie-breaker. |
-| Priority labels | The schemas overlap, but this pass did not trace the triage collector merge path. Do not assume global/project/fleet/component precedence without auditing triage execution code. |
 | Rig vs component settings | Rig component `extensions`, workload settings/defaults, and component registry `extensions` are separate resolution surfaces. They meet in bench/trace dispatch, but there is no single global merge order across every command. |
 
 ## Simplification Proposal

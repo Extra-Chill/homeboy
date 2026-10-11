@@ -90,7 +90,6 @@ fn component_from_spec(
         id: registry_id.unwrap_or(component_id).to_string(),
         local_path,
         remote_url: spec.remote_url.clone(),
-        triage_remote_url: spec.triage_remote_url.clone(),
         extensions: spec.extensions.clone(),
         ..Component::default()
     };
@@ -108,9 +107,6 @@ fn apply_rig_component_overrides(
     }
     if let Some(remote_url) = spec.remote_url.clone() {
         component.remote_url = Some(remote_url);
-    }
-    if let Some(triage_remote_url) = spec.triage_remote_url.clone() {
-        component.triage_remote_url = Some(triage_remote_url);
     }
     if let Some(extensions) = spec.extensions.clone() {
         component.extensions = Some(extensions);
@@ -174,7 +170,6 @@ mod tests {
             path_setting: None,
             checkout_root: None,
             remote_url: None,
-            triage_remote_url: None,
             stack: None,
             lab_stack: None,
             branch: None,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 #[test]
-fn shipped_discovery_bypasses_runtime_with_composed_and_extension_commands() {
+fn shipped_discovery_bypasses_runtime_with_builtin_and_extension_commands() {
     let home = tempfile::tempdir().expect("temporary home");
     write_cli_extension(home.path(), "sample-runtime", "sample-cli");
 
@@ -20,7 +20,7 @@ fn shipped_discovery_bypasses_runtime_with_composed_and_extension_commands() {
         ("long-help", &["--help"][..]),
         ("short-help", &["-h"][..]),
         ("version", &["--version"][..]),
-        ("nested-help", &["triage", "--help"][..]),
+        ("nested-help", &["status", "--help"][..]),
         ("extension-help", &["sample-cli", "--help"][..]),
     ] {
         let sentinel = home.path().join(format!("{case}-runtime-initialized"));
@@ -49,8 +49,8 @@ fn shipped_discovery_bypasses_runtime_with_composed_and_extension_commands() {
         assert!(!stdout.is_empty(), "{} produced no output", args.join(" "));
         if matches!(case, "long-help" | "short-help") {
             assert!(
-                stdout.contains("triage"),
-                "missing composed command: {stdout}"
+                stdout.contains("status"),
+                "missing built-in command: {stdout}"
             );
             assert!(
                 stdout.contains("sample-cli"),

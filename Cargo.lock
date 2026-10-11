@@ -726,7 +726,6 @@ dependencies = [
  "homeboy-lab-contract",
  "homeboy-product-identity",
  "homeboy-runner-contract",
- "homeboy-triage",
  "libc",
  "reqwest",
  "rusqlite",
@@ -1318,18 +1317,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "homeboy-triage"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "homeboy-core",
- "homeboy-rig",
- "serde",
- "serde_json",
 ]
 
 [[package]]

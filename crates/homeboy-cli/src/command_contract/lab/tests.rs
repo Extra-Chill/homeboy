@@ -13,14 +13,8 @@
 //! registry (#10313) was a declared path spelling clap does not expose, which
 //! is likewise unobservable here without a test.
 
-use super::{
-    lab_cli_arguments_are_visible_for_path, scope_lab_cli_arguments_with, LabCommandRouteSupport,
-    LAB_VISIBLE_COMMAND_PATHS,
-};
-use crate::cli_runtime::CliCapability;
+use super::{lab_cli_arguments_are_visible_for_path, LAB_VISIBLE_COMMAND_PATHS};
 use crate::cli_surface::{current_command_surface, Cli, CommandSurfaceEntry};
-use crate::command_contract::{CommandPortabilityContract, LabCommandContract, LabCommandRoute};
-use crate::commands::route::{route_composed_lab_command, ComposedLabRouteOptions};
 use clap::{CommandFactory, FromArgMatches};
 
 fn cook_command(command: clap::Command) -> clap::Command {
@@ -230,7 +224,7 @@ fn owned(path: &[&str]) -> Vec<String> {
 fn every_declared_path_is_visible_and_undeclared_paths_are_not() {
     for path in LAB_VISIBLE_COMMAND_PATHS {
         assert!(
-            lab_cli_arguments_are_visible_for_path(&owned(path), &[], true),
+            lab_cli_arguments_are_visible_for_path(&owned(path)),
             "declared Lab-visible path `{}` is not visible",
             path.join(" ")
         );
@@ -240,7 +234,7 @@ fn every_declared_path_is_visible_and_undeclared_paths_are_not() {
     // subcommand a previous refactor wrongly advertised these flags on.
     for path in [vec![], vec!["contract"], vec!["contract", "manifest"]] {
         assert!(
-            !lab_cli_arguments_are_visible_for_path(&owned(&path), &[], true),
+            !lab_cli_arguments_are_visible_for_path(&owned(&path)),
             "`{}` must not advertise Lab placement flags",
             path.join(" ")
         );
@@ -344,206 +338,4 @@ fn every_lab_visible_path_has_an_invocation_with_a_lab_contract() {
             argv.join(" ")
         );
     }
-}
-
-struct ComposedLabCapability;
-
-impl CliCapability for ComposedLabCapability {
-    fn name(&self) -> &'static str {
-        "composed-lab"
-    }
-
-    fn command(&self) -> clap::Command {
-        clap::Command::new(self.name()).arg(
-            clap::Arg::new("destructive")
-                .long("destructive")
-                .action(clap::ArgAction::SetTrue),
-        )
-    }
-
-    fn run(&self, _: &clap::ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
-        Ok((serde_json::Value::Null, 0))
-    }
-
-    fn lab_command_route(
-        &self,
-        matches: &clap::ArgMatches,
-    ) -> crate::core::Result<Option<LabCommandRoute>> {
-        let contract = if matches.get_flag("destructive") {
-            LabCommandContract::local_only(
-                "composed lab",
-                "destructive composed commands stay local",
-            )
-        } else {
-            LabCommandContract::portable("composed lab", None, false, &[])
-        };
-        Ok(Some(LabCommandRoute::new(
-            CommandPortabilityContract::lab(contract),
-            Vec::new(),
-            None,
-        )))
-    }
-
-    fn lab_command_route_support(&self) -> Option<LabCommandRouteSupport> {
-        Some(LabCommandRouteSupport {
-            visible_paths: &[&["composed-lab"]],
-            message_label: "composed-lab",
-            hint_label: "composed lab",
-        })
-    }
-}
-
-#[test]
-fn composed_command_uses_the_typed_route_and_scoped_lab_surface() {
-    let capability = ComposedLabCapability;
-    let support = capability
-        .lab_command_route_support()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let summary = super::lab_runner_support_summary(&support);
-    assert!(summary.supported_labels.contains(&"composed-lab"));
-    assert!(summary.hint.contains("composed lab"));
-    let command =
-        scope_lab_cli_arguments_with(Cli::command().subcommand(capability.command()), &support);
-    let matches = command
-        .clone()
-        .try_get_matches_from(["homeboy", "composed-lab", "--placement", "lab"])
-        .expect("composed Lab flags parse only through its declared support");
-    let (_, subcommand_matches) = matches.subcommand().expect("composed command match");
-    let route = capability
-        .lab_command_route(subcommand_matches)
-        .expect("route resolution")
-        .expect("Lab route");
-    assert!(route
-        .lab_contract()
-        .is_some_and(|contract| contract.is_portable()));
-
-    let destructive = command
-        .try_get_matches_from(["homeboy", "composed-lab", "--destructive"])
-        .expect("composed destructive command parses");
-    let (_, destructive_matches) = destructive.subcommand().expect("composed command match");
-    assert!(!capability
-        .lab_command_route(destructive_matches)
-        .expect("route resolution")
-        .expect("Lab route")
-        .lab_contract()
-        .expect("contract")
-        .is_portable());
-}
-
-fn composed_options(placement: crate::cli_surface::Placement) -> ComposedLabRouteOptions<'static> {
-    ComposedLabRouteOptions {
-        placement,
-        runner: None,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        delete_workspace_on_failure: false,
-        detach_after_handoff: false,
-        runner_env: &[],
-        runner_secret_env: &[],
-        lab_env_json: None,
-        runner_workspace_root: None,
-    }
-}
-
-fn composed_preflight(
-    placement: crate::cli_surface::Placement,
-) -> homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult {
-    use homeboy::core::parsed_command_preflight::{
-        ControllerExecution, DeferredWorkloadPolicy, GenericRoutePolicySnapshot, LabRouteIntent,
-        ParsedCommandIdentity, ParsedCommandPolicySnapshot, ParsedCommandPreflightInput,
-        PlacementIntent, ProvenanceRequirement, ResourceAdmissionEvidence,
-        ResourceAdmissionRequirement, RunnerIntent, RunnerNormalization,
-    };
-    let placement_intent = match placement {
-        crate::cli_surface::Placement::Auto => PlacementIntent::Auto,
-        crate::cli_surface::Placement::Local => PlacementIntent::Local,
-        crate::cli_surface::Placement::Lab => PlacementIntent::Lab,
-        crate::cli_surface::Placement::LabOrLocal => PlacementIntent::LabOrLocal,
-    };
-    homeboy::core::parsed_command_preflight::resolve_parsed_command_preflight(
-        vec!["homeboy".to_string(), "composed-lab".to_string()],
-        ParsedCommandPreflightInput {
-            identity: ParsedCommandIdentity {
-                family: "composed-lab".to_string(),
-                operation: Vec::new(),
-            },
-            resource_admission: ResourceAdmissionRequirement::Exempt,
-            controller_execution: ControllerExecution::Ordinary,
-            deferred_workload: DeferredWorkloadPolicy::Forbidden,
-            placement: placement_intent,
-            runner: RunnerIntent::Default,
-            runner_normalization: RunnerNormalization::None,
-            lab_route: LabRouteIntent::Supported { automatic: true },
-            provenance: ProvenanceRequirement::CaptureExecution,
-        },
-        ParsedCommandPolicySnapshot {
-            resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
-            resource_policy: None,
-            lab_readiness: None,
-            selected_runner_id: None,
-            generic_route: GenericRoutePolicySnapshot {
-                command_supports_lab: true,
-                automatic_authorized: false,
-                selected_runner_id: None,
-            },
-            deferred_pressure_refusal: false,
-            runner_admitted: false,
-            runner_incompatible: false,
-            auto_local_capacity_fallback: false,
-        },
-    )
-    .expect("composed preflight resolves")
-}
-
-#[test]
-fn composed_routes_enter_generic_lab_dispatch_and_reject_local_only_lab_placement() {
-    let portable = LabCommandRoute::new(
-        CommandPortabilityContract::lab(LabCommandContract::portable(
-            "composed portable",
-            Some("--write"),
-            true,
-            &["fixture-capability"],
-        )),
-        vec!["fixture-extension".to_string()],
-        None,
-    );
-    let error = route_composed_lab_command(
-        &portable,
-        composed_options(crate::cli_surface::Placement::Lab),
-        &["homeboy".to_string(), "composed-lab".to_string()],
-        None,
-        &composed_preflight(crate::cli_surface::Placement::Lab),
-    )
-    .expect_err("required Lab placement enters the generic dispatcher and requires a runner");
-    assert!(error
-        .message
-        .contains("required Lab placement has no selected ready runner"));
-    let contract = portable
-        .lab_route_contract()
-        .expect("portable route contract");
-    assert_eq!(contract.required_extensions, ["fixture-extension"]);
-    assert_eq!(contract.required_capabilities[0].name, "fixture-capability");
-    assert_eq!(portable.lab_offload_mutation_flag(), Some("--write"));
-    assert!(portable.lab_offload_captures_mutation_patch());
-
-    let local_only = LabCommandRoute::new(
-        CommandPortabilityContract::lab(LabCommandContract::local_only(
-            "composed destructive",
-            "destructive composed commands stay local",
-        )),
-        Vec::new(),
-        None,
-    );
-    let error = route_composed_lab_command(
-        &local_only,
-        composed_options(crate::cli_surface::Placement::Lab),
-        &["homeboy".to_string(), "composed-lab".to_string()],
-        None,
-        &composed_preflight(crate::cli_surface::Placement::Lab),
-    )
-    .expect_err("local-only composed routes fail closed for explicit Lab placement");
-    assert!(error
-        .message
-        .contains("destructive composed commands stay local"));
 }

@@ -140,7 +140,7 @@ mod tests {
     fn schedule(id: &str) -> Schedule {
         Schedule {
             id: id.to_string(),
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),

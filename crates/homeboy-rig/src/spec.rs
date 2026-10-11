@@ -1245,15 +1245,9 @@ pub struct ComponentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout_root: Option<String>,
 
-    /// Optional source repository URL. When omitted, `homeboy triage rig`
-    /// falls back to `git -C <path> remote get-url origin`.
+    /// Optional source repository URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
-
-    /// Reporting-only GitHub remote override for `homeboy triage rig`.
-    /// Does not affect git, deploy, release, or rig pipeline operations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage_remote_url: Option<String>,
 
     /// Stack ID this component should track. `homeboy rig sync` and explicit
     /// `stack` pipeline steps use this to delegate combined-fixes upkeep to

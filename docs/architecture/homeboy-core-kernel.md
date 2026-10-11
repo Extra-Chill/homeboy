@@ -110,8 +110,8 @@ workflows succeeded, but do not report a capability-isolated build delta.
 | Audit / Refactor | Extract adapters and language/domain implementations outward | core directly imports Audit; its provider registrations are explicit at `cli_runtime.rs:170-209`; existing [#2240](https://github.com/Extra-Chill/homeboy/issues/2240) and [#6855](https://github.com/Extra-Chill/homeboy/issues/6855) track ecosystem removal |
 | Rig | Retain generic materialization contract; no package extraction now | Runner, Lab, and agent-task consume rig data. `cli_runtime.rs:197-200` shows a provider seam, but a separate package would not reduce the default graph until CLI composition changes |
 | Fuzz | Accepted first optional command package | extension manifests supply `homeboy/fuzz-campaign/v1` (`homeboy-extensions/nodejs/nodejs.json:91-98`); retain the generic artifact/evidence contract; reuse [#6766](https://github.com/Extra-Chill/homeboy/issues/6766) for schema cleanup |
-| Issues / Triage | Accepted as one optional automation package | `homeboy-triage` is directly linked only by CLI; persisted `triage_items` records are owned by the generic observation store (`observation/store/schema.rs:122-151`) and need a compatibility reader before package removal |
-| Tunnel | Accepted optional operations package | direct `homeboy_tunnel::register()` at `cli_runtime.rs:169`; `homeboy tunnel --help` exposes service and preview commands; no sibling repository consumer was found in the inspected Extensions checkout |
+| Issues | Accepted as one optional automation package | Triage was deleted outright in [#15774](https://github.com/Extra-Chill/homeboy/issues/15774) instead of being optionalized |
+| Tunnel | Deleted in [#15774](https://github.com/Extra-Chill/homeboy/issues/15774) | no current consumer; deleted rather than optionalized |
 | Release / Deploy | Retain typed contracts and first-class command packages; no optionalization now | Extensions explicitly rely on `homeboy release` and `homeboy deploy` (`homeboy-extensions/README.md:54-60`, Cloudflare Workers README); Homeboy release automation also invokes `homeboy release` in `.github/workflows/release.yml` |
 | Remote operations | No extraction decision | [#8015](https://github.com/Extra-Chill/homeboy/issues/8015) completed with a no-premature-consolidation direction. Keep target/auth/transport primitives in core; do not create an operations layer until it deletes duplicated behavior |
 | Runs / evidence | Retain in core | Runs, artifacts, schema migrations, and recovery are kernel durability concerns. `observation/store/schema.rs:17-212` owns the shared SQLite records and indexes |
@@ -151,8 +151,10 @@ to a package-location move without rollback-compatible readers.
    compiled capability has no registration. This is the prerequisite for deletion.
 2. Move Audit/Refactor adapters and ecosystem grammar knowledge above core through
    the existing #2240/#6855 tracks; remove core's direct Audit edges.
-3. Establish optional command-package composition for Fuzz, Issues/Triage, and
-   Tunnel while preserving their command/result schemas and generated help.
+3. Establish optional command-package composition for Fuzz and Issues while
+   preserving their command/result schemas and generated help. (Triage and
+   Tunnel were deleted in #15774, together with the descriptor-capability seam
+   that had only ever registered Triage.)
 4. Measure the default graph, warm/clean build, focused tests, and binary size
    against the same shared target before claiming a reduction.
 5. Migrate proven external Rust callers off `homeboy-core`/`homeboy-cli`

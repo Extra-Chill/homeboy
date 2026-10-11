@@ -162,8 +162,7 @@ pub fn write_portable_config(dir: &Path, component: &Component) -> Result<()> {
 }
 
 pub(crate) fn validate_component_remote_urls(component: &Value) -> Result<()> {
-    validate_github_remote_url_field(component, "remote_url")?;
-    validate_github_remote_url_field(component, "triage_remote_url")
+    validate_github_remote_url_field(component, "remote_url")
 }
 
 fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()> {
@@ -651,27 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_invalid_triage_remote_url() {
-        let dir = TempDir::new().expect("temp dir");
-        let mut component = Component::new(
-            "test-comp".to_string(),
-            dir.path().to_string_lossy().to_string(),
-            String::new(),
-            None,
-        );
-        component.triage_remote_url = Some("https://gitlab.com/foo/bar.git".to_string());
-
-        let result = write_portable_config(dir.path(), &component);
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().code.as_str(),
-            "validation.invalid_argument"
-        );
-        assert!(!dir.path().join("homeboy.json").exists());
-    }
-
-    #[test]
     fn test_validate_component_remote_urls_rejects_invalid_merge_without_rewriting_homeboy_json() {
         crate::test_support::with_isolated_home(|home| {
             let repo = home.path().join("my-comp");
@@ -722,7 +700,6 @@ mod tests {
             None,
         );
         component.remote_url = Some("https://github.com/Extra-Chill/homeboy.git".to_string());
-        component.triage_remote_url = Some("git@github.com:Extra-Chill/homeboy.git".to_string());
 
         write_portable_config(dir.path(), &component).expect("GitHub remotes should be valid");
 
@@ -731,10 +708,6 @@ mod tests {
         assert_eq!(
             json.get("remote_url").and_then(|v| v.as_str()),
             Some("https://github.com/Extra-Chill/homeboy.git")
-        );
-        assert_eq!(
-            json.get("triage_remote_url").and_then(|v| v.as_str()),
-            Some("git@github.com:Extra-Chill/homeboy.git")
         );
     }
 
@@ -749,8 +722,6 @@ mod tests {
         );
         component.remote_url =
             Some("git@github.example.com:example-org/intelligence.git".to_string());
-        component.triage_remote_url =
-            Some("https://github.example.com/example-org/intelligence.git".to_string());
 
         write_portable_config(dir.path(), &component)
             .expect("GitHub Enterprise remotes should be valid");

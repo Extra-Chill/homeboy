@@ -485,8 +485,8 @@ mod tests {
             vec!["fleet", "check", "prod"]
         );
         assert_eq!(
-            split_command("  triage   --json  ").expect("split"),
-            vec!["triage", "--json"]
+            split_command("  status   --json  ").expect("split"),
+            vec!["status", "--json"]
         );
         assert_eq!(
             split_command(r#"deploy prod --note "nightly drift check""#).expect("split"),
@@ -545,7 +545,7 @@ mod tests {
     fn declared(id: &str, notify_on: NotifyPolicy) -> Schedule {
         Schedule {
             id: id.to_string(),
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
@@ -591,7 +591,7 @@ mod tests {
             );
             let schedule = Schedule {
                 id: "stale-marker".to_string(),
-                command: Some(vec!["triage".to_string()]),
+                command: Some(vec!["status".to_string()]),
                 exec: None,
                 steps: Vec::new(),
                 every: Cadence::from_seconds(3_600).expect("cadence"),

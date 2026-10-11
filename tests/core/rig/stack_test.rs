@@ -16,7 +16,6 @@ fn component(path: &str, stack: Option<&str>) -> ComponentSpec {
         path_setting: None,
         checkout_root: None,
         remote_url: None,
-        triage_remote_url: None,
         stack: stack.map(str::to_string),
         lab_stack: None,
         branch: None,

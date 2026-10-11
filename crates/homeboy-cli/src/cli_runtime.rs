@@ -1,4 +1,4 @@
-use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgMatches, Command, FromArgMatches, Parser};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read, Write};
 use std::process::Command as ProcessCommand;
@@ -10,7 +10,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::capability_registry::CommandCapabilityRegistry;
 use crate::cli_surface::{
     command_safety_manifest_from_dynamic, command_surface_from, Cli, CommandSafetyManifest,
     CommandSurfaceCommandProvenance, CommandSurfaceDoctorReport, CommandSurfaceRegistry, Commands,
@@ -21,7 +20,6 @@ use crate::command_capability::{
     classify as classify_command_capability, homeboy_owned_args, requires_startup_reconciliation,
     CommandCapability,
 };
-use crate::command_contract::{LabCommandRoute, LabCommandRouteSupport};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -45,81 +43,6 @@ use homeboy_runner_contract::{
     RUNNER_API_CAPABILITIES_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 use homeboy_upgrade::upgrade;
-
-/// A typed command package installed by a product composition root.
-///
-/// The base CLI owns common globals and response envelopes, while capability
-/// crates own their Clap grammar and execution. Keeping this boundary here lets
-/// a kernel-only CLI build omit product capabilities entirely.
-pub trait CliCapability: Sync {
-    fn name(&self) -> &'static str;
-    fn command(&self) -> Command;
-    /// Typed descriptor capabilities participate in the same fail-closed
-    /// preflight as built-ins. Dynamic shell extensions intentionally remain
-    /// outside this boundary because they are not typed descriptors.
-    fn preflight(
-        &self,
-        _matches: &ArgMatches,
-        _normalized_args: &[String],
-    ) -> crate::core::parsed_command_preflight::ParsedCommandPreflightInput {
-        use crate::core::parsed_command_preflight::{
-            ControllerExecution, DeferredWorkloadPolicy, LabRouteIntent, ParsedCommandIdentity,
-            ParsedCommandPreflightInput, PlacementIntent, ProvenanceRequirement,
-            ResourceAdmissionRequirement, RunnerIntent, RunnerNormalization,
-        };
-        ParsedCommandPreflightInput {
-            identity: ParsedCommandIdentity {
-                family: self.name().to_string(),
-                operation: Vec::new(),
-            },
-            resource_admission: ResourceAdmissionRequirement::Exempt,
-            controller_execution: ControllerExecution::ControllerOnly,
-            deferred_workload: DeferredWorkloadPolicy::Forbidden,
-            placement: PlacementIntent::Local,
-            runner: RunnerIntent::Default,
-            runner_normalization: RunnerNormalization::None,
-            lab_route: LabRouteIntent::Unsupported,
-            provenance: ProvenanceRequirement::CaptureExecution,
-        }
-    }
-    fn preflight_policy(
-        &self,
-        _matches: &ArgMatches,
-        _normalized_args: &[String],
-    ) -> crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
-        crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
-            resource_admission_evidence:
-                crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
-            resource_policy: None,
-            lab_readiness: None,
-            selected_runner_id: None,
-            generic_route: crate::core::parsed_command_preflight::GenericRoutePolicySnapshot {
-                command_supports_lab: false,
-                automatic_authorized: false,
-                selected_runner_id: None,
-            },
-            deferred_pressure_refusal: false,
-            runner_admitted: false,
-            runner_incompatible: false,
-            auto_local_capacity_fallback: false,
-        }
-    }
-    fn run(&self, matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)>;
-
-    /// Resolve a descriptor-composed command through the same typed Lab route
-    /// contract as a built-in command. Absent remains fail-closed.
-    fn lab_command_route(
-        &self,
-        _matches: &ArgMatches,
-    ) -> crate::core::Result<Option<LabCommandRoute>> {
-        Ok(None)
-    }
-
-    /// Declares scoped help and runner-guidance metadata for the route.
-    fn lab_command_route_support(&self) -> Option<LabCommandRouteSupport> {
-        None
-    }
-}
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 pub(crate) const COOK_STARTUP_LAUNCHER_ID_ENV: &str = "HOMEBOY_COOK_STARTUP_LAUNCHER_ID";
@@ -871,7 +794,6 @@ pub(crate) fn select_unmaterialized_cook_runner(
 
 pub struct CliRuntime {
     extension_discovery: OnceLock<ExtensionCliDiscovery>,
-    capabilities: CommandCapabilityRegistry,
 }
 
 struct ExtensionCliCommand {
@@ -1149,7 +1071,6 @@ fn fanout_resume_execution_context(
 /// directory.
 fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
-    capabilities: &[&dyn CliCapability],
 ) -> Result<(), crate::core::error::Error> {
     // Register the runner daemon-exec driver so the daemon's /exec endpoint
     // can prepare and run a runner job as a local child without core
@@ -1298,12 +1219,8 @@ fn register_startup_providers_after_reconcile(
     // Register the Lab-runner hint provider so core::runner can compose
     // `--runner`/`--placement` unsupported errors from the command-spec table
     // without depending on `command_contract`.
-    let lab_support = capabilities
-        .iter()
-        .filter_map(|capability| capability.lab_command_route_support())
-        .collect::<Vec<_>>();
-    crate::runner::set_lab_runner_hint_provider(move || {
-        let summary = crate::command_contract::lab_runner_support_summary(&lab_support);
+    crate::runner::set_lab_runner_hint_provider(|| {
+        let summary = crate::command_contract::lab_runner_support_summary();
         crate::runner::LabRunnerHint {
             hint: summary.hint,
             unsupported_message: summary.unsupported_message,
@@ -1325,31 +1242,14 @@ pub fn register_all_providers(
     agent_task: &crate::core::defaults::AgentTaskConfig,
 ) -> Result<(), crate::core::error::Error> {
     register_startup_providers_before_reconcile();
-    register_startup_providers_after_reconcile(agent_task, &[])
+    register_startup_providers_after_reconcile(agent_task)
 }
 
 impl CliRuntime {
     pub fn new() -> Self {
-        Self::with_capabilities(&[])
-    }
-
-    pub fn with_capabilities(capabilities: &'static [&'static dyn CliCapability]) -> Self {
-        Self::try_with_required_capabilities(capabilities, &[])
-            .expect("CLI capability composition must be valid")
-    }
-
-    pub fn try_with_required_capabilities(
-        capabilities: &'static [&'static dyn CliCapability],
-        required: &[&str],
-    ) -> crate::core::Result<Self> {
-        Ok(Self {
+        Self {
             extension_discovery: OnceLock::new(),
-            capabilities: CommandCapabilityRegistry::compose(
-                capabilities,
-                required,
-                &Cli::command(),
-            )?,
-        })
+        }
     }
 
     pub fn run_startup_fast_path(&self, args: &[String]) -> Option<std::process::ExitCode> {
@@ -1378,12 +1278,7 @@ impl CliRuntime {
         register_startup_providers_before_reconcile();
         if std::env::var_os(CONTROLLER_FALLBACK_RECONCILIATION_ENV).is_some() {
             let config = crate::core::defaults::load_config();
-            if register_startup_providers_after_reconcile(
-                &config.agent_task,
-                &self.capabilities.capabilities(),
-            )
-            .is_err()
-            {
+            if register_startup_providers_after_reconcile(&config.agent_task).is_err() {
                 return std::process::ExitCode::from(2);
             }
             let _ =
@@ -1437,10 +1332,7 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         let config = crate::core::defaults::load_config();
-        if let Err(error) = register_startup_providers_after_reconcile(
-            &config.agent_task,
-            &self.capabilities.capabilities(),
-        ) {
+        if let Err(error) = register_startup_providers_after_reconcile(&config.agent_task) {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
@@ -1544,17 +1436,10 @@ impl CliRuntime {
         }
     }
 
-    fn run_matches(&self, matches: ArgMatches, normalized: Vec<String>) -> std::process::ExitCode {
-        self.run_matches_with_capability_admission(matches, normalized, None)
-    }
-
-    fn run_matches_with_capability_admission(
+    fn run_matches(
         &self,
         matches: ArgMatches,
         mut normalized: Vec<String>,
-        capability_admission: Option<
-            crate::core::parsed_command_preflight::ResourceAdmissionEvidence,
-        >,
     ) -> std::process::ExitCode {
         let command_identity = command_identity_from_matches(&matches);
 
@@ -1572,189 +1457,6 @@ impl CliRuntime {
             .flatten()
             .cloned();
         crate::core::set_artifact_root_override(artifact_root_override.clone());
-
-        if let Some((capability, capability_matches)) = self.capability_matches(&matches) {
-            let route = match capability.lab_command_route(capability_matches) {
-                Ok(route) => route,
-                Err(error) => {
-                    output_runtime::emit_json_result_for_identity(
-                        Err(error),
-                        output_file.as_deref(),
-                        2,
-                        &command_identity,
-                    );
-                    return std::process::ExitCode::from(2);
-                }
-            };
-            let placement = *matches
-                .get_one::<crate::cli_surface::Placement>("placement")
-                .unwrap_or(&crate::cli_surface::Placement::Auto);
-            let runner = matches.get_one::<String>("runner").map(String::as_str);
-            if route.is_none()
-                && (placement == crate::cli_surface::Placement::Lab || runner.is_some())
-            {
-                let error = crate::core::Error::validation_invalid_argument(
-                    "placement",
-                    "this composed command has no Lab route contract",
-                    None,
-                    None,
-                );
-                output_runtime::emit_json_result_for_identity(
-                    Err(error),
-                    output_file.as_deref(),
-                    2,
-                    &command_identity,
-                );
-                return std::process::ExitCode::from(2);
-            }
-            let mut routed_preflight = None;
-            if let Some(route) = route {
-                let runner_env = matches
-                    .get_many::<String>("runner_env")
-                    .map(|values| values.cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                let runner_secret_env = matches
-                    .get_many::<String>("runner_secret_env")
-                    .map(|values| values.cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                let options = crate::commands::route::ComposedLabRouteOptions {
-                    placement,
-                    runner,
-                    allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
-                    skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
-                    delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
-                    detach_after_handoff: matches.get_flag("wait"),
-                    runner_env: &runner_env,
-                    runner_secret_env: &runner_secret_env,
-                    lab_env_json: matches
-                        .get_one::<String>("lab_env_json")
-                        .map(String::as_str),
-                    runner_workspace_root: matches
-                        .get_one::<String>("runner_workspace_root")
-                        .map(String::as_str),
-                };
-                if crate::commands::route::is_agent_task_providers_query(&normalized) {
-                    if let Some(runner_id) = options.runner.as_deref() {
-                        let error =
-                            crate::commands::route::runner_provider_query_requires_runner_exec(
-                                runner_id,
-                                &normalized,
-                            );
-                        output_runtime::emit_json_result_for_identity(
-                            Err(error),
-                            output_file.as_deref(),
-                            2,
-                            &command_identity,
-                        );
-                        return std::process::ExitCode::from(2);
-                    }
-                }
-                if let Some(exit_code) = preflight_composed_lab_route(
-                    &route,
-                    &options,
-                    output_file.as_deref(),
-                    &command_identity,
-                ) {
-                    return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-                }
-                let preflight = match resolve_composed_capability_preflight(
-                    capability,
-                    capability_matches,
-                    &route,
-                    &options,
-                    &normalized,
-                ) {
-                    Ok(preflight) => preflight,
-                    Err(error) => {
-                        output_runtime::emit_json_result_for_identity(
-                            Err(error),
-                            output_file.as_deref(),
-                            2,
-                            &command_identity,
-                        );
-                        return std::process::ExitCode::from(2);
-                    }
-                };
-                crate::core::parsed_command_preflight::capture_result(preflight.clone());
-                crate::commands::utils::execution_provenance::capture(&preflight);
-                match crate::commands::route::route_composed_lab_command(
-                    &route,
-                    options,
-                    &normalized,
-                    output_file.as_deref(),
-                    &preflight,
-                ) {
-                    Ok(Some(exit_code)) => {
-                        return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        output_runtime::emit_json_result_for_identity(
-                            Err(error),
-                            output_file.as_deref(),
-                            2,
-                            &command_identity,
-                        );
-                        return std::process::ExitCode::from(2);
-                    }
-                }
-                routed_preflight = Some(preflight);
-            }
-            if let Some(path) = output_file.as_deref() {
-                if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
-                    return exit;
-                }
-            }
-            if let Some(preflight) = routed_preflight {
-                let (json_result, exit_code) = if matches!(
-                    preflight.resource_admission,
-                    crate::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
-                ) {
-                    (
-                        Err(resource_admission_error(&preflight.resource_admission)),
-                        2,
-                    )
-                } else {
-                    match capability.run(capability_matches) {
-                        Ok((value, exit_code)) => (Ok(value), exit_code),
-                        Err(error) => (Err(error), 2),
-                    }
-                };
-                output_runtime::emit_json_result_for_identity(
-                    json_result,
-                    output_file.as_deref(),
-                    exit_code,
-                    &command_identity,
-                );
-                return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-            }
-            let input = capability.preflight(capability_matches, &normalized);
-            // Capabilities declare their requirement and policy only. Runtime
-            // owns the host probe, then core derives the admission verdict.
-            let evidence = capability_admission.unwrap_or_else(|| match input.resource_admission {
-                crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt => {
-                    crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable
-                }
-                crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Required { .. } => {
-                    crate::commands::resources::run_preflight()
-                        .map(|(resources, _)| resource_policy::resource_admission_evidence(&resources))
-                        .unwrap_or(crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable)
-                }
-            });
-            let (json_result, exit_code) = self.run_capability_with_admission_evidence(
-                capability,
-                capability_matches,
-                &normalized,
-                evidence,
-            );
-            output_runtime::emit_json_result_for_identity(
-                json_result,
-                output_file.as_deref(),
-                exit_code,
-                &command_identity,
-            );
-            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-        }
 
         if let Some(extension_cmd) = self.try_parse_extension_cli_command(&matches) {
             if let Some(path) = output_file.as_deref() {
@@ -2285,10 +1987,7 @@ impl CliRuntime {
 
     fn composed_command_registry(&self) -> ComposedCommandRegistry {
         let discovery = self.extension_discovery();
-        self.capabilities
-            .validate_external_names(discovery.info.iter().map(|info| info.tool.as_str()))
-            .expect("dynamic and typed capability command names must not conflict");
-        let mut command = build_augmented_command(&discovery.info, &discovery.health);
+        let command = build_augmented_command(&discovery.info, &discovery.health);
         let mut provenance = Cli::command_with_scoped_lab_args()
             .get_subcommands()
             .filter(|subcommand| !subcommand.is_hide_set())
@@ -2306,72 +2005,9 @@ impl CliRuntime {
                     registry: CommandSurfaceRegistry::Extension,
                 }),
         );
-        for entry in self.capabilities.entries() {
-            if !entry.command.is_hide_set() {
-                provenance.push(CommandSurfaceCommandProvenance {
-                    command: entry.capability.name().to_string(),
-                    registry: CommandSurfaceRegistry::Descriptor,
-                });
-            }
-            command = command.subcommand(entry.command.clone());
-        }
-        let support = self
-            .capabilities
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.capability.lab_command_route_support())
-            .collect::<Vec<_>>();
         ComposedCommandRegistry {
-            command: crate::command_contract::scope_composed_lab_cli_arguments(command, &support),
+            command,
             provenance,
-        }
-    }
-
-    fn capability_matches<'a>(
-        &'a self,
-        matches: &'a ArgMatches,
-    ) -> Option<(&'a dyn CliCapability, &'a ArgMatches)> {
-        let (name, sub_matches) = matches.subcommand()?;
-        self.capabilities
-            .find(name)
-            .map(|capability| (capability, sub_matches))
-    }
-
-    fn run_capability_with_admission_evidence(
-        &self,
-        capability: &dyn CliCapability,
-        matches: &ArgMatches,
-        normalized: &[String],
-        evidence: crate::core::parsed_command_preflight::ResourceAdmissionEvidence,
-    ) -> (crate::core::Result<serde_json::Value>, i32) {
-        let input = capability.preflight(matches, normalized);
-        let mut policy = capability.preflight_policy(matches, normalized);
-        // Runtime owns the host observation. A capability can declare its
-        // requirement but cannot bless itself by supplying admission evidence.
-        policy.resource_admission_evidence = evidence;
-        let preflight =
-            match crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
-                normalized.to_vec(),
-                input,
-                policy,
-            ) {
-                Ok(preflight) => preflight,
-                Err(error) => return (Err(error), 2),
-            };
-        crate::core::parsed_command_preflight::capture_result(preflight.clone());
-        crate::commands::utils::execution_provenance::capture(&preflight);
-        if matches!(
-            preflight.resource_admission,
-            crate::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
-        ) {
-            return (
-                Err(resource_admission_error(&preflight.resource_admission)),
-                2,
-            );
-        }
-        match capability.run(matches) {
-            Ok((value, exit_code)) => (Ok(value), exit_code),
-            Err(error) => (Err(error), 2),
         }
     }
 
@@ -3593,212 +3229,6 @@ fn preflight_hot_command(
     )
 }
 
-fn preflight_composed_lab_route(
-    route: &LabCommandRoute,
-    options: &crate::commands::route::ComposedLabRouteOptions<'_>,
-    output_file: Option<&str>,
-    command_identity: &output::CommandIdentity,
-) -> Option<i32> {
-    let hot_command = resource_policy::hot_command_for_lab_route(route)?;
-    let Ok((resources, _)) = crate::commands::resources::run_preflight() else {
-        return None;
-    };
-    let mut readiness = if hot_command.lab_offload_supported {
-        options
-            .runner
-            .map(crate::runner::lab_runner_readiness_for_admission)
-            .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
-            .ok()
-    } else {
-        None
-    };
-    let observed_at_ms = unix_timestamp_ms();
-    if hot_command.lab_offload_supported
-        && options.runner.is_none()
-        && !matches!(options.placement, crate::cli_surface::Placement::Local)
-        && resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref())
-            .is_some()
-    {
-        if let Some(observed) = readiness.take() {
-            let (resolved, _) = resolve_terminal_lab_inventory(observed, observed_at_ms, || {
-                let refreshed = crate::runner::refresh_lab_runner_readiness_for_admission()?;
-                Ok((refreshed, unix_timestamp_ms()))
-            });
-            readiness = Some(resolved);
-        }
-    }
-    let warning =
-        resource_policy::evaluate_with_runner_hint(hot_command, &resources, readiness.as_ref());
-    let runner_hosted = resource_policy::is_runner_hosted_exec();
-    let runner_admits_offload = readiness.as_ref().is_some_and(|readiness| {
-        readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
-            && readiness
-                .selected_runner_id
-                .as_ref()
-                .is_some_and(|runner| readiness.available_runner_ids.contains(runner))
-    });
-    let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
-        hot_command,
-        &resources,
-        readiness.as_ref(),
-        options.placement,
-    );
-    let mut context = resource_policy::resource_policy_context_from_evaluation(
-        hot_command,
-        &resources,
-        if runner_hosted {
-            None
-        } else {
-            warning.as_ref()
-        },
-        options.placement.is_explicit_local_override(),
-        auto_local_capacity_fallback,
-        readiness.as_ref(),
-        runner_hosted,
-    );
-    if let Some(runner) = options.runner {
-        context.runner_selection.reason = "explicit_lab_runner".to_string();
-        context.runner_selection.runner_id = Some(runner.to_string());
-    }
-    resource_policy::capture_context(context);
-    let warning = warning?;
-    if let Some(error) = resource_policy::non_interactive_preflight_error(
-        &warning,
-        options.placement.is_explicit_local_override() || runner_hosted,
-        is_interactive_shell(),
-        resource_policy::admission_recovery(
-            &std::env::args().collect::<Vec<_>>(),
-            readiness.as_ref(),
-        ),
-        runner_admits_offload || auto_local_capacity_fallback,
-    ) {
-        output_runtime::emit_json_result_for_identity(Err(error), output_file, 2, command_identity);
-        return Some(2);
-    }
-    None
-}
-
-fn resolve_composed_capability_preflight(
-    capability: &dyn CliCapability,
-    matches: &ArgMatches,
-    route: &LabCommandRoute,
-    options: &crate::commands::route::ComposedLabRouteOptions<'_>,
-    normalized: &[String],
-) -> crate::core::Result<crate::core::parsed_command_preflight::ParsedCommandPreflightResult> {
-    use crate::core::parsed_command_preflight::{
-        ControllerExecution, GenericRoutePolicySnapshot, LabReadinessSnapshot, LabRouteIntent,
-        PlacementIntent, ResourceAdmissionEvidence, ResourceHeat, RunnerIntent,
-    };
-
-    let mut input = capability.preflight(matches, normalized);
-    input.controller_execution = ControllerExecution::Ordinary;
-    input.placement = match options.placement {
-        crate::cli_surface::Placement::Auto => PlacementIntent::Auto,
-        crate::cli_surface::Placement::Local => PlacementIntent::Local,
-        crate::cli_surface::Placement::Lab => PlacementIntent::Lab,
-        crate::cli_surface::Placement::LabOrLocal => PlacementIntent::LabOrLocal,
-    };
-    input.runner = options
-        .runner
-        .map(|runner| RunnerIntent::Explicit(runner.to_string()))
-        .unwrap_or(RunnerIntent::Default);
-    let route_contract = route.lab_route_contract().ok_or_else(|| {
-        crate::core::Error::validation_invalid_argument(
-            "placement",
-            "this composed command has no Lab route contract",
-            None,
-            None,
-        )
-    })?;
-    input.lab_route = LabRouteIntent::Supported {
-        automatic: matches!(
-            route_contract.command.portability,
-            crate::command_contract::LabCommandPortability::Portable
-        ),
-    };
-
-    let context = resource_policy::captured_context();
-    let readiness = context
-        .as_ref()
-        .map(|context| LabReadinessSnapshot {
-            state: context.runner_selection.readiness_state.clone(),
-            selected_runner_id: options
-                .runner
-                .map(str::to_string)
-                .or_else(|| context.runner_selection.runner_id.clone()),
-            available_runner_ids: context.runner_selection.available_runner_ids.clone(),
-            reasons: context.runner_selection.readiness_reasons.clone(),
-            remediation_commands: context.runner_selection.remediation_commands.clone(),
-            repair_admitted_runner_ids: Vec::new(),
-        })
-        .or_else(|| {
-            (options.placement != crate::cli_surface::Placement::Local)
-                .then(|| crate::runner::refresh_lab_runner_readiness_for_admission().ok())
-                .flatten()
-                .map(|readiness| resource_policy::lab_readiness_snapshot(&readiness))
-        });
-    let selected_runner_id = options.runner.map(str::to_string).or_else(|| {
-        readiness
-            .as_ref()
-            .and_then(|value| value.selected_runner_id.clone())
-    });
-    let runner_admitted = selected_runner_id.as_ref().is_some_and(|selected| {
-        readiness.as_ref().is_some_and(|readiness| {
-            readiness.state == "connected_ready"
-                && readiness
-                    .available_runner_ids
-                    .iter()
-                    .any(|runner| runner == selected)
-        })
-    });
-    let resource_admission_evidence = context
-        .as_ref()
-        .map(|context| ResourceAdmissionEvidence::Observed {
-            pressure: match context.severity.as_str() {
-                "hot" => ResourceHeat::Hot,
-                "warm" => ResourceHeat::Warm,
-                _ => ResourceHeat::None,
-            },
-        })
-        .unwrap_or_else(|| match input.resource_admission {
-            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Exempt => {
-                ResourceAdmissionEvidence::Unavailable
-            }
-            crate::core::parsed_command_preflight::ResourceAdmissionRequirement::Required {
-                ..
-            } => crate::commands::resources::run_preflight()
-                .map(|(resources, _)| resource_policy::resource_admission_evidence(&resources))
-                .unwrap_or(ResourceAdmissionEvidence::Unavailable),
-        });
-    let command = crate::core::lab_routing::lab_offload_command_from_route_contract(route_contract);
-    let automatic_authorized = options.runner.is_some()
-        || crate::core::lab_routing::authorizes_policy_lab_runner(
-            &command.command,
-            options.placement,
-            context.as_ref().map(|context| context.severity.as_str()),
-        );
-    let auto_local_capacity_fallback = context
-        .as_ref()
-        .is_some_and(|context| context.runner_selection.reason == "local_capacity_fallback");
-    let mut policy = capability.preflight_policy(matches, normalized);
-    policy.resource_admission_evidence = resource_admission_evidence;
-    policy.resource_policy = context;
-    policy.lab_readiness = readiness;
-    policy.selected_runner_id = selected_runner_id.clone();
-    policy.generic_route = GenericRoutePolicySnapshot {
-        command_supports_lab: true,
-        automatic_authorized,
-        selected_runner_id,
-    };
-    policy.runner_admitted = runner_admitted;
-    policy.auto_local_capacity_fallback = auto_local_capacity_fallback;
-    crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
-        normalized.to_vec(),
-        input,
-        policy,
-    )
-}
-
 fn preflight_hot_command_with_input(
     cli: &Cli,
     normalized_args: &[String],
@@ -4463,39 +3893,6 @@ fn exit_code_to_u8(code: i32) -> u8 {
     }
 }
 
-fn resource_admission_error(
-    decision: &crate::core::parsed_command_preflight::ResourceAdmissionDecision,
-) -> crate::core::Error {
-    use crate::core::parsed_command_preflight::{
-        ResourceAdmissionDecision, ResourceAdmissionEvidence,
-    };
-
-    let ResourceAdmissionDecision::Rejected {
-        label,
-        engages_at,
-        evidence,
-    } = decision
-    else {
-        unreachable!("only rejected admission decisions produce an error")
-    };
-    let observed = match evidence {
-        ResourceAdmissionEvidence::Observed { pressure } => format!("{pressure:?}").to_lowercase(),
-        ResourceAdmissionEvidence::Unavailable => "unavailable".to_string(),
-    };
-    let mut error = crate::core::Error::validation_invalid_argument(
-        "resource-policy",
-        format!(
-            "Refusing to start `{label}`: resource admission requires pressure below {engages_at:?}, observed {observed}."
-        ),
-        None,
-        None,
-    );
-    error.details["run_created"] = serde_json::Value::Bool(false);
-    error.details["resource_admission"] =
-        serde_json::to_value(decision).expect("resource admission decision serializes");
-    error
-}
-
 fn is_interactive_shell() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
@@ -4821,7 +4218,6 @@ mod tests {
     use sha2::{Digest, Sha256};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
@@ -4875,181 +4271,6 @@ mod tests {
             delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &argv)
                 .expect("preflight remains in the current read-only runtime"),
             None
-        );
-    }
-
-    struct AdmissionFixtureCapability;
-
-    static ADMISSION_FIXTURE_CAPABILITY: AdmissionFixtureCapability = AdmissionFixtureCapability;
-    static ADMISSION_FIXTURE_RUNS: AtomicUsize = AtomicUsize::new(0);
-    static ADMISSION_FIXTURE_CAPABILITIES: [&'static dyn CliCapability; 1] =
-        [&ADMISSION_FIXTURE_CAPABILITY];
-
-    struct ComposedDoctorCapability;
-    struct HiddenComposedDoctorCapability;
-
-    static COMPOSED_DOCTOR_CAPABILITY: ComposedDoctorCapability = ComposedDoctorCapability;
-    static HIDDEN_COMPOSED_DOCTOR_CAPABILITY: HiddenComposedDoctorCapability =
-        HiddenComposedDoctorCapability;
-    static COMPOSED_DOCTOR_CAPABILITIES: [&'static dyn CliCapability; 2] = [
-        &COMPOSED_DOCTOR_CAPABILITY,
-        &HIDDEN_COMPOSED_DOCTOR_CAPABILITY,
-    ];
-
-    impl CliCapability for ComposedDoctorCapability {
-        fn name(&self) -> &'static str {
-            "triage"
-        }
-
-        fn command(&self) -> Command {
-            Command::new(self.name()).about("composed doctor fixture")
-        }
-
-        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
-            unreachable!("the command-surface fixture is never dispatched")
-        }
-    }
-
-    impl CliCapability for HiddenComposedDoctorCapability {
-        fn name(&self) -> &'static str {
-            "hidden-doctor-fixture"
-        }
-
-        fn command(&self) -> Command {
-            Command::new(self.name()).hide(true)
-        }
-
-        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
-            unreachable!("the command-surface fixture is never dispatched")
-        }
-    }
-
-    impl CliCapability for AdmissionFixtureCapability {
-        fn name(&self) -> &'static str {
-            "admission-fixture"
-        }
-
-        fn command(&self) -> Command {
-            Command::new(self.name()).arg(
-                clap::Arg::new("exempt")
-                    .long("exempt")
-                    .action(clap::ArgAction::SetTrue),
-            )
-        }
-
-        fn preflight(
-            &self,
-            matches: &ArgMatches,
-            _normalized_args: &[String],
-        ) -> crate::core::parsed_command_preflight::ParsedCommandPreflightInput {
-            use crate::core::parsed_command_preflight::{
-                ControllerExecution, DeferredWorkloadPolicy, LabRouteIntent, ParsedCommandIdentity,
-                ParsedCommandPreflightInput, PlacementIntent, ProvenanceRequirement,
-                ResourceAdmissionRequirement, ResourceHeat, RunnerIntent, RunnerNormalization,
-            };
-            ParsedCommandPreflightInput {
-                identity: ParsedCommandIdentity {
-                    family: self.name().to_string(),
-                    operation: Vec::new(),
-                },
-                resource_admission: if matches.get_flag("exempt") {
-                    ResourceAdmissionRequirement::Exempt
-                } else {
-                    ResourceAdmissionRequirement::Required {
-                        label: "admission fixture".to_string(),
-                        engages_at: ResourceHeat::Warm,
-                    }
-                },
-                controller_execution: ControllerExecution::ControllerOnly,
-                deferred_workload: DeferredWorkloadPolicy::Forbidden,
-                placement: PlacementIntent::Local,
-                runner: RunnerIntent::Default,
-                runner_normalization: RunnerNormalization::None,
-                lab_route: LabRouteIntent::Unsupported,
-                provenance: ProvenanceRequirement::CaptureExecution,
-            }
-        }
-
-        fn run(&self, _matches: &ArgMatches) -> crate::core::Result<(serde_json::Value, i32)> {
-            ADMISSION_FIXTURE_RUNS.fetch_add(1, Ordering::SeqCst);
-            Ok((serde_json::json!({ "status": "ran" }), 0))
-        }
-    }
-
-    fn run_admission_fixture(
-        evidence: crate::core::parsed_command_preflight::ResourceAdmissionEvidence,
-        exempt: bool,
-    ) -> std::process::ExitCode {
-        let runtime = CliRuntime::with_capabilities(&ADMISSION_FIXTURE_CAPABILITIES);
-        let mut normalized = vec!["homeboy".to_string(), "admission-fixture".to_string()];
-        if exempt {
-            normalized.push("--exempt".to_string());
-        }
-        let matches = runtime
-            .build_augmented_command()
-            .try_get_matches_from(normalized.clone())
-            .expect("fixture capability parses");
-        runtime.run_matches_with_capability_admission(matches, normalized, Some(evidence))
-    }
-
-    #[test]
-    fn typed_capability_resource_admission_rejects_before_run_and_admits_once() {
-        use crate::core::parsed_command_preflight::{
-            ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
-        };
-
-        ADMISSION_FIXTURE_RUNS.store(0, Ordering::SeqCst);
-        crate::core::parsed_command_preflight::reset_captured_result_for_test();
-        let rejected = run_admission_fixture(
-            ResourceAdmissionEvidence::Observed {
-                pressure: ResourceHeat::Warm,
-            },
-            false,
-        );
-        assert_eq!(rejected, std::process::ExitCode::from(2));
-        assert_eq!(ADMISSION_FIXTURE_RUNS.load(Ordering::SeqCst), 0);
-        assert!(matches!(
-            crate::core::parsed_command_preflight::captured_result()
-                .expect("rejected preflight is captured")
-                .resource_admission,
-            ResourceAdmissionDecision::Rejected { .. }
-        ));
-
-        crate::core::parsed_command_preflight::reset_captured_result_for_test();
-        let admitted = run_admission_fixture(
-            ResourceAdmissionEvidence::Observed {
-                pressure: ResourceHeat::None,
-            },
-            false,
-        );
-        assert_eq!(admitted, std::process::ExitCode::SUCCESS);
-        assert_eq!(ADMISSION_FIXTURE_RUNS.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            crate::core::parsed_command_preflight::captured_result()
-                .expect("admitted preflight is captured")
-                .resource_admission,
-            ResourceAdmissionDecision::Admitted
-        );
-
-        crate::core::parsed_command_preflight::reset_captured_result_for_test();
-        let unavailable = run_admission_fixture(ResourceAdmissionEvidence::Unavailable, false);
-        assert_eq!(unavailable, std::process::ExitCode::from(2));
-        assert_eq!(ADMISSION_FIXTURE_RUNS.load(Ordering::SeqCst), 1);
-
-        crate::core::parsed_command_preflight::reset_captured_result_for_test();
-        let exempt = run_admission_fixture(
-            ResourceAdmissionEvidence::Observed {
-                pressure: ResourceHeat::Hot,
-            },
-            true,
-        );
-        assert_eq!(exempt, std::process::ExitCode::SUCCESS);
-        assert_eq!(ADMISSION_FIXTURE_RUNS.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            crate::core::parsed_command_preflight::captured_result()
-                .expect("exempt preflight is captured")
-                .resource_admission,
-            ResourceAdmissionDecision::NotRequired
         );
     }
 
@@ -6774,7 +5995,7 @@ mod tests {
     fn doctor_uses_the_same_composed_registry_as_root_help() {
         crate::test_support::with_isolated_home(|home| {
             write_cli_extension(home.path(), "sample-runtime", "sample-cli");
-            let runtime = CliRuntime::with_capabilities(&COMPOSED_DOCTOR_CAPABILITIES);
+            let runtime = CliRuntime::new();
             let registry = runtime.composed_command_registry();
 
             let help = registry
@@ -6789,22 +6010,12 @@ mod tests {
             );
 
             assert!(report.agrees, "{:?}", report.drift_notes);
-            assert!(help.contains("triage"), "root help omitted triage: {help}");
             assert!(
                 help.contains("sample-cli"),
                 "root help omitted extension command: {help}"
             );
-            assert!(!help.contains("hidden-doctor-fixture"));
-            assert!(!report
-                .source_registry_commands
-                .contains(&"hidden-doctor-fixture".to_string()));
-            assert!(report.help_commands.contains(&"triage".to_string()));
-            assert!(report
-                .source_registry_commands
-                .contains(&"triage".to_string()));
             for (command, registry) in [
                 ("status", CommandSurfaceRegistry::Core),
-                ("triage", CommandSurfaceRegistry::Descriptor),
                 ("sample-cli", CommandSurfaceRegistry::Extension),
             ] {
                 assert!(

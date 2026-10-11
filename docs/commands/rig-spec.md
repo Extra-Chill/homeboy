@@ -178,8 +178,7 @@ Components are local checkouts used by pipeline steps. Portable package rigs can
 | `path` | string | Filesystem path to the checkout. Supports `~`, `${env.NAME}`, and use through `${components.<id>.path}`. |
 | `component_id` | string | Optional Homeboy component registry ID to resolve when `path` is omitted or expands to an empty value. Defaults to the component map key. |
 | `path_setting` | string | Optional environment variable name whose value supplies the path when explicit `path` and registry lookup are unavailable. |
-| `remote_url` | string | Optional source repository URL for triage/reporting fallback. |
-| `triage_remote_url` | string | Optional reporting-only GitHub remote override. |
+| `remote_url` | string | Optional source repository URL. |
 | `stack` | string | Stack ID synced by `homeboy rig sync` and by explicit `stack` pipeline steps. The component `path` must resolve to the same checkout as the stack's `component_path`. |
 | `lab_stack` | object | Immutable repository stack for Lab materialization without a controller checkout. It declares `repository`, a `base` `{ reference, sha }`, and ordered PR entries with `{ number, head: { reference, sha }, merge_mainline? }`. |
 | `branch` | string | Expected branch hint surfaced to humans in status/spec output. |

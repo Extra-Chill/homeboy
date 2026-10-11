@@ -174,13 +174,6 @@ pub struct Component {
     /// Release ownership metadata used to guard sharp release execution modes.
     #[serde(default, skip_serializing_if = "ComponentReleaseConfig::is_default")]
     pub release: ComponentReleaseConfig,
-    /// Reporting-only GitHub remote override for `homeboy triage`.
-    /// Does not affect git, deploy, or release operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub triage_remote_url: Option<String>,
-    /// Labels treated as priority issues by `homeboy triage` for this component.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority_labels: Option<Vec<String>>,
     #[serde(default)]
     pub auto_cleanup: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -308,8 +301,6 @@ impl Component {
             remote_url: None,
             github: GithubConfig::default(),
             release: ComponentReleaseConfig::default(),
-            triage_remote_url: None,
-            priority_labels: None,
             auto_cleanup: false,
             docs_dir: None,
             docs_dirs: Vec::new(),
@@ -631,8 +622,6 @@ mod tests {
             "remote_owner": "www-data",
             "deploy_strategy": "artifact",
             "remote_url": "https://github.test/agents-api",
-            "triage_remote_url": "https://github.test/agents-api-issues",
-            "priority_labels": ["p0"],
             "auto_cleanup": true,
             "docs_dir": "docs",
             "docs_dirs": ["docs", "guides"],

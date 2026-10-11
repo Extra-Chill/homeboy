@@ -190,4 +190,3 @@ Status takes the shared scope selectors, which are mutually exclusive:
 
 - [component](component.md)
 - [project](project.md)
-- [triage](triage.md)

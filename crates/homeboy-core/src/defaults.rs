@@ -42,9 +42,6 @@ pub struct HomeboyConfig {
     pub lab: LabConfig,
 
     #[serde(default)]
-    pub triage: TriageConfig,
-
-    #[serde(default)]
     pub agent_task: AgentTaskConfig,
 
     /// Notification delivery policy. Transports are discovered from installed
@@ -170,7 +167,6 @@ impl Default for HomeboyConfig {
             defaults: Defaults::default(),
             bench: BenchConfig::default(),
             lab: LabConfig::default(),
-            triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
             notifications: NotificationConfig::default(),
             automation: AutomationConfig::default(),
@@ -537,12 +533,6 @@ pub struct LabConfig {
     pub runner_workspace_ttl: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TriageConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub priority_labels: Option<Vec<String>>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -822,23 +812,6 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn homeboy_config_parses_triage_priority_labels() {
-        let config: HomeboyConfig = serde_json::from_str(
-            r#"{
-                "triage": {
-                    "priority_labels": ["security", "urgent"]
-                }
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            config.triage.priority_labels,
-            Some(vec!["security".to_string(), "urgent".to_string()])
-        );
-    }
-
-    #[test]
     fn retention_shared_store_fields_deserialize_with_documented_defaults() {
         let config: HomeboyConfig = serde_json::from_str(r#"{"retention":{}}"#).unwrap();
 
@@ -1006,13 +979,6 @@ mod tests {
             let loaded = load_config();
             assert!(!loaded.settings.contains_key("cache_marker"));
         });
-    }
-
-    #[test]
-    fn homeboy_config_leaves_triage_priority_labels_unset_by_default() {
-        let config = HomeboyConfig::default();
-
-        assert!(config.triage.priority_labels.is_none());
     }
 
     #[test]

@@ -117,22 +117,6 @@ fn component_lifecycle_unknown_value_is_rejected() {
 }
 
 #[test]
-fn component_priority_labels_serialization_roundtrip() {
-    let mut component = Component::new(
-        "sample-component".to_string(),
-        "/tmp/sample-component".to_string(),
-        "remote/components/sample-component".to_string(),
-        None,
-    );
-    component.priority_labels = Some(vec!["urgent".to_string()]);
-
-    let json = serde_json::to_string(&component).unwrap();
-    let parsed: Component = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(parsed.priority_labels, Some(vec!["urgent".to_string()]));
-}
-
-#[test]
 fn package_coverage_normalizes_paths_and_rejects_malformed_declarations() {
     let component: Component = serde_json::from_value(serde_json::json!({
         "id": "fixture",

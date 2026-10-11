@@ -19,9 +19,6 @@ homeboy --output homeboy-results/review.json \
 
 homeboy --output homeboy-results/bench.json \
   bench my-component --baseline
-
-homeboy --output homeboy-results/triage.json \
-  triage workspace --mine --failing-checks
 ```
 
 Use a real path. Bare format names such as `json` are rejected.
