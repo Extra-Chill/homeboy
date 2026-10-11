@@ -11,7 +11,7 @@ commands_use_review_report() {
   normalized="$(canonicalize_commands "${COMMANDS}")"
 
   local setup_file="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
-  [ "${normalized}" = "review audit,review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ] && { [ -z "${setup_file}" ] || [ ! -f "${setup_file}" ]; }
+  [ "${normalized}" = "review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ] && { [ -z "${setup_file}" ] || [ ! -f "${setup_file}" ]; }
 }
 
 add_review_banner() {
@@ -143,32 +143,6 @@ append_lint_details() {
   fi
 }
 
-append_audit_details() {
-  local json_file="$1"
-  local details total
-
-  details="$(jq -r '
-    (.data.baseline_comparison.new_items // .data.findings // .findings // [])
-    | group_by(.context_label // .convention // .kind // "audit")
-    | sort_by(-length)
-    | .[:10][]?
-    | "- **" + (.[0].context_label // .[0].convention // .[0].kind // "audit") + "** — " + (length|tostring) + " finding(s)"
-  ' "${json_file}" 2>/dev/null || true)"
-  total="$(jq -r '
-    if (.data.baseline_comparison.new_items? // null) != null then .data.baseline_comparison.new_items | length
-    elif (.data.findings? // null) != null then .data.findings | length
-    elif (.findings? // null) != null then .findings | length
-    else 0 end
-  ' "${json_file}" 2>/dev/null || printf '0')"
-
-  if [ -n "${details}" ]; then
-    SECTION_BODY+="${details}"$'\n'
-  fi
-  if [ "${total}" != "0" ] && [ "${total}" != "null" ]; then
-    SECTION_BODY+="- _Total: ${total} finding(s)_"$'\n'
-  fi
-}
-
 append_test_details() {
   local json_file="$1"
   local details counts failed passed skipped total
@@ -200,7 +174,6 @@ append_command_details() {
   local json_file="$2"
 
   case "$(quality_base_command "${command}")" in
-    audit) append_audit_details "${json_file}" ;;
     lint) append_lint_details "${json_file}" ;;
     test) append_test_details "${json_file}" ;;
   esac
@@ -233,7 +206,7 @@ append_split_command_section() {
   fi
 
   case "${command}" in
-    audit|lint|test|build|audit-baseline)
+    lint|test|build)
       SECTION_BODY+="> Deep dive: homeboy review ${command} ${COMP_ID}${scope_suffix}"$'\n\n'
       ;;
     *)

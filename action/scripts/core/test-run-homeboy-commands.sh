@@ -172,7 +172,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","operation":"audit","success":true,"status":"succeeded","exit_code":0,"data":{"changed_since":{"contextual_findings":1,"introduced_findings":0},"verdict":"pass"}}' > "${output}"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","operation":"lint","success":true,"status":"succeeded","exit_code":0,"data":{"passed":true}}' > "${output}"
 exit 0
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
@@ -180,22 +180,22 @@ chmod +x "${TMP_DIR}/bin/homeboy"
 PATH="${TMP_DIR}/bin:${PATH}" \
 GITHUB_ACTION_PATH="${ROOT_DIR}" \
 GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
-GITHUB_OUTPUT="${TMP_DIR}/audit-output" \
-GITHUB_ENV="${TMP_DIR}/audit-env" \
-RESOLVED_COMMANDS='audit' \
+GITHUB_OUTPUT="${TMP_DIR}/lint-output" \
+GITHUB_ENV="${TMP_DIR}/lint-env" \
+RESOLVED_COMMANDS='lint' \
 COMPONENT_NAME='homeboy-action' \
-bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/audit.log" 2>&1
+bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/lint.log" 2>&1
 
-if ! grep -q '^results={"audit":"pass"}$' "${TMP_DIR}/audit-output"; then
-  printf 'FAIL: passing legacy audit result is not recorded as pass\n'
-  cat "${TMP_DIR}/audit.log"
+if ! grep -q '^results={"lint":"pass"}$' "${TMP_DIR}/lint-output"; then
+  printf 'FAIL: passing legacy lint result is not recorded as pass\n'
+  cat "${TMP_DIR}/lint.log"
   exit 1
 fi
-if ! jq -e '.command == "review" and .operation == "audit" and .success == true and .exit_code == 0' "${TMP_DIR}/workspace/homeboy-ci-results/audit.json" >/dev/null; then
-  printf 'FAIL: passing audit result is not retained at its durable path\n'
+if ! jq -e '.command == "review" and .operation == "lint" and .success == true and .exit_code == 0' "${TMP_DIR}/workspace/homeboy-ci-results/lint.json" >/dev/null; then
+  printf 'FAIL: passing lint result is not retained at its durable path\n'
   exit 1
 fi
-printf 'PASS: passing legacy audit accepts and retains the review result envelope\n'
+printf 'PASS: passing legacy lint accepts and retains the review result envelope\n'
 
 cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash

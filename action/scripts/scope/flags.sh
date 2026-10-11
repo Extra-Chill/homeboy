@@ -6,7 +6,6 @@
 
 # Get CLI flags for a command based on current scope.
 # Usage: scope_flags_for "review lint"
-#        scope_flags_for "refactor --from all --write"
 # Prints: "--changed-since abc123" or ""
 scope_flags_for() {
   local cmd="$1"
@@ -15,7 +14,7 @@ scope_flags_for() {
   if declare -F quality_base_command >/dev/null 2>&1; then
     base_cmd="$(quality_base_command "${cmd}")"
   else
-    # Extract the base command (first word) from compound commands like "refactor --from all --write"
+    # Extract the base command (first word) from compound commands
     base_cmd=$(printf '%s' "${cmd}" | awk '{print $1}')
   fi
 
@@ -24,21 +23,7 @@ scope_flags_for() {
   fi
 
   case "${base_cmd}" in
-    # `audit` was in the exempt arm above, so under differential gating it ran
-    # UNSCOPED over the whole repository. Measured on Extra-Chill/homeboy: 12m07s
-    # to report `DRIFT INCREASED: 445 new finding(s) since baseline`, exit 1,
-    # then a 684s baseline rerun that failed identically, so the gate excused it
-    # as `baseline_red` and published green. 32.7 minutes for no verdict
-    # (homeboy#11751 W1-2).
-    #
-    # A differential baseline is not a substitute for scoping here: `review
-    # audit` already computes introduced-versus-contextual findings from
-    # `--changed-since` itself, which answers "did this PR add a finding" without
-    # rerunning the whole audit at the base ref.
-    #
-    # `audit` and `test` also appeared in the arm below, where they were dead:
-    # `case` takes the first matching arm, so those patterns never applied.
-    audit|lint|test|refactor|review)
+    lint|test|review)
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;
     # release, fleet, deploy, git, and other operations are never scoped

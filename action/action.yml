@@ -53,11 +53,7 @@ inputs:
 
   # ── Commands ──
   commands:
-    description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → review audit,review lint,review test; cron → release.'
-    required: false
-    default: ''
-  expected-commands:
-    description: 'Full set of command types expected to run across the workflow (e.g. "review audit,review lint,review test"). Used by auto-issue reconciliation to avoid closing issues owned by sibling invocations when a workflow splits review audit/lint/test across separate steps. Defaults to `commands` when empty.'
+    description: 'Override commands to run. If empty, inferred from event context: PR/push/manual → review lint,review test; cron → release.'
     required: false
     default: ''
   component:
@@ -93,11 +89,11 @@ inputs:
     required: false
     default: ''
   differential-gating:
-    description: 'On PRs, compare audit/lint/test failure counts against the base SHA and fail only when the PR is worse.'
+    description: 'On PRs, compare lint/test failure counts against the base SHA and fail only when the PR is worse.'
     required: false
     default: 'false'
   baseline-commands:
-    description: 'Commands to rerun at the PR base when differential-gating is true. Use auto to rerun requested review audit/lint/test commands, a comma-separated subset such as review audit,review test, or none to skip baseline reruns.'
+    description: 'Commands to rerun at the PR base when differential-gating is true. Use auto to rerun requested review lint/test commands, a comma-separated subset such as review lint,review test, or none to skip baseline reruns.'
     required: false
     default: 'auto'
   observation-window:
@@ -145,11 +141,7 @@ inputs:
 
   # ── GitHub integration ──
   app-token:
-    description: 'GitHub App token. Enables auto-issue filing and workflow re-triggers. Generate with actions/create-github-app-token.'
-    required: false
-    default: ''
-  auto-issue:
-    description: 'Override auto-issue filing. Default: auto-enabled on non-PR events.'
+    description: 'GitHub App token. Enables PR comments and workflow re-triggers. Generate with actions/create-github-app-token.'
     required: false
     default: ''
 
@@ -883,27 +875,6 @@ runs:
         HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds || env.HOMEBOY_TEST_TIMEOUT_SECONDS || '1500' }}
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/pr/post-pr-comment.sh
-
-    # ── Phase 7: Auto-issue filing ──
-    # Default: enabled on non-PR events (auto when input is empty).
-
-    - name: Auto-file categorized issues
-      id: categorized-issues
-      if: |
-        always()
-        && github.event_name != 'pull_request'
-        && steps.select-results.outputs.results != ''
-        && (inputs.auto-issue == 'true' || (inputs.auto-issue == '' && github.event_name != 'pull_request'))
-      continue-on-error: true
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.app-token || github.token }}
-        RESULTS: ${{ steps.select-results.outputs.results }}
-        COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
-        EXPECTED_COMMANDS: ${{ inputs.expected-commands }}
-        COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
-        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
-      run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh
 
     - name: Publish phase timing summary
       id: phase-summary

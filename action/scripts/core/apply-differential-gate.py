@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Downgrade audit/test failures when PR metrics do not exceed base metrics."""
+"""Downgrade lint/test failures when PR metrics do not exceed base metrics."""
 
 from __future__ import annotations
 
@@ -25,38 +25,6 @@ def unwrap(payload: dict[str, Any] | None) -> dict[str, Any]:
     if "success" in payload and isinstance(payload.get("data"), dict):
         return payload["data"]
     return payload
-
-
-def audit_count(payload: dict[str, Any] | None) -> int | None:
-    data = unwrap(payload)
-    summary = data.get("summary", {}) if isinstance(data, dict) else {}
-    if isinstance(summary, dict) and isinstance(summary.get("outliers_found"), int):
-        return int(summary["outliers_found"])
-
-    findings = data.get("findings", []) if isinstance(data, dict) else []
-    if isinstance(findings, list) and findings:
-        return len(findings)
-
-    conventions = data.get("conventions", []) if isinstance(data, dict) else []
-    if isinstance(conventions, list):
-        total = 0
-        saw_conventions = False
-        for convention in conventions:
-            if not isinstance(convention, dict):
-                continue
-            saw_conventions = True
-            outliers = convention.get("outliers", [])
-            if isinstance(outliers, list):
-                total += len(outliers)
-        if saw_conventions:
-            return total
-
-    baseline = data.get("baseline_comparison", {}) if isinstance(data, dict) else {}
-    new_items = baseline.get("new_items", []) if isinstance(baseline, dict) else []
-    if isinstance(baseline, dict) and "new_items" in baseline and isinstance(new_items, list):
-        return len(new_items)
-
-    return None
 
 
 def test_count(payload: dict[str, Any] | None) -> int | None:
@@ -101,21 +69,20 @@ def lint_count(payload: dict[str, Any] | None) -> int | None:
 
 def quality_base_command(command: str) -> str:
     parts = command.split()
-    if len(parts) == 1 and parts[0] in {"audit", "lint", "test"}:
+    if len(parts) == 1 and parts[0] in {"lint", "test"}:
         return parts[0]
-    if len(parts) >= 2 and parts[0] == "review" and parts[1] in {"audit", "lint", "test"}:
+    if len(parts) >= 2 and parts[0] == "review" and parts[1] in {"lint", "test"}:
         return parts[1]
     return ""
 
 
-def changed_scope_introduced_count(command: str, payload: dict[str, Any] | None) -> int | None:
+def changed_scope_introduced_count(payload: dict[str, Any] | None) -> int | None:
     data = unwrap(payload)
     changed_since = data.get("changed_since", {}) if isinstance(data, dict) else {}
     if not isinstance(changed_since, dict):
         return None
 
-    key = "introduced_findings" if command == "audit" else "introduced_failures"
-    value = changed_since.get(key)
+    value = changed_since.get("introduced_failures")
     return int(value) if isinstance(value, int) else None
 
 
@@ -135,7 +102,7 @@ def test_evidence_command_identity(command: str) -> str:
 # How a metric was derived. The distinction is load-bearing for the zero guard
 # in main(): zero means opposite things depending on provenance.
 #
-#   SCOPED -- `changed_since.introduced_{findings,failures}`. A deliberate
+#   SCOPED -- `changed_since.introduced_failures`. A deliberate
 #             measurement of what *this change* introduced. Zero is the
 #             success case: the repository may be red, but the candidate added
 #             nothing to it. This is the entire point of changed-scope gating.
@@ -149,12 +116,10 @@ TOTAL = "total"
 def metric_for(command: str, directory: str) -> tuple[int | None, str | None]:
     base_command = quality_base_command(command)
     payload = read_json(os.path.join(directory, f"{output_stem(command)}.json"))
-    scoped_count = changed_scope_introduced_count(base_command, payload)
+    scoped_count = changed_scope_introduced_count(payload)
     if scoped_count is not None:
         return scoped_count, SCOPED
-    if base_command == "audit":
-        value = audit_count(payload)
-    elif base_command == "lint":
+    if base_command == "lint":
         value = lint_count(payload)
     elif base_command == "test":
         value = test_count(payload)
@@ -388,7 +353,7 @@ def main() -> int:
     adjusted = dict(results)
     for command, status in list(adjusted.items()):
         base_command = quality_base_command(command)
-        if base_command not in {"audit", "lint", "test"}:
+        if base_command not in {"lint", "test"}:
             continue
         # A timeout is admitted here so that a candidate which ran out of clock
         # can still be recognised as pre-existing when the baseline ran out of

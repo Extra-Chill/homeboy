@@ -132,8 +132,8 @@ printf 'PASS: zero-exit baseline missing and malformed structured output fail cl
 
 # A baseline exists to excuse a FAILING candidate. When the candidate passed,
 # rerunning the whole command at the base ref cannot change the verdict. It was
-# unconditional: on Extra-Chill/homeboy the Audit baseline is 684s and Lint's is
-# 110s against 137s of real work (homeboy#11751 W1-10).
+# unconditional: on Extra-Chill/homeboy Lint's baseline was 110s against 137s
+# of real work (homeboy#11751 W1-10).
 passing_log="${TMP_DIR}/candidate-passed.log"
 set +e
 PATH="${TMP_DIR}/bin:${PATH}" \

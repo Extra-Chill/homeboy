@@ -169,7 +169,7 @@ assert_equals 'distinct' \
 #
 # Every case below feeds a recorded payload shape through the classifier and
 # asserts the resulting *verdict*. None of them assert a command string: the
-# post-merge audit gate passed for weeks while asserting only the command it
+# post-merge gate passed for weeks while asserting only the command it
 # ran, which is how it scanned zero files undetected.
 
 # Reset both fixture dirs so no earlier case can leak a stale sidecar into a

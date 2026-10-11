@@ -4,7 +4,7 @@ set -euo pipefail
 
 if homeboy --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
   placement_mode=global
-elif homeboy review audit --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
+elif homeboy review lint --help 2>&1 | grep -E '^[[:space:]]+--placement([[:space:]]|<)' >/dev/null; then
   placement_mode=scoped
 else
   placement_mode=legacy

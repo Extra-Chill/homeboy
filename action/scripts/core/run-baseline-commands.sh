@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-EFFECTIVE_COMMANDS="${COMMANDS:-review audit,review lint,review test}"
+EFFECTIVE_COMMANDS="${COMMANDS:-review lint,review test}"
 BASELINE_COMMANDS_INPUT="${BASELINE_COMMANDS:-auto}"
 
 if [ "${HOMEBOY_DIFFERENTIAL_GATING:-false}" != "true" ]; then
@@ -27,12 +27,12 @@ fi
 # the candidate PASSED there is nothing to excuse: no baseline result can change
 # a passing verdict, so rerunning the whole command at the base ref buys nothing.
 #
-# It was being rerun unconditionally. Measured on Extra-Chill/homeboy, the Audit
-# baseline is 684s and the Lint baseline 110s -- Lint's real work is 137s, so its
-# baseline was +80% for no verdict (homeboy#11751 W1-10).
+# It was being rerun unconditionally. Measured on Extra-Chill/homeboy, the Lint
+# baseline was 110s against 137s of real Lint work, so its baseline was +80% for
+# no verdict (homeboy#11751 W1-10).
 #
 # `select-test-baseline.sh` already makes exactly this decision for the sharded
-# Test path; this brings the unsharded audit/lint path in line with it.
+# Test path; this brings the unsharded lint path in line with it.
 #
 # Fail-safe: an absent or unparseable CANDIDATE_RESULTS keeps every baseline, so
 # a caller that does not supply candidate status is never silently degraded into
@@ -50,7 +50,7 @@ IFS=',' read -ra CMD_ARRAY <<< "${ORDERED_COMMANDS}"
 for CMD in "${CMD_ARRAY[@]}"; do
   CMD="$(echo "${CMD}" | xargs)"
   case "$(quality_base_command "${CMD}")" in
-    audit|lint|test)
+    lint|test)
       if [ "$(candidate_status "${CMD}")" = pass ]; then
         SKIPPED_PASSING_COMMANDS+=("${CMD}")
         continue
@@ -68,7 +68,7 @@ if [ "${#BASELINE_RUN_COMMANDS[@]}" -eq 0 ]; then
   if [ "${#SKIPPED_PASSING_COMMANDS[@]}" -gt 0 ]; then
     echo "Every requested command passed on the candidate; no baseline comparison is needed"
   else
-    echo "No audit/lint/test commands requested; skipping differential baseline run"
+    echo "No lint/test commands requested; skipping differential baseline run"
   fi
   exit 0
 fi

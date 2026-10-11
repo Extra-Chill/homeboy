@@ -84,7 +84,7 @@ assert_false "a missing output file is not detected" \
 assert_true "comma_list_contains finds a trimmed member" \
   comma_list_contains 'review test, review lint' 'review lint'
 assert_false "comma_list_contains rejects an absent member" \
-  comma_list_contains 'review lint,review audit' 'review test'
+  comma_list_contains 'review lint,review build' 'review test'
 assert_false "comma_list_contains rejects an empty haystack" \
   comma_list_contains '' 'review test'
 

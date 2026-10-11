@@ -86,32 +86,6 @@ command_status() {
   echo "${RESULTS}" | jq -r --arg cmd "${command}" 'if .[$cmd] == "pass" or .[$cmd] == "fail" or .[$cmd] == "timeout" or .[$cmd] == "not_run" or .[$cmd] == "baseline_red" or .[$cmd] == "inconclusive" or .[$cmd] == "no_measurement" or .[$cmd] == "invalid_evidence" or .[$cmd] == "no_comparable_evidence" then .[$cmd] else "unknown" end' 2>/dev/null || echo "unknown"
 }
 
-is_refactor_owning_section() {
-  local section_key="${SECTION_KEY:-}"
-  local section_title="${SECTION_TITLE:-}"
-  local commands_csv="${COMMANDS:-}"
-
-  case "${section_key}" in
-    refactor*|auto-refactor*|*refactor*)
-      return 0
-      ;;
-  esac
-
-  case "${section_title}" in
-    Refactor*|Auto-refactor*|*Refactor*)
-      return 0
-      ;;
-  esac
-
-  case "${commands_csv}" in
-    *refactor*)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
 command_is_selected() {
   local command="$1"
   local selected

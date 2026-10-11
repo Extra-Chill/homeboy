@@ -355,10 +355,10 @@ write_aggregate_phase() {
     > "${dir}/manifest.json"
 }
 
-# Regression for #438: all six producers carry the one selected CLI identity,
-# so three passing differential gates deterministically remain three passing
+# Regression for #438: every producer carries the one selected CLI identity,
+# so passing differential gates deterministically remain passing
 # aggregate checks instead of becoming provenance failures.
-for command in 'review audit' 'review lint' 'review test'; do
+for command in 'review lint' 'review test'; do
   aggregate_root="${tmp}/aggregate-$(printf '%s' "${command}" | tr ' ' '-')"
   write_aggregate_phase "${aggregate_root}" candidate candidate "${command}" 'homeboy 9.9.9+candidate'
   write_aggregate_phase "${aggregate_root}" baseline base "${command}" 'homeboy 9.9.9+candidate'
@@ -368,12 +368,12 @@ for command in 'review audit' 'review lint' 'review test'; do
   grep -F "{\"${command}\":\"pass\"}" "${tmp}/aggregate-output" >/dev/null \
     || { printf 'FAIL: %s aggregate did not preserve six-phase passing evidence\n' "${command}"; exit 1; }
 done
-printf 'PASS: six revision-bound passing phases deterministically produce three passing aggregates\n'
+printf 'PASS: revision-bound passing phases deterministically produce passing aggregates\n'
 
-# The shared reconciler is the enforcement path for Audit, Lint, and Test. Prove
+# The shared reconciler is the enforcement path for Lint and Test. Prove
 # each aggregate emits producer, artifact, and rerun evidence for transported
 # malformed provenance rather than degrading to a generic gate failure.
-for command in 'review audit' 'review lint' 'review test'; do
+for command in 'review lint' 'review test'; do
   aggregate_root="${tmp}/malformed-$(printf '%s' "${command}" | tr ' ' '-')"
   write_aggregate_phase "${aggregate_root}" candidate candidate "${command}" ''
   write_aggregate_phase "${aggregate_root}" baseline base "${command}" 'homeboy 9.9.9+candidate'

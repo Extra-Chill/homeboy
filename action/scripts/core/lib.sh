@@ -98,14 +98,10 @@ quality_base_command() {
   local cmd="$1"
   cmd="$(printf '%s' "${cmd}" | xargs)"
   case "${cmd}" in
-    "review audit"*) printf '%s\n' "audit" ;;
-    "review audit-baseline"*) printf '%s\n' "audit-baseline" ;;
     "review lint"*) printf '%s\n' "lint" ;;
     "review test"*) printf '%s\n' "test" ;;
     "review build"*) printf '%s\n' "build" ;;
     "review ci"*) printf '%s\n' "ci" ;;
-    audit|audit\ *) printf '%s\n' "audit" ;;
-    audit-baseline|audit-baseline\ *) printf '%s\n' "audit-baseline" ;;
     lint|lint\ *) printf '%s\n' "lint" ;;
     test|test\ *) printf '%s\n' "test" ;;
     build|build\ *) printf '%s\n' "build" ;;
@@ -114,13 +110,13 @@ quality_base_command() {
   esac
 }
 
-# Sort commands into canonical order: audit → lint → test → build → refactor → bench.
-# Review-backed audit/lint/test/build are core quality gates; real refactor and bench commands
+# Sort commands into canonical order: lint → test → build → bench.
+# Review-backed lint/test/build are core quality gates; bench commands
 # run after them when explicitly requested. Release and operations commands are
 # handled by dedicated steps and are filtered out here defensively.
 canonicalize_commands() {
   local commands="$1"
-  local audit="" lint="" test="" build="" refactor="" bench="" others=()
+  local lint="" test="" build="" bench="" others=()
   local cmd base_cmd
 
   IFS=',' read -ra CMD_ARRAY <<< "${commands}"
@@ -128,11 +124,9 @@ canonicalize_commands() {
     cmd="$(printf '%s' "${cmd}" | xargs)"
     base_cmd="$(quality_base_command "${cmd}")"
     case "${base_cmd}" in
-      audit)   audit="${cmd}" ;;
       lint)    lint="${cmd}" ;;
       test)    test="${cmd}" ;;
       build)   build="${cmd}" ;;
-      refactor) refactor="${cmd}" ;;
       bench) bench="${cmd}" ;;
       release|deploy|git) ;;
       *)       others+=("${cmd}") ;;
@@ -140,11 +134,9 @@ canonicalize_commands() {
   done
 
   local result=()
-  [ -n "${audit}" ] && result+=("${audit}")
   [ -n "${lint}" ]  && result+=("${lint}")
   [ -n "${test}" ]  && result+=("${test}")
   [ -n "${build}" ] && result+=("${build}")
-  [ -n "${refactor}" ] && result+=("${refactor}")
   [ -n "${bench}" ] && result+=("${bench}")
   result+=("${others[@]+"${others[@]}"}")
 
@@ -191,7 +183,7 @@ resolve_baseline_commands() {
     cmd="$(echo "${cmd}" | xargs)"
     base_cmd="$(quality_base_command "${cmd}")"
     case "${base_cmd}" in
-      audit|lint|test) ;;
+      lint|test) ;;
       *) continue ;;
     esac
 
@@ -228,7 +220,7 @@ baseline_command_selected() {
   case "${baseline_input}" in
     auto)
       case "${command}" in
-        review\ audit|review\ lint|review\ test|audit|lint|test) return 0 ;;
+        review\ lint|review\ test|lint|test) return 0 ;;
       esac
       return 1
       ;;
@@ -266,11 +258,11 @@ settings_json_flags() {
 valid_command_result_output() {
   local output_file="$1" expected_command="$2" command_exit="$3"
   # Homeboy reports the executed top-level command in the result envelope.
-  # Legacy quality aliases (`audit`, `lint`, `test`, `build`) are executed
+  # Legacy quality aliases (`lint`, `test`, `build`) are executed
   # through `review`, so validate them against the translated command root.
   local expected_root
   case "$(quality_base_command "${expected_command}")" in
-    audit|audit-baseline|lint|test|build) expected_root="review" ;;
+    lint|test|build) expected_root="review" ;;
     *) expected_root="$(printf '%s' "${expected_command}" | awk '{print $1}')" ;;
   esac
   jq -e \
@@ -468,7 +460,7 @@ homeboy_placement_mode() {
   if [ -z "${HOMEBOY_ACTION_PLACEMENT_MODE+x}" ]; then
     if homeboy_help_supports_placement; then
       HOMEBOY_ACTION_PLACEMENT_MODE=global
-    elif homeboy_help_supports_placement review audit; then
+    elif homeboy_help_supports_placement review lint; then
       HOMEBOY_ACTION_PLACEMENT_MODE=scoped
     else
       HOMEBOY_ACTION_PLACEMENT_MODE=legacy
@@ -484,7 +476,7 @@ homeboy_command_placement_flags() {
   homeboy_placement_mode
   if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${HOMEBOY_ACTION_PLACEMENT_MODE}" = "scoped" ]; then
     case "${command}" in
-      review\ audit|review\ lint|review\ test|review\ build|review)
+      review\ lint|review\ test|review\ build|review)
         read -ra command_parts <<< "${command}"
         if homeboy_help_supports_placement "${command_parts[@]}"; then
           printf '%s' '--placement local '
@@ -504,14 +496,7 @@ build_run_command() {
   local global_flags
   global_flags="$(homeboy_global_flags "${output_file}")"
 
-  if [[ "${cmd}" == refactor* ]]; then
-    local refactor_args
-    refactor_args="$(printf '%s' "${cmd#refactor}" | xargs)"
-    if [[ "${refactor_args}" == "lint" || "${refactor_args}" == "lint "* ]]; then
-      refactor_args="--from lint${refactor_args#lint}"
-    fi
-    full_cmd="homeboy ${global_flags}refactor ${component_id} ${refactor_args} --path ${workspace}"
-  elif [[ "${cmd}" == bench* ]]; then
+  if [[ "${cmd}" == bench* ]]; then
     local bench_args
     bench_args="$(printf '%s' "${cmd#bench}" | xargs)"
     full_cmd="homeboy ${global_flags}bench ${component_id}"
@@ -521,7 +506,7 @@ build_run_command() {
     full_cmd="homeboy ${global_flags}${cmd}"
   elif [[ "${cmd}" == "review "* ]]; then
     full_cmd="$(review_subcommand_run_command "${cmd}" "${component_id}" "${workspace}" "${global_flags}")"
-  elif [[ "$(quality_base_command "${cmd}")" =~ ^(audit|audit-baseline|lint|test|build)$ ]]; then
+  elif [[ "$(quality_base_command "${cmd}")" =~ ^(lint|test|build)$ ]]; then
     full_cmd="$(review_subcommand_run_command "review ${cmd}" "${component_id}" "${workspace}" "${global_flags}")"
   else
     full_cmd="homeboy ${global_flags}${cmd} ${component_id} --path ${workspace}"

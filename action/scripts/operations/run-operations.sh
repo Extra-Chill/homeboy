@@ -2,7 +2,7 @@
 #
 # Run passthrough operations commands.
 #
-# Unlike quality-gate commands (audit/lint/test), fleet, deploy, and native git
+# Unlike quality-gate commands (lint/test), fleet, deploy, and native git
 # commands are passthrough operations. They use their own argument structure
 # and don't take component/workspace/scope flags from the action — the full
 # command is passed through as-is.

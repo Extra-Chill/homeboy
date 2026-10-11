@@ -30,8 +30,8 @@ assert_key() {
   printf 'PASS: %s\n' "${label}"
 }
 
-assert_key "compound command" "refactor-from-all" COMMANDS="refactor --from all"
-assert_key "explicit section key" "audit-lint" COMMANDS="review audit" COMMENT_SECTION_KEY_INPUT="Audit & Lint"
-assert_key "job fallback" "homeboy-build-lint-test" COMMANDS="review audit,review lint,review test" GITHUB_JOB="Homeboy Build (Lint & Test)"
+assert_key "compound command" "bench-rig-main" COMMANDS="bench --rig main"
+assert_key "explicit section key" "lint-test" COMMANDS="review lint" COMMENT_SECTION_KEY_INPUT="Lint & Test"
+assert_key "job fallback" "homeboy-build-lint-test" COMMANDS="review lint,review test" GITHUB_JOB="Homeboy Build (Lint & Test)"
 
 printf 'All section key slug checks passed.\n'

@@ -74,8 +74,8 @@ assert_exit 0 "closed PR ignores stale failing quality results" \
 assert_exit 0 "closed PR ignores malformed stale results" \
   env RESULTS='{"review test":"fail"}}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 
-assert_exit 0 "merged PR preserves a completed passing audit" \
-  env RESULTS='{"audit":"pass"}' COMMANDS='audit' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
+assert_exit 0 "merged PR preserves a completed passing lint" \
+  env RESULTS='{"lint":"pass"}' COMMANDS='lint' OPERATIONS_RESULTS='' PR_ACTIVE='false' bash "${ENFORCE_STATUS}"
 
 assert_exit 0 "passing quality results pass" \
   env RESULTS='{"review test":"pass"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
@@ -86,7 +86,7 @@ assert_exit 0 "baseline red quality results do not fail PR" \
 assert_exit 0 "inconclusive quality results do not fail PR" \
   env RESULTS='{"review lint":"inconclusive"}' COMMANDS='review lint' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
-# Required lint/Test evidence cannot be absent; audit remains candidate-only.
+# Required lint/Test evidence cannot be absent; other commands remain candidate-only.
 assert_exit 1 "no_measurement required Test results fail PR" \
   env RESULTS='{"review test":"no_measurement"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 assert_exit 1 "no_measurement required Lint results fail PR" \
@@ -99,10 +99,10 @@ assert_exit 1 "no_measurement suffixed review lint results fail PR" \
   env RESULTS='{"review lint component":"no_measurement"}' COMMANDS='review lint component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 assert_exit 1 "no_measurement suffixed review test results fail PR" \
   env RESULTS='{"review test component":"no_measurement"}' COMMANDS='review test component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
-assert_exit 0 "no_measurement Audit remains candidate-only" \
-  env RESULTS='{"review audit":"no_measurement"}' COMMANDS='review audit' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
-assert_exit 0 "no_measurement suffixed Audit remains candidate-only" \
-  env RESULTS='{"review audit component":"no_measurement"}' COMMANDS='review audit component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 0 "no_measurement Build remains candidate-only" \
+  env RESULTS='{"review build":"no_measurement"}' COMMANDS='review build' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
+assert_exit 0 "no_measurement suffixed Build remains candidate-only" \
+  env RESULTS='{"review build component":"no_measurement"}' COMMANDS='review build component' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"
 
 assert_exit 1 "invalid Test evidence fails final enforcement" \
   env RESULTS='{"review test":"invalid_evidence"}' COMMANDS='review test' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}"

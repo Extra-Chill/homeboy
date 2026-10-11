@@ -27,10 +27,10 @@ source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/lib.sh"
 source "${GITHUB_ACTION_PATH}/scripts/pr/comment/sections.sh"
 
-# Same precedence as select-final-results.sh, generate-failure-digest.sh, and
-# auto-file-categorized-issues.sh. This consumer was the one left on the raw
-# HOMEBOY_OUTPUT_DIR, which is why dropping the duplicate bench copy broke the
-# comment summary rather than any of the other three.
+# Same precedence as select-final-results.sh and generate-failure-digest.sh.
+# This consumer was the one left on the raw HOMEBOY_OUTPUT_DIR, which is why
+# dropping the duplicate bench copy broke the comment summary rather than any
+# of the others.
 OUTPUT_DIR="${HOMEBOY_CI_RESULTS_DIR:-${HOMEBOY_OUTPUT_DIR:-}}"
 COMP_ID="$(resolve_component_id)"
 WORKSPACE="$(resolve_workspace)"
@@ -56,10 +56,10 @@ COMMENT_KEY="$(derive_comment_key)"
 SECTION_KEY="$(derive_section_key)"
 SECTION_TITLE="$(derive_section_title)"
 HEADER="## Homeboy Results — \`${COMP_ID}\`"
-# Preserve the current rendered section order (lint, build, test, audit, bench).
+# Preserve the current rendered section order (lint, build, test, bench).
 # Tooling versions are passed as the core-managed footer instead of an action-
 # rendered pseudo-section.
-SECTION_ORDER="lint,build,test,audit,bench"
+SECTION_ORDER="lint,build,test,bench"
 
 if ! comment_has_actionable_content; then
   echo "Skipping PR comment — run passed with no actionable content"

@@ -51,11 +51,6 @@ assert_env_contains "${env_file}" "SCOPE_MODE=changed" "auto PR uses changed sco
 assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "auto PR records base ref"
 
 # --- scope_flags_for -------------------------------------------------------
-#
-# `audit` used to share the differential-gating exemption with `test`, so under
-# gating it ran unscoped over the whole repository: 12m07s to report 445 findings
-# and exit 1, then a 684s baseline rerun that failed identically and downgraded
-# the verdict to `baseline_red` (homeboy#11751 W1-2).
 
 assert_flags() {
   local cmd="$1" gating="$2" expected="$3" label="$4" actual
@@ -70,10 +65,8 @@ assert_flags() {
   printf 'PASS: %s\n' "${label}"
 }
 
-assert_flags audit true '--changed-since origin/main' 'audit is scoped under differential gating'
-assert_flags audit false '--changed-since origin/main' 'audit is scoped without differential gating'
 assert_flags lint true '--changed-since origin/main' 'lint stays scoped under differential gating'
-assert_flags refactor true '--changed-since origin/main' 'refactor stays scoped'
+assert_flags lint false '--changed-since origin/main' 'lint is scoped without differential gating'
 assert_flags review true '--changed-since origin/main' 'review stays scoped'
 
 # Homeboy turns this one changed ref into the extension's exact changed-test
@@ -87,9 +80,9 @@ assert_flags release true '' 'release is never scoped'
 assert_flags deploy true '' 'deploy is never scoped'
 
 # Nothing is scoped when there is no changed scope to apply.
-no_scope="$(SCOPE_MODE=full SCOPE_BASE_REF=origin/main bash -c "source '${SCRIPT_DIR}/flags.sh'; scope_flags_for audit")"
+no_scope="$(SCOPE_MODE=full SCOPE_BASE_REF=origin/main bash -c "source '${SCRIPT_DIR}/flags.sh'; scope_flags_for lint")"
 [ -z "${no_scope}" ] || { printf 'FAIL: full scope must not emit --changed-since, got %s\n' "${no_scope}"; exit 1; }
-missing_base="$(SCOPE_MODE=changed SCOPE_BASE_REF= bash -c "source '${SCRIPT_DIR}/flags.sh'; scope_flags_for audit")"
+missing_base="$(SCOPE_MODE=changed SCOPE_BASE_REF= bash -c "source '${SCRIPT_DIR}/flags.sh'; scope_flags_for lint")"
 [ -z "${missing_base}" ] || { printf 'FAIL: absent base ref must not emit --changed-since, got %s\n' "${missing_base}"; exit 1; }
 printf 'PASS: no changed scope emits no flag\n'
 

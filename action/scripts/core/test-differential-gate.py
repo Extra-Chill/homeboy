@@ -40,36 +40,23 @@ def main() -> None:
         current.mkdir()
         base.mkdir()
 
-        write_json(base / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 5}}})
-        write_json(current / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 5}}})
+        write_json(base / "lint.json", {"success": False, "data": {"summary": {"findings": 5}}})
+        write_json(current / "lint.json", {"success": False, "data": {"summary": {"findings": 5}}})
         assert_equal(
-            {"audit": "baseline_red"},
-            run_gate({"audit": "fail"}, current, base),
-            "audit failure that reproduces unchanged on the baseline is baseline_red",
+            {"lint": "baseline_red"},
+            run_gate({"lint": "fail"}, current, base),
+            "lint failure that reproduces unchanged on the baseline is baseline_red",
         )
 
-        write_json(current / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 6}}})
+        write_json(current / "lint.json", {"success": False, "data": {"summary": {"findings": 6}}})
         assert_equal(
-            {"audit": "fail"},
-            run_gate({"audit": "fail"}, current, base),
-            "audit failure remains when outliers increase",
+            {"lint": "fail"},
+            run_gate({"lint": "fail"}, current, base),
+            "lint failure remains when findings increase",
         )
 
-        write_json(
-            current / "audit.json",
-            {
-                "success": False,
-                "data": {
-                    "summary": {"outliers_found": 6},
-                    "changed_since": {"introduced_findings": 0, "contextual_findings": 6},
-                },
-            },
-        )
-        assert_equal(
-            {"audit": "pass"},
-            run_gate({"audit": "fail"}, current, base),
-            "changed-scope audit failure passes when no findings were introduced",
-        )
+        (base / "lint.json").unlink()
+        (current / "lint.json").unlink()
 
         write_json(base / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
@@ -103,17 +90,9 @@ def main() -> None:
         )
 
         assert_equal(
-            {"lint": "inconclusive", "audit": "pass"},
-            run_gate({"lint": "fail", "audit": "pass"}, current, base),
+            {"lint": "inconclusive", "test": "pass"},
+            run_gate({"lint": "fail", "test": "pass"}, current, base),
             "lint failure without comparable metrics is inconclusive",
-        )
-
-        (base / "audit.json").unlink()
-        (current / "audit.json").unlink()
-        assert_equal(
-            {"audit": "inconclusive"},
-            run_gate({"audit": "fail"}, current, base),
-            "missing metric files are inconclusive",
         )
 
         # The candidate's own lint already compared the changed files against

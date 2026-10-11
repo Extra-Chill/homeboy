@@ -12,11 +12,7 @@ on:
       commands:
         description: 'Homeboy quality commands to run.'
         type: string
-        default: 'review audit,review lint,review test'
-      expected-commands:
-        description: 'Full command set expected across the workflow.'
-        type: string
-        default: ''
+        default: 'review lint,review test'
       component:
         description: 'Component name override.'
         type: string
@@ -110,7 +106,7 @@ on:
         type: string
         default: ''
       differential-gating:
-        description: 'Enable PR differential gating for audit/lint/test.'
+        description: 'Enable PR differential gating for lint/test.'
         type: string
         default: 'false'
       baseline-commands:
@@ -161,10 +157,6 @@ on:
         description: 'Post the default Homeboy PR comment.'
         type: string
         default: 'true'
-      auto-issue:
-        description: 'Override auto-issue filing.'
-        type: string
-        default: ''
       comment-key:
         description: 'Shared PR comment key.'
         type: string
@@ -385,13 +377,13 @@ jobs:
               rest="$(printf '%s' "${command#review}" | xargs)"
               review_base="${rest%% *}"
               case "${review_base}" in
-                audit|lint|test)
+                lint|test)
                   base="${review_base}"
                   ;;
               esac
             fi
             case "${base}" in
-              audit|lint|test|refactor|bench)
+              lint|test|bench)
                 if [ -z "${selected_commands[${base}]:-}" ]; then
                   selected_commands[${base}]="${command}"
                 fi
@@ -420,7 +412,7 @@ jobs:
              case "${BASELINE_COMMANDS}" in
                none) printf '%s\n' false; return ;;
                auto)
-                 case "${command}" in review\ audit|review\ lint|review\ test|audit|lint|test) printf '%s\n' true ;; *) printf '%s\n' false ;; esac
+                 case "${command}" in review\ lint|review\ test|lint|test) printf '%s\n' true ;; *) printf '%s\n' false ;; esac
                  return ;;
              esac
              IFS=',' read -ra requested <<< "${BASELINE_COMMANDS}"
@@ -432,10 +424,8 @@ jobs:
 
           title_for() {
             case "$1" in
-              audit) printf '%s\n' 'Audit' ;;
               lint) printf '%s\n' 'Lint' ;;
               test) printf '%s\n' 'Test' ;;
-              refactor) printf '%s\n' 'Refactor' ;;
               bench) printf '%s\n' 'Bench' ;;
               *) printf '%s\n' "${1:-Homeboy}" ;;
             esac
@@ -447,7 +437,7 @@ jobs:
               | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//'
           }
 
-          for base in audit lint test refactor bench; do
+          for base in lint test bench; do
             if [ -n "${selected_commands[${base}]:-}" ]; then
               title="$(title_for "${base}")"
               command="${selected_commands[${base}]}"
@@ -541,7 +531,6 @@ jobs:
           extension-source: ${{ inputs.extension-source }}
           extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ matrix.command }}
-          expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
           scope: ${{ inputs.scope }}
@@ -553,7 +542,7 @@ jobs:
           auto-setup: ${{ inputs.auto-setup }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
-          # Preserve differential scope semantics (full audit/test, changed
+          # Preserve differential scope semantics (full test, changed
           # lint) while deferring the baseline to its independent job.
           differential-gating: ${{ inputs.differential-gating }}
           baseline-commands: none
@@ -566,7 +555,6 @@ jobs:
           comment-section-key: ${{ inputs.comment-section-key || matrix.section_key }}
           comment-section-title: ${{ inputs.comment-section-title || matrix.section_title }}
           pr-comment: 'false'
-          auto-issue: 'false'
           pr-policy: ''
           pr-open-policy: ''
           pr-policy-merge: 'false'
@@ -676,7 +664,6 @@ jobs:
           extension-source: ${{ inputs.extension-source }}
           extension-ref: ${{ inputs.extension-ref }}
           commands: ${{ matrix.command }}
-          expected-commands: ${{ inputs.expected-commands || inputs.commands }}
           component: ${{ inputs.component }}
           args: ${{ inputs.args }}
           # The base checkout cannot derive the candidate's changed scope by
@@ -692,7 +679,6 @@ jobs:
           test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
-          auto-issue: 'false'
       - name: Write baseline phase provenance
         id: provenance
         if: always() && steps.baseline-policy.outputs.run == 'true'
@@ -825,7 +811,6 @@ jobs:
           test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
-          auto-issue: 'false'
       - name: Plan candidate Test shards
         id: plan
         if: always() && steps.inventory.outcome == 'success'
@@ -984,7 +969,6 @@ jobs:
           test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
-          auto-issue: 'false'
       - name: Write candidate Test shard provenance
         if: always()
         env:

@@ -63,7 +63,7 @@ export HOMEBOY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensio
 export HOMEBOY_EXTENSION_REVISION="abc123"
 export HOMEBOY_ACTION_REPOSITORY="Extra-Chill/homeboy-action"
 export HOMEBOY_ACTION_REF="v2"
-export COMMANDS="review lint,review test,review audit"
+export COMMANDS="review lint,review test"
 export COMPONENT_NAME="wordpress"
 export SCOPE_CONTEXT="pr"
 export SCOPE_MODE="changed"
@@ -106,7 +106,7 @@ grep -Fx -- "https://github.com/Extra-Chill/homeboy-action/actions/runs/12345" "
 grep -Fx -- "--tooling-json" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "${TOOLING_JSON}" "${ARGS_FILE}" >/dev/null
 grep -Fx -- "--commands" "${ARGS_FILE}" >/dev/null
-grep -Fx -- "review lint,review test,review audit" "${ARGS_FILE}" >/dev/null
+grep -Fx -- "review lint,review test" "${ARGS_FILE}" >/dev/null
 grep -F "runs report failure-digest --help" "${CALLS_FILE}" >/dev/null
 
 jq -e \

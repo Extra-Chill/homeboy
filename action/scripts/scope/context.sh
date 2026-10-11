@@ -37,7 +37,7 @@ scope_note_for() {
 
   # All scoped commands get the same note
   case "${cmd}" in
-    audit|lint|test)
+    lint|test)
       printf ' _(changed files only)_'
       ;;
   esac

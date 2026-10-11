@@ -66,7 +66,7 @@ if [ "${actual}" != "${expected}" ]; then
   exit 1
 fi
 
-if [ "$(grep -Fc 'COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}' "${ROOT_DIR}/action.yml")" -ne 6 ]; then
+if [ "$(grep -Fc 'COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}' "${ROOT_DIR}/action.yml")" -ne 5 ]; then
   printf 'FAIL: every downstream identity consumer must receive the resolved portable ID\n'
   exit 1
 fi

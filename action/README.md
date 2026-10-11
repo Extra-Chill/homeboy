@@ -16,7 +16,9 @@ The action release stream is aligned with that channel. Release commits and tags
 
 ## Breaking Change Notice
 
-The generic source-mutation interface has been removed: `autofix`, `autofix-mode`, `autofix-open-pr`, `autofix-max-commits`, `autofix-commands`, and `autofix-label` are no longer accepted by the action or reusable workflow. Quality runs are read-only; audit, lint, test, review reporting, failure digests, categorized issue reconciliation, and final status enforcement remain available. Consumers using any removed input must remove it before adopting the next major action release.
+The generic source-mutation interface has been removed: `autofix`, `autofix-mode`, `autofix-open-pr`, `autofix-max-commits`, `autofix-commands`, and `autofix-label` are no longer accepted by the action or reusable workflow. Quality runs are read-only; lint, test, review reporting, failure digests, and final status enforcement remain available.
+
+Code audit, `refactor`, and categorized issue reconciliation have also been removed, following their deletion from Homeboy ([Extra-Chill/homeboy#15774](https://github.com/Extra-Chill/homeboy/issues/15774)). `review audit`, `review audit-baseline`, and `refactor` are no longer recognized commands, and the `auto-issue` and `expected-commands` inputs are gone. Reusable-workflow callers must stop passing those inputs; lint autofix is a local command, `homeboy review lint <component> --fix`.
 
 ## Quick Start
 
@@ -25,10 +27,10 @@ The generic source-mutation interface has been removed: `autofix`, `autofix-mode
 Prefer the reusable workflow so Homeboy Action owns the CI DAG and result
 aggregation. It projects binary setup, command execution, artifact
 publication, result reconciliation, and enforcement into named GitHub jobs and
-steps. A failed command appears as `Run candidate Audit`, `Run candidate Lint`,
-or `Run candidate Test` in the GitHub UI and `gh run view --log`, rather than
+steps. A failed command appears as `Run candidate Lint` or
+`Run candidate Test` in the GitHub UI and `gh run view --log`, rather than
 as an anonymous composite-action step. The workflow runs all requested quality
-commands before failing, so an audit failure does not hide lint or test
+commands before failing, so a lint failure does not hide test
 feedback.
 
 For pull requests with `differential-gating: 'true'`, the reusable workflow
@@ -84,7 +86,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       extension: wordpress
-      commands: review audit,review lint,review test
+      commands: review lint,review test
       php-version: '8.3'
     secrets: inherit
 ```
@@ -139,7 +141,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       component: homeboy
-      commands: review audit,review lint,review test
+      commands: review lint,review test
       build-command: cargo build --release
       build-artifact-path: target/release/homeboy
     secrets: inherit
@@ -256,8 +258,7 @@ dry-run never receives the token and never publishes.
 #### Release credentials
 
 Set `HOMEBOY_APP_ID` and `HOMEBOY_APP_PRIVATE_KEY` as repository secrets to
-release with a GitHub App token (enables auto-issue filing and workflow
-re-triggers). Both are optional: without them the workflow falls back to the
+release with a GitHub App token (enables workflow re-triggers). Both are optional: without them the workflow falls back to the
 automatic `GITHUB_TOKEN`, which is sufficient for tag and GitHub Release
 creation in the same repository. Pass `secrets: inherit` from the caller.
 
@@ -403,7 +404,7 @@ Run `homeboy bench` in CI and preserve the raw structured output for downstream 
     component: homeboy
     commands: bench
     rig: main,pr
-    scenario: audit-self
+    scenario: cli-startup
     runs: 3
     iterations: 10
 ```
@@ -417,7 +418,7 @@ Set `import-observations: true` on jobs that should consume observation bundles 
 Artifact boundaries:
 
 - `homeboy-ci-results-<component>-<commands>-<job>-<os>-<runtime>`: immediate structured command outputs used for pass/fail decisions and PR rendering, such as `bench.json`.
-- `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>`: persisted Homeboy run history exported for later import/query by agents and other tooling. The suffix prevents collisions when a workflow splits audit/lint/test across jobs, matrix dimensions, or multiple action invocations.
+- `homeboy-observations-<component>-<commands>-<job>-<os>-<runtime>`: persisted Homeboy run history exported for later import/query by agents and other tooling. The suffix prevents collisions when a workflow splits lint/test across jobs, matrix dimensions, or multiple action invocations.
 
 #### Continuous release outputs
 
@@ -458,8 +459,7 @@ Use these outputs to gate downstream jobs:
 | `source` | No | | Path to build homeboy from source (e.g. `.`). Falls back to release binary. |
 | `extension` | No | | Extension ID (e.g. `wordpress`, `rust`, `node`) |
 | `extension-source` | No | `Extra-Chill/homeboy-extensions` | Git URL to install the extension from |
-| `commands` | No | `review audit,review lint,review test` | Comma-separated commands to run |
-| `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `review audit,review lint,review test`). Set this on every invocation when a workflow splits review audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
+| `commands` | No | `review lint,review test` | Comma-separated commands to run |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
 | `ssh-key` | No | | SSH private key for `deploy` operations commands. Starts an agent and loads it; if empty, SSH is assumed pre-configured. |
@@ -471,8 +471,8 @@ Use these outputs to gate downstream jobs:
 | `runs` | No | | Bench run count passed to `homeboy bench --runs` |
 | `iterations` | No | | Bench iteration count passed to `homeboy bench --iterations` |
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
-| `differential-gating` | No | `false` | On PRs, compare `review audit`/`review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. |
-| `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review audit`/`review lint`/`review test` commands; use a comma-separated subset such as `review audit` or `none` to skip baseline reruns. |
+| `differential-gating` | No | `false` | On PRs, compare `review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. |
+| `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review lint`/`review test` commands; use a comma-separated subset such as `review test` or `none` to skip baseline reruns. |
 | `retry-introduced-test-failures` | No | `true` | Before blaming the PR for a candidate-only test failure, retry it in isolation on the candidate to rule out flakiness. Requires `differential-gating`. Currently supported for the `cargo-nextest` and `cargo test` runners only. |
 | `retry-introduced-test-attempts` | No | `2` | Retry attempts per candidate-only test identity when `retry-introduced-test-failures` is true. |
 
@@ -488,7 +488,6 @@ Test reconciliation consumes Homeboy's `homeboy/test-outcomes/v1` and `homeboy/t
 | `php-version` | No | | PHP version (sets up via `shivammathur/setup-php`) |
 | `node-version` | No | | Node.js version (sets up via `actions/setup-node`) |
 | `scope` | No | `auto` | Execution scope: `auto` uses changed scope on PRs and full scope elsewhere; `changed` forces `--changed-since` when a base SHA is available; `full` scans the full workspace. |
-| `auto-issue` | No | *(auto)* | Reconcile categorized audit, lint, and test issues on non-PR runs. Empty means enabled for non-PR events and disabled for PRs; set `false` to suppress issue maintenance. |
 | `comment-key` | No | *(auto)* | Shared PR comment key so multiple jobs aggregate into one sticky comment |
 | `comment-section-key` | No | *(auto)* | Section key within the shared PR comment |
 | `comment-section-title` | No | *(auto)* | Visible heading for this section in the shared PR comment |
@@ -505,7 +504,7 @@ Test reconciliation consumes Homeboy's `homeboy/test-outcomes/v1` and `homeboy/t
 | `release-skip-github-release` | No | `false` | Skip GitHub Release creation |
 | `release-verify-github-release` | No | `true` | Verify that a successful release has a GitHub Release |
 
-Quality command inputs `audit`, `lint`, `test`, `build`, and `audit-baseline` are action-level shorthand. Homeboy Action runs them through Homeboy's review umbrella, for example `commands: test` emits `homeboy review test <component> --path <workspace>`. Commands that remain top-level in Homeboy, including `bench` and `refactor`, are emitted as top-level commands.
+Quality command inputs `lint`, `test`, and `build` are action-level shorthand. Homeboy Action runs them through Homeboy's review umbrella, for example `commands: test` emits `homeboy review test <component> --path <workspace>`. Commands that remain top-level in Homeboy, including `bench`, are emitted as top-level commands.
 
 ## Outputs
 
@@ -563,7 +562,7 @@ A step that must run earlier still needs its own tooling.
     php-version: '8.3'
 ```
 
-### Full Suite with Audit
+### Full Suite
 
 ```yaml
 jobs:
@@ -571,7 +570,7 @@ jobs:
     uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@v2
     with:
       extension: wordpress
-      commands: review audit,review lint,review test
+      commands: review lint,review test
       php-version: '8.3'
       node-version: '20'
     secrets: inherit
@@ -587,7 +586,7 @@ By default, `scope: auto` uses changed-file scope for pull requests and full-wor
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: wordpress
-    commands: review lint,review test,review audit
+    commands: review lint,review test
     php-version: '8.3'
     scope: 'changed'
 ```
@@ -596,7 +595,7 @@ By default, `scope: auto` uses changed-file scope for pull requests and full-wor
 
 Use the reusable workflow for normal CI. Split jobs are still supported for
 specialized cases, but the workflow author is responsible for dependency
-semantics. Avoid chaining `audit -> lint -> test` with `needs` unless skipped
+semantics. Avoid chaining `lint -> test` with `needs` unless skipped
 downstream checks are intentional.
 
 ```yaml
@@ -621,18 +620,9 @@ jobs:
           component: homeboy
           commands: review test
 
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: Extra-Chill/homeboy-action@v2
-        with:
-          extension: rust
-          component: homeboy
-          commands: review audit
 ```
 
-All three jobs write to the **same PR comment** automatically.
+Both jobs write to the **same PR comment** automatically.
 
 ### Deterministic PR Policy Gate
 
@@ -722,7 +712,7 @@ jobs:
         with:
           source: '.'
           extension: rust
-          commands: review audit
+          commands: review test
 
   # Version bump + changelog + tag
   prepare:
@@ -839,9 +829,9 @@ missing, and prints the project and server ids it found. The reusable
 Prefer two lanes:
 
 1. **PR lane:** fast, scoped feedback for the author.
-2. **Main lane:** full-suite signal that can maintain issues when something reaches `main`.
+2. **Main lane:** full-suite signal when something reaches `main`.
 
-This keeps PR comments lightweight while preventing the issue tracker from becoming a noisy task queue for speculative or changed-file-only findings.
+This keeps PR comments lightweight while the main lane still checks the whole repository.
 
 #### Two-workflow strategy
 
@@ -871,12 +861,12 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: review lint,review test,review audit
+          commands: review lint,review test
           scope: changed
           php-version: '8.3'
 ```
 
-Use `homeboy-main.yml` for full checks and issue maintenance:
+Use `homeboy-main.yml` for full checks:
 
 ```yaml
 name: Homeboy Main
@@ -895,7 +885,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v6
@@ -905,19 +894,18 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: review lint,review test,review audit
+          commands: review lint,review test
           scope: full
-          auto-issue: 'true'
           php-version: '8.3'
 ```
 
-If you also run continuous release, keep release as its own workflow or separate job after the full quality gate. Release jobs should run `commands: release`; they should not be the only place full `review lint,review test,review audit` runs.
+If you also run continuous release, keep release as its own workflow or separate job after the full quality gate. Release jobs should run `commands: release`; they should not be the only place full `review lint,review test` runs.
 
 > **Avoid cron-based release triggers.** A `schedule` cron fires whether there are new commits or not. Push-to-main triggers the quality/release pipeline only when there is new code to evaluate.
 
 #### Single workflow with default scope
 
-If you prefer one workflow, keep the default `scope: auto` behavior and make only the issue-filing policy event-aware:
+If you prefer one workflow, keep the default `scope: auto` behavior:
 
 ```yaml
 name: Homeboy CI
@@ -933,7 +921,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@v6
@@ -943,8 +930,7 @@ jobs:
       - uses: Extra-Chill/homeboy-action@v2
         with:
           extension: wordpress
-          commands: review lint,review test,review audit
-          auto-issue: ${{ github.event_name != 'pull_request' && 'true' || 'false' }}
+          commands: review lint,review test
           php-version: '8.3'
 ```
 
@@ -964,42 +950,24 @@ When a PR changes a test-harness config file (`.github/workflows/**`, `homeboy.j
 
 ### Differential gating
 
-Set `differential-gating: 'true'` to make PR `review audit` and `review test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
+Set `differential-gating: 'true'` to make PR `review test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:
 
 ```yaml
 - uses: Extra-Chill/homeboy-action@v2
   with:
     extension: rust
-    commands: review audit,review test,review lint
+    commands: review test,review lint
     differential-gating: 'true'
 ```
 
 When enabled on pull requests:
 
-1. `review audit` and `review test` run in full-scope mode on the PR branch.
-2. The action temporarily checks out the base SHA in the same workspace and captures base `review audit`/`review test` JSON.
-3. The final gate passes `review audit`/`review test` failures when the parsed PR count is less than or equal to the parsed base count.
+1. `review test` runs in full-scope mode on the PR branch.
+2. The action temporarily checks out the base SHA in the same workspace and captures base `review test` JSON.
+3. The final gate passes `review test` failures when the parsed PR count is less than or equal to the parsed base count.
 4. `review lint` is unchanged and still gates on the command exit code.
 
 If the baseline checkout cannot be run safely or the structured counts cannot be parsed, the original failure is preserved.
-
-#### Audit signal hygiene
-
-Use auto-filed issues as a **task queue**, not as a dumping ground for every metric Homeboy can calculate. A good auto-filed issue should be current, concrete, and safe for a human or coding agent to act on.
-
-Recommended policy:
-
-| Signal type | CI handling |
-|-------------|-------------|
-| High-confidence, low-count findings | Allow auto-issue filing. These make good task-queue entries. |
-| Test failures with clear clusters | Allow auto-issue filing from the main lane. Keep PR feedback in comments. |
-| Generic CI command failures | Do not file issues. Keep these in CI output unless they produce categorized audit, lint, or test findings. |
-| High-count trend metrics | Keep in job summaries or dashboards. Do not turn every item into a task issue. |
-| Known noisy or research-only audit rules | Suppress from auto-issue filing with Homeboy audit config; keep them visible in full audit output. |
-
-The main lane is the right place to maintain issue state because it runs against the full repository and can update, close, or suppress stale findings consistently. PR lanes should focus on author feedback and should not maintain long-lived audit issues from partial data.
-
-When a rule is useful as a health metric but not safe as an actionable task list, keep it in job summaries or dashboards rather than turning every item into a tracker task. Homeboy Action delegates issue policy to `homeboy issues reconcile`, so auto-issue maintenance follows the current Homeboy CLI contract.
 
 ### PR Comment Identity
 
@@ -1007,7 +975,7 @@ PR comments are posted only with `app-token`. This keeps Homeboy comments under 
 
 ### Fork PR Note
 
-On fork-based pull requests, GitHub App secrets may be unavailable. Homeboy Action treats the PR comment step as best-effort — lint/test/audit execution still runs and determines job pass/fail.
+On fork-based pull requests, GitHub App secrets may be unavailable. Homeboy Action treats the PR comment step as best-effort — lint/test execution still runs and determines job pass/fail.
 
 ## Failure Digest
 
@@ -1015,7 +983,6 @@ On failed runs, Homeboy Action emits a **Failure Digest** to the job summary and
 
 - Tooling versions (Homeboy CLI, extension source/revision, action ref)
 - Failed test count + top failed tests
-- Audit summary (drift/outliers/top findings)
 - Links back to the full workflow run logs
 
 When multiple jobs invoke Homeboy Action on the same PR, they **merge into one shared PR comment** by default.
