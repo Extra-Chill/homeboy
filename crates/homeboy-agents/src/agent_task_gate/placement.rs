@@ -401,6 +401,32 @@ fn execute_with_context(
     execute_with_context_and_resources(request, cwd, context, None)
 }
 
+/// `PATH` for a Lab gate that does not declare one: the Homeboy runtime's
+/// directory first, then the runner user's installed tools.
+///
+/// Installed tools (npm, node, composer, ...) are not credentials. Gate
+/// isolation privatizes `HOME`/XDG config and cache, not tool discovery, so
+/// the tool `PATH` resolves against the runner's real home (read here, before
+/// the gate's `HOME` is isolated) and the runner process `PATH`. A minimal
+/// system `PATH` made every Node/Composer gate exit 127 on the candidate and
+/// the baseline alike (#15766).
+fn lab_gate_path(runtime_id: &str) -> String {
+    let runtime = Path::new(runtime_id);
+    let runtime_parent = runtime.is_absolute().then(|| runtime.parent()).flatten();
+    let home = homeboy_core::paths::home_root().ok();
+    let existing_path = std::env::var_os("PATH");
+    let tools = homeboy_engine_primitives::command_path::runner_tool_path(
+        home.as_deref(),
+        existing_path.as_deref(),
+    )
+    .map(|path| path.to_string_lossy().into_owned())
+    .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".to_string());
+    match runtime_parent {
+        Some(parent) => format!("{}:{tools}", parent.display()),
+        None => tools,
+    }
+}
+
 fn execute_with_context_and_resources(
     request: LabGateRequest,
     cwd: &Path,
@@ -422,12 +448,9 @@ fn execute_with_context_and_resources(
     // historical local gate policy inherits the controller environment.
     environment.mode = AgentTaskGateEnvironmentMode::Replace;
     if !environment.variables.contains_key("PATH") && !environment.preserve.contains_key("PATH") {
-        let runtime = Path::new(context.runtime_id());
-        let runtime_parent = runtime.is_absolute().then(|| runtime.parent()).flatten();
-        let path = runtime_parent
-            .map(|parent| format!("{}:/usr/local/bin:/usr/bin:/bin", parent.display()))
-            .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".to_string());
-        environment.variables.insert("PATH".to_string(), path);
+        environment
+            .variables
+            .insert("PATH".to_string(), lab_gate_path(context.runtime_id()));
     }
     if let Some(resources) = resources {
         if resources.len() != environment.extension_inputs.len()
@@ -701,6 +724,68 @@ mod tests {
             assert!(request.verify_receipt(&wrong_owner).is_err());
             fs::write(temp.path().join("candidate.txt"), "altered candidate\n").unwrap();
             assert!(request.verify_materialized_candidate(temp.path()).is_err());
+        });
+    }
+
+    fn gate_printing_path_and_home(root: &Path) -> LabGateRequest {
+        let mut request = request(root);
+        request.argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s\\n%s' \"$PATH\" \"$HOME\"".to_string(),
+        ];
+        request
+    }
+
+    #[test]
+    fn lab_gate_without_declared_path_resolves_runner_user_tools() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let local_bin = home.path().join(".local/bin");
+            let node_bin = home.path().join(".local/opt/node-v24.13.1-linux-x64/bin");
+            fs::create_dir_all(&local_bin).unwrap();
+            fs::create_dir_all(&node_bin).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let request = gate_printing_path_and_home(temp.path());
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "/runner/binaries/homeboy-build/homeboy", "reservation").unwrap();
+
+            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            let (path, gate_home) = receipt.report.stdout.split_once('\n').unwrap();
+            let parts = std::env::split_paths(path).collect::<Vec<_>>();
+            assert_eq!(parts[0], Path::new("/runner/binaries/homeboy-build"));
+            let position = |entry: &Path| parts.iter().position(|part| part == entry);
+            let local = position(&local_bin).expect("runner ~/.local/bin on gate PATH");
+            let node = position(&node_bin).expect("runner node bin on gate PATH");
+            let system = position(Path::new("/usr/bin")).expect("system bin on gate PATH");
+            assert!(local < system && node < system);
+            assert_ne!(
+                Path::new(gate_home),
+                home.path(),
+                "gate HOME stays isolated"
+            );
+        });
+    }
+
+    #[test]
+    fn lab_gate_declared_path_is_kept() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let mut request = gate_printing_path_and_home(temp.path());
+            request.environment.variables.insert(
+                "PATH".to_string(),
+                "/declared/bin:/usr/bin:/bin".to_string(),
+            );
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "/runner/binaries/homeboy-build/homeboy", "reservation").unwrap();
+
+            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            let (path, _) = receipt.report.stdout.split_once('\n').unwrap();
+            assert_eq!(path, "/declared/bin:/usr/bin:/bin");
         });
     }
 

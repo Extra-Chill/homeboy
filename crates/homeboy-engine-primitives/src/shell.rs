@@ -93,6 +93,10 @@ pub fn quote_path(path: &str) -> String {
 /// user/tool bin directories and versioned Node installs are discoverable
 /// before the dispatched command runs. Pure shell-string construction shared by
 /// remote-dispatch callers; contains no runner-specific behavior.
+///
+/// Expanded on the remote side, so it cannot call
+/// [`crate::command_path::runner_tool_path`]; it mirrors that directory set
+/// (the node-bin loop prepends, so node bins resolve first here).
 pub fn remote_shell_path_preamble() -> &'static str {
     concat!(
         "export PATH=\"$HOME/.local/bin:$HOME/.",
