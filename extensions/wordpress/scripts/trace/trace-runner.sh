@@ -74,18 +74,6 @@ homeboy_wordpress_resolve_wp_codebox_bin() {
     homeboy_wp_codebox_resolve_bin "${HOMEBOY_SETTINGS_JSON:-}"
 }
 
-homeboy_wordpress_trace_wp_version() {
-    local version=""
-    local extracted=""
-
-    if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
-        [ -n "$extracted" ] && [ "$extracted" != "null" ] && version="$extracted"
-    fi
-
-    printf '%s\n' "$version"
-}
-
 homeboy_wordpress_trace_php_wrapper() {
     local runtime_scenario="$1"
     local runtime_results="$2"
@@ -121,7 +109,7 @@ homeboy_trace_run_php_scenario_wp_codebox() {
     local codebox_bin wp_version plugin_slug run_mount_host runtime_run_dir runtime_results runtime_artifacts runtime_scenario wrapper_file recipe_file output_file codebox_artifacts_dir status mounts_json dep_path dep_slug dep_source
 
     codebox_bin="$(homeboy_wordpress_resolve_wp_codebox_bin)" || return 1
-    wp_version="$(homeboy_wordpress_trace_wp_version)"
+    wp_version="$(homeboy_wp_codebox_wordpress_version)"
     plugin_slug="$(basename "$HOMEBOY_COMPONENT_PATH")"
     run_mount_host="$(homeboy_wp_codebox_resolve_mount_path "$HOMEBOY_RUN_DIR")"
     runtime_run_dir="/homeboy-trace-run"

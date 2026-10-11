@@ -98,14 +98,11 @@ if [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
 fi
 
 WP_CONFIG_DEFINES_JSON="{}"
-WP_CODEBOX_WORDPRESS_VERSION=""
+WP_CODEBOX_WORDPRESS_VERSION="$(homeboy_wp_codebox_wordpress_version)"
 WP_CODEBOX_MULTISITE="${HOMEBOY_WORDPRESS_MULTISITE:-}"
 if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
     extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -c '.wp_config_defines // {}' 2>/dev/null || echo "{}")
     [ -n "$extracted" ] && WP_CONFIG_DEFINES_JSON="$extracted"
-
-    extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
-    [ -n "$extracted" ] && [ "$extracted" != "null" ] && WP_CODEBOX_WORDPRESS_VERSION="$extracted"
 
     if [ -z "$WP_CODEBOX_MULTISITE" ]; then
         extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wp_codebox_multisite // empty' 2>/dev/null || true)

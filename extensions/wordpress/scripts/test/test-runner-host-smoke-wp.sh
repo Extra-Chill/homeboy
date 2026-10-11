@@ -76,16 +76,6 @@ homeboy_wordpress_host_smoke_abs() {
     esac
 }
 
-homeboy_wordpress_smoke_wp_version() {
-    local version=""
-    if [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] && [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ]; then
-        local extracted
-        extracted=$(printf '%s' "$HOMEBOY_SETTINGS_JSON" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
-        [ -n "$extracted" ] && [ "$extracted" != "null" ] && version="$extracted"
-    fi
-    printf '%s\n' "$version"
-}
-
 # Build the recipe mounts and child environment mapping together so every
 # dependency root exposed to a smoke is the translated path that was mounted.
 homeboy_wordpress_smoke_recipe_inputs() {
@@ -343,7 +333,7 @@ fi
 homeboy_wp_codebox_export_command "${HOMEBOY_SETTINGS_JSON:-}" || exit 1
 homeboy_wp_codebox_preflight_command || exit 1
 WP_CODEBOX_COMMAND=("${HOMEBOY_WP_CODEBOX_COMMAND[@]}")
-WP_VERSION="$(homeboy_wordpress_smoke_wp_version)"
+WP_VERSION="$(homeboy_wp_codebox_wordpress_version)"
 RECIPE_INPUTS="$(homeboy_wordpress_smoke_recipe_inputs)" || exit 1
 RECIPE_MOUNTS="$(jq -c '.mounts' <<< "$RECIPE_INPUTS")"
 RECIPE_DEPENDENCY_ROOTS="$(jq -c '.dependency_roots' <<< "$RECIPE_INPUTS")"

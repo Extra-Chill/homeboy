@@ -16,6 +16,7 @@ cp "${WORDPRESS_ROOT}/scripts/test/test-runner.sh" \
     "${FIXTURE_ROOT}/extension-sources/wordpress/scripts/test/"
 cp "${WORDPRESS_ROOT}/scripts/lib/validation-dependencies.sh" \
     "${WORDPRESS_ROOT}/scripts/lib/wp-scripts-toolchain.sh" \
+    "${WORDPRESS_ROOT}/scripts/lib/wp-codebox-paths.sh" \
     "${FIXTURE_ROOT}/extension-sources/wordpress/scripts/lib/"
 cp "${REPOSITORY_ROOT}/scripts/lib/test-result-adapters.sh" \
     "${REPOSITORY_ROOT}/scripts/lib/runner-harness.sh" \

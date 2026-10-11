@@ -39,6 +39,11 @@ WP_SCRIPTS_TOOLCHAIN_HELPER="${HOMEBOY_RUNTIME_WP_SCRIPTS_TOOLCHAIN:-${SCRIPT_DI
 # shellcheck source=../lib/wp-scripts-toolchain.sh
 source "$WP_SCRIPTS_TOOLCHAIN_HELPER"
 
+# Standalone PHP smokes receive WordPress core source from WP Codebox.
+WP_CODEBOX_PATHS_HELPER="${HOMEBOY_RUNTIME_WP_CODEBOX_PATHS:-${SCRIPT_DIR}/../lib/wp-codebox-paths.sh}"
+# shellcheck source=../lib/wp-codebox-paths.sh
+source "$WP_CODEBOX_PATHS_HELPER"
+
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
     echo "DEBUG: Component: ${HOMEBOY_COMPONENT_ID:-none}"
@@ -422,6 +427,25 @@ homeboy_wordpress_standalone_dependency_environment() {
     done <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS"
 }
 
+# Standalone smokes run with host PHP and no booted WordPress, but some load
+# core source files directly (for example wp-includes/html-api). Resolve the
+# core tree once per run through WP Codebox, matching the version query the
+# WP Codebox runners use. Resolution failure only warns: smokes that need core
+# fail with their own message, and smokes that do not are unaffected.
+homeboy_wordpress_standalone_core_root() {
+    [ -z "${STANDALONE_WORDPRESS_CORE_ROOT_RESOLVED+x}" ] || return 0
+    STANDALONE_WORDPRESS_CORE_ROOT_RESOLVED=1
+    STANDALONE_WORDPRESS_CORE_ROOT=""
+    STANDALONE_WORDPRESS_CORE_VERSION=""
+
+    if homeboy_wp_codebox_wordpress_source "${HOMEBOY_SETTINGS_JSON:-}"; then
+        STANDALONE_WORDPRESS_CORE_ROOT="$HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ROOT"
+        STANDALONE_WORDPRESS_CORE_VERSION="${HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_VERSION:-unknown}"
+    else
+        echo "WARNING: WordPress core source unavailable for standalone smokes: ${HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR}" >&2
+    fi
+}
+
 homeboy_wordpress_run_standalone_php_smoke_files() {
     local smoke_files_raw="$1"
     local php_bin="${HOMEBOY_PHP_BIN:-php}"
@@ -443,6 +467,16 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     done
     dependency_env+=("HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON=${STANDALONE_DEPENDENCY_ROOTS_JSON}")
 
+    # The runner owns HOMEBOY_WORDPRESS_CORE_ROOT: set it from the resolved
+    # tree, otherwise keep an inherited value out of the smoke environment.
+    homeboy_wordpress_standalone_core_root
+    local core_env=(-u HOMEBOY_WORDPRESS_CORE_ROOT)
+    if [ -n "$STANDALONE_WORDPRESS_CORE_ROOT" ]; then
+        core_env=()
+        dependency_env+=("HOMEBOY_WORDPRESS_CORE_ROOT=${STANDALONE_WORDPRESS_CORE_ROOT}")
+        echo "  WordPress core: ${STANDALONE_WORDPRESS_CORE_ROOT} (${STANDALONE_WORDPRESS_CORE_VERSION})"
+    fi
+
     while IFS= read -r smoke_file; do
         [ -n "$smoke_file" ] || continue
         if ! smoke_abs="$(homeboy_wordpress_rel_test_file "$smoke_file")"; then
@@ -451,7 +485,7 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
         fi
         rel_path="$smoke_abs"
         echo "PHP_SMOKE_BEGIN:${rel_path}"
-        if env "${dependency_env[@]}" "$php_bin" "${PLUGIN_PATH}/${rel_path}"; then
+        if env ${core_env[@]+"${core_env[@]}"} "${dependency_env[@]}" "$php_bin" "${PLUGIN_PATH}/${rel_path}"; then
             echo "PHP_SMOKE_OK:${rel_path}"
             passed=$((passed + 1))
         else

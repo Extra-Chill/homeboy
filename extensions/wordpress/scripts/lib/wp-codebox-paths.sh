@@ -266,6 +266,78 @@ homeboy_wp_codebox_resolve_command() {
     printf '%s\n' "$bin"
 }
 
+# WordPress version query every WP Codebox caller passes as `--wp`. Empty means
+# the WP Codebox default.
+homeboy_wp_codebox_wordpress_version() {
+    local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
+    local version=""
+
+    if [ -n "$settings_json" ] && [ "$settings_json" != "{}" ]; then
+        version=$(printf '%s' "$settings_json" | jq -r '.wordpress_runtime_version // .wp_codebox_wordpress_version // empty' 2>/dev/null || true)
+        [ "$version" != "null" ] || version=""
+    fi
+    printf '%s\n' "$version"
+}
+
+# Resolve an extracted WordPress core source tree through
+# `wp-codebox wordpress-source --json` (schema wp-codebox/wordpress-source/v1)
+# for host-PHP consumers that load core files without booting WordPress.
+#
+# Must run in the caller's shell (not a command substitution). On success sets
+# HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ROOT and
+# HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_VERSION and returns 0. On failure sets
+# HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR to a one-line reason and returns 1.
+# shellcheck disable=SC2034 # Out-parameters read by the caller.
+homeboy_wp_codebox_wordpress_source() {
+    local settings_json="${1:-${HOMEBOY_SETTINGS_JSON:-}}"
+    local version_query output root reason status=0
+    local stderr_file
+    local args=(wordpress-source)
+
+    HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ROOT=""
+    HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_VERSION=""
+    HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR=""
+
+    stderr_file="$(mktemp)" || {
+        HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="could not create a temporary file"
+        return 1
+    }
+
+    if ! homeboy_wp_codebox_resolve_command "$settings_json" >/dev/null 2>"$stderr_file"; then
+        reason="$(grep -v '^[[:space:]]*$' "$stderr_file" | head -n 1 || true)"
+        rm -f "$stderr_file"
+        HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="${reason:-WP Codebox CLI is unavailable}"
+        return 1
+    fi
+
+    version_query="$(homeboy_wp_codebox_wordpress_version "$settings_json")"
+    [ -z "$version_query" ] || args+=(--wp "$version_query")
+    args+=(--json)
+
+    output="$("${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "${args[@]}" 2>"$stderr_file")" || status=$?
+    if [ "$status" -ne 0 ]; then
+        reason="$(grep -v '^[[:space:]]*$' "$stderr_file" | tail -n 1 || true)"
+        rm -f "$stderr_file"
+        HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="wp-codebox ${args[*]} exited ${status}${reason:+: ${reason}}"
+        return 1
+    fi
+    rm -f "$stderr_file"
+
+    if ! printf '%s' "$output" | jq -e '.schema == "wp-codebox/wordpress-source/v1" and (.root | type == "string" and length > 0)' >/dev/null 2>&1; then
+        HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="wp-codebox wordpress-source returned output without schema wp-codebox/wordpress-source/v1 and a root"
+        return 1
+    fi
+
+    root="$(printf '%s' "$output" | jq -r '.root')"
+    if [ ! -f "${root}/wp-includes/version.php" ]; then
+        HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="wp-codebox wordpress-source root has no wp-includes/version.php: ${root}"
+        return 1
+    fi
+
+    HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ROOT="$root"
+    HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_VERSION="$(printf '%s' "$output" | jq -r '.version // empty')"
+}
+
 # Serialize the resolved invocation as a JSON argv array so non-shell consumers
 # (the PHPUnit adapter) inherit this resolver's precedence and `node` prefixing
 # instead of maintaining a second candidate list.

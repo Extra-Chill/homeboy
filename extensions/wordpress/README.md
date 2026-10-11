@@ -173,6 +173,12 @@ mounted with the component and executed via `wordpress.run-php`. An exact
 `tests` entry overrides `default_environment`. Omitting `default_environment`
 keeps the existing `wordpress` default.
 
+Standalone PHP smokes receive `HOMEBOY_WORDPRESS_CORE_ROOT`, a WordPress core
+source tree resolved through `wp-codebox wordpress-source` at the configured
+`wordpress_runtime_version`, for smokes that load core files without booting
+WordPress. If it cannot be resolved the runner warns and runs the smokes without
+it. See [docs/TESTING.md](docs/TESTING.md#real-wordpress-host-smokes).
+
 To rerun one existing smoke on demand before pushing:
 
 ```bash

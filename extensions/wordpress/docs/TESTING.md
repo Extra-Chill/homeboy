@@ -102,6 +102,22 @@ among the declared dependencies and does not conflict with a reserved runtime
 variable. This preserves established callers such as `DATA_MACHINE_PATH` while
 the JSON map remains the canonical multi-dependency interface.
 
+`standalone-php` smokes run with host PHP and no booted WordPress. They receive
+host checkout paths for declared validation dependencies (the same
+`HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON` map plus `<SLUG>_PATH` variables) and
+`HOMEBOY_WORDPRESS_CORE_ROOT`: an extracted WordPress core source tree (it
+contains `wp-includes/version.php`) for smokes that load core files such as
+`wp-includes/html-api/*` without booting WordPress. The runner resolves it once
+per run, only when standalone smokes are selected, through
+`wp-codebox wordpress-source --json`, passing `--wp` from
+`wordpress_runtime_version` (or `wp_codebox_wordpress_version`) when set, and
+prints `WordPress core: <root> (<version>)`. When WP Codebox is unavailable,
+predates `wordpress-source`, is offline, or returns invalid output, the runner
+prints one `WARNING: WordPress core source unavailable for standalone smokes:
+<reason>` line to stderr and runs the smokes without the variable; that alone
+does not fail the suite. Smokes that need core should check the variable and
+fail with their own message.
+
 ```bash
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
 ```
