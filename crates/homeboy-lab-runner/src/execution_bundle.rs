@@ -13,6 +13,74 @@ pub(crate) fn binary(path: &str, verified_build_identity: Option<&str>) -> serde
     })
 }
 
+/// Facts that identify one admitted Lab execution. Inline offload and durable
+/// staging both supply these so the two paths cannot publish different bundles.
+pub(crate) struct ExecutionBundleInputs<'a> {
+    /// Runner Homeboy executable the command will run through.
+    pub(crate) homeboy_path: &'a str,
+    /// Build identity verified for `homeboy_path`; never inferred or defaulted.
+    pub(crate) verified_build_identity: Option<&'a str>,
+    pub(crate) remote_cwd: &'a str,
+    /// Direct-daemon admission coordinates; both `None` means reverse broker.
+    pub(crate) daemon_lease_id: Option<&'a str>,
+    pub(crate) reservation_job_id: Option<&'a str>,
+    pub(crate) rig_registry_root: Option<&'a str>,
+    pub(crate) rigs: serde_json::Value,
+    pub(crate) extensions: serde_json::Value,
+    pub(crate) extension_runtime_home: Option<&'a str>,
+    pub(crate) workspace_mapping: serde_json::Value,
+    pub(crate) required_extensions: &'a [String],
+    pub(crate) requested_command: &'a [String],
+    pub(crate) executed_argv: &'a [String],
+    pub(crate) runner_id: &'a str,
+}
+
+/// Build the immutable execution bundle for an admitted Lab job.
+pub(crate) fn build(inputs: ExecutionBundleInputs<'_>) -> serde_json::Value {
+    let authority = (inputs.daemon_lease_id.is_none() && inputs.reservation_job_id.is_none())
+        .then_some("reverse_broker");
+    serde_json::json!({
+        "schema": LAB_EXECUTION_BUNDLE_SCHEMA,
+        "binary": binary(inputs.homeboy_path, inputs.verified_build_identity),
+        // The materialized workspace deletes this artifact root on every known
+        // terminal result, bounding content-addressed transport retention.
+        "provenance_dir": format!(
+            "{}/provenance",
+            crate::lab::offload::remote_lab_artifact_dir(inputs.remote_cwd)
+        ),
+        "admission": {
+            "daemon_lease_id": inputs.daemon_lease_id,
+            "reservation_job_id": inputs.reservation_job_id,
+            "authority": authority,
+        },
+        "rig_registry_root": inputs.rig_registry_root,
+        "rigs": inputs.rigs,
+        "extensions": inputs.extensions,
+        "extension_runtime_home": inputs.extension_runtime_home,
+        "workspace_mapping": inputs.workspace_mapping,
+        "identities": {
+            "requested": {
+                "runner_id": inputs.runner_id,
+                "extensions": inputs.required_extensions,
+                "command": inputs.requested_command,
+            },
+            "resolved": {
+                "binary": inputs.homeboy_path,
+                "rig_registry_root": inputs.rig_registry_root,
+                "rigs": inputs.rigs,
+                "extensions": inputs.extensions,
+                "workspace_mapping": inputs.workspace_mapping,
+            },
+            "executed": {
+                "argv": inputs.executed_argv,
+                "daemon_lease_id": inputs.daemon_lease_id,
+                "reservation_job_id": inputs.reservation_job_id,
+                "authority": authority,
+            },
+        },
+    })
+}
+
 /// Validate the authority passed to the runner process. This is deliberately
 /// stricter than checking for an environment key: only a complete bundle can
 /// replace runner-global extension resolution.
@@ -78,6 +146,33 @@ pub(crate) fn bundle_env(bundle: &serde_json::Value) -> HashMap<String, String> 
         LAB_EXECUTION_BUNDLE_ENV.to_string(),
         serde_json::to_string(bundle).expect("Lab execution bundle serializes"),
     )])
+}
+
+/// Export the bundle as the child's authoritative environment: the bundle
+/// itself, the admitted executable, and the job-private Homeboy config root.
+/// Call this after every untrusted per-job override layer.
+pub(crate) fn apply_authority_env(env: &mut HashMap<String, String>, bundle: &serde_json::Value) {
+    env.extend(bundle_env(bundle));
+    if let Some(path) = bundle
+        .pointer("/binary/path")
+        .and_then(serde_json::Value::as_str)
+    {
+        env.insert("HOMEBOY_COMMAND".to_string(), path.to_string());
+    }
+    if let Some(home) = bundle
+        .get("extension_runtime_home")
+        .and_then(serde_json::Value::as_str)
+    {
+        // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
+        // hid the runner user's toolchains (rustup, cargo, npm, git config),
+        // so a runner where `cargo` works failed toolchain readiness (#14991).
+        // A caller's `HOME` never applies on the runner.
+        env.remove("HOME");
+        env.insert(
+            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
+            format!("{}/.config/homeboy", home.trim_end_matches('/')),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -240,5 +335,114 @@ mod tests {
             &["/runner/bin/homeboy".to_string(), "test".to_string()],
             &["fixture".to_string()],
         ));
+    }
+
+    fn sample_inputs<'a>(
+        command: &'a [String],
+        required: &'a [String],
+        lease: Option<&'a str>,
+        job: Option<&'a str>,
+    ) -> ExecutionBundleInputs<'a> {
+        ExecutionBundleInputs {
+            homeboy_path: "/runner/bin/homeboy",
+            verified_build_identity: Some("homeboy 1.2.3+abc123"),
+            remote_cwd: "/srv/homeboy/_lab_workspaces/app-abc",
+            daemon_lease_id: lease,
+            reservation_job_id: job,
+            rig_registry_root: Some("/srv/rigs"),
+            rigs: serde_json::json!([{ "rig_id": "r" }]),
+            extensions: serde_json::json!([{ "id": "fixture", "remote_path": "/runner/job/fixture", "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]),
+            extension_runtime_home: Some("/runner/job/home"),
+            workspace_mapping: serde_json::json!({ "workspaces": [] }),
+            required_extensions: required,
+            requested_command: command,
+            executed_argv: command,
+            runner_id: "lab",
+        }
+    }
+
+    #[test]
+    fn build_publishes_direct_admission_bundle_with_run_owned_provenance_dir() {
+        let command = vec!["/runner/bin/homeboy".to_string(), "test".to_string()];
+        let required = vec!["fixture".to_string()];
+        let bundle = build(sample_inputs(
+            &command,
+            &required,
+            Some("lease-a"),
+            Some("job-a"),
+        ));
+
+        assert_eq!(bundle["schema"], LAB_EXECUTION_BUNDLE_SCHEMA);
+        assert_eq!(bundle["binary"]["path"], "/runner/bin/homeboy");
+        assert_eq!(bundle["binary"]["build_identity"], "homeboy 1.2.3+abc123");
+        assert_eq!(
+            bundle["provenance_dir"],
+            format!(
+                "{}/provenance",
+                crate::lab::offload::remote_lab_artifact_dir(
+                    "/srv/homeboy/_lab_workspaces/app-abc"
+                )
+            )
+        );
+        assert_eq!(bundle["admission"]["daemon_lease_id"], "lease-a");
+        assert_eq!(bundle["admission"]["reservation_job_id"], "job-a");
+        assert!(bundle["admission"]["authority"].is_null());
+        assert_eq!(bundle["rig_registry_root"], "/srv/rigs");
+        assert_eq!(bundle["extension_runtime_home"], "/runner/job/home");
+        assert_eq!(bundle["identities"]["requested"]["runner_id"], "lab");
+        assert_eq!(bundle["identities"]["requested"]["command"][1], "test");
+        assert_eq!(
+            bundle["identities"]["resolved"]["extensions"],
+            bundle["extensions"]
+        );
+        assert_eq!(bundle["identities"]["executed"]["argv"][0], command[0]);
+        assert_eq!(
+            bundle["identities"]["executed"]["reservation_job_id"],
+            "job-a"
+        );
+        assert!(validate_bundle_env(
+            &bundle_env(&bundle),
+            &command,
+            &required
+        ));
+    }
+
+    #[test]
+    fn build_marks_reverse_broker_authority_without_a_daemon_reservation() {
+        let command = vec!["/runner/bin/homeboy".to_string(), "test".to_string()];
+        let required = vec!["fixture".to_string()];
+        let bundle = build(sample_inputs(&command, &required, None, None));
+
+        assert_eq!(bundle["admission"]["authority"], "reverse_broker");
+        assert_eq!(
+            bundle["identities"]["executed"]["authority"],
+            "reverse_broker"
+        );
+        assert!(validate_bundle_env(
+            &bundle_env(&bundle),
+            &command,
+            &required
+        ));
+    }
+
+    #[test]
+    fn authority_env_overrides_untrusted_values_and_roots_config_at_job_home() {
+        let command = vec!["/runner/bin/homeboy".to_string()];
+        let bundle = build(sample_inputs(&command, &[], None, None));
+        let mut env = HashMap::from([
+            ("HOMEBOY_COMMAND".to_string(), "/tmp/evil".to_string()),
+            (LAB_EXECUTION_BUNDLE_ENV.to_string(), "{}".to_string()),
+            ("HOME".to_string(), "/home/caller".to_string()),
+        ]);
+
+        apply_authority_env(&mut env, &bundle);
+
+        assert_eq!(env["HOMEBOY_COMMAND"], "/runner/bin/homeboy");
+        assert!(!env.contains_key("HOME"));
+        assert_eq!(
+            env[homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV],
+            "/runner/job/home/.config/homeboy"
+        );
+        assert!(validate_bundle_env(&env, &command, &[]));
     }
 }

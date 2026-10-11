@@ -1204,7 +1204,7 @@ fn runner_temp_owner(
 
 const PROVENANCE_ENV_INLINE_MAX_BYTES: usize = 8 * 1024;
 
-fn child_provenance_env(
+pub(crate) fn child_provenance_env(
     mut env: HashMap<String, String>,
     source_snapshot: String,
 ) -> Result<HashMap<String, String>> {

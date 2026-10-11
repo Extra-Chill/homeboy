@@ -113,6 +113,8 @@ pub(crate) use failure::{
 };
 pub(crate) use handoff::lab_offload_handoff_hints;
 pub use handoff::runner_job_cancel_for_session;
+#[cfg(test)]
+pub(crate) use process::child_provenance_env;
 pub(crate) use process::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
 };

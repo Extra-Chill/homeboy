@@ -453,27 +453,7 @@ fn lab_runner_exec_options(
         context.runner_id.to_string(),
     );
     if let Some(bundle) = context.lab_metadata.get("execution_bundle") {
-        env.extend(crate::execution_bundle::bundle_env(bundle));
-        if let Some(path) = bundle
-            .pointer("/binary/path")
-            .and_then(serde_json::Value::as_str)
-        {
-            env.insert("HOMEBOY_COMMAND".to_string(), path.to_string());
-        }
-        if let Some(home) = bundle
-            .get("extension_runtime_home")
-            .and_then(serde_json::Value::as_str)
-        {
-            // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
-            // hid the runner user's toolchains (rustup, cargo, npm, git config),
-            // so a runner where `cargo` works failed toolchain readiness (#14991).
-            // A caller's `HOME` never applies on the runner.
-            env.remove("HOME");
-            env.insert(
-                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
-                format!("{}/.config/homeboy", home.trim_end_matches('/')),
-            );
-        }
+        crate::execution_bundle::apply_authority_env(&mut env, bundle);
     }
     env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
     RunnerExecOptions {
@@ -565,27 +545,7 @@ pub(crate) fn exec_lab_context(
     }
     // Reassert immutable authority after untrusted per-job overrides.
     if let Some(bundle) = context.lab_metadata.get("execution_bundle") {
-        env.extend(crate::execution_bundle::bundle_env(bundle));
-        if let Some(path) = bundle
-            .pointer("/binary/path")
-            .and_then(serde_json::Value::as_str)
-        {
-            env.insert("HOMEBOY_COMMAND".to_string(), path.to_string());
-        }
-        if let Some(home) = bundle
-            .get("extension_runtime_home")
-            .and_then(serde_json::Value::as_str)
-        {
-            // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
-            // hid the runner user's toolchains (rustup, cargo, npm, git config),
-            // so a runner where `cargo` works failed toolchain readiness (#14991).
-            // A caller's `HOME` never applies on the runner.
-            env.remove("HOME");
-            env.insert(
-                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
-                format!("{}/.config/homeboy", home.trim_end_matches('/')),
-            );
-        }
+        crate::execution_bundle::apply_authority_env(&mut env, bundle);
     }
     let mut secret_env_names = context
         .secret_env_handoff
@@ -2755,50 +2715,28 @@ pub(crate) fn run_lab_offload_inner(
             authority.lease_expires_at_ms(),
         )?;
     }
-    lab_metadata["execution_bundle"] = serde_json::json!({
-        "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
-        "binary": crate::execution_bundle::binary(
-            &homeboy_path,
-            configured_build_identity.as_deref(),
-        ),
-        // The materialized workspace deletes this artifact root on every known
-        // terminal result, bounding content-addressed transport retention.
-        "provenance_dir": format!("{}/provenance", remote_lab_artifact_dir(&remote_cwd)),
-        "admission": {
-            "daemon_lease_id": admission
+    let admission_authority = admission
+        .as_ref()
+        .map(|reservation| reservation.authority());
+    lab_metadata["execution_bundle"] =
+        crate::execution_bundle::build(crate::execution_bundle::ExecutionBundleInputs {
+            homeboy_path: &homeboy_path,
+            verified_build_identity: configured_build_identity.as_deref(),
+            remote_cwd: &remote_cwd,
+            daemon_lease_id: admission_authority
                 .as_ref()
-                .map(|reservation| reservation.authority().daemon_lease_id().to_string()),
-            "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
-            "authority": admission.is_none().then_some("reverse_broker"),
-        },
-        "rig_registry_root": rig_registry_root,
-        "rigs": synced_rigs,
-        "extensions": extension_overlays,
-        "extension_runtime_home": extension_runtime_home,
-        "workspace_mapping": workspace_mapping_metadata,
-        "identities": {
-            "requested": {
-                "runner_id": runner_id,
-                "extensions": contract.required_extensions,
-                "command": request.normalized_args,
-            },
-            "resolved": {
-                "binary": homeboy_path,
-                "rig_registry_root": rig_registry_root,
-                "rigs": &synced_rigs,
-                "extensions": &extension_overlays,
-                "workspace_mapping": &workspace_mapping_metadata,
-            },
-            "executed": {
-                "argv": &remote_command,
-                "daemon_lease_id": admission
-                    .as_ref()
-                    .map(|reservation| reservation.authority().daemon_lease_id().to_string()),
-                "reservation_job_id": admission.as_ref().map(|reservation| reservation.job_id()),
-                "authority": admission.is_none().then_some("reverse_broker"),
-            },
-        },
-    });
+                .map(|authority| authority.daemon_lease_id()),
+            reservation_job_id: admission.as_ref().map(|reservation| reservation.job_id()),
+            rig_registry_root: rig_registry_root.as_deref(),
+            rigs: serde_json::json!(&synced_rigs),
+            extensions: extension_overlays.clone(),
+            extension_runtime_home: extension_runtime_home.as_deref(),
+            workspace_mapping: workspace_mapping_metadata.clone(),
+            required_extensions: &contract.required_extensions,
+            requested_command: request.normalized_args,
+            executed_argv: &remote_command,
+            runner_id,
+        });
     // Admission is the final setup step before handing metadata to the runner.
     // Attach now so the published setup total includes every completed phase.
     attach_lab_offload_overhead(&mut lab_metadata, &overhead);
