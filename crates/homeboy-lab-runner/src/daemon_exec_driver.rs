@@ -146,13 +146,21 @@ fn prepare_daemon_exec(
         secret_env_plan,
     );
     let authoritative_run_id = request.authoritative_run_id;
-    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+    // This driver runs inside the daemon, and its child reads the daemon's
+    // build-specific job store. Default the child's Homeboy to this binary
+    // instead of the configured one; a job's own selection still wins. If the
+    // path cannot be resolved the child's build stamp check names the skew.
+    let mut env = request.env;
+    if let Ok(daemon_executable) = homeboy_core::daemon::daemon_launchable_executable() {
+        super::command_path::default_daemon_child_homeboy(&mut env, &daemon_executable);
+    }
+    let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
         runner,
         cwd: request.cwd,
         project_id: request.project_id,
         command: request.command,
-        env: request.env,
+        env,
         secret_env_names: request.secret_env_names,
         secret_env_plan: Some(secret_env_plan),
         capture_patch: request.capture_patch,
@@ -161,6 +169,7 @@ fn prepare_daemon_exec(
         require_paths: request.require_paths,
         validate_require_paths_on_host: request.validate_require_paths_on_host,
     })?;
+    super::command_path::front_selected_homeboy_on_path(&mut plan.env);
     Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
         runner_id: plan.runner.id.clone(),
         cwd: plan.cwd.clone(),

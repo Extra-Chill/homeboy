@@ -54,6 +54,10 @@ mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod stop;
+/// The daemon's own executable. A direct daemon child shares the daemon's
+/// build-specific durable store, so runner drivers launch Homeboy children
+/// from this path rather than from configuration or `PATH`.
+pub use lifetime::launchable_executable as daemon_launchable_executable;
 /// Idle window, in seconds, for automatically launched daemons; `0` selects a
 /// resident launch. See `lifetime::launch_idle_timeout`.
 pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
@@ -4299,6 +4303,14 @@ fn enqueue_exec_request(
                     crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV
                         .to_string(),
                     execution_context.id().to_string(),
+                );
+                // The child authenticates against this daemon's store, whose
+                // format is build-specific. Stamp the build so a skewed child
+                // refuses with a named cause instead of "job not found".
+                plan.env.insert(
+                    crate::runner_job_execution_context::DAEMON_CHILD_BUILD_IDENTITY_ENV
+                        .to_string(),
+                    crate::build_identity::current().display,
                 );
                 let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
                 let cancellation_requested = Arc::new(AtomicBool::new(false));
