@@ -49,7 +49,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
 - **`deployment_providers`** (array): Generic extension-owned deployment provider descriptors invoked through Extension API v1
 - **`executable`** (object): Standalone tool runtime and inputs
-- **`platform`** (object): Platform behavior definitions (database, deployment, version patterns)
+- **`platform`** (object): Platform behavior definitions (deployment, version patterns)
 - **`structured_sidecars`** (object): Declares public machine-readable run-directory sidecar contracts
 - **`notification_transports`** (array): Declares versioned, extension-owned completion notification transports
 - **`external_check_detail_resolvers`** (array): Declares bounded, extension-owned hydration of failed external CI statuses
@@ -808,53 +808,16 @@ Runtime IDs are extension-owned strings. Runtime requirements must use the canon
 
 ## Platform Configuration
 
-Platform configuration defines database, deployment, and version detection behaviors.
+Platform configuration defines deployment and version detection behaviors.
 
 ```json
 {
   "platform": {
-    "database": {},
     "deployment": {},
     "version_patterns": []
   }
 }
 ```
-
-### Database Configuration
-
-```json
-{
-  "platform": {
-    "database": {
-      "cli": {
-        "connect": "string",
-        "query": "string",
-        "tables": "string",
-        "describe": "string"
-      },
-      "defaults": {
-        "host": "string",
-        "port": number,
-        "user": "string"
-      }
-    }
-  }
-}
-```
-
-#### Database Fields
-
-- **`cli`** (object): Database CLI template commands
-  - **`connect`** (string): Connection command template
-    - Template variables: `{{db_host}}`, `{{db_port}}`, `{{db_name}}`, `{{db_user}}`
-  - **`query`** (string): Query command template
-    - Template variables: `{{query}}`, `{{db_host}}`, `{{db_name}}`, etc.
-  - **`tables`** (string): List tables command template
-  - **`describe`** (string): Describe table command template
-- **`defaults`** (object): Default database connection values
-  - **`host`** (string): Default host
-  - **`port`** (number): Default port
-  - **`user`** (string): Default user
 
 ### Deployment Configuration
 
@@ -1124,19 +1087,6 @@ Documentation files live in the extension's `docs/` directory. Topics resolve to
     }
   },
   "platform": {
-    "database": {
-      "cli": {
-        "connect": "wp db cli",
-        "query": "wp db query \"{{query}}\"",
-        "tables": "wp db tables",
-        "describe": "wp db describe {{table}}"
-      },
-      "defaults": {
-        "host": "localhost",
-        "port": 3306,
-        "user": "root"
-      }
-    },
     "version_patterns": [
       {
         "file": "style.css",

@@ -80,19 +80,6 @@ pub struct SourceSnapshotConfig {
     pub sync_excludes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli: Option<DatabaseCliConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseCliConfig {
-    pub tables_command: String,
-    pub describe_command: String,
-    pub query_command: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CliHelpConfig {
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -206,16 +206,6 @@ persisted default that would silently apply to every future sweep.
 - `extensions`
 - `components`
 
-### `DatabaseConfig`
-
-- `cli`
-
-### `DatabaseCliConfig`
-
-- `tables_command`
-- `describe_command`
-- `query_command`
-
 ### `CliHelpConfig`
 
 - `project_id_help`

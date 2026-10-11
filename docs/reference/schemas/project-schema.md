@@ -2,8 +2,7 @@
 
 Project configuration defines environment-specific context stored in
 `projects/<id>.json`: server bindings, domains, local paths, remote paths,
-project-scoped CLI settings, API settings, database settings, and component
-attachments. Components can run local quality loops without a project; projects
+project-scoped CLI settings, and component attachments. Components can run local quality loops without a project; projects
 matter when the workflow needs environment context.
 
 ## Schema
@@ -16,10 +15,7 @@ matter when the workflow needs environment context.
   "server_id": "string",
   "base_path": "string",
   "path_roots": {},
-  "api": {},
-  "database": {},
   "remote_files": {},
-  "remote_logs": {},
   "table_prefix": "string",
   "shared_tables": [],
   "sub_targets": [],

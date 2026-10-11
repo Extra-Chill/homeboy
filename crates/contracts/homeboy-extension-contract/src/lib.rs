@@ -67,9 +67,8 @@ pub use manifest_capability_config::{
     DiscoveryMarkerConfig, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor, ScriptsConfig,
 };
 pub use manifest_toolchain_config::{
-    CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DatabaseCliConfig, DeployVerification,
-    LintChangedFileRoute, RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection,
-    TestSettingStringPredicate,
+    CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DeployVerification, LintChangedFileRoute,
+    RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection, TestSettingStringPredicate,
 };
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
