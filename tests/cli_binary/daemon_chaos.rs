@@ -162,11 +162,16 @@ fn daemon_pid(data: &serde_json::Value) -> i64 {
 fn start_on_demand(bin: &Path, home: &Path, reaper: &mut Reaper) -> serde_json::Value {
     let started = homeboy_at(bin, home)
         .args(["daemon", "start"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .expect("daemon start");
-    assert!(started.success(), "daemon start failed");
+    // Keep the refusal evidence: a bare "daemon start failed" left the CI
+    // failure in #15756 undiagnosable.
+    assert!(
+        started.status.success(),
+        "daemon start failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&started.stdout),
+        String::from_utf8_lossy(&started.stderr)
+    );
     let current = wait_status(
         bin,
         home,

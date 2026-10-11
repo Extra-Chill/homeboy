@@ -88,24 +88,92 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
                 current_digest.as_deref(),
             )
         })
-        .map(|mut candidate| {
-            let process_store_fallback = match command_state_dir(&candidate.cmdline) {
-                CommandStateDir::Proven(_) => None,
-                CommandStateDir::Ambiguous => Some(false),
-                CommandStateDir::Absent => Some(true),
-            };
-            recover_candidate_store_from_process_environment(
-                &mut candidate,
+        .filter_map(|candidate| {
+            attribute_scanned_candidate(
+                candidate,
                 jobs_path,
-                process_store_fallback,
+                test_namespace,
                 process_durable_store_path,
-            );
-            if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
-                candidate.ownership = DaemonProcessOwnership::Unrelated;
-            }
-            candidate
+                candidate_process_is_live,
+            )
         })
         .collect())
+}
+
+/// Whether `pid` still names a process that can own a durable store: present,
+/// not a zombie, and not already exiting.
+///
+/// An exiting Linux process keeps reporting as running (`R`) after it has
+/// released its address space, which is exactly when its procfs environment
+/// reads back empty. Its `PF_EXITING` flag is set before that release, so it
+/// separates "exiting" from "live but unattributable". Unexpected procfs
+/// errors fall back to the generic liveness probe, keeping the candidate.
+#[cfg(target_os = "linux")]
+fn candidate_process_is_live(pid: u32) -> bool {
+    const PF_EXITING: u64 = 0x4;
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return pid_is_running(pid),
+    };
+    // Fields after the command: state, ppid, pgrp, session, tty_nr, tpgid,
+    // flags (proc(5) fields 3..=9).
+    let Some((_, fields)) = stat.rsplit_once(") ") else {
+        return pid_is_running(pid);
+    };
+    let mut fields = fields.split_whitespace();
+    if matches!(fields.next(), Some("Z" | "X" | "x")) {
+        return false;
+    }
+    match fields.nth(5).and_then(|flags| flags.parse::<u64>().ok()) {
+        Some(flags) => flags & PF_EXITING == 0,
+        None => pid_is_running(pid),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn candidate_process_is_live(pid: u32) -> bool {
+    pid_is_running(pid)
+}
+
+/// Finish attributing one candidate from the `ps` snapshot, or drop it when
+/// the scanned process has already exited.
+///
+/// The snapshot is only an observation. Attributing each candidate (hashing
+/// its running image, reading its procfs environment) takes long enough on a
+/// loaded host for a daemon in the snapshot to exit first. Its environment is
+/// then unreadable, so it would stay `Ambiguous` and, holding no lease of its
+/// own, block start and recovery in every unrelated state directory as a
+/// "live" unleased conflict (#15756). A process that no longer exists cannot
+/// own a store. Liveness is checked after the environment read so a process
+/// that exits during that read is caught too (see
+/// [`candidate_process_is_live`]); a live process whose store cannot be proven
+/// stays fail-closed `Ambiguous`.
+fn attribute_scanned_candidate(
+    mut candidate: DaemonProcessCandidate,
+    jobs_path: &Path,
+    test_namespace: bool,
+    resolve_store: impl FnOnce(u32, bool) -> Option<PathBuf>,
+    is_running: impl FnOnce(u32) -> bool,
+) -> Option<DaemonProcessCandidate> {
+    let process_store_fallback = match command_state_dir(&candidate.cmdline) {
+        CommandStateDir::Proven(_) => None,
+        CommandStateDir::Ambiguous => Some(false),
+        CommandStateDir::Absent => Some(true),
+    };
+    recover_candidate_store_from_process_environment(
+        &mut candidate,
+        jobs_path,
+        process_store_fallback,
+        resolve_store,
+    );
+    if !is_running(candidate.pid) {
+        return None;
+    }
+    if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
+        candidate.ownership = DaemonProcessOwnership::Unrelated;
+    }
+    Some(candidate)
 }
 
 /// Supervise one daemon child and persist its bounded termination evidence.
@@ -842,6 +910,79 @@ mod process_candidate_tests {
             "/Users/chubes/.config/homeboy/bin/homeboy"
         );
         assert_eq!(candidate.ownership, DaemonProcessOwnership::Ambiguous);
+    }
+
+    /// #15756: a foreign daemon that exits between the `ps` snapshot and its
+    /// attribution has no readable environment left. It must not survive as a
+    /// live `Ambiguous` candidate that blocks an unrelated store's startup,
+    /// while a live process with the same unprovable evidence stays
+    /// fail-closed.
+    #[test]
+    fn candidate_that_exits_before_attribution_is_dropped_but_live_one_stays_ambiguous() {
+        let jobs_path = Path::new("/tmp/fresh-home/.config/homeboy/daemon/jobs.json");
+        let scanned = || {
+            parse_daemon_process_candidate(
+                "4242 homeboy /opt/homeboy daemon serve --addr 127.0.0.1:0 --startup-token foreign",
+                jobs_path,
+                None,
+            )
+            .expect("daemon candidate")
+        };
+        // The environment of an exited process is unreadable.
+        let unreadable_environment = |_pid: u32, _allow_home: bool| None;
+
+        assert_eq!(
+            attribute_scanned_candidate(
+                scanned(),
+                jobs_path,
+                false,
+                unreadable_environment,
+                |_| false,
+            ),
+            None,
+            "an exited process cannot hold the store"
+        );
+
+        let live = attribute_scanned_candidate(
+            scanned(),
+            jobs_path,
+            false,
+            unreadable_environment,
+            |_| true,
+        )
+        .expect("a live candidate is retained");
+        assert_eq!(live.ownership, DaemonProcessOwnership::Ambiguous);
+        assert_eq!(live.durable_store_path, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn candidate_liveness_excludes_zombie_and_reaped_processes() {
+        assert!(candidate_process_is_live(std::process::id()));
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id();
+        // Unreaped, the exited child is a zombie: present in procfs, not live.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z'))
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never became a zombie"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!candidate_process_is_live(pid), "a zombie owns no store");
+
+        child.wait().expect("reap child");
+        assert!(
+            !candidate_process_is_live(pid),
+            "a reaped PID owns no store"
+        );
     }
 }
 
