@@ -190,6 +190,15 @@ fn acknowledged_cook_launches_opencode_with_the_concrete_cli_model() {
             "--no-finalize",
         ])
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        // Auto placement consults the host's real load average before it
+        // admits local execution. On a loaded CI runner (load >= 0.75 per
+        // core while nextest runs process-heavy tests in parallel) local
+        // admission is rejected, and with no Lab runner configured the Cook
+        // queues as `blocked_runner_unavailable` and retries until the
+        // 120s slow-timeout kills it (#15756). This test is about the
+        // model argv boundary, not pressure admission, so pin a quiet
+        // reading the same way the Lab handoff tests do (#14984).
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
         .env("OPENAI_API_KEY", "test-only-unusable-key")
         .env("PATH", prepend_path(&bin));
     let output = bounded_output(command);
