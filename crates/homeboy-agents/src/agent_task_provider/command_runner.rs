@@ -3006,10 +3006,22 @@ fn run_provider_readiness_invocation_with_timeout(
     let stdout_reader = child.take_stdout().map(spawn_readiness_output_reader);
     let stderr_reader = child.take_stderr().map(spawn_readiness_output_reader);
     let mut stdin_complete = stdin_writer.is_none();
+    // A probe may exit, successfully, without reading its request, and the
+    // request write then fails with EPIPE. That only says the probe closed its
+    // stdin; whether it produced a verdict is decided by its exit status and
+    // output. Failing the attempt on EPIPE made the outcome a race between the
+    // probe's exit and this writer thread, and a lost race was retried as a
+    // transient failure, running a ready probe a second time (#15756). Keep
+    // the write error and report it only if the probe yields no valid result.
+    let mut unread_request: Option<std::io::Error> = None;
     let terminal = loop {
         if !stdin_complete {
             match stdin_receiver.try_recv() {
                 Ok(Ok(())) => stdin_complete = true,
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                    stdin_complete = true;
+                    unread_request = Some(error);
+                }
                 Ok(Err(error)) => {
                     break Err(format!(
                         "failed to write provider readiness request: {error}"
@@ -3075,6 +3087,22 @@ fn run_provider_readiness_invocation_with_timeout(
             Err(terminal_error) => format!("{terminal_error}; cleanup failed: {error}"),
         });
     }
+    let result = readiness_result_from_output(provider, credential_env, terminal, stdout, stderr);
+    match (result, unread_request) {
+        (Err(message), Some(write_error)) => Err(format!(
+            "failed to write provider readiness request: {write_error}; {message}"
+        )),
+        (result, _) => result,
+    }
+}
+
+fn readiness_result_from_output(
+    provider: &AgentTaskExecutorProvider,
+    credential_env: &[(String, String)],
+    terminal: Result<std::process::ExitStatus, String>,
+    stdout: Result<ReadinessOutputCapture, String>,
+    stderr: Result<ReadinessOutputCapture, String>,
+) -> Result<ProviderReadinessInvocationResult, String> {
     let status = terminal?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -4061,6 +4089,30 @@ mod readiness_process_tests {
             wait_until_not_running(pid),
             "descendant {pid} survived failed stdin cleanup"
         );
+    }
+
+    /// #15756: a probe that never reads its request still owns its verdict.
+    /// The request is larger than a pipe buffer, so closing stdin always
+    /// fails the write with EPIPE while the probe is still running. That
+    /// must not fail the attempt (and get it retried as a second probe run).
+    #[test]
+    fn readiness_verdict_survives_a_probe_that_does_not_read_its_request() {
+        let provider = readiness_provider(
+            "exec 0<&-; sleep 0.3; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":null}'",
+            &[],
+        );
+        let config = json!({ "large": "x".repeat(2 * 1024 * 1024) });
+
+        let result = run_provider_readiness_invocation_with_env_and_timeout(
+            &provider,
+            &config,
+            &[],
+            Duration::from_secs(60),
+            None,
+        )
+        .expect("the probe's own verdict is authoritative");
+
+        assert!(result.ready);
     }
 
     #[test]
