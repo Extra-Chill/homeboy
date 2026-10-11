@@ -199,10 +199,12 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
 }
 
 /// #13702 direction 2: a coordinator failure recorded before any child was
-/// admitted keeps the batch `queued` and `resumable`, reported through
+/// admitted keeps the durable batch `queued` and `resumable`, reported through
 /// `admission_blocker`, rather than a terminal `failed` subject state — the
 /// coordinator has not executed a child yet, so the same fanout identity must
-/// stay claimable (`record_fanout_run_batch_failure_in_store`). This mirrors
+/// stay claimable (`record_fanout_run_batch_failure_in_store`). Since #15706
+/// the status projection reports `blocked` for that batch, so an operator
+/// reads "act" rather than "wait"; the durable state stays `queued`. This mirrors
 /// the lib-level coverage in
 /// `commands::agent_task::fanout::tests::pre_admission_status_is_retryable_and_preserves_declared_tracker_identity`
 /// through the actual CLI binary. The command still exits zero — reading a
@@ -250,7 +252,8 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
         assert_eq!(output["exit_code"], 0);
         assert_eq!(output["status"], "succeeded");
         assert!(output.get("subject_state").is_none());
-        assert_eq!(output["data"]["batch"]["status"], "queued");
+        assert_eq!(output["data"]["batch"]["status"], "blocked");
+        assert_eq!(output["data"]["batch"]["batch"]["state"], "queued");
         assert_eq!(output["data"]["batch"]["resumable"], true);
         assert_eq!(
             output["data"]["batch"]["admission_blocker"]["stage"],
