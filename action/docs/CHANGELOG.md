@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.19] - 2026-10-11
+
+### Changed
+- drop audit, refactor, and auto-issue support
+
 ## [2.20.18] - 2026-10-11
 
 ### Changed
