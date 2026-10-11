@@ -30,7 +30,14 @@ COMPOSER_VENDOR_DIR="${STAGING_DIR}" composer install --quiet --no-interaction -
 verify_vendor() {
     local vendor_dir="$1"
 
-    php -r '
+    # Run every check from inside the tree being verified. PHPStan (and other
+    # tools) also load ./vendor/autoload.php from the working directory; from
+    # the extension root that is the live vendor/, whose autoloader class has
+    # the same name as the staged one, so PHP fatals on redeclaration (#2932).
+    (
+        cd "${vendor_dir}"
+
+        php -r '
 $loader = require $argv[1];
 if (! $loader instanceof Composer\Autoload\ClassLoader) {
     fwrite(STDERR, "Composer autoload did not return a ClassLoader.\n");
@@ -38,18 +45,19 @@ if (! $loader instanceof Composer\Autoload\ClassLoader) {
 }
 ' "${vendor_dir}/autoload.php"
 
-    for binary in phpcs phpstan; do
-        if [[ ! -x "${vendor_dir}/bin/${binary}" ]]; then
-            echo "Composer dependency integrity check failed: vendor/bin/${binary} is missing or not executable." >&2
+        for binary in phpcs phpstan; do
+            if [[ ! -x "${vendor_dir}/bin/${binary}" ]]; then
+                echo "Composer dependency integrity check failed: vendor/bin/${binary} is missing or not executable." >&2
+                exit 1
+            fi
+            "${vendor_dir}/bin/${binary}" --version >/dev/null
+        done
+
+        if [[ ! -f "${vendor_dir}/wp-phpunit/wp-phpunit/wp-tests-config.php" ]]; then
+            echo "Composer dependency integrity check failed: the WP Codebox PHPUnit harness is incomplete." >&2
             exit 1
         fi
-        "${vendor_dir}/bin/${binary}" --version >/dev/null
-    done
-
-    if [[ ! -f "${vendor_dir}/wp-phpunit/wp-phpunit/wp-tests-config.php" ]]; then
-        echo "Composer dependency integrity check failed: the WP Codebox PHPUnit harness is incomplete." >&2
-        exit 1
-    fi
+    )
 }
 
 verify_vendor "${EXTENSION_PATH}/${STAGING_DIR}"
