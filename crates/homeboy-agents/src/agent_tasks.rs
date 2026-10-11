@@ -359,7 +359,9 @@ pub mod provider {
     };
     /// Controller-owned credential refresh before Lab delivery (#15783).
     pub use crate::agent_task_provider::{
-        provider_controller_refreshes_for_plan_with_providers, run_provider_controller_refresh,
+        provider_controller_refreshes_for_plan_with_providers,
+        provider_route_secret_env_for_plan_with_providers,
+        provider_route_secret_sources_for_plan_with_providers, run_provider_controller_refresh,
         ProviderControllerRefresh,
     };
 }

@@ -136,38 +136,62 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
     }
     // Resolve against the plan's selected route so provider-scoped credential
     // files (for example an `openai-oauth` default) are provisioned too.
-    let fallback_sources =
+    let mut fallback_sources =
         crate::lab::secrets::agent_task_controller_credential_sources(source_args)?;
-    let provisions = provider_file_secret_source_provisions(required_names, &fallback_sources);
-    if provisions.is_empty() {
+    // Rotation fallbacks are delivered too, best-effort: a fallback the
+    // controller cannot serve is skipped, never made mandatory (#15783). The
+    // admitted route's sources keep precedence for any shared name.
+    let (route_names, route_sources) =
+        crate::lab::secrets::agent_task_controller_route_credentials(source_args)?;
+    for (name, source) in route_sources {
+        fallback_sources.entry(name).or_insert(source);
+    }
+    let mut candidate_names = required_names.to_vec();
+    candidate_names.extend(route_names);
+    candidate_names.sort();
+    candidate_names.dedup();
+    let provisions = provider_file_secret_source_provisions(&candidate_names, &fallback_sources);
+    let pending = provisions
+        .into_iter()
+        .filter(|provision| {
+            !provision
+                .env_names
+                .iter()
+                .all(|name| request_env.contains_key(name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
         return Ok(());
     }
-    if provisions.iter().any(|provision| {
-        !provision
-            .env_names
-            .iter()
-            .all(|name| request_env.contains_key(name.as_str()))
-    }) {
-        // The controller owns these accounts' refresh chains: bring every
-        // declared source current here before any of it is read or delivered.
-        for refresh in crate::lab::secrets::agent_task_controller_credential_refreshes(source_args)?
-        {
-            run_provider_controller_refresh(&refresh.provider, &refresh.invocation).map_err(
-                |reason| {
-                    Error::validation_invalid_argument(
-                        "secret_env",
-                        format!(
-                            "controller could not refresh provider credentials before provisioning runner `{}`: {reason}",
-                            runner.id
-                        ),
-                        Some(runner.id.clone()),
-                        Some(vec![
-                            "Refresh the provider login on the controller (for OpenCode: `opencode auth login`), then rerun.".to_string(),
-                        ]),
-                    )
-                },
-            )?;
+    let is_required = |names: &[String]| names.iter().any(|name| required_names.contains(name));
+
+    // The controller owns these accounts' refresh chains: bring every declared
+    // source current here before any of it is read or delivered.
+    let mut unrefreshed: Vec<String> = Vec::new();
+    for refresh in crate::lab::secrets::agent_task_controller_credential_refreshes(source_args)? {
+        let Err(reason) = run_provider_controller_refresh(&refresh.provider, &refresh.invocation)
+        else {
+            continue;
+        };
+        if is_required(&refresh.secret_env) {
+            return Err(Error::validation_invalid_argument(
+                "secret_env",
+                format!(
+                    "controller could not refresh provider credentials before provisioning runner `{}`: {reason}",
+                    runner.id
+                ),
+                Some(runner.id.clone()),
+                Some(vec![
+                    "Refresh the provider login on the controller (for OpenCode: `opencode auth login`), then rerun.".to_string(),
+                ]),
+            ));
         }
+        homeboy_core::log_status!(
+            "lab",
+            "Skipping fallback credentials for runner `{}`: {reason}",
+            runner.id
+        );
+        unrefreshed.extend(refresh.secret_env);
     }
 
     let server_id = runner.server_id.as_deref().ok_or_else(|| {
@@ -180,28 +204,33 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
     })?;
     let server = server::load(server_id)?;
     let client = SshClient::from_server(&server, server_id)?;
-    for provision in provisions {
-        if provision
-            .env_names
-            .iter()
-            .all(|name| request_env.contains_key(name.as_str()))
+    for provision in pending {
+        let required = is_required(&provision.env_names);
+        if !required
+            && provision
+                .env_names
+                .iter()
+                .any(|name| unrefreshed.contains(name))
         {
             continue;
         }
-        agent_task_secrets::resolve_secret_env_with_fallbacks(
+        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(
             &provision.env_names,
             &fallback_sources,
-        )
-        .map_err(|err| {
-            provider_file_secret_source_error(
+        );
+        if let Err(err) = resolved {
+            if !required {
+                continue;
+            }
+            return Err(provider_file_secret_source_error(
                 &runner.id,
                 &provision,
                 format!(
                     "controller credential source does not satisfy provider env names: {}",
                     err.message
                 ),
-            )
-        })?;
+            ));
+        }
         provision_provider_file_secret_source(&client, &runner.id, &provision)?;
     }
     Ok(())

@@ -86,6 +86,63 @@ pub fn provider_secret_sources_for_plan_with_providers(
     sources
 }
 
+/// Declared credential sources across every route the plan may dispatch,
+/// rotation fallbacks included, for best-effort Lab delivery only (#15783).
+///
+/// Admission and readiness keep [`provider_secret_sources_for_plan_with_providers`],
+/// which describes exactly the admitted route (#14194). This wider map only
+/// lets a runner that evaluates rotation itself find a fallback's credentials
+/// already delivered. The selected route comes first and wins a shared name.
+pub fn provider_route_secret_sources_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> HashMap<String, defaults::AgentTaskSecretSource> {
+    let mut sources = HashMap::new();
+    for request in plan_provider_route_requests(plan) {
+        let Some(provider) = select_provider(providers, &request) else {
+            continue;
+        };
+        for (name, source) in provider_secret_sources(provider, Some(&request)) {
+            sources.entry(name).or_insert(source);
+        }
+    }
+    sources
+}
+
+/// Every route the scheduler may dispatch for the plan: each task's own route
+/// followed by its rotation fallbacks.
+fn plan_provider_route_requests(plan: &AgentTaskPlan) -> Vec<AgentTaskRequest> {
+    plan.tasks
+        .iter()
+        .flat_map(|task| {
+            crate::agent_task_scheduler::AgentTaskScheduleSupport::provider_route_candidates(
+                task,
+                plan.options.rotation.as_ref(),
+            )
+        })
+        .map(|(request, _)| request)
+        .collect()
+}
+
+/// Provider secret env names across every route the plan may dispatch,
+/// rotation fallbacks included. Used for best-effort Lab delivery of fallback
+/// credentials; admission keeps using the selected routes' names only.
+pub fn provider_route_secret_env_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for request in plan_provider_route_requests(plan) {
+        let Some(provider) = select_provider(providers, &request) else {
+            continue;
+        };
+        names.extend(provider_secret_env_plan(provider, &request).secret_env_names());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// A controller-side command that makes a route's declared credentials current
 /// before they are delivered to a runner (#15783).
 ///
@@ -97,6 +154,8 @@ pub fn provider_secret_sources_for_plan_with_providers(
 pub struct ProviderControllerRefresh {
     pub provider: AgentTaskExecutorProvider,
     pub invocation: CommandInvocation,
+    /// Secret env names of the account this refresh keeps current.
+    pub secret_env: Vec<String>,
 }
 
 pub fn provider_controller_refreshes_for_plan_with_providers(
@@ -104,21 +163,22 @@ pub fn provider_controller_refreshes_for_plan_with_providers(
     providers: &[AgentTaskExecutorProvider],
 ) -> Vec<ProviderControllerRefresh> {
     let mut refreshes: Vec<ProviderControllerRefresh> = Vec::new();
-    for request in &plan.tasks {
-        let Some(provider) = select_provider(providers, request) else {
+    for request in plan_provider_route_requests(plan) {
+        let Some(provider) = select_provider(providers, &request) else {
             continue;
         };
-        let Some(invocation) = effective_provider_default(provider, request)
-            .and_then(|config| {
-                config
-                    .get("controller_refresh")
-                    .or_else(|| config.get("controllerRefresh"))
-            })
+        let Some(config) = effective_provider_default(provider, &request) else {
+            continue;
+        };
+        let Some(invocation) = config
+            .get("controller_refresh")
+            .or_else(|| config.get("controllerRefresh"))
             .and_then(|value| serde_json::from_value::<CommandInvocation>(value.clone()).ok())
             .filter(|invocation| !invocation.argv.is_empty())
         else {
             continue;
         };
+        let secret_env = provider_config_secret_env(config);
         if refreshes.iter().any(|existing| {
             existing.provider.id == provider.id && existing.invocation.argv == invocation.argv
         }) {
@@ -127,6 +187,7 @@ pub fn provider_controller_refreshes_for_plan_with_providers(
         refreshes.push(ProviderControllerRefresh {
             provider: provider.clone(),
             invocation,
+            secret_env,
         });
     }
     refreshes
@@ -966,6 +1027,100 @@ mod tests {
         );
         assert!(!sources.contains_key("PLAN_FALLBACK_TOKEN"));
         assert!(!sources.contains_key("TASK_FALLBACK_TOKEN"));
+    }
+
+    fn controller_refresh_rotation_fixture() -> (Vec<AgentTaskExecutorProvider>, AgentTaskPlan) {
+        let providers: Vec<AgentTaskExecutorProvider> = [
+            serde_json::json!({
+                "id": "test.primary",
+                "backend": "test",
+                "secret_env_requirements": [{
+                    "env": ["PRIMARY_TOKEN"],
+                    "secret_env_sources": {
+                        "PRIMARY_TOKEN": {"source": "env", "env_var": "PRIMARY_SOURCE"}
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "id": "test.fallback",
+                "backend": "test",
+                "provider_defaults": {
+                    "refreshed-account": {
+                        "secret_env": ["REFRESHED_ACCESS", "REFRESHED_EXPIRES"],
+                        "secret_env_sources": {
+                            "REFRESHED_ACCESS": {"source": "json-file", "path": "~/.auth.json", "field": "acct.access"},
+                            "REFRESHED_EXPIRES": {"source": "json-file", "path": "~/.auth.json", "field": "acct.expires"}
+                        },
+                        "controller_refresh": {"argv": ["node", "{{runtime_path}}/refresh.cjs"]}
+                    }
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|value| serde_json::from_value(value).expect("provider"))
+        .collect();
+        let mut task = request(Value::Null);
+        task.executor.selector = Some("test.primary".to_string());
+        let mut plan = AgentTaskPlan::new("controller-refresh-rotation", vec![task]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.primary".to_string()),
+                    ..Default::default()
+                },
+                AgentTaskProviderRotationEntry {
+                    selector: Some("test.fallback".to_string()),
+                    provider_config: serde_json::json!({"provider": "refreshed-account"}),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        (providers, plan)
+    }
+
+    #[test]
+    fn route_secret_sources_cover_rotation_fallbacks_for_lab_delivery() {
+        // #15783: the admitted-route map above stays narrow (#14194); the
+        // route map used only for best-effort Lab delivery includes fallbacks.
+        let (providers, plan) = controller_refresh_rotation_fixture();
+
+        let admitted = provider_secret_sources_for_plan_with_providers(&plan, &providers);
+        let routes = provider_route_secret_sources_for_plan_with_providers(&plan, &providers);
+        let route_names = provider_route_secret_env_for_plan_with_providers(&plan, &providers);
+
+        assert!(!admitted.contains_key("REFRESHED_ACCESS"));
+        assert_eq!(
+            routes["REFRESHED_ACCESS"].field.as_deref(),
+            Some("acct.access")
+        );
+        assert!(routes.contains_key("PRIMARY_TOKEN"));
+        assert!(route_names.contains(&"REFRESHED_ACCESS".to_string()));
+        assert!(route_names.contains(&"PRIMARY_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn controller_refreshes_include_a_rotation_fallback_account() {
+        let (providers, plan) = controller_refresh_rotation_fixture();
+
+        let refreshes = provider_controller_refreshes_for_plan_with_providers(&plan, &providers);
+
+        assert_eq!(refreshes.len(), 1);
+        assert_eq!(refreshes[0].provider.id, "test.fallback");
+        assert_eq!(
+            refreshes[0].invocation.argv,
+            vec![
+                "node".to_string(),
+                "{{runtime_path}}/refresh.cjs".to_string()
+            ]
+        );
+        assert_eq!(
+            refreshes[0].secret_env,
+            vec![
+                "REFRESHED_ACCESS".to_string(),
+                "REFRESHED_EXPIRES".to_string()
+            ]
+        );
     }
 
     #[test]
