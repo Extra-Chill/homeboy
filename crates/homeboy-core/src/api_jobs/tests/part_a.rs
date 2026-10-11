@@ -86,12 +86,7 @@ fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
     let path = temp.path().join("jobs.json");
     let store = JobStore::open_without_reconciliation(&path).expect("open store");
     store
-        .create_admission_at(
-            json!({ "admission": { "state": "reserved" } }),
-            0,
-            None,
-            None,
-        )
+        .create_admission_at(json!({ "admission": { "state": "reserved" } }), 0, None)
         .expect("create already-expired admission");
 
     assert_eq!(
@@ -119,7 +114,6 @@ fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
             active_child_count: None,
             active_cell_count: None,
         }),
-        workspace_claim_binding: None,
         workspace_owner_lease: None,
     };
     let first = store.create_test_local_runner_job(Some(local_runner()));

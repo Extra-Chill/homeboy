@@ -20,6 +20,19 @@ use crate::api_jobs::{
 use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
 use crate::error::{Error, Result};
 
+/// Encode a runner job request as the daemon's direct `/exec` body: the
+/// Runner API v1 submission under `submission_key`. Callers add the inline
+/// `runner` descriptor or `workspace_owner_request` on the returned value.
+pub fn direct_exec_body(job_request: serde_json::Value, submission_key: &str) -> serde_json::Value {
+    let request: RemoteRunnerJobRequest =
+        serde_json::from_value(job_request).expect("runner job request fixture");
+    serde_json::to_value(crate::daemon::DirectDaemonExecSubmitRequest::new(
+        &request,
+        submission_key,
+    ))
+    .expect("serialize direct exec body")
+}
+
 pub fn save_test_server(id: &str, host: &str) -> Result<()> {
     crate::server::save(&crate::server::Server {
         id: id.to_string(),

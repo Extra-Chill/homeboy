@@ -9,14 +9,11 @@
 //! real and the result events, exit codes, captured stdout/stderr, and patch
 //! artifacts are exercised end to end.
 
-use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest};
-use homeboy_core::daemon::{route_with_body, DirectDaemonExecSubmitRequest};
+use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore};
+use homeboy_core::daemon::route_with_body;
 use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::observation::ObservationStore;
-use homeboy_core::test_support::HomeGuard;
-use homeboy_runner_contract::{
-    RunnerApiSubmitRequest, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
-};
+use homeboy_core::test_support::{direct_exec_body, HomeGuard};
 
 use crate::runner_staging_operation::SourceArtifactTransfer;
 use crate::runner_staging_store::RemoteRunnerStagingRequest;
@@ -124,42 +121,14 @@ fn staged_job_id(response: &serde_json::Value) -> String {
 }
 
 fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Value {
-    let request = RemoteRunnerJobRequest {
-        runner_id: "lab-local".to_string(),
-        project_id: None,
-        operation: "runner.exec".to_string(),
-        command: command.into_iter().map(str::to_string).collect(),
-        cwd: Some(std::env::current_dir().expect("cwd").display().to_string()),
-        env: Default::default(),
-        secret_env_names: Vec::new(),
-        secret_env_plan: Default::default(),
-        env_materialization: None,
-        capture_patch: false,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        require_paths: Vec::new(),
-        extension_env_providers: Vec::new(),
-        lab_runner_workload: None,
-        lifecycle: None,
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        metadata: None,
-    };
-    serde_json::to_value(DirectDaemonExecSubmitRequest {
-        submission: RunnerApiSubmitRequest {
-            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            submission_key: submission_key.to_string(),
-            envelope: request.execution_envelope(),
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-            credential_delivery: None,
-        },
-        runner: None,
-        raw_exec: false,
-        workspace_owner_request: None,
-    })
-    .expect("serialize direct submission")
+    direct_exec_body(
+        serde_json::json!({
+            "runner_id": "lab-local",
+            "cwd": std::env::current_dir().expect("cwd").display().to_string(),
+            "command": command,
+        }),
+        submission_key,
+    )
 }
 
 #[test]
@@ -502,11 +471,14 @@ fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
     let response = route_with_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "homeboy-lab",
-            "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "printf lab"]
-        })),
+        Some(direct_exec_body(
+            serde_json::json!({
+                "runner_id": "homeboy-lab",
+                "cwd": std::env::current_dir().expect("cwd"),
+                "command": ["sh", "-c", "printf lab"]
+            }),
+            "daemon-host-without-runner-config",
+        )),
         &store,
     );
 
@@ -550,14 +522,17 @@ fn exec_applies_request_env_to_daemon_command() {
     let response = route_with_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "printf '%s' \"$HOMEBOY_TEST_DAEMON_ENV\""],
-            "env": {
-                "HOMEBOY_TEST_DAEMON_ENV": "ok"
-            }
-        })),
+        Some(direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": std::env::current_dir().expect("cwd"),
+                "command": ["sh", "-c", "printf '%s' \"$HOMEBOY_TEST_DAEMON_ENV\""],
+                "env": {
+                    "HOMEBOY_TEST_DAEMON_ENV": "ok"
+                }
+            }),
+            "daemon-request-env",
+        )),
         &store,
     );
 
@@ -642,23 +617,21 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     )
     .expect("install fixture extension");
     let store = JobStore::default();
-    let response = route_with_body(
-        "POST",
-        "/exec",
-        Some(serde_json::json!({
+    let mut body = direct_exec_body(
+        serde_json::json!({
             "runner_id": "lab-local",
-            "runner": {
-                "id": "lab-local",
-                "kind": "local",
-                "secret_env": { "FIXTURE_SECRET": { "file": secret } }
-            },
             "cwd": std::env::current_dir().expect("cwd"),
             "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s|%s|%s|%s|%s' \"$FIXTURE_SECRET\" \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\""],
-            "extension_env_providers": ["fixture"],
-            "idempotency_key": "daemon-explicit-run"
-        })),
-        &store,
+            "extension_env_providers": ["fixture"]
+        }),
+        "daemon-explicit-run",
     );
+    body["runner"] = serde_json::json!({
+        "id": "lab-local",
+        "kind": "local",
+        "secret_env": { "FIXTURE_SECRET": { "file": secret } }
+    });
+    let response = route_with_body("POST", "/exec", Some(body), &store);
 
     assert_eq!(response.status_code, 200);
     assert_eq!(
@@ -729,11 +702,14 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
     let response = route_with_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "printf out; printf err >&2; exit 7"]
-        })),
+        Some(direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": std::env::current_dir().expect("cwd"),
+                "command": ["sh", "-c", "printf out; printf err >&2; exit 7"]
+            }),
+            "daemon-failed-command",
+        )),
         &store,
     );
 
@@ -798,13 +774,16 @@ fn exec_capture_patch_records_remote_delta_artifact() {
     let response = route_with_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": workspace.path(),
-            "command": ["sh", "-c", "printf 'after\n' > file.txt"],
-            "capture_patch": true,
-            "source_snapshot": source_snapshot,
-        })),
+        Some(direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": workspace.path(),
+                "command": ["sh", "-c", "printf 'after\n' > file.txt"],
+                "capture_patch": true,
+                "source_snapshot": source_snapshot,
+            }),
+            "daemon-capture-patch",
+        )),
         &store,
     );
 

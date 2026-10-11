@@ -2825,16 +2825,19 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
     let response = route_with_job_store_and_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": cwd.display().to_string(),
-            "command": [
-                "__homeboy_test_process_tree__",
-                format!(
-                    "trap '' TERM; sleep 30 & echo $! > {child_pid_path}; while :; do :; done; touch {marker_path}"
-                ),
-            ],
-        })),
+        Some(crate::test_support::direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": cwd.display().to_string(),
+                "command": [
+                    "__homeboy_test_process_tree__",
+                    format!(
+                        "trap '' TERM; sleep 30 & echo $! > {child_pid_path}; while :; do :; done; touch {marker_path}"
+                    ),
+                ],
+            }),
+            "cancel-process-tree",
+        )),
         &store,
     );
     assert_eq!(response.status_code, 200);
@@ -2863,11 +2866,14 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
     let follow_up = route_with_job_store_and_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": cwd.display().to_string(),
-            "command": ["__homeboy_test_process_tree__", "sleep 0.1"],
-        })),
+        Some(crate::test_support::direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": cwd.display().to_string(),
+                "command": ["__homeboy_test_process_tree__", "sleep 0.1"],
+            }),
+            "cancel-process-tree-follow-up",
+        )),
         &store,
     );
     assert_eq!(follow_up.status_code, 200);
@@ -3581,7 +3587,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
     assert!(response["error"]["message"]
         .as_str()
         .expect("message")
-        .contains("invalid exec request body"));
+        .contains("Runner API v1 `submission` envelope"));
 }
 
 #[test]
@@ -3606,12 +3612,13 @@ fn routes_json_body_to_analysis_enqueue() {
 }
 
 #[test]
-fn route_with_body_validates_exec_requests() {
+fn route_with_body_refuses_exec_requests_without_runner_submission() {
     let _home = HomeGuard::new();
     let response = route_with_job_store_and_body(
         "POST",
         "/exec",
         Some(serde_json::json!({
+            "runner_id": "lab-local",
             "cwd": "relative",
             "command": []
         })),
@@ -3620,6 +3627,7 @@ fn route_with_body_validates_exec_requests() {
 
     assert_eq!(response.status_code, 400);
     assert_eq!(response.body["error"], "validation.invalid_argument");
+    assert_eq!(response.body["details"]["field"], "submission");
 }
 
 fn create_lab_local_runner() -> HomeGuard {
@@ -3639,11 +3647,14 @@ fn routes_exec_body_to_daemon_job() {
     let response = route_with_job_store_and_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "printf ok"]
-        })),
+        Some(crate::test_support::direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": std::env::current_dir().expect("cwd"),
+                "command": ["sh", "-c", "printf ok"]
+            }),
+            "routes-exec-body",
+        )),
         &store,
     );
 
@@ -3742,20 +3753,19 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
 
     // Exercise the daemon's actual `/exec` endpoint path after it has registered
     // the direct owner, rather than testing the rollback helper in isolation.
-    let response = route_with_body(
-        "POST",
-        "/exec",
-        Some(serde_json::json!({
+    let mut body = crate::test_support::direct_exec_body(
+        serde_json::json!({
             "runner_id": "lab-local",
             "cwd": std::env::current_dir().expect("cwd"),
             "command": ["sh", "-c", "printf should-not-run"],
-            "workspace_owner_request": {
-                "workspace": workspace,
-                "owner_id": "endpoint-commit-rollback"
-            }
-        })),
-        &store,
+        }),
+        "endpoint-commit-rollback",
     );
+    body["workspace_owner_request"] = serde_json::json!({
+        "workspace": workspace,
+        "owner_id": "endpoint-commit-rollback"
+    });
+    let response = route_with_body("POST", "/exec", Some(body), &store);
 
     assert_eq!(response.status_code, 400, "response: {}", response.body);
     assert_eq!(response.body["error"], "internal.io_error");
@@ -3850,12 +3860,15 @@ fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
     let response = route_with_job_store_and_body(
         "POST",
         "/exec",
-        Some(serde_json::json!({
-            "runner_id": "lab-local",
-            "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "printf ok"],
-            "path_materialization_plan": path_materialization_plan
-        })),
+        Some(crate::test_support::direct_exec_body(
+            serde_json::json!({
+                "runner_id": "lab-local",
+                "cwd": std::env::current_dir().expect("cwd"),
+                "command": ["sh", "-c", "printf ok"],
+                "path_materialization_plan": path_materialization_plan
+            }),
+            "path-materialization-plan",
+        )),
         &store,
     );
 

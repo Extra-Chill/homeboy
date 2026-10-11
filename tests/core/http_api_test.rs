@@ -1767,7 +1767,6 @@ fn queued_local_runner_job(store: &JobStore, durable_run_id: Option<&str>) -> cr
             active_child_count: None,
             active_cell_count: None,
         }),
-        workspace_claim_binding: None,
         workspace_owner_lease: None,
     }))
 }

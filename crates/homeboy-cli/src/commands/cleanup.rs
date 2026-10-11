@@ -15,9 +15,7 @@ use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverride
 use homeboy::core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
-use homeboy::core::daemon::{
-    ControllerJobSubmission, ControllerJobSubmissionDisposition, LocalControllerJobClient,
-};
+use homeboy::core::daemon::{ControllerJobSubmission, LocalControllerJobClient};
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -550,11 +548,7 @@ fn compact_cleanup_job(job: &homeboy::core::api_jobs::Job, command: &'static str
 fn compact_cleanup_submission(submission: &ControllerJobSubmission) -> Value {
     let mut output = compact_cleanup_job(&submission.job, "submitted");
     output["submission"] = serde_json::json!({
-        "disposition": match submission.disposition {
-            ControllerJobSubmissionDisposition::Created => "created",
-            ControllerJobSubmissionDisposition::Reused => "reused",
-            ControllerJobSubmissionDisposition::Unknown => "unknown",
-        },
+        "disposition": submission.disposition.as_str(),
     });
     output
 }

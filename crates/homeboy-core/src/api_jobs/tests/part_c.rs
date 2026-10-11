@@ -32,7 +32,6 @@ fn direct_local_runner(runner_id: &str) -> LocalRunnerJob {
         command: vec!["homeboy".to_string(), "test".to_string()],
         cwd: Some("/srv/extrachill".to_string()),
         lifecycle: None,
-        workspace_claim_binding: None,
         workspace_owner_lease: None,
     }
 }

@@ -85,6 +85,65 @@ fn stalled_daemon_probe_returns_timeout_reason_code() {
 }
 
 #[test]
+fn daemon_exec_probe_submits_a_runner_api_v1_submission() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = std::io::BufReader::new(stream);
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut reader, &mut line).expect("read header");
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("content length");
+                }
+            }
+        }
+        let mut body = vec![0; content_length];
+        std::io::Read::read_exact(&mut reader, &mut body).expect("read body");
+        captured_tx.send(body).expect("capture body");
+        let response_body = r#"{"success":true,"data":{"body":{"job":{"id":"probe-job"}}}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        std::io::Write::write_all(reader.get_mut(), response.as_bytes()).expect("write response");
+    });
+
+    let check = probes::daemon_exec_check_with_timeout(
+        "homeboy-lab",
+        "/home/user/Developer",
+        &format!("http://{addr}"),
+        std::time::Duration::from_secs(5),
+    );
+
+    assert_eq!(check.status, RunnerDoctorStatus::Ok);
+    let body = captured_rx.recv().expect("captured probe body");
+    let submitted: homeboy::core::daemon::DirectDaemonExecSubmitRequest =
+        serde_json::from_slice(&body).expect("probe body is a direct daemon submission");
+    assert_eq!(
+        submitted.submission.schema,
+        homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA
+    );
+    assert!(submitted
+        .submission
+        .submission_key
+        .starts_with("runner-doctor:v1:homeboy-lab:"));
+    let dispatch = submitted.submission.envelope.dispatch.expect("dispatch");
+    assert_eq!(dispatch.runner_id, "homeboy-lab");
+    assert_eq!(dispatch.cwd.as_deref(), Some("/home/user/Developer"));
+    assert_eq!(dispatch.command, vec!["homeboy", "--version"]);
+}
+
+#[test]
 fn exhausted_overall_budget_skips_daemon_probe_with_stable_reason_code() {
     let check = probes::daemon_exec_check_with_timeout(
         "homeboy-lab",

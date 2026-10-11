@@ -1879,14 +1879,34 @@ pub(super) fn daemon_exec_check_with_timeout(
             );
         }
     };
+    let probe_request = homeboy_core::api_jobs::RemoteRunnerJobRequest {
+        runner_id: runner_id.to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: vec!["homeboy".to_string(), "--version".to_string()],
+        cwd: Some(workspace_root.to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        extension_env_providers: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        workspace_claim_binding: None,
+        workspace_owner_lease: None,
+        metadata: None,
+    };
+    let submission = homeboy_core::daemon::DirectDaemonExecSubmitRequest::new(
+        &probe_request,
+        format!("runner-doctor:v1:{runner_id}:{}", uuid::Uuid::new_v4()),
+    );
     let response = client
         .post(format!("{}/exec", local_url.trim_end_matches('/')))
-        .json(&serde_json::json!({
-            "runner_id": runner_id,
-            "cwd": workspace_root,
-            "command": ["homeboy", "--version"],
-            "capture_patch": false
-        }))
+        .json(&submission)
         .send();
     let response = match response {
         Ok(response) => response,

@@ -233,8 +233,12 @@ review markdown report output, and review banners are rejected. Non-allowlisted
 tool IDs such as deploy, release, SSH, auth, keychain, and DB operations are
 rejected before any job starts.
 
-`POST /exec` remains a daemon-internal structured execution route for existing
-runner plumbing. It is not the sandbox-agent contract.
+`POST /exec` remains a daemon-internal structured execution route for runner
+plumbing. It accepts only a Runner API v1 `submission` envelope with a
+caller-owned `submission_key`; a body without one is refused with a
+`submission` validation error. `POST /admissions` likewise requires
+`admission_lease_protocol: 1` and returns a renewable token-bearing lease. It is
+not the sandbox-agent contract.
 
 The packaged broker service sets `HOME=/var/lib/homeboy`, so the daemon durable
 job store is `/var/lib/homeboy/.config/homeboy/daemon/jobs.json`. The store keeps

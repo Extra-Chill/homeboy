@@ -701,7 +701,6 @@ mod tests {
                     durable_run_id: Some(durable_run_id.to_string()),
                     ..RunnerJobLifecycleMetadata::default()
                 }),
-                workspace_claim_binding: None,
                 workspace_owner_lease: None,
             }));
             store
@@ -782,7 +781,6 @@ mod tests {
                     durable_run_id: Some("controller-cook-run".to_string()),
                     ..RunnerJobLifecycleMetadata::default()
                 }),
-                workspace_claim_binding: None,
                 workspace_owner_lease: None,
             }));
             store
