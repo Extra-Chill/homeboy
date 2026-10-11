@@ -20,6 +20,7 @@ macro_rules! builtin_json_command_descriptors {
             (Deps, $crate::cli_surface::DepsArgs::run, CommandSpec { subcommand_safety: DEPS_SUBCOMMAND_SAFETY, ..command_spec("deps", CommandJsonFamily::Ops) }),
             (File, $crate::commands::file::run, CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) }),
             (Deploy, $crate::commands::deploy::run, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS))),
+            (Harvest, $crate::commands::harvest::run, command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"]))),
             (Component, $crate::commands::component::run, CommandSpec { subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY, ..command_spec("component", CommandJsonFamily::Workspace) }),
             (Config, $crate::commands::config::run, CommandSpec { subcommand_safety: CONFIG_SUBCOMMAND_SAFETY, ..command_spec("config", CommandJsonFamily::Workspace) }),
             (Contract, $crate::commands::contract::run, command_spec_with_output_notes("contract", CommandJsonFamily::Workspace, "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface")),

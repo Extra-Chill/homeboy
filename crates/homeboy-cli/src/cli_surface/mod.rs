@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
-    deferred_workload, deploy, extension, file, fuzz, git, project, refactor, release, review, rig,
-    runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace, upgrade,
-    worktree,
+    deferred_workload, deploy, extension, file, fuzz, git, harvest, project, refactor, release,
+    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace,
+    upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -196,6 +196,8 @@ pub enum Commands {
     File(file::FileArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
+    /// Recover remote component content into local Git history
+    Harvest(harvest::HarvestArgs),
     /// Manage standalone component configurations
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration

@@ -241,6 +241,7 @@ pub mod extension;
 pub mod file;
 pub mod fuzz;
 pub mod git;
+pub mod harvest;
 pub mod issues;
 pub mod json_output;
 pub mod lint;

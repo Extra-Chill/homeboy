@@ -108,6 +108,7 @@ pub use homeboy_finding as finding;
 pub use homeboy_gate_contract::gate;
 pub mod control_plane;
 pub mod git;
+pub mod harvest;
 pub mod host_mutation_lifecycle;
 pub mod http_api;
 pub mod http_probe;
