@@ -6,31 +6,7 @@ use homeboy_extension_contract::trace_config::TraceBrowserEvidenceAdapterConfig;
 mod implementation;
 mod types;
 
-pub use types::{
-    ArtifactComparison, BrowserEvidenceCompareArgs, BrowserEvidenceCompareReport,
-    BrowserEvidenceCompareTotals,
-};
-
-pub fn render_browser_evidence_compare_from_args(
-    args: &BrowserEvidenceCompareArgs,
-) -> homeboy::core::Result<String> {
-    browser_evidence_compare_from_args(args).map(|report| report.markdown)
-}
-
-pub fn browser_evidence_compare_from_args(
-    args: &BrowserEvidenceCompareArgs,
-) -> homeboy::core::Result<BrowserEvidenceCompareReport> {
-    let baseline_dir = PathBuf::from(&args.baseline_dir);
-    let candidate_dir = PathBuf::from(&args.candidate_dir);
-    browser_evidence_compare_from_dirs_with_visual(
-        &[baseline_dir],
-        &[candidate_dir],
-        &args.baseline_label,
-        &args.candidate_label,
-        args.include_local_paths,
-        visual_compare_options(args)?,
-    )
-}
+pub use types::{ArtifactComparison, BrowserEvidenceCompareReport, BrowserEvidenceCompareTotals};
 
 pub fn browser_evidence_compare_from_dirs(
     baseline_dirs: &[PathBuf],
@@ -155,27 +131,4 @@ pub struct VisualCompareOptions {
     pub provider_command: String,
     pub provider_args: Vec<String>,
     pub threshold: Option<f64>,
-}
-
-fn visual_compare_options(
-    args: &BrowserEvidenceCompareArgs,
-) -> homeboy::core::Result<Option<VisualCompareOptions>> {
-    if !args.visual_compare {
-        return Ok(None);
-    }
-    let Some(provider_command) = args.visual_compare_provider.clone() else {
-        return Err(homeboy::core::Error::validation_missing_argument(vec![
-            "--visual-compare-provider".to_string(),
-        ]));
-    };
-    Ok(Some(VisualCompareOptions {
-        artifacts_dir: args
-            .visual_artifacts_dir
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".homeboy/browser-visual-compare")),
-        provider_command,
-        provider_args: args.visual_provider_args.clone(),
-        threshold: args.visual_threshold,
-    }))
 }

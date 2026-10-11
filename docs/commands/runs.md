@@ -16,7 +16,6 @@ homeboy runs hotspots <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
 homeboy runs show <run-id> [--format json|--json]
 homeboy runs dossier <run-id> [--format json|--json]
-homeboy runs resume-plan <run-id>
 homeboy runs evidence <run-id> [--full] [-q <jsonpath>...]
 homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>] [--limit <count>] [--offset <count>] [--full]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
@@ -31,37 +30,21 @@ homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <f
 homeboy runs findings reconcile <component> [--findings <path>|--from-output <command=path>] [--apply]
 homeboy runs findings reconcile-run <component> [--output-dir <dir>] [--apply]
 homeboy runs findings build --from-output <command=path> [--run-url <url>]
-homeboy runs finding <finding-id>
-homeboy runs latest-finding [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--tool <tool>] [--file <path>]
 homeboy runs export --run <run-id> --output <dir>
 homeboy runs export --since <duration> --output <dir>
 homeboy runs import <dir>
 homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --workflow <workflow.yml> --artifact-glob <glob>
 homeboy runs import --from-gh-actions --component <id> --repo <owner/repo> --run-id <gh-run-id> --artifact-glob <glob>
-homeboy runs query --select <jsonpath>[,<jsonpath>...] [--group-by <jsonpath>] [--count] [--format json|table|csv]
-homeboy runs drift --metric <jsonpath> [--window 7d] [--threshold 0.0] [--baseline <duration>] [--format json|table]
-homeboy runs loop-sync <archive-root> [--component <id>] [--rig <id>] [--label <label>] [--dry-run]
-homeboy runs report <failure-digest|performance-digest|bench-coverage|browser-evidence-compare|matrix-artifacts|compare> [OPTIONS]
+homeboy runs report failure-digest --output-dir <dir> --results <json>
 ```
 
 ## Description
 
 `homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, render typed report projections, and run explicit cleanup or reconciliation tasks.
 
-### Report projections
+### Failure digest
 
-The former top-level `homeboy report` family now lives under `homeboy runs report`, alongside the evidence it interprets:
-
-```bash
-homeboy runs report failure-digest --output-dir <dir> --results <json>
-homeboy runs report performance-digest --output-dir <dir>
-homeboy runs report bench-coverage [component] [--path <checkout>] [--all]
-homeboy runs report browser-evidence-compare --before <dir> --after <dir>
-homeboy runs report matrix-artifacts <run-id>
-homeboy runs report compare --old <artifact> --new <artifact>
-```
-
-The report arguments, inner `report.*` payload schemas, and Markdown rendering are unchanged. JSON output is now carried by the standard tagged Runs envelope under `variant: "report"`; consumers of the old direct JSON object must read its `payload` field. External scripts using `homeboy report ...` must replace that prefix with `homeboy runs report ...`.
+`homeboy runs report failure-digest --output-dir <dir> --results <json>` renders a Markdown failure digest from Homeboy command output JSON files and prints it directly.
 
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 
@@ -83,8 +66,6 @@ For full-coverage claims, prefer persisted evidence that distinguishes declared,
 homeboy --output json runs refs --kind bench --component studio --rig studio-bfb --since 24h
 homeboy --output json runs refs --kind trace --component gutenberg --aggregate-artifact-kind trace_summary
 ```
-
-`homeboy runs resume-plan <run-id>` reads generic `validation_progress` metadata from a run and reports the last completed command, any active command, and the next pending command. Homeboy core records this ledger for Homeboy-managed validation command sets without understanding npm, smoke groups, benchmarks, or implementation-specific command names; command manifests come from project configuration or extension-provided runners.
 
 `homeboy runs evidence <run-id>` emits a byte- and cardinality-bounded operator projection: run status, failure summary, selected `failure.diagnostic`, its exact continuation, artifact totals, and returned/omitted counts. The complete pretty-serialized `homeboy/command-result/v3` envelope is capped at 16,384 bytes for both stdout and `--output`; when necessary, optional artifact rows and guidance are omitted deterministically while schema, status, counts, and the selected diagnostic handle remain available. Standard bounded run IDs remain exact in `run_id`, `complete_command`, and `full_report_command`; an abnormal persisted ID that exceeds the public budget causes those optional locator fields to be omitted rather than truncated. Each returned artifact carries a stable opaque `ah_...` handle derived from durable ownership identity; `homeboy runs artifact get-handle <opaque-handle>` resolves file artifacts and `homeboy runs artifact preview-handle <opaque-handle>` safely serves directory artifacts without a run id, ordinal, name token, or shell interpolation. The selected diagnostic is first in the bounded artifact list; strings are deterministically shortened with an omitted-byte marker. The output is explicitly versioned as `homeboy/runs-evidence-summary/v1` under the `evidence_summary` variant. Consumers that require the established lossless `evidence` variant must use `--full`; this preserves the prior report schema unchanged. Use `runs artifacts <run-id>` for the full artifact inventory, or `-q/--field` with JSONPath selectors such as `-q '$.failure.diagnostic'` for a narrow machine-readable projection. Lab sibling artifacts sharing the runner job are included in both views. Local operator files are represented as non-reviewer-visible handles with a fetch command instead of absolute machine paths. Directory diagnostics continue with `runs artifact preview-handle`, and URL diagnostics continue with their validated URL. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
 
@@ -153,12 +134,10 @@ for generic runner, static HTML, and matrix examples.
 
 `homeboy runs distribution` aggregates categorical values from dot-separated JSON metadata paths. Scalar string, number, and boolean values are counted directly; arrays are flattened and counted by scalar element. The output reports inspected runs, matched/missing runs per field, total and unique value counts, value percentages, and repeated values.
 
-`homeboy runs latest-run` and `homeboy runs latest-finding` select the newest run
-or finding that matches the provided filters. `latest-run` is useful when automation
+`homeboy runs latest-run` selects the newest run that matches the provided filters. `latest-run` is useful when automation
 starts from component/kind/status context instead of a known run id.
 
-`homeboy runs findings` lists recorded findings for a run, while `homeboy runs
-finding` reads one finding by id. The `runs findings reconcile`, `reconcile-run`,
+`homeboy runs findings` lists recorded findings for a run. The `runs findings reconcile`, `reconcile-run`,
 and `build` subcommands normalize finding streams and reconcile them against an
 issue tracker from the evidence pillar. They default to dry-run planning; pass
 `--apply` on reconcile commands to mutate tracker state.
@@ -169,20 +148,6 @@ Discovery uses that component marker, independently of titles and optional label
 Lint, audit, and test retain independently keyed sections; narrowed measurements
 preserve unmeasured sections. Old category issues and markerless titles are not
 migrated or matched, and remain outside the canonical reconciliation contract.
-
-`homeboy runs query` projects JSONPath expressions over imported run artifact
-rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or
-CSV without baking domain-specific artifact schemas into Homeboy core. `query`
-is the generic projection reader for imported run artifacts.
-
-`homeboy runs drift` calculates window-based distribution drift for one JSONPath
-metric across imported artifact rows. It reports value shares for the selected
-window and can compare them against a longer baseline window. `drift` is useful
-for lightweight distribution checks over imported artifact rows.
-
-`homeboy runs loop-sync` inventories continuous-loop archive directories and,
-unless `--dry-run` is passed, records the triage summary as observation evidence.
-`loop-sync` bridges existing loop archives into observation evidence.
 
 ## Compare Metrics Across History
 
@@ -244,7 +209,7 @@ homeboy-observations/
   test_failures.json
 ```
 
-The v1 bundle is metadata-only: artifact records are exported, but artifact file bytes are not copied. Imported local file and directory artifacts are stored as `metadata-only` records with portable labels rather than source-machine paths. `homeboy runs query` reports these rows as skipped evidence, and `homeboy runs artifact get` explains that bytes are unavailable. `findings.json` contains normalized observation findings, and `test_failures.json` is an additive subset of findings where test commands recorded individual failures. Zip output is intentionally out of scope for v1; pass a directory path to `--output`.
+The v1 bundle is metadata-only: artifact records are exported, but artifact file bytes are not copied. Imported local file and directory artifacts are stored as `metadata-only` records with portable labels rather than source-machine paths. `homeboy runs artifact get` explains that bytes are unavailable. `findings.json` contains normalized observation findings, and `test_failures.json` is an additive subset of findings where test commands recorded individual failures. Zip output is intentionally out of scope for v1; pass a directory path to `--output`.
 
 `homeboy runs import` is idempotent. Existing identical records are accepted, while conflicting records with the same primary key fail clearly.
 
@@ -267,7 +232,6 @@ delete files, or update the local observation store:
 - `artifact cleanup-persisted --apply`: deletes persisted local artifact files/directories and their database records.
 - `export`: writes an observation bundle directory.
 - `import`: inserts observation bundle or GitHub Actions artifact records into the local observation store.
-- `loop-sync`: syncs continuous-loop archive directories into observation artifacts.
 - `reconcile`: marks orphaned running records stale.
 
 ```bash

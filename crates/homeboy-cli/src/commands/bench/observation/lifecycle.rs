@@ -162,10 +162,6 @@ pub(in crate::commands::bench) fn history_hints(summary: &BenchObservationSummar
         ),
         format!("List related bench runs: {list_command}"),
         format!(
-            "Query persisted bench metadata: homeboy runs query --component {} --since 24h",
-            summary.component_id
-        ),
-        format!(
             "Observation store: {} (debug path; prefer `homeboy runs ...` commands above)",
             summary.store_path
         ),

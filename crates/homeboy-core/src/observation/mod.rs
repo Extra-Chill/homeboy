@@ -12,7 +12,6 @@ pub mod context;
 pub mod disk_budget;
 pub mod evidence_report;
 mod lifecycle;
-pub mod loop_inventory_run;
 pub mod observed_workflow;
 pub mod records;
 mod run_failure_causes;
@@ -32,7 +31,6 @@ pub use bundle::{
     read_bundle_dir, write_bundle_dir, ObservationBundle, ObservationBundleArtifactBytes,
     ObservationBundleManifest, BUNDLE_FORMAT, BUNDLE_VERSION,
 };
-pub use loop_inventory_run::persist_loop_inventory_run;
 
 pub use crate::notification_route::NotificationRoute;
 pub use budget_findings::finding_records_from_budget;
