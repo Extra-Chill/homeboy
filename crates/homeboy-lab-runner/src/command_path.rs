@@ -49,6 +49,55 @@ pub(crate) fn set_homeboy_command_selection(
         .or_insert_with(|| homeboy_path.display().to_string());
 }
 
+/// Default a direct daemon child's Homeboy to the daemon's own binary.
+///
+/// The child authenticates against the daemon's durable job store, and that
+/// store's format is build-specific (jobs.json became SQLite in 0.418.0). The
+/// configured `homeboy_path` can name another build after a refresh or
+/// upgrade, and a child launched from it cannot find the job that launched it.
+/// The daemon is the one build guaranteed to match, so it takes the place of
+/// configuration as the default. A job that selected its own binary keeps it:
+/// it runs before preparation and uses the same job-wins precedence as
+/// [`set_homeboy_command_selection`], so a bare `homeboy` argv resolves to the
+/// daemon and an explicit absolute path is left alone.
+pub(crate) fn default_daemon_child_homeboy(
+    env: &mut HashMap<String, String>,
+    daemon_executable: &Path,
+) {
+    if !daemon_executable.is_absolute() {
+        return;
+    }
+    env.entry("HOMEBOY_COMMAND".to_string())
+        .or_insert_with(|| daemon_executable.display().to_string());
+}
+
+/// Put the selected Homeboy binary's directory first on `PATH`, so a nested
+/// bare `homeboy` in the child resolves to the same build as `HOMEBOY_COMMAND`
+/// rather than to the configured binary preparation put there.
+pub(crate) fn front_selected_homeboy_on_path(env: &mut HashMap<String, String>) {
+    let Some(parent) = env
+        .get("HOMEBOY_COMMAND")
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .and_then(Path::parent)
+        .and_then(Path::to_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let path = env.entry("PATH".to_string()).or_default();
+    let rest = path
+        .split(':')
+        .filter(|entry| !entry.is_empty() && *entry != parent)
+        .collect::<Vec<_>>()
+        .join(":");
+    *path = if rest.is_empty() {
+        parent
+    } else {
+        format!("{parent}:{rest}")
+    };
+}
+
 fn absolute_homeboy_parent(homeboy_path: Option<&str>) -> Option<&str> {
     let homeboy_path = Path::new(homeboy_path?);
     if !homeboy_path.is_absolute() {
@@ -565,6 +614,48 @@ mod tests {
             env.get("HOMEBOY_COMMAND"),
             Some(&"/build-a/homeboy".to_string())
         );
+    }
+
+    #[test]
+    fn daemon_binary_displaces_configured_binary_as_child_default() {
+        let mut env = HashMap::new();
+
+        default_daemon_child_homeboy(&mut env, Path::new("/slots/new/homeboy"));
+        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/slots/old/homeboy"));
+        front_selected_homeboy_on_path(&mut env);
+
+        assert_eq!(env["HOMEBOY_COMMAND"], "/slots/new/homeboy");
+        assert_eq!(env["PATH"].split(':').next(), Some("/slots/new"));
+        assert_eq!(
+            env["PATH"]
+                .split(':')
+                .filter(|entry| *entry == "/slots/new")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn job_selected_binary_survives_daemon_default() {
+        let mut env = HashMap::from([(
+            "HOMEBOY_COMMAND".to_string(),
+            "/build-b/homeboy".to_string(),
+        )]);
+
+        default_daemon_child_homeboy(&mut env, Path::new("/slots/new/homeboy"));
+        front_selected_homeboy_on_path(&mut env);
+
+        assert_eq!(env["HOMEBOY_COMMAND"], "/build-b/homeboy");
+        assert_eq!(env["PATH"].split(':').next(), Some("/build-b"));
+    }
+
+    #[test]
+    fn relative_daemon_executable_is_not_a_selection() {
+        let mut env = HashMap::new();
+
+        default_daemon_child_homeboy(&mut env, Path::new("homeboy"));
+
+        assert!(!env.contains_key("HOMEBOY_COMMAND"));
     }
 
     #[test]

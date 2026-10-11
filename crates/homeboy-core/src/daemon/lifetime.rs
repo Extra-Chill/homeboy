@@ -98,7 +98,7 @@ const REPLACED_EXECUTABLE_SUFFIX: &str = " (deleted)";
 /// `current_exe()` as `<path> (deleted)`. That path does not exist, so
 /// launching it fails and a supervisor could never spawn its own `daemon stop`
 /// (#15403). The installed file at the original path is the binary to run.
-pub(super) fn launchable_executable() -> std::io::Result<std::path::PathBuf> {
+pub fn launchable_executable() -> std::io::Result<std::path::PathBuf> {
     Ok(launchable_path(std::env::current_exe()?))
 }
 
