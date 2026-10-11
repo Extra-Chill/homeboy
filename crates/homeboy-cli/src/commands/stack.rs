@@ -185,7 +185,7 @@ pub enum StackCommandOutput {
 #[derive(Serialize)]
 pub struct StackListOutput {
     pub command: &'static str,
-    /// Rows under `entities`, mirrored under the deprecated `stacks` key (#14876).
+    /// Rows under `entities` (#14876).
     #[serde(flatten)]
     pub stacks: EntityRows<StackSummary>,
 }
@@ -337,7 +337,7 @@ fn list(config_root: &Path) -> CmdResult<StackCommandOutput> {
 fn list_output(summaries: Vec<StackSummary>) -> StackCommandOutput {
     StackCommandOutput::List(StackListOutput {
         command: "stack.list",
-        stacks: EntityRows::with_legacy_key(summaries, "stacks"),
+        stacks: EntityRows::new(summaries),
     })
 }
 
@@ -608,7 +608,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_output_mirrors_rows_under_entities_and_legacy_stacks_key() {
+    fn list_output_returns_rows_under_entities_only() {
         let value = serde_json::to_value(list_output(vec![StackSummary {
             id: "combined-fixes".to_string(),
             description: "Combined fixes".to_string(),
@@ -623,7 +623,10 @@ mod tests {
         assert_eq!(value["command"], "stack.list");
         assert_eq!(value["entities"][0]["id"], "combined-fixes");
         assert_eq!(value["entities"][0]["pr_count"], 2);
-        assert_eq!(value["entities"], value["stacks"]);
+        assert!(
+            value.get("stacks").is_none(),
+            "legacy mirror removed (#15742)"
+        );
     }
 
     #[test]
@@ -631,6 +634,6 @@ mod tests {
         let value = serde_json::to_value(list_output(Vec::new())).expect("serialize stack list");
 
         assert_eq!(value["entities"], serde_json::json!([]));
-        assert_eq!(value["stacks"], serde_json::json!([]));
+        assert!(value.get("stacks").is_none());
     }
 }

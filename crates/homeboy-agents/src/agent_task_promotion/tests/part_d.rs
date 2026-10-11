@@ -58,7 +58,6 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
                     artifact_id: Some(artifact_id.to_string()),
                     dry_run: false,
                     gates: VerifyGateOptions::default(),
-                    provider_command: None,
                     provider_invocation: None,
                     repository_integrity_evidence: None,
                 },
@@ -104,7 +103,6 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -189,7 +187,6 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -261,7 +258,6 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -327,7 +323,6 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
                 artifact_id: None,
                 dry_run: false,
                 gates: VerifyGateOptions::default(),
-                provider_command: None,
                 provider_invocation: None,
                 repository_integrity_evidence: None,
             },
@@ -435,7 +430,6 @@ fn promote_dry_run_validates_provider_request_without_applying() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -487,7 +481,6 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
                     private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                     ..Default::default()
                 },
-                provider_command: None,
                 provider_invocation: None,
                 repository_integrity_evidence: None,
             },
@@ -550,7 +543,6 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },

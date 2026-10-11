@@ -3624,7 +3624,6 @@ mod tests {
                         plan: plan.clone(),
                     }],
                     promotion_transport: json!({
-                        "provider_command": null,
                         "provider_invocation": null,
                         "attempt_dispatch": { "kind": "local" },
                     }),

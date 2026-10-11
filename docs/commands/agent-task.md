@@ -669,7 +669,7 @@ enforces a canonical `homeboy review test` argv and a positive suite timeout.
 The typed declaration is persisted unchanged through Cook and Lab handoff; use
 `--verify` only for arbitrary shell programs.
 
-Add `--dry-run` to inspect the derived branch/worktree names and batch-cook spec
+Add `--preview` to inspect the derived branch/worktree names and batch-cook spec
 without creating worktrees. Add `--run-plan` after reviewing provider readiness
 to execute the generated batch immediately. When DMC worktree creation is blocked
 by an active lock or another queue issue, the output reports `status: blocked`,
@@ -699,7 +699,7 @@ scripts that branched on that exit code must branch on `subject_state` or
 `data.batch.status` instead.
 
 Planning-only cook-batch invocations (`cook-batch` without `--run-plan`, and
-`--dry-run`) report envelope status `planned`, not `succeeded` (#13702): no
+`--preview`) report envelope status `planned`, not `succeeded` (#13702): no
 agent ran and no PR opened, even though worktrees may have been provisioned.
 A blocked worktree preflight remains a failed operation: it exits non-zero and
 lifts the primary blocked row into the envelope's failure summary.
@@ -1102,8 +1102,8 @@ accepted as `--selector`) selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
 The same `--model` value records adopted-candidate and manual-finalization AI
-provenance. `--ai-model` remains a deprecated compatibility alias for those
-two commands and will be removed in the next minor release.
+provenance. `finalize-pr` still accepts `--ai-model` as a deprecated alias
+because external publication tooling calls it; `adopt` accepts only `--model`.
 
 ## Fanout/Reconcile
 
@@ -1140,8 +1140,8 @@ batch-cook surface.
 Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
 `workspace`, `task_url`, `backend`, `selector`, `model`, `secret_env`,
 `provider_config`, and `client_context`. Review fields include `to_worktree`,
-`provider_command`, `verify`, `private_verify`, `max_attempts`, `base`, `head`,
-`title`, `commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
+`verify`, `private_verify`, `max_attempts`, `base`, `head`, `title`,
+`commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
 
 ## Gate Command Contracts
 

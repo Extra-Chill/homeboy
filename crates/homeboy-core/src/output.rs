@@ -511,13 +511,14 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
 /// Rows of a `* list` command, serialized under the canonical `entities` key.
 ///
 /// Every row-shaped list command returns its rows under `data.entities` so one
-/// reader works across all of them (#14876). Commands that historically used a
-/// command-specific key (`projects`, `stacks`, `rigs`, ...) also mirror the
-/// same rows under that legacy key.
+/// reader works across all of them (#14876). `project list` and
+/// `extension list` still mirror the same rows under their historical key
+/// because live callers read it (`wp-coding-agents` reads `data.projects`;
+/// the runner-upgrade preflight reads `data.extensions` from not-yet-upgraded
+/// runners). Every other list emits `entities` only (#15742).
 ///
-/// **The legacy key is deprecated** and kept only for a deprecation window;
-/// consumers must read `entities`. Removing the mirror is a one-line change
-/// here (or dropping `legacy_key` at the call site).
+/// **The legacy key is deprecated**; consumers must read `entities`. Removing
+/// the mirror is dropping `legacy_key` at the call site.
 ///
 /// Embed with `#[serde(flatten)]`. `entities` is always emitted, including as
 /// `[]` when the list is empty, so absence is never a valid "no rows" answer.

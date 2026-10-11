@@ -352,7 +352,6 @@ pub(super) fn promote_recoverable_patch_count(
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -389,7 +388,6 @@ pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionRequest 
         artifact_id: None,
         dry_run: false,
         gates: VerifyGateOptions::default(),
-        provider_command: None,
         provider_invocation: None,
         repository_integrity_evidence: None,
     }
@@ -426,7 +424,6 @@ pub(super) fn adopted_commit_options(
         artifact_id: None,
         dry_run: false,
         gates,
-        provider_command: None,
         provider_invocation: None,
         repository_integrity_evidence: None,
     }

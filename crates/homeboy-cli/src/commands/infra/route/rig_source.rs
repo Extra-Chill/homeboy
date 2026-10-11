@@ -202,12 +202,11 @@ pub(super) fn runner_rig_source_management_command(
 }
 
 pub(super) fn strip_rig_source_management_local_wrapper_flags(command: &[String]) -> Vec<String> {
-    const FLAGS: [(&str, bool); 7] = [
+    const FLAGS: [(&str, bool); 6] = [
         ("--runner", true),
         ("--output", true),
         ("--artifact-root", true),
         ("--placement", true),
-        ("--allow-local-fallback", false),
         ("--allow-dirty-lab-workspace", false),
         ("--wait", false),
     ];

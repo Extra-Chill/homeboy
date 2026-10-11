@@ -202,7 +202,6 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
             to_worktree: args.to_worktree,
-            provider_command: args.provider_command,
             provider_argv: args.provider_argv,
         },
     )?;
@@ -399,7 +398,6 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         artifact_id,
         dry_run: args.dry_run,
         gates,
-        provider_command: args.provider_command,
         provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
             argv: args.provider_argv,
             ..Default::default()

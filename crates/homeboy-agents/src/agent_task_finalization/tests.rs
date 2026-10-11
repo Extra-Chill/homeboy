@@ -3292,7 +3292,6 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                     verify: vec!["true".to_string()],
                     ..Default::default()
                 },
-                provider_command: None,
                 provider_invocation: None,
                 repository_integrity_evidence: None,
             },

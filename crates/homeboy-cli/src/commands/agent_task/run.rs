@@ -1327,11 +1327,7 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
         || flag == "--lab-env-json"
         || matches!(
             flag,
-            "--provider-config"
-                | "--provider-command"
-                | "--provider-argv"
-                | "--client-context"
-                | "--secret-env"
+            "--provider-config" | "--provider-argv" | "--client-context" | "--secret-env"
         );
     if !sensitive {
         return (unit, None);
@@ -7856,7 +7852,6 @@ fn run_preflight_cook_execution(
                 source_refs: args.dispatch.task_url.into_iter().collect(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: args.provider_command,
                 provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
                     argv: args.provider_argv,
                     ..Default::default()

@@ -1217,7 +1217,6 @@ mod tests {
                 source_refs: Vec::new(),
             },
             provider_transport: CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },

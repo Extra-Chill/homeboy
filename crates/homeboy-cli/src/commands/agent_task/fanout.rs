@@ -4112,8 +4112,6 @@ struct BatchCookSpec {
     to_worktree: String,
     #[serde(default)]
     adopted_worktree: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    provider_command: Option<String>,
     #[serde(default)]
     verify: Vec<String>,
     #[serde(default)]
@@ -4399,7 +4397,6 @@ impl BatchCookSpec {
                         .collect(),
                 },
                 provider_transport: CookProviderTransport {
-                    provider_command: self.provider_command.clone(),
                     provider_invocation: None,
                     attempt_dispatcher: None,
                 },
@@ -4660,7 +4657,6 @@ fn build_cook_batch_plan_with_profiles(
             ),
             to_worktree: explicit_worktree.clone().unwrap_or(worktree),
             adopted_worktree: explicit_worktree.is_some(),
-            provider_command: None,
             verify,
             private_verify,
             input_sources,

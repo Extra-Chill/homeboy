@@ -1699,7 +1699,6 @@ fn replay_text_value_flag(flag: &str) -> bool {
             | "--gate-package-artifact"
             | "--gate-extension-input"
             | "--provider-evidence"
-            | "--provider-command"
             | "--provider-argv"
     )
 }
@@ -3786,11 +3785,11 @@ fn inline_portable_settings_profiles(
             rewritten.extend(iter.cloned());
             break;
         }
-        if arg == "--settings-json-file" || arg == "--settings-profile" {
+        if arg == "--settings-json-file" {
             let _ = iter.next();
             continue;
         }
-        if arg.starts_with("--settings-json-file=") || arg.starts_with("--settings-profile=") {
+        if arg.starts_with("--settings-json-file=") {
             continue;
         }
         rewritten.push(arg.clone());

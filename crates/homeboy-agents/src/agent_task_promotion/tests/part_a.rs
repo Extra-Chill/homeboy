@@ -47,7 +47,6 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
             artifact_id: Some(artifact_id.to_string()),
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         };
@@ -116,7 +115,6 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
                 artifact_id: Some(artifact_id.to_string()),
                 dry_run: false,
                 gates: VerifyGateOptions::default(),
-                provider_command: None,
                 provider_invocation: None,
                 repository_integrity_evidence: None,
             },
@@ -211,7 +209,6 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
             artifact_id: Some(artifact_id.to_string()),
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -301,7 +298,6 @@ fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -361,7 +357,6 @@ fn recoverable_request_with_task_base(
         artifact_id: None,
         dry_run: false,
         gates: VerifyGateOptions::default(),
-        provider_command: None,
         provider_invocation: None,
         repository_integrity_evidence: None,
     }
@@ -494,7 +489,6 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -574,7 +568,6 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         artifact_id: None,
         dry_run: false,
         gates: VerifyGateOptions::default(),
-        provider_command: None,
         provider_invocation: None,
         repository_integrity_evidence: None,
     };
@@ -646,7 +639,6 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -720,7 +712,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -782,7 +773,6 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
             ..Default::default()
         },
-        provider_command: None,
         provider_invocation: None,
         repository_integrity_evidence: None,
     };
@@ -918,7 +908,6 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         };

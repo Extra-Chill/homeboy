@@ -1160,19 +1160,11 @@ pub struct AgentTaskCookArgs {
     /// authority.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
-    /// Exact argv element for the promotion apply-provider. Repeat once per element.
-    #[arg(
-        long,
-        value_name = "COMMAND",
-        long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
-    )]
-    pub provider_command: Option<String>,
     /// Exact argv element for the promotion apply-provider. Repeat once per
     /// element; values are never shell-split.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
-        conflicts_with = "provider_command",
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,

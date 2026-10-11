@@ -386,14 +386,6 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
         ],
     );
     ledger.mark("git_fixtures");
-    let provider = context.root().join("provider.sh");
-    std::fs::write(
-        &provider,
-        "#!/bin/sh\nset -eu\ncat >/dev/null\nprintf '%s\\n' '{\"schema\":\"homeboy/agent-task-outcome/v1\",\"status\":\"succeeded\",\"summary\":\"fixture provider completed\"}'\n",
-    )
-    .expect("write provider");
-    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))
-        .expect("make provider executable");
     let notification_extension = context
         .config_dir()
         .join("homeboy/extensions/test-notification");
@@ -608,8 +600,6 @@ esac
             task_worktree.to_str().expect("task worktree path"),
             "--to-worktree",
             task_worktree.to_str().expect("task worktree path"),
-            "--provider-command",
-            provider.to_str().expect("provider path"),
             "--verify",
             "true",
             "--max-attempts",

@@ -959,8 +959,8 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
     paths_safety(
         &["fanout cook-batch"],
-        operator_safety(Some("--dry-run"), &["--run-plan"]),
-        "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed",
+        operator_safety(Some("--preview"), &["--run-plan"]),
+        "creates/reuses task worktrees and can run the generated fanout unless --preview is passed",
     ),
 ];
 

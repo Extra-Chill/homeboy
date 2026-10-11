@@ -296,7 +296,6 @@ mod timeout_tests {
                     artifact_id: Some(patch.id.clone()),
                     dry_run: false,
                     gates: crate::agent_task_gate::VerifyGateOptions::default(),
-                    provider_command: None,
                     provider_invocation: None,
                     repository_integrity_evidence: None,
                 },

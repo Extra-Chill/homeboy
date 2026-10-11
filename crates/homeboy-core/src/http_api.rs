@@ -231,7 +231,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
                 request: homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
                     to_worktree: query_value(path, "to_worktree"),
-                    provider_command: query_value(path, "provider_command"),
                     provider_argv: query_values(path, "provider_argv"),
                 },
             })

@@ -936,7 +936,6 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             lineage: None,
         }],
         promotion_transport: serde_json::json!({
-            "provider_command": options.provider_transport.provider_command,
             "provider_invocation": options.provider_transport.provider_invocation,
             "attempt_dispatch": attempt_dispatch,
         }),
@@ -2994,11 +2993,6 @@ fn reconstruct_recipe_options(
         &mut gates,
         &recipe.promotion_transport["attempt_dispatch"],
     );
-    let provider_command = recipe
-        .promotion_transport
-        .get("provider_command")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
     let provider_invocation = recipe
         .promotion_transport
         .get("provider_invocation")
@@ -3076,7 +3070,6 @@ fn reconstruct_recipe_options(
             source_refs: recipe.source_refs.clone(),
         },
         provider_transport: CookProviderTransport {
-            provider_command,
             provider_invocation,
             attempt_dispatcher,
         },
@@ -3752,7 +3745,7 @@ mod tests {
                 run_id: "run".to_string(),
                 plan: plan.clone(),
             }],
-            promotion_transport: serde_json::json!({"provider_command": null, "provider_invocation": null, "attempt_dispatch": { "kind": "local" }}),
+            promotion_transport: serde_json::json!({"provider_invocation": null, "attempt_dispatch": { "kind": "local" }}),
             gate_policy: serde_json::json!({"verify": [], "private_verify": [], "private_gate_reveal": "summary_only"}),
             retry_budget: serde_json::json!({"max_attempts": 1, "execution_budget": plan.options.execution_budget}),
             finalization: serde_json::json!({"no_finalize": true, "base": "main", "head": null, "title": "title", "commit_message": "message", "protected_branches": [], "ai_tool": "test", "ai_model": null, "ai_used_for": "test", "to_worktree": "target", "source_worktree_path": null, "task_base_sha": null}),
@@ -4683,7 +4676,10 @@ mod tests {
         request.workspace.source_worktree_path = Some("/tmp/lab-source".into());
         request.workspace.task_base_sha = Some("lab-base".to_string());
         request.workspace.source_refs = vec!["issue:lab".to_string()];
-        request.provider_transport.provider_command = Some("lab-agent".to_string());
+        request.provider_transport.provider_invocation = Some(CommandInvocation {
+            argv: vec!["lab-agent".to_string()],
+            ..Default::default()
+        });
         request.provider_transport.attempt_dispatcher = Some(dispatcher.clone());
         request.retry_policy.max_attempts = 2;
         request.finalization.draft_pr = true;
@@ -4724,8 +4720,12 @@ mod tests {
                     assert_eq!(request.workspace.task_base_sha.as_deref(), Some("lab-base"));
                     assert_eq!(request.workspace.source_refs, ["issue:lab"]);
                     assert_eq!(
-                        request.provider_transport.provider_command.as_deref(),
-                        Some("lab-agent")
+                        request
+                            .provider_transport
+                            .provider_invocation
+                            .as_ref()
+                            .map(|invocation| invocation.argv.clone()),
+                        Some(vec!["lab-agent".to_string()])
                     );
                     assert_eq!(request.retry_policy.max_attempts, 2);
                     assert!(request.finalization.draft_pr);
@@ -4748,7 +4748,10 @@ mod tests {
         options.workspace.source_worktree_path = Some("/tmp/nested".into());
         options.workspace.task_base_sha = Some("base-sha".to_string());
         options.workspace.source_refs = vec!["issue:nested".to_string()];
-        options.provider_transport.provider_command = Some("provider".to_string());
+        options.provider_transport.provider_invocation = Some(CommandInvocation {
+            argv: vec!["provider".to_string()],
+            ..Default::default()
+        });
         options.retry_policy.max_attempts = 3;
         options.finalization.draft_pr = true;
         options.finalization.head = Some("nested-head".to_string());
@@ -4761,8 +4764,8 @@ mod tests {
         assert_eq!(persisted.attempts[0].run_id, "nested-run");
         assert_eq!(persisted.source_refs, ["issue:nested"]);
         assert_eq!(
-            persisted.promotion_transport["provider_command"],
-            "provider"
+            persisted.promotion_transport["provider_invocation"]["argv"],
+            serde_json::json!(["provider"])
         );
         assert_eq!(persisted.retry_budget["max_attempts"], 3);
         assert_eq!(persisted.finalization["to_worktree"], "fixture@nested");
@@ -4795,8 +4798,8 @@ mod tests {
             options.workspace.source_refs
         );
         assert_eq!(
-            reconstructed.provider_transport.provider_command,
-            options.provider_transport.provider_command
+            reconstructed.provider_transport.provider_invocation,
+            options.provider_transport.provider_invocation
         );
         assert!(reconstructed
             .provider_transport

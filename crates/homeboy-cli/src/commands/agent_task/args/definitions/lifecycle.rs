@@ -280,9 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn model_parses_canonically_for_adoption_and_ai_model_remains_compatible() {
-        for flag in ["--model", "--ai-model"] {
-            let cli = Cli::try_parse_from([
+    fn model_parses_canonically_for_adoption() {
+        let adopt = |flag: &str| {
+            Cli::try_parse_from([
                 "homeboy",
                 "agent-task",
                 "adopt",
@@ -292,15 +292,17 @@ mod tests {
                 flag,
                 "openai/gpt-5.6-sol",
             ])
-            .expect("adoption model parses");
-            let Commands::AgentTask(agent_task) = cli.command else {
-                panic!("expected agent-task command");
-            };
-            let AgentTaskCommand::Adopt(args) = agent_task.command else {
-                panic!("expected adoption command");
-            };
-            assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
-        }
+        };
+        let cli = adopt("--model").expect("adoption model parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::Adopt(args) = agent_task.command else {
+            panic!("expected adoption command");
+        };
+        assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
+        // The deprecated `--ai-model` alias was deleted for adoption (#15742).
+        assert!(adopt("--ai-model").is_err());
     }
 
     #[test]
@@ -683,18 +685,10 @@ pub struct ReviewArgs {
     /// Target managed worktree handle for the review candidate.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: Option<String>,
-    /// Deprecated shell command for the promotion apply provider.
-    #[arg(
-        long,
-        value_name = "COMMAND",
-        long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
-    )]
-    pub provider_command: Option<String>,
     /// Exact argv element for the promotion apply provider; repeat per element.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
-        conflicts_with = "provider_command",
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
@@ -709,18 +703,10 @@ pub struct PromoteArgs {
     /// Declared base branch resolved immediately before promotion gates run.
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
-    /// Deprecated shell command for the promotion apply provider.
-    #[arg(
-        long,
-        value_name = "COMMAND",
-        long_help = "Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`."
-    )]
-    pub provider_command: Option<String>,
     /// Exact argv element for the promotion apply provider; repeat per element.
     #[arg(
         long = "provider-argv",
         value_name = "ARG",
-        conflicts_with = "provider_command",
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
@@ -766,10 +752,8 @@ pub struct AdoptArgs {
     /// Immutable commit revision in the recorded source worktree.
     #[arg(long, value_name = "SHA")]
     pub candidate_ref: String,
-    /// Concrete model that prepared the externally supplied candidate. Use
-    /// `--model`; `--ai-model` is a deprecated compatibility alias and will be
-    /// removed in the next minor release.
-    #[arg(long = "model", alias = "ai-model", value_name = "MODEL")]
+    /// Concrete model that prepared the externally supplied candidate.
+    #[arg(long = "model", value_name = "MODEL")]
     pub ai_model: Option<String>,
     /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
     #[arg(long)]

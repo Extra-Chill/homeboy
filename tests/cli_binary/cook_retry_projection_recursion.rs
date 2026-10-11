@@ -38,7 +38,6 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
             source_refs: Vec::new(),
         },
         provider_transport: CookProviderTransport {
-            provider_command: None,
             provider_invocation: None,
             attempt_dispatcher: None,
         },
@@ -182,7 +181,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
             source_refs: Vec::new(),
         },
         provider_transport: CookProviderTransport {
-            provider_command: None,
             provider_invocation: None,
             attempt_dispatcher: None,
         },

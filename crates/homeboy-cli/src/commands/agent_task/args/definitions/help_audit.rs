@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn fanout_cook_batch_accepts_preview_and_hidden_dry_run_alias() {
+    fn fanout_cook_batch_accepts_preview_without_dry_run_alias() {
         let command = agent_task_command();
         let cook_batch = command
             .find_subcommand("fanout")
@@ -104,19 +104,11 @@ mod tests {
                 .is_some_and(|help| !help.to_string().trim().is_empty()),
             "--preview must carry help text"
         );
-        let mut names: Vec<String> = preview
-            .get_aliases()
-            .into_iter()
-            .flatten()
-            .map(str::to_string)
-            .collect();
-        names.sort();
-        assert_eq!(names, vec!["dry-run".to_string()]);
+        // The historical `--dry-run` spelling was deleted (#15742); `--preview`
+        // is the one verb.
         assert!(
-            preview
-                .get_visible_aliases()
-                .map_or(true, |aliases| aliases.is_empty()),
-            "--dry-run stays a hidden alias so help advertises one canonical verb"
+            preview.get_all_aliases().is_none(),
+            "--preview carries no aliases"
         );
     }
 

@@ -1759,7 +1759,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2017,7 +2016,6 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2115,7 +2113,6 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2336,7 +2333,6 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2555,7 +2551,6 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2735,7 +2730,6 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -3741,7 +3735,6 @@ fn logs_return_canonical_events_while_diagnostics_stay_on_diagnose_and_review() 
             run_id: run_id.to_string(),
             full: true,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
@@ -3979,7 +3972,6 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -5988,7 +5980,6 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: Some(Arc::new(RetryRunDispatcher)),
             },
@@ -6074,7 +6065,6 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: Some(Arc::new(RetryRunDispatcher)),
             },

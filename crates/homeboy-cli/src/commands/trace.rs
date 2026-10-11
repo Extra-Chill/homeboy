@@ -250,7 +250,7 @@ pub struct TraceArgs {
     pub keep_overlay: bool,
 
     /// Require canonical evidence. This is the default; retained for explicit command logs.
-    #[arg(long, alias = "proof")]
+    #[arg(long)]
     pub canonical: bool,
     /// Allow intentionally local/development evidence. The output is marked non-canonical.
     #[arg(long, alias = "allow-local-evidence")]
