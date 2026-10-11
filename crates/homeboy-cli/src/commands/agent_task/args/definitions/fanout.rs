@@ -211,8 +211,7 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// separately; preview then performs one bounded provider-owned readiness
     /// admission using the batch deadline before printing the plan and replay
     /// command.
-    /// `--dry-run` is accepted as the historical spelling of this flag.
-    #[arg(long = "preview", alias = "dry-run")]
+    #[arg(long = "preview")]
     pub preview: bool,
     /// Maximum wall-clock budget for each bounded static --preview planning
     /// phase (default 10 seconds per phase).
@@ -341,9 +340,8 @@ pub struct AgentTaskFanoutPlanArgs {
     pub gates: VerifyGateArgs,
     /// Accepted for verb consistency with `agent-task cook --preview` and
     /// `fanout cook-batch --preview`: `fanout plan` is always side-effect
-    /// free, so this flag changes nothing. `--dry-run` is accepted as the
-    /// historical spelling.
-    #[arg(long = "preview", alias = "dry-run")]
+    /// free, so this flag changes nothing.
+    #[arg(long = "preview")]
     pub preview: bool,
 }
 

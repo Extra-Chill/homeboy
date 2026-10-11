@@ -608,7 +608,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                             artifact_id: None,
                             dry_run: false,
                             gates: options.gates.clone(),
-                            provider_command: options.provider_transport.provider_command.clone(),
                             provider_invocation: options
                                 .provider_transport
                                 .provider_invocation

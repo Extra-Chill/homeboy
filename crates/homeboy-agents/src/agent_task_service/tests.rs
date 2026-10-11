@@ -924,7 +924,6 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
                 artifact_id: Some(artifact.id.clone()),
                 dry_run: false,
                 gates: crate::agent_task_gate::VerifyGateOptions::default(),
-                provider_command: None,
                 provider_invocation: None,
             repository_integrity_evidence: None,
             },

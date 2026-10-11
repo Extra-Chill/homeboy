@@ -883,13 +883,12 @@ fn redact_settings_args(args: &mut [serde_json::Value]) {
             redact_next = false;
         } else if matches!(
             value,
-            "--setting" | "--setting-json" | "--settings-json-file" | "--settings-profile"
+            "--setting" | "--setting-json" | "--settings-json-file"
         ) {
             redact_next = true;
         } else if value.starts_with("--setting=")
             || value.starts_with("--setting-json=")
             || value.starts_with("--settings-json-file=")
-            || value.starts_with("--settings-profile=")
         {
             *arg = serde_json::Value::String(
                 value.split_once('=').expect("checked").0.to_string() + "=[REDACTED]",

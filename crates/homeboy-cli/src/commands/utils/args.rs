@@ -254,23 +254,7 @@ fn arg_takes_value(arg: &Arg) -> bool {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    mark_explicit_passthrough(normalize_legacy_allow_local_fallback(
-        normalize_review_audit_baseline(args),
-    ))
-}
-
-/// Retain the one concrete placement alias being removed from the public
-/// surface. The consolidated placement value keeps its semantics explicit.
-fn normalize_legacy_allow_local_fallback(args: Vec<String>) -> Vec<String> {
-    args.into_iter()
-        .flat_map(|arg| {
-            if arg == "--allow-local-fallback" {
-                vec!["--placement".to_string(), "lab-or-local".to_string()]
-            } else {
-                vec![arg]
-            }
-        })
-        .collect()
+    mark_explicit_passthrough(normalize_review_audit_baseline(args))
 }
 
 fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
@@ -459,16 +443,15 @@ mod normalize_tests {
     }
 
     #[test]
-    fn legacy_allow_local_fallback_normalizes_to_placement() {
+    fn removed_allow_local_fallback_flag_is_rejected() {
+        // `--placement lab-or-local` is the only spelling (#15742).
         let args = normalize(argv(&[
             "homeboy",
             "bench",
             "example",
             "--allow-local-fallback",
         ]));
-        let cli = Cli::try_parse_from(args).expect("legacy fallback flag should normalize");
-
-        assert_eq!(cli.placement, crate::cli_surface::Placement::LabOrLocal);
+        assert!(Cli::try_parse_from(args).is_err());
     }
 
     #[test]
@@ -1803,7 +1786,7 @@ use std::path::{Path, PathBuf};
 ///
 /// Three inputs by design:
 ///
-/// - `--settings-json-file <file>` / `--settings-profile <file>` (typed):
+/// - `--settings-json-file <file>` (typed):
 ///   read a JSON object and apply each top-level key as a typed setting value.
 ///   These values sit below explicit CLI overrides.
 ///
@@ -1831,11 +1814,7 @@ pub struct SettingArgs {
     /// Each top-level object key becomes a setting key. Values retain their
     /// JSON type. Explicit --setting and --setting-json flags override file
     /// values for the same key.
-    #[arg(
-        long = "settings-json-file",
-        alias = "settings-profile",
-        value_name = "FILE"
-    )]
+    #[arg(long = "settings-json-file", value_name = "FILE")]
     pub settings_json_file: Vec<PathBuf>,
 
     /// String setting override. Repeatable.

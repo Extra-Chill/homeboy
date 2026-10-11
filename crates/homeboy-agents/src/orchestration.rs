@@ -2802,7 +2802,6 @@ fn review_promotion_candidates(
                             artifact_id: None,
                             dry_run: true,
                             gates: Default::default(),
-                            provider_command: None,
                             provider_invocation: None,
                             repository_integrity_evidence: None,
                         },
@@ -2874,10 +2873,6 @@ fn review_promotion_candidates(
                     if cook_contract.is_some() {
                         command.push("--gates-from-cook-recipe".to_string());
                     }
-                    if let Some(provider_command) = &request.provider_command {
-                        command
-                            .extend(["--provider-command".to_string(), provider_command.clone()]);
-                    }
                     command.extend(
                         request
                             .provider_argv
@@ -2935,7 +2930,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
         requested_id: &RunId,
         request: &ControlPlaneRunReviewRequest,
     ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
-        request.validate()?;
         let target = crate::agent_task_lifecycle::resolve_cook_reader_target_in_store(
             &self.lookup.store,
             requested_id.as_str(),
@@ -9837,26 +9831,6 @@ mod tests {
                 ambient.read_record(candidate_id).expect("sentinel after"),
                 foreign_before
             );
-        });
-    }
-
-    #[test]
-    fn review_rejects_conflicting_provider_inputs() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
-            let error = service
-                .review(
-                    &RunId::new("missing-run").expect("run"),
-                    &ControlPlaneRunReviewRequest {
-                        to_worktree: None,
-                        provider_command: Some("provider".to_string()),
-                        provider_argv: vec!["provider".to_string()],
-                    },
-                )
-                .expect_err("conflicting provider inputs");
-
-            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
         });
     }
 

@@ -137,7 +137,6 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
                     homeboy::agents::agent_tasks::gate::AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
         },
     )

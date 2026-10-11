@@ -19,10 +19,9 @@ These are provided by clap:
 - `--version` / `-V`: print version and exit
 - `--help` / `-h`: print help and exit
 - `--output <PATH>`: write the structured JSON envelope to a file in addition to stdout
-- `--placement <auto|local|lab>`: select automatic placement, intentional controller execution, or required Lab execution
+- `--placement <auto|local|lab|lab-or-local>`: select automatic placement, intentional controller execution, required Lab execution, or Lab execution that may fall back to the controller after offload preflight fails
 - `--artifact-root <DIR>`: copy persisted run artifacts to a specific directory
 - `--runner <RUNNER_ID>`: route commands with portable Lab offload support to a connected Homeboy Lab runner
-- `--allow-local-fallback`: permit a selected Lab runner to fall back to local execution after offload preflight fails
 - `--allow-dirty-lab-workspace`: permit Lab git workspace materialization to overwrite a dirty runner-side checkout
 
 `--output` is a global flag, so pass it before the subcommand:

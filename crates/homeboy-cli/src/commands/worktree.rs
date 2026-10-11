@@ -177,8 +177,7 @@ enum WorktreeCommand {
     Cleanup {
         // Remove planned worktrees and artifacts after safety checks.
         // Without --apply, only reports the plan; --dry-run names that
-        // default explicitly. This pair is the precedent the shared
-        // plan-default mutation group was modeled on (#11139).
+        // default explicitly, as on every shared mutation group (#11139).
         #[command(flatten)]
         mutation: MutationArgs,
         /// Allow dirty/unpushed worktree removal; hard gates still apply
@@ -287,8 +286,6 @@ pub struct WorktreeCleanupCommandOutput {
     pub worktrees: WorktreeCleanupOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub deprecated_flag: Option<&'static str>,
     #[serde(rename = "_homeboy_actionable")]
     pub actionable: CommandActionableMetadata,
 }
@@ -631,7 +628,6 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             allow_unmerged_branches,
         } => {
             let apply = mutation.is_apply();
-            let deprecated_dry_run = mutation.dry_run;
             let worktrees = worktree::cleanup(WorktreeCleanupOptions {
                 force,
                 dry_run: !apply,
@@ -663,7 +659,6 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
                 artifact_cleanup,
-                deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
                 actionable,
             })
         }
@@ -932,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_cleanup_dry_run_is_a_legacy_plan_only_alias() {
+    fn worktree_cleanup_dry_run_is_the_shared_plan_only_flag() {
         let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--dry-run"]);
 
         let Commands::Worktree(args) = cli.command else {
@@ -945,20 +940,6 @@ mod tests {
         assert!(!mutation.apply);
         assert!(mutation.dry_run);
         assert!(cleanup_is_dry_run(mutation.is_apply()));
-    }
-
-    #[test]
-    fn worktree_cleanup_dry_run_marks_the_deprecated_flag() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--dry-run"]);
-
-        let Commands::Worktree(args) = cli.command else {
-            panic!("expected worktree command");
-        };
-        let WorktreeCommand::Cleanup { mutation, .. } = args.command else {
-            panic!("expected worktree cleanup command");
-        };
-
-        assert_eq!(mutation.dry_run.then_some("--dry-run"), Some("--dry-run"));
     }
 
     #[test]

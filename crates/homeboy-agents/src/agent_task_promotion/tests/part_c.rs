@@ -142,7 +142,6 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patc
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -181,7 +180,6 @@ fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -256,7 +254,6 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         })
@@ -317,7 +314,6 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -367,7 +363,6 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -453,7 +448,6 @@ fn promote_applies_patch_with_fake_workspace_provider() {
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
                 ..Default::default()
             },
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -540,7 +534,6 @@ fn promote_persists_force_added_ignored_git_candidate_paths() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },
@@ -612,7 +605,6 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                     hydrate_dependencies: true,
                     ..Default::default()
                 },
-                provider_command: None,
                 provider_invocation: None,
                 repository_integrity_evidence: None,
             },

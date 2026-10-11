@@ -42,7 +42,6 @@ pub struct AgentTaskPromotionRequest {
     /// Deterministic verification gates.
     #[serde(default)]
     pub gates: VerifyGateOptions,
-    pub provider_command: Option<String>,
     pub provider_invocation: Option<CommandInvocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,

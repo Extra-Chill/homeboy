@@ -62,7 +62,7 @@ impl AgentTaskPromotionJob {
                 "promotion jobs require a destination worktree",
             ));
         }
-        if request.provider_command.is_some() || request.provider_invocation.is_some() {
+        if request.provider_invocation.is_some() {
             return Err(invalid_promotion_job(
                 "promotion jobs require controller-owned provider references, not inline commands",
             ));
@@ -506,7 +506,6 @@ mod tests {
             artifact_id: Some("patch-1".to_string()),
             dry_run: false,
             gates: VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         }
@@ -658,7 +657,15 @@ mod tests {
         assert!(AgentTaskPromotionJob::new(missing_artifact).is_err());
 
         let mut inline_provider = request();
-        inline_provider.provider_command = Some("provider --token private".to_string());
+        inline_provider.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![
+                    "provider".to_string(),
+                    "--token".to_string(),
+                    "private".to_string(),
+                ],
+                ..Default::default()
+            });
         assert!(AgentTaskPromotionJob::new(inline_provider).is_err());
     }
 

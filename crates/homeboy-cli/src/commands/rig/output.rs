@@ -58,7 +58,7 @@ pub type RigReleaseLockOutput = CommandReport<rig::ReleaseLeaseOutcome>;
 #[derive(Serialize)]
 pub struct RigListOutput {
     pub command: &'static str,
-    /// Rows under `entities`, mirrored under the deprecated `rigs` key (#14876).
+    /// Rows under `entities` (#14876).
     #[serde(flatten)]
     pub rigs: EntityRows<RigSummary>,
 }
@@ -67,7 +67,7 @@ impl RigListOutput {
     pub fn new(rigs: Vec<RigSummary>) -> Self {
         Self {
             command: "rig.list",
-            rigs: EntityRows::with_legacy_key(rigs, "rigs"),
+            rigs: EntityRows::new(rigs),
         }
     }
 }
@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rig_list_mirrors_rows_under_entities_and_legacy_rigs_key() {
+    fn rig_list_returns_rows_under_entities_only() {
         let output = RigCommandOutput::List(RigListOutput::new(vec![RigSummary {
             id: "studio-bfb".to_string(),
             declared_id: None,
@@ -199,7 +199,10 @@ mod tests {
         assert_eq!(value["variant"], "list");
         assert_eq!(value["payload"]["command"], "rig.list");
         assert_eq!(value["payload"]["entities"][0]["id"], "studio-bfb");
-        assert_eq!(value["payload"]["entities"], value["payload"]["rigs"]);
+        assert!(
+            value["payload"].get("rigs").is_none(),
+            "legacy mirror removed (#15742)"
+        );
     }
 
     #[test]
@@ -208,7 +211,7 @@ mod tests {
             .expect("serialize rig list");
 
         assert_eq!(value["payload"]["entities"], serde_json::json!([]));
-        assert_eq!(value["payload"]["rigs"], serde_json::json!([]));
+        assert!(value["payload"].get("rigs").is_none());
     }
 
     #[test]

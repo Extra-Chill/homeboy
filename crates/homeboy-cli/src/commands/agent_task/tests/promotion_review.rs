@@ -98,7 +98,6 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -130,7 +129,6 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             run_id: run_id.to_string(),
             full: true,
             to_worktree: Some("fixture@retained-gates".to_string()),
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review Cook attempt");
@@ -320,7 +318,6 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
             run_id: run_id.to_string(),
             full: true,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review");
@@ -393,7 +390,6 @@ fn review_does_not_advertise_a_command_for_an_invalid_resume_gate_contract() {
             run_id: run_id.to_string(),
             full: true,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review remains readable");
@@ -418,7 +414,6 @@ fn review_reports_queued_run_without_chat_state() {
             run_id: "run-review-queued".to_string(),
             full: true,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
@@ -446,7 +441,6 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
             run_id: "run-review-completed".to_string(),
             full: true,
             to_worktree: Some("homeboy-review-flow".to_string()),
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
@@ -476,7 +470,6 @@ fn default_review_is_bounded_and_points_to_full_evidence() {
             run_id: "run-review-default-bounded".to_string(),
             full: false,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("review loaded");
@@ -634,7 +627,6 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             run_id: cook_id.to_string(),
             full: true,
             to_worktree: None,
-            provider_command: None,
             provider_argv: Vec::new(),
         })
         .expect("Cook review is bounded");
@@ -842,7 +834,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
                 source_refs: Vec::new(),
             },
             provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },

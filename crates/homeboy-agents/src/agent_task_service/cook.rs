@@ -1522,7 +1522,6 @@ pub struct CookBasePreparation {
 
 #[derive(Debug, Clone)]
 pub struct CookProviderTransport {
-    pub provider_command: Option<String>,
     pub provider_invocation: Option<CommandInvocation>,
     /// The route-selected provider transport. `None` executes locally.
     pub attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
@@ -7127,7 +7126,6 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && options.provider_transport.attempt_dispatcher.is_none()
         && options.workspace.source_worktree_path.is_none()
-        && options.provider_transport.provider_command.is_none()
         && options.provider_transport.provider_invocation.is_none()
     {
         run_cook_startup_phase(

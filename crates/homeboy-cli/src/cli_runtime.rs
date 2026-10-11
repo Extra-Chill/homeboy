@@ -7773,7 +7773,6 @@ mod tests {
                     source_refs: Vec::new(),
                 },
                 provider_transport: crate::agents::agent_task_service::CookProviderTransport {
-                    provider_command: None,
                     provider_invocation: None,
                     attempt_dispatcher: None,
                 },
@@ -7930,7 +7929,6 @@ mod tests {
                     source_refs: Vec::new(),
                 },
                 provider_transport: crate::agents::agent_task_service::CookProviderTransport {
-                    provider_command: None,
                     provider_invocation: None,
                     attempt_dispatcher: None,
                 },

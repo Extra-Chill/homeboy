@@ -733,7 +733,6 @@ pub(crate) fn promote_attempt_in_store(
                     artifact_id,
                     dry_run: false,
                     gates: options.gates.clone(),
-                    provider_command: options.provider_transport.provider_command.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
                     repository_integrity_evidence,
                 },
@@ -899,7 +898,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         artifact_id: artifact_id.map(str::to_string),
         dry_run: false,
         gates: options.gates.clone(),
-        provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
         repository_integrity_evidence: None,
     };
@@ -1037,7 +1035,6 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         artifact_id: None,
         dry_run: false,
         gates: options.gates.clone(),
-        provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
         repository_integrity_evidence: None,
     };
@@ -1357,9 +1354,6 @@ pub(crate) fn cook_promotion_argv(
         artifact_id.to_string(),
     ];
     crate::agent_task_gate::append_promotion_gate_argv(&mut command, &options.gates);
-    if let Some(provider) = &options.provider_transport.provider_command {
-        command.extend(["--provider-command".to_string(), provider.clone()]);
-    }
     if let Some(invocation) = &options.provider_transport.provider_invocation {
         for argument in &invocation.argv {
             command.push(format!("--provider-argv={argument}"));
@@ -1477,7 +1471,6 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     artifact_id: Some(promotion.patch_artifact.id.clone()),
                     dry_run: false,
                     gates: options.gates.clone(),
-                    provider_command: options.provider_transport.provider_command.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
                     repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
                 },
@@ -2211,7 +2204,6 @@ fn verify_replacement_gates_owned(
             artifact_id: Some(original.patch_artifact.id.clone()),
             dry_run: false,
             gates,
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: original.repository_integrity_evidence.clone(),
         },
@@ -2883,7 +2875,6 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             artifact_id: Some(recovery.promotion.patch_artifact.id.clone()),
             dry_run: false,
             gates: options.gates.clone(),
-            provider_command: options.provider_transport.provider_command.clone(),
             provider_invocation: options.provider_transport.provider_invocation.clone(),
             repository_integrity_evidence: recovery.promotion.repository_integrity_evidence.clone(),
         },
@@ -7595,7 +7586,6 @@ fn ambiguous_promotion_artifact_ids(
             artifact_id: None,
             dry_run: false,
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
-            provider_command: None,
             provider_invocation: None,
             repository_integrity_evidence: None,
         },

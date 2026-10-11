@@ -951,10 +951,10 @@ mod tests {
         }
     }
 
-    /// A dry run plans without executing. Detaching it would hand the daemon a
+    /// A preview plans without executing. Detaching it would hand the daemon a
     /// coordinator that exits immediately.
     #[test]
-    fn a_dry_run_cook_batch_remains_synchronous() {
+    fn a_preview_cook_batch_remains_synchronous() {
         let cli = cli(&[
             "--placement",
             "local",
@@ -964,7 +964,7 @@ mod tests {
             "--repo",
             "acme/widget",
             "--run-plan",
-            "--dry-run",
+            "--preview",
             "https://github.com/acme/widget/issues/1",
         ]);
 

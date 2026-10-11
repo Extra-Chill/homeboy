@@ -4100,7 +4100,12 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         );
         options.identity.initial_run_id = run_id.to_string();
         options.finalization.no_finalize = false;
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.gates = VerifyGateOptions {
             verify: vec!["public gate".to_string()],
             private_verify: vec!["private gate".to_string()],
@@ -5795,7 +5800,6 @@ fn batch_cook_options(
             source_refs: Vec::new(),
         },
         provider_transport: CookProviderTransport {
-            provider_command: None,
             provider_invocation: None,
             attempt_dispatcher: Some(dispatcher),
         },
@@ -8100,7 +8104,12 @@ impl CandidateAdoptionFixture {
         options.identity.initial_run_id = run_id.clone();
         options.workspace.source_worktree_path = Some(source.clone());
         options.workspace.task_base_sha = Some(base.clone());
-        options.provider_transport.provider_command = Some(provider.display().to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![provider.display().to_string()],
+
+                ..Default::default()
+            });
         options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.retry_policy.max_attempts = max_attempts;
         options.identity.initial_plan.options.execution_budget =
@@ -8873,7 +8882,12 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
                 phase: "controller_admission",
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = run_id.to_string();
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook returns the persisted dispatch failure");
@@ -12692,7 +12706,12 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = Some(source.clone());
         options.workspace.to_worktree = source.display().to_string();
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
         options.identity.initial_plan.tasks[0].workspace.kind =
             Some("homeboy-worktree".to_string());
@@ -12796,7 +12815,12 @@ fn retry_reports_missing_candidate_source_as_retryable_recovery() {
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = Some(source.clone());
         options.workspace.to_worktree = source.display().to_string();
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
         options.identity.initial_plan.tasks[0].workspace.kind =
             Some("homeboy-worktree".to_string());
@@ -12836,7 +12860,12 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
                 failures_remaining: AtomicUsize::new(1),
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = first_run_id.to_string();
         options.retry_policy.max_attempts = 2;
 
@@ -13015,7 +13044,12 @@ fn cook_persists_materialization_failure_without_provider_execution() {
         let cook_id = "cook-materialization-failure";
         let run_id = "cook-materialization-failure-attempt-1";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = Some(temp.path().to_path_buf());
         options.retry_policy.max_attempts = 3;
@@ -13053,7 +13087,12 @@ fn run_cook_persists_recipe_in_explicit_store_only() {
         let store = CookRecipeStore::from_data_root(explicit_data.path().to_path_buf());
         let cook_id = "cook-explicit-recipe-store";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = "cook-explicit-recipe-store-attempt-1".to_string();
         options.workspace.source_worktree_path = Some(source.path().to_path_buf());
 
@@ -13170,7 +13209,12 @@ fn cook_claims_its_durable_attempt_before_slow_baseline_materialization() {
             }),
         );
         options.identity.initial_run_id = "cook-slow-baseline-attempt-1".to_string();
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.workspace.source_worktree_path = Some(source.clone());
         // Cook validates the destination before it stages a baseline, so the
         // fixture has to declare a real workspace rather than a bare handle.
@@ -13244,7 +13288,12 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
                 failures_remaining: AtomicUsize::new(usize::MAX),
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = "cook-runner-exhaustion-attempt-1".to_string();
         options.retry_policy.max_attempts = 2;
 
@@ -13297,7 +13346,12 @@ fn cook_prepares_transport_before_pinning_runtime_generation() {
                 observed_pin_during_preparation: Arc::clone(&observed_pin),
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = "cook-pin-ordering-attempt-1".to_string();
 
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
@@ -13323,7 +13377,12 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
                 phase: "controller_admission",
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = run_id.to_string();
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook returns the persisted runtime mismatch");
@@ -13362,7 +13421,12 @@ fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
                 phase: "lab_staging_controller",
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = run_id.to_string();
         options.retry_policy.max_attempts = 2;
 
@@ -13426,7 +13490,12 @@ fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() 
                 phase: "pre_provider_worktree_lookup",
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = run_id.to_string();
 
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
@@ -13546,7 +13615,12 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
                 runner_jobs_created: Arc::clone(&runner_jobs_created),
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = "cook-retryable-transport-attempt-1".to_string();
         options.retry_policy.max_attempts = 2;
 
@@ -13739,7 +13813,12 @@ fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
         options.identity.initial_run_id = "cook-baseline-attestation-attempt-1".to_string();
         options.workspace.to_worktree = source.display().to_string();
         options.workspace.source_worktree_path = Some(source.clone());
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
         let source_identity = crate::agent_task_workspace_identity::attest_workspace(&source)
             .expect("attest admitted source workspace");
@@ -13809,7 +13888,12 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
                 runner_jobs_created: Arc::new(AtomicUsize::new(0)),
             }),
         );
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
         options.identity.initial_run_id = format!("{cook_id}-attempt-1");
         options.workspace.to_worktree = "fixture@local-placement-override".to_string();
         options.workspace.source_worktree_path = Some(worktree.clone());
@@ -14539,8 +14623,12 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                     source_refs: Vec::new(),
                 },
                 provider_transport: CookProviderTransport {
-                    provider_command: Some("fixture-promotion-provider".to_string()),
-                    provider_invocation: None,
+                    provider_invocation: Some(
+                        homeboy_core::command_invocation::CommandInvocation {
+                            argv: vec!["fixture-promotion-provider".to_string()],
+                            ..Default::default()
+                        },
+                    ),
                     attempt_dispatcher: Some(Arc::new(AcceptedDetachedAttemptDispatcher)),
                 },
                 retry_policy: CookRetryPolicy { max_attempts: 1 },
@@ -14635,7 +14723,12 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
             }),
         );
         options.identity.initial_run_id = run_id.to_string();
-        options.provider_transport.provider_command = Some("fixture-provider".to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
 
         // Simulate interruption after the immutable recipe commit and before
         // the dispatcher creates the first run record.
@@ -14806,7 +14899,12 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         options.workspace.to_worktree = target.display().to_string();
         options.workspace.source_worktree_path = Some(source.clone());
         options.workspace.task_base_sha = Some(base.clone());
-        options.provider_transport.provider_command = Some(provider.display().to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![provider.display().to_string()],
+
+                ..Default::default()
+            });
         options.provider_transport.attempt_dispatcher = None;
         options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.retry_policy.max_attempts = 2;
@@ -15037,7 +15135,12 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = None;
         options.workspace.task_base_sha = Some(base.clone());
-        options.provider_transport.provider_command = Some(provider.display().to_string());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec![provider.display().to_string()],
+
+                ..Default::default()
+            });
         options.provider_transport.attempt_dispatcher = None;
         options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.retry_policy.max_attempts = 2;
@@ -19589,7 +19692,6 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
             source_refs: Vec::new(),
         },
         provider_transport: CookProviderTransport {
-            provider_command: None,
             provider_invocation: None,
             attempt_dispatcher: None,
         },
@@ -20825,7 +20927,6 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
                 source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/8058".to_string()],
             },
             provider_transport: CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -23708,7 +23809,6 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             source_refs: Vec::new(),
         },
         provider_transport: CookProviderTransport {
-            provider_command: None,
             provider_invocation: None,
             attempt_dispatcher: None,
         },
@@ -24089,7 +24189,12 @@ fn stage_terminal_batch_child(
     options.workspace.source_worktree_path = Some(workspace.to_path_buf());
     // The provider attempt is complete; no dispatcher work should run on resume.
     options.finalization.no_finalize = false;
-    options.provider_transport.provider_command = Some("fixture-provider".to_string());
+    options.provider_transport.provider_invocation =
+        Some(homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["fixture-provider".to_string()],
+
+            ..Default::default()
+        });
     options.gates = VerifyGateOptions {
         verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
         private_gate_reveal: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,

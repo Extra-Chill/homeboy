@@ -2053,7 +2053,6 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
                 source_refs: Vec::new(),
             },
             provider_transport: crate::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -2149,7 +2148,6 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
                 source_refs: Vec::new(),
             },
             provider_transport: crate::agents::agent_task_service::CookProviderTransport {
-                provider_command: None,
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
@@ -3382,7 +3380,7 @@ fn local_fanout_warning_is_silent_for_a_dry_run_plan() {
         "r",
         "--verify",
         "cargo test",
-        "--dry-run",
+        "--preview",
         "--run-plan",
     ]);
     assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);

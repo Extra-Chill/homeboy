@@ -1838,13 +1838,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_settings_json_file_and_profile_alias() {
+    fn parses_repeated_settings_json_file() {
         let cli = TestCli::try_parse_from([
             "test",
             "homeboy",
             "--settings-json-file",
             "base.json",
-            "--settings-profile",
+            "--settings-json-file",
             "profile.json",
         ])
         .expect("test should parse settings file flags");
@@ -2765,11 +2765,11 @@ mod tests {
     }
 
     #[test]
-    fn filter_strips_settings_json_file_aliases() {
+    fn filter_strips_settings_json_file_flags() {
         let args = vec![
             "--settings-json-file".to_string(),
             "base.json".to_string(),
-            "--settings-profile=profile.json".to_string(),
+            "--settings-json-file=profile.json".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);

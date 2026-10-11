@@ -39,11 +39,7 @@ pub struct DispatchCoreArgs {
     /// needs one for each possible gate or required review-form remediation;
     /// provider rotations cannot replace those retries. Defaults to 0; a
     /// configured provider rotation never funds these.
-    #[arg(
-        long = "max-same-provider-retries",
-        alias = "same-provider-retries",
-        value_name = "N"
-    )]
+    #[arg(long = "max-same-provider-retries", value_name = "N")]
     pub same_provider_retries: Option<u32>,
 
     /// Persist the run for a daemon/runner but do not execute immediately.

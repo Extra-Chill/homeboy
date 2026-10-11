@@ -966,7 +966,6 @@ fn routes_versioned_control_plane_endpoints() {
             id: "run-abc".to_string(),
             request: ControlPlaneRunReviewRequest {
                 to_worktree: Some("homeboy@candidate".to_string()),
-                provider_command: None,
                 provider_argv: vec!["homeboy".to_string(), "--config=path with spaces".to_string()],
             },
         }
@@ -1046,28 +1045,6 @@ fn control_plane_http_review_uses_the_typed_provider_contract() {
     assert_eq!(
         review.evidence["request"]["provider_argv"],
         serde_json::json!(["homeboy", "--config=path with spaces"])
-    );
-}
-
-#[test]
-fn control_plane_http_review_rejects_conflicting_provider_inputs() {
-    register_fixture_control_plane_provider();
-    let response = http_api::handle(HttpApiRequest {
-        method: HttpMethod::Get,
-        path: format!(
-            "/v1/control-plane/runs/{CONTROL_PLANE_FIXTURE_RUN}/review?provider_command=homeboy&provider_argv=homeboy"
-        ),
-        body: None,
-    })
-    .expect("typed review error");
-
-    assert_eq!(response.status, 400);
-    let result: ControlPlaneResult<ControlPlaneRunReview> =
-        serde_json::from_value(response.body).expect("result");
-    assert!(!result.ok);
-    assert_eq!(
-        result.error.expect("error").class,
-        homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
     );
 }
 
