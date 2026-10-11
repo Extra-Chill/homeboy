@@ -115,7 +115,6 @@ pub(super) fn lifecycle(
             run_id.as_deref().or(job_id.as_deref()).unwrap_or("unknown")
         )),
         status: resource_status_for_status(status),
-        migration_provenance: None,
     };
     let resource_lifecycle = ResourceLifecycle::inspect(&resource_record);
     let finalization =

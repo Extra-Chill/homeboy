@@ -349,7 +349,6 @@ fn metadata_with_resource_lifecycle(
             artifact.run_id
         )),
         status: ResourceLifecycleResourceStatus::Retained,
-        migration_provenance: None,
     };
     metadata["resource_lifecycle_index"] = serde_json::to_value(ResourceLifecycleIndex {
         schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
