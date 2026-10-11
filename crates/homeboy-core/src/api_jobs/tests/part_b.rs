@@ -1904,16 +1904,17 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
     request.metadata = Some(json!({ "submission_key": "agent-task:crash-window" }));
-    let legacy_fingerprint = request
-        .submission_payload_fingerprint()
-        .expect("legacy fingerprint");
+    let submission = request.into_runner_api_fixture();
+    let expected_fingerprint =
+        crate::api_jobs::runner_api_submission_payload_fingerprint(&submission)
+            .expect("submission fingerprint");
 
     // Models POST-before-ack-persist: the recovery POST carries the same key.
     let first = store
-        .submit_remote_runner_job(request.clone())
+        .submit_runner_api_request(submission.clone())
         .expect("first submit");
     let replay = store
-        .submit_remote_runner_job(request)
+        .submit_runner_api_request(submission)
         .expect("replayed submit");
     assert_eq!(first.id, replay.id);
     assert_eq!(
@@ -1947,7 +1948,7 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
             .expect("job store mutex poisoned")
             .submission_keys["agent-task:crash-window"]
             .fingerprint,
-        legacy_fingerprint
+        expected_fingerprint
     );
 }
 
@@ -2037,8 +2038,8 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let request = remote_runner_request("homeboy-lab", None);
     store
-        .submit_remote_runner_job(request.clone())
-        .expect("legacy submit");
+        .submit_runner_api_fixture(request.clone())
+        .expect("fixture submit");
     let mut dual = super::durable_snapshot(&path);
     dual["jobs"][0]["remote_runner"]["request"] =
         serde_json::to_value(&request).expect("request JSON");
@@ -2083,8 +2084,8 @@ fn legacy_request_only_record_normalizes_owner_lease_into_canonical_sidecar() {
     let mut request = remote_runner_request("homeboy-lab", None);
     request.workspace_owner_lease = Some(lease.clone());
     let job = store
-        .submit_remote_runner_job(request.clone())
-        .expect("legacy submit");
+        .submit_runner_api_fixture(request.clone())
+        .expect("fixture submit");
     drop(store);
 
     let mut persisted = super::durable_snapshot(&path);
@@ -2225,24 +2226,18 @@ fn remote_runner_submission_key_survives_restart_and_rejects_conflicts() {
         "evidence": { "attempt": 1 },
     }));
     let accepted = store
-        .submit_remote_runner_job(request.clone())
+        .submit_runner_api_fixture(request.clone())
         .expect("first submit");
     drop(store);
 
     let restarted = JobStore::open_without_reconciliation(&path).expect("restart store");
-    let mut replay_request = request.clone();
-    replay_request.metadata = Some(json!({
-        "submission_key": "agent-task:v1:restart",
-        "reconciled_from": "durable_detached_handoff_intent",
-        "transport": "controller-recovery",
-    }));
     let replay = restarted
-        .submit_remote_runner_job(replay_request)
+        .submit_runner_api_fixture(request.clone())
         .expect("replay");
     assert_eq!(replay.id, accepted.id);
     request.command.push("different".to_string());
     let conflict = restarted
-        .submit_remote_runner_job(request)
+        .submit_runner_api_fixture(request)
         .expect_err("conflict fails closed");
     assert_eq!(conflict.code, crate::ErrorCode::ValidationInvalidArgument);
     assert_eq!(

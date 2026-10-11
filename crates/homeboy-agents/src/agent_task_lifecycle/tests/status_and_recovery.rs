@@ -1196,7 +1196,7 @@ fn detached_cook_intent_reconciliation_converges_both_crash_windows_without_secr
                 &["HOMEBOY_TEST_REVERSE_SECRET".to_string()],
             )
             .expect("persist redacted pre-submit intent");
-            record_lab_offload_submission_request(run_id, &replay_request(run_id, &command))
+            record_lab_offload_submission_envelope(run_id, &replay_request(run_id, &command))
                 .expect("persist exact request before post");
 
             if post_accept_fault {
@@ -1269,10 +1269,10 @@ fn pending_submission_owns_running_proxy_until_job_projection_arrives() {
         })
         .expect("record controller proxy");
         let request = replay_request(run_id, &command);
-        record_lab_offload_submission_request(run_id, &request)
+        record_lab_offload_submission_envelope(run_id, &request)
             .expect("persist pending broker request");
         let accepted_job = store
-            .submit_runner_api_fixture(request)
+            .submit_runner_api_request(request)
             .expect("broker accepts before response projection");
         rewrite_record_for_test(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
@@ -1336,7 +1336,7 @@ fn expired_running_submission_retains_typed_handoff_rejection() {
             durable_plan: None,
         })
         .expect("record controller proxy");
-        record_lab_offload_submission_request(run_id, &replay_request(run_id, &command))
+        record_lab_offload_submission_envelope(run_id, &replay_request(run_id, &command))
             .expect("persist pending broker request");
         rewrite_record_for_test(run_id, |record| {
             set_run_state(record, AgentTaskRunState::Running);
@@ -1399,7 +1399,7 @@ fn cancelled_or_expired_pending_handoff_never_submits_new_runner_work() {
 
         cancel_run("cancel-before-admission", Some("operator cancelled"))
             .expect("cancel before daemon acceptance");
-        record_lab_offload_submission_request(
+        record_lab_offload_submission_envelope(
             "expire-before-admission",
             &replay_request("expire-before-admission", &command),
         )
@@ -1513,9 +1513,9 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             )
             .expect("preparing intent");
             let request = replay_request(run_id, &command);
-            record_lab_offload_submission_request(run_id, &request).expect("pending request");
+            record_lab_offload_submission_envelope(run_id, &request).expect("pending request");
             let job = store
-                .submit_runner_api_fixture(request)
+                .submit_runner_api_request(request)
                 .expect("accepted broker job");
 
             if run_id == "accepted-then-expired" {
@@ -1585,7 +1585,7 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
             &[],
         )
         .expect("preparing absent handoff");
-        record_lab_offload_submission_request(
+        record_lab_offload_submission_envelope(
             "absent-after-deadline",
             &replay_request("absent-after-deadline", &command),
         )
@@ -3285,7 +3285,7 @@ impl RunnerContinuationProvider for CountingRunnerProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         self.record();
         Err(Error::internal_unexpected("counted reverse broker job"))

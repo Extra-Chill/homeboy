@@ -7,7 +7,6 @@
 //! reconciliation state machine into a named, testable seam.
 
 use super::*;
-use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 use homeboy_runner_contract::RunnerApiSubmitRequest;
 
 // The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
@@ -176,79 +175,50 @@ fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) ->
         && handoff.submission_key.as_deref() == Some(submission_key)
 }
 
-enum PendingRunnerReplay {
-    Envelope(RunnerApiSubmitRequest),
-    Legacy(RemoteRunnerJobRequest),
-}
+/// The durable replay input is the exact envelope request persisted by
+/// `record_lab_offload_submission_envelope` before it crossed the broker.
+struct PendingRunnerReplay(RunnerApiSubmitRequest);
 
 impl PendingRunnerReplay {
+    fn dispatch(&self) -> Option<&homeboy_runner_contract::RunnerExecutionDispatch> {
+        self.0.envelope.dispatch.as_ref()
+    }
+
     fn runner_id(&self) -> &str {
-        match self {
-            Self::Envelope(request) => request
-                .envelope
-                .dispatch
-                .as_ref()
-                .map(|dispatch| dispatch.runner_id.as_str())
-                .unwrap_or_default(),
-            Self::Legacy(request) => &request.runner_id,
-        }
+        self.dispatch()
+            .map(|dispatch| dispatch.runner_id.as_str())
+            .unwrap_or_default()
     }
 
     fn submission_key(&self) -> Option<&str> {
-        match self {
-            Self::Envelope(request) => Some(request.submission_key.trim())
-                .filter(|submission_key| !submission_key.is_empty()),
-            Self::Legacy(request) => request.submission_key(),
-        }
+        Some(self.0.submission_key.trim()).filter(|submission_key| !submission_key.is_empty())
     }
 
     fn cwd(&self) -> Option<&str> {
-        match self {
-            Self::Envelope(request) => request
-                .envelope
-                .dispatch
-                .as_ref()
-                .and_then(|dispatch| dispatch.cwd.as_deref()),
-            Self::Legacy(request) => request.cwd.as_deref(),
-        }
+        self.dispatch().and_then(|dispatch| dispatch.cwd.as_deref())
     }
 
     fn command(&self) -> &[String] {
-        match self {
-            Self::Envelope(request) => request
-                .envelope
-                .dispatch
-                .as_ref()
-                .map(|dispatch| dispatch.command.as_slice())
-                .unwrap_or_default(),
-            Self::Legacy(request) => &request.command,
-        }
+        self.dispatch()
+            .map(|dispatch| dispatch.command.as_slice())
+            .unwrap_or_default()
     }
 }
 
 fn pending_runner_replay(intent: &serde_json::Map<String, Value>) -> Result<PendingRunnerReplay> {
-    if let Some(envelope) = intent.get("replay_envelope_request") {
-        return serde_json::from_value(envelope.clone())
-            .map(PendingRunnerReplay::Envelope)
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse envelope runner replay request".to_string()),
-                )
-            });
-    }
-    serde_json::from_value(intent.get("replay_request").cloned().ok_or_else(|| {
+    let envelope = intent.get("replay_envelope_request").ok_or_else(|| {
         Error::internal_unexpected(
-            "pending runner submission intent has no complete replay request",
+            "pending runner submission intent has no replay_envelope_request",
         )
-    })?)
-    .map(PendingRunnerReplay::Legacy)
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse runner replay request".to_string()),
-        )
-    })
+    })?;
+    serde_json::from_value(envelope.clone())
+        .map(PendingRunnerReplay)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse envelope runner replay request".to_string()),
+            )
+        })
 }
 
 /// The replay decision and its consequence must name one installation. This
@@ -309,24 +279,8 @@ pub fn reconcile_pending_runner_submission_intent_in_store(
     }
     let cwd = replay.cwd().unwrap_or_default().to_string();
     let command = replay.command().to_vec();
-    let submission = match replay {
-        PendingRunnerReplay::Envelope(request) => {
-            runner_continuation::RunnerContinuationSubmission::RunnerApi(request)
-        }
-        PendingRunnerReplay::Legacy(mut request) => {
-            let mut metadata = request.metadata.take().unwrap_or_else(|| json!({}));
-            if !metadata.is_object() {
-                metadata = json!({});
-            }
-            metadata["submission_key"] = json!(submission_key);
-            metadata["durable_run_id"] = json!(run_id);
-            metadata["reconciled_from"] = json!("durable_detached_handoff_intent");
-            request.metadata = Some(metadata);
-            runner_continuation::RunnerContinuationSubmission::LegacyReplay(request)
-        }
-    };
     match runner_continuation::with_runner_continuation(|provider| {
-        provider.submit_runner_api_request(&runner_id, submission)
+        provider.submit_runner_api_request(&runner_id, replay.0)
     }) {
         Ok(job) => {
             record_detached_lab_run_locked_in_store(

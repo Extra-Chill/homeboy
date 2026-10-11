@@ -66,7 +66,7 @@ impl RunnerContinuationProvider for IdleRunnerFixture {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by idle fixture"))
     }
@@ -245,7 +245,7 @@ impl RunnerContinuationProvider for TerminalSnapshotProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "not used by terminal reconciliation",
@@ -289,7 +289,7 @@ impl RunnerContinuationProvider for ServiceRunnerFixture {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by service fixture"))
     }
@@ -563,7 +563,7 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
             "agent-task:v1:homeboy-lab:intent-before-post"
         );
         assert!(pending.metadata["runner_submission_intent"]
-            .get("replay_request")
+            .get("replay_envelope_request")
             .is_none());
         assert!(pending
             .lab_handoff
@@ -607,16 +607,7 @@ fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
             durable_plan: None,
         })
         .expect("controller proxy");
-        let legacy = replay_request(run_id, &command);
-        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
-            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: homeboy_runner_contract::RUNNER_API_V1,
-            submission_key: legacy.submission_key().expect("submission key").to_string(),
-            envelope: legacy.execution_envelope(),
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-            credential_delivery: None,
-        };
+        let submission = replay_request(run_id, &command);
 
         let pending = record_lab_offload_submission_envelope(run_id, &submission)
             .expect("persist Runner API intent");
@@ -626,7 +617,6 @@ fn detached_handoff_persists_only_the_runner_api_replay_envelope() {
             homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(&submission)
                 .expect("fingerprint");
 
-        assert!(intent.get("replay_request").is_none());
         assert_eq!(intent["replay_envelope_request"], json!(submission));
         assert_eq!(intent["payload_fingerprint"], expected_fingerprint);
         assert!(has_live_pending_runner_submission_intent(
@@ -704,7 +694,8 @@ fn rooted_pending_submission_cancellation_fences_only_its_own_root() {
                     .expect("typed pending handoff")
                     .submission_key = Some(format!("agent-task:v1:homeboy-lab:{run_id}"));
                 record.metadata["runner_submission_intent"]["state"] = json!("pending");
-                record.metadata["runner_submission_intent"]["replay_request"] = json!(replay);
+                record.metadata["runner_submission_intent"]["replay_envelope_request"] =
+                    json!(replay);
                 true
             })
             .expect("persist pending transport request");
@@ -813,23 +804,13 @@ fn rooted_preparing_submission_cancellation_fences_later_pending_transition() {
         json!("preparing")
     );
 
-    let legacy = replay_request(run_id, &command);
-    let mut envelope = legacy.execution_envelope();
-    envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+    let mut request = replay_request(run_id, &command);
+    request.envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
         source: Some("reverse_broker".to_string()),
         kind: Some("runner.exec".to_string()),
         durable_run_id: Some(run_id.to_string()),
         ..Default::default()
     });
-    let request = homeboy_runner_contract::RunnerApiSubmitRequest {
-        schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-        api_version: homeboy_runner_contract::RUNNER_API_V1,
-        submission_key: legacy.submission_key().expect("stable key").to_string(),
-        envelope,
-        workspace_claim_binding: None,
-        workspace_owner_lease: None,
-        credential_delivery: None,
-    };
     let mut post_called = false;
     let admission = with_pending_runner_submission_admission_in_store(
         &lifecycle_store,
@@ -874,23 +855,13 @@ fn pending_reverse_broker_post_guard_serializes_with_rooted_cancellation() {
             &[],
         )
         .expect("preflight submission intent");
-        let legacy = replay_request(run_id, &command);
-        let mut envelope = legacy.execution_envelope();
-        envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+        let mut submission = replay_request(run_id, &command);
+        submission.envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
             source: Some("reverse_broker".to_string()),
             kind: Some("runner.exec".to_string()),
             durable_run_id: Some(run_id.to_string()),
             ..Default::default()
         });
-        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
-            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: homeboy_runner_contract::RUNNER_API_V1,
-            submission_key: legacy.submission_key().expect("stable key").to_string(),
-            envelope,
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-            credential_delivery: None,
-        };
         record_lab_offload_submission_envelope(run_id, &submission)
             .expect("persist exact pending broker request");
 
@@ -964,23 +935,13 @@ fn cancellation_waits_while_the_initial_runner_post_owns_the_handoff_fence() {
             &[],
         )
         .expect("intent");
-        let legacy = replay_request(run_id, &command);
-        let mut envelope = legacy.execution_envelope();
-        envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
+        let mut submission = replay_request(run_id, &command);
+        submission.envelope.lifecycle = Some(homeboy_runner_contract::RunnerJobLifecycleMetadata {
             source: Some("reverse_broker".to_string()),
             kind: Some("runner.exec".to_string()),
             durable_run_id: Some(run_id.to_string()),
             ..Default::default()
         });
-        let submission = homeboy_runner_contract::RunnerApiSubmitRequest {
-            schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: homeboy_runner_contract::RUNNER_API_V1,
-            submission_key: legacy.submission_key().expect("submission key").to_string(),
-            envelope,
-            workspace_claim_binding: None,
-            workspace_owner_lease: None,
-            credential_delivery: None,
-        };
         record_lab_offload_submission_envelope(run_id, &submission)
             .expect("durable write-ahead request");
 
@@ -1063,8 +1024,8 @@ fn cancellation_reloads_preparing_to_pending_intent_after_waiting_for_handoff_lo
         )
         .expect("preparing intent");
 
-        let legacy = replay_request(run_id, &command);
-        let submission_key = legacy.submission_key().expect("stable key").to_string();
+        let pending = replay_request(run_id, &command);
+        let submission_key = pending.submission_key.clone();
         let handoff_lock = LabHandoffLock::lock_in_store(&store, run_id).expect("handoff lock");
         let runner_jobs = JobStore::default();
         let submitted = Arc::new(Mutex::new(Vec::new()));
@@ -1113,7 +1074,7 @@ fn cancellation_reloads_preparing_to_pending_intent_after_waiting_for_handoff_lo
         // Model the owner completing its irreversible POST and durable pending
         // intent while still holding the very lock cancellation is waiting for.
         let accepted_job = runner_jobs
-            .submit_remote_runner_job(legacy.clone())
+            .submit_runner_api_request(pending.clone())
             .expect("broker accepted the exact pending request");
         store
             .mutate_record(run_id, |record| {
@@ -1126,8 +1087,8 @@ fn cancellation_reloads_preparing_to_pending_intent_after_waiting_for_handoff_lo
                 handoff.submission_key = Some(submission_key.clone());
                 record.lab_handoff = Some(handoff);
                 record.metadata["runner_submission_intent"]["state"] = json!("pending");
-                record.metadata["runner_submission_intent"]["replay_request"] =
-                    json!(legacy.clone());
+                record.metadata["runner_submission_intent"]["replay_envelope_request"] =
+                    json!(pending.clone());
                 true
             })
             .expect("persist accepted pending intent before releasing the owner lock");
@@ -1356,14 +1317,14 @@ fn pending_runner_acceptance_racing_cancellation_is_bound_then_cancelled() {
             handoff.submission_key = Some(format!("agent-task:v1:homeboy-lab:{run_id}"));
             record.lab_handoff = Some(handoff);
             record.metadata["runner_submission_intent"]["state"] = json!("pending");
-            record.metadata["runner_submission_intent"]["replay_request"] = json!(replay);
+            record.metadata["runner_submission_intent"]["replay_envelope_request"] = json!(replay);
             true
         })
         .expect("pending request");
 
     let runner_jobs = JobStore::default();
     let accepted_job = runner_jobs
-        .submit_remote_runner_job(replay_request(run_id, &command))
+        .submit_runner_api_request(replay_request(run_id, &command))
         .expect("runner accepts while cancellation resolves");
     let cancel_job_store = runner_jobs.clone();
     let expected_job_id = accepted_job.id;
@@ -1432,7 +1393,7 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
     .expect("runner proxy");
     let runner_jobs = JobStore::default();
     let accepted_job = runner_jobs
-        .submit_remote_runner_job(replay_request(run_id, &command))
+        .submit_runner_api_request(replay_request(run_id, &command))
         .expect("accepted runner job");
     record_detached_lab_run_in_store(
         &lifecycle_store,

@@ -12,7 +12,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission;
 use homeboy_core::api_jobs::{
     ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
     RunnerJobSource,
@@ -3823,25 +3822,22 @@ fn reconcile_terminal_jobs_for_session<T>(
 /// it prepares the claimed process.
 pub fn submit_runner_api_request(
     runner_id: &str,
-    submission: RunnerContinuationSubmission,
+    submission: homeboy_runner_contract::RunnerApiSubmitRequest,
 ) -> Result<Job> {
-    let submitted_runner_id = match &submission {
-        RunnerContinuationSubmission::RunnerApi(request) => request
-            .envelope
-            .dispatch
-            .as_ref()
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "envelope.dispatch",
-                    "runner submission envelope requires dispatch",
-                    None,
-                    None,
-                )
-            })?
-            .runner_id
-            .as_str(),
-        RunnerContinuationSubmission::LegacyReplay(request) => request.runner_id.as_str(),
-    };
+    let submitted_runner_id = submission
+        .envelope
+        .dispatch
+        .as_ref()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "envelope.dispatch",
+                "runner submission envelope requires dispatch",
+                None,
+                None,
+            )
+        })?
+        .runner_id
+        .as_str();
     if submitted_runner_id != runner_id {
         return Err(Error::validation_invalid_argument(
             "runner_id",
@@ -3852,11 +3848,7 @@ pub fn submit_runner_api_request(
     }
     let broker_url = reverse_broker_url(runner_id)?;
     let client = broker_client("build reverse broker submission client")?;
-    let body = match &submission {
-        RunnerContinuationSubmission::RunnerApi(request) => serde_json::to_value(request),
-        RunnerContinuationSubmission::LegacyReplay(request) => serde_json::to_value(request),
-    }
-    .map_err(|error| {
+    let body = serde_json::to_value(&submission).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some("serialize reverse runner submission".to_string()),
@@ -3870,24 +3862,24 @@ pub fn submit_runner_api_request(
         "replay reverse runner submission",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )?;
-    if let Some(value) = response.get("response") {
-        let response: homeboy_runner_contract::RunnerApiSubmitResponse =
-            serde_json::from_value(value.clone()).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse replayed envelope runner submit response".to_string()),
-                )
-            })?;
-        if let homeboy_runner_contract::RunnerApiSubmitOutcome::Rejected { failure } =
-            response.outcome
-        {
-            return Err(Error::validation_invalid_argument(
-                "runner_submission",
-                failure.message,
-                None,
-                None,
-            ));
-        }
+    let submit_response: homeboy_runner_contract::RunnerApiSubmitResponse = serde_json::from_value(
+        response.get("response").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse replayed envelope runner submit response".to_string()),
+        )
+    })?;
+    if let homeboy_runner_contract::RunnerApiSubmitOutcome::Rejected { failure } =
+        submit_response.outcome
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_submission",
+            failure.message,
+            None,
+            None,
+        ));
     }
     serde_json::from_value(
         response.get("job").cloned().ok_or_else(|| {

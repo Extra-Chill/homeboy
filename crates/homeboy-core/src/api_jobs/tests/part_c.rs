@@ -976,8 +976,8 @@ fn workspace_bound_reverse_jobs_reject_old_or_missing_worker_capability() {
 fn remote_runner_legacy_claims_remain_available_only_for_context_free_jobs() {
     let store = JobStore::default();
     let job = store
-        .submit_remote_runner_job(remote_runner_request("homeboy-lab", None))
-        .expect("legacy job queues");
+        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
+        .expect("context-free job queues");
 
     let claim = store
         .claim_remote_runner_job_with_execution_protocol("homeboy-lab", None, 30_000, None, None)

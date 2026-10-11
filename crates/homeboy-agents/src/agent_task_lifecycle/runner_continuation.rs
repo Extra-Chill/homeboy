@@ -12,9 +12,7 @@
 //! fail (so the caller annotates "runner disconnected"), and existence /
 //! connection checks report `false`.
 
-use homeboy_core::api_jobs::{
-    Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
-};
+use homeboy_core::api_jobs::{Job, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot};
 use homeboy_core::error::{Error, Result};
 use homeboy_runner_contract::{RunnerApiSubmitRequest, WorkspaceClaim, WorkspaceIdentity};
 
@@ -53,14 +51,6 @@ pub enum RunnerLiveJobAuthority {
     Idle,
     Busy,
     Unknown,
-}
-
-/// One reverse-broker submission operation. Current callers use the Runner API;
-/// the legacy variant exists only to replay request-shaped durable records
-/// without changing their established idempotency fingerprint.
-pub enum RunnerContinuationSubmission {
-    RunnerApi(RunnerApiSubmitRequest),
-    LegacyReplay(RemoteRunnerJobRequest),
 }
 
 /// Runner-side operations the agent-task lifecycle needs when reconciling or
@@ -220,7 +210,7 @@ pub trait RunnerContinuationProvider: Send + Sync {
     fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        submission: RunnerContinuationSubmission,
+        submission: RunnerApiSubmitRequest,
     ) -> Result<Job>;
 
     fn lookup_reverse_broker_submission(
@@ -268,7 +258,7 @@ impl RunnerContinuationProvider for NoopProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot submit reverse broker job",
@@ -421,7 +411,7 @@ mod tests {
         fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _submission: RunnerContinuationSubmission,
+            _submission: RunnerApiSubmitRequest,
         ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }

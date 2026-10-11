@@ -7,7 +7,7 @@ use std::{
 
 use homeboy_agents::agent_task_lifecycle::{
     self, AgentTaskLifecycleStore, AgentTaskRunState, LabOffloadProxyPlan,
-    RunnerContinuationProvider, RunnerContinuationSubmission,
+    RunnerContinuationProvider,
 };
 use homeboy_core::{
     api_jobs::{Job, RunnerJobLogSnapshot},
@@ -216,7 +216,11 @@ impl RunnerContinuationProvider for AdmissionProbe {
             "unused private proof continuation",
         ))
     }
-    fn submit_runner_api_request(&self, _: &str, _: RunnerContinuationSubmission) -> Result<Job> {
+    fn submit_runner_api_request(
+        &self,
+        _: &str,
+        _: homeboy_runner_contract::RunnerApiSubmitRequest,
+    ) -> Result<Job> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err(Error::internal_unexpected(
             "cancellation admission fence failed",

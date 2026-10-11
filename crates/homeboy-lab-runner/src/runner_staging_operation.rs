@@ -22,10 +22,8 @@ use homeboy_engine_primitives::content_hash;
 
 use crate::direct_lab_handoff::{DirectLabHandoffEnvelope, DirectLabHandoffReceipt};
 
-pub const REMOTE_RUNNER_STAGING_SCHEMA_V1: &str = "homeboy/remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v2";
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
-pub const REMOTE_RUNNER_STAGING_CAPABILITY_V1: &str = "remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v2";
 pub const DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY: &str = "direct-runner-staged-execution/v1";
 pub const REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY: &str =
@@ -40,9 +38,7 @@ pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
 pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
-/// Legacy result schema accepted for persisted source-package checks.
-pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v1";
-pub const SOURCE_PACKAGE_CHECK_SCHEMA_V2: &str = "homeboy/source-package-check/v2";
+pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v2";
 const SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA: &str = "homeboy/source-package-limit-diagnostic/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,9 +65,7 @@ pub struct SourcePackageFailure {
 pub struct SourcePackageCheckVerdict {
     pub schema: String,
     pub valid: bool,
-    /// Present for v2 results. V1 records did not declare aggregate limits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limits: Option<SourcePackageLimits>,
+    pub limits: SourcePackageLimits,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted: Option<SourcePackageAccepted>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,9 +144,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
                 .sum();
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                     valid: true,
-                    limits: Some(source_package_limits()),
+                    limits: source_package_limits(),
                     accepted: Some(SourcePackageAccepted {
                         package_format: transfer.package.format,
                         file_count,
@@ -169,9 +163,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         Err(error) => {
             return SourcePackageScan {
                 verdict: SourcePackageCheckVerdict {
-                    schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
+                    schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                     valid: false,
-                    limits: Some(source_package_limits()),
+                    limits: source_package_limits(),
                     accepted: None,
                     partial: source_package_partial_from_error(&error).or(Some(
                         SourcePackagePartial {
@@ -447,9 +441,9 @@ pub fn scan_source_package(root: &Path) -> SourcePackageScan {
         });
         SourcePackageScan {
             verdict: SourcePackageCheckVerdict {
-                schema: SOURCE_PACKAGE_CHECK_SCHEMA_V2.to_string(),
+                schema: SOURCE_PACKAGE_CHECK_SCHEMA.to_string(),
                 valid: failures.is_empty(),
-                limits: Some(source_package_limits()),
+                limits: source_package_limits(),
                 accepted,
                 partial: (!failures.is_empty()).then_some(SourcePackagePartial {
                     file_count,
@@ -1764,11 +1758,7 @@ impl RemoteRunnerStagingEnvelope {
         let mut handoff = handoff.clone();
         handoff.recipe.source_path = None;
         let envelope = Self {
-            schema: if handoff.schema == crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1 {
-                REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string()
-            } else {
-                REMOTE_RUNNER_STAGING_SCHEMA.to_string()
-            },
+            schema: REMOTE_RUNNER_STAGING_SCHEMA.to_string(),
             handoff,
             materialization,
         };
@@ -1777,15 +1767,9 @@ impl RemoteRunnerStagingEnvelope {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !matches!(
-            self.schema.as_str(),
-            REMOTE_RUNNER_STAGING_SCHEMA_V1 | REMOTE_RUNNER_STAGING_SCHEMA
-        ) || self.handoff.recipe.source_path.is_some()
-            || !matches!(
-                self.handoff.schema.as_str(),
-                crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
-                    | crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
-            )
+        if self.schema != REMOTE_RUNNER_STAGING_SCHEMA
+            || self.handoff.recipe.source_path.is_some()
+            || self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA
             || self.handoff.run_id.trim().is_empty()
             || self.handoff.runner_id.trim().is_empty()
             || self.handoff.idempotency_key != self.handoff.run_id
@@ -1803,18 +1787,6 @@ impl RemoteRunnerStagingEnvelope {
         }
         self.handoff.recipe.validate_for_runner_staging()?;
         self.materialization.validate()?;
-        if self.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1
-            && (self.handoff.schema != crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1
-                || self.materialization.source_artifact.is_none()
-                || self.materialization.workspace.is_some())
-        {
-            return Err(Error::validation_invalid_argument(
-                "remote_runner_staging",
-                "v1 staging accepts bounded source artifacts only",
-                Some(self.handoff.run_id.clone()),
-                None,
-            ));
-        }
         if let Some(workspace) = &self.materialization.workspace {
             let plan = canonical_json_bytes(&self.handoff.durable_plan).map_err(|error| {
                 Error::internal_json(
@@ -1920,16 +1892,11 @@ pub fn submit_remote_runner_staging(
             None,
         ));
     }
-    let staging_capability = if envelope.schema == REMOTE_RUNNER_STAGING_SCHEMA_V1 {
-        REMOTE_RUNNER_STAGING_CAPABILITY_V1
-    } else {
-        REMOTE_RUNNER_STAGING_CAPABILITY
-    };
-    if !transport.supports_capability(staging_capability) {
+    if !transport.supports_capability(REMOTE_RUNNER_STAGING_CAPABILITY) {
         return Err(Error::runner_capability_missing(
             &envelope.handoff.runner_id,
             "sealed runner staging",
-            vec![staging_capability.to_string()],
+            vec![REMOTE_RUNNER_STAGING_CAPABILITY.to_string()],
             Vec::new(),
         ));
     }
@@ -2000,10 +1967,9 @@ pub(crate) mod tests_support {
             (self.compatible
                 && matches!(
                     capability,
-                    REMOTE_RUNNER_STAGING_CAPABILITY | REMOTE_RUNNER_STAGING_CAPABILITY_V1
+                    REMOTE_RUNNER_STAGING_CAPABILITY
+                        | REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY
                 ))
-                || (self.compatible
-                    && capability == REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY)
                 || (self.source_artifact_compatible
                     && capability == REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY)
                 || (self.symlink_artifact_compatible
@@ -2215,17 +2181,6 @@ pub(crate) mod tests_support {
                 .remote_cwd,
             "/runner/workspaces/run-1"
         );
-    }
-
-    #[test]
-    fn bounded_artifact_v1_interoperates_with_a_new_runner() {
-        let mut envelope = envelope();
-        envelope.handoff.schema =
-            crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1.to_string();
-        envelope.schema = REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string();
-        let receipt = submit_remote_runner_staging(&mut transport(0), &envelope)
-            .expect("new runner accepts old bounded staging");
-        assert!(receipt.artifacts.source_artifact.is_some());
     }
 
     #[test]
@@ -2657,10 +2612,7 @@ pub(crate) mod tests_support {
                 .contains("homeboy source package check --path")
         );
         let verdict = scan_source_package(source.path()).verdict;
-        assert_eq!(
-            verdict.limits.expect("v2 limits").entry_limit,
-            MAX_SOURCE_PACKAGE_ENTRIES
-        );
+        assert_eq!(verdict.limits.entry_limit, MAX_SOURCE_PACKAGE_ENTRIES);
         assert_eq!(
             verdict.partial.expect("partial measurement").file_count,
             MAX_SOURCE_PACKAGE_ENTRIES + 1
@@ -2698,35 +2650,10 @@ pub(crate) mod tests_support {
     }
 
     #[test]
-    fn source_package_check_v1_round_trips_without_v2_limits() {
-        let legacy = json!({
-            "schema": SOURCE_PACKAGE_CHECK_SCHEMA,
-            "valid": false,
-            "partial": {"file_count": 3, "bytes": 12},
-            "excluded": [],
-            "blocked": []
-        });
-
-        let verdict: SourcePackageCheckVerdict =
-            serde_json::from_value(legacy).expect("deserialize v1 check");
-        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA);
-        assert!(verdict.limits.is_none());
-        let serialized = serde_json::to_value(&verdict).expect("serialize v1 check");
-        assert!(serialized.get("limits").is_none());
-        assert_eq!(
-            serialized["partial"]["largest_entries"],
-            serde_json::Value::Null
-        );
-    }
-
-    #[test]
-    fn source_package_check_v2_round_trips_with_limits() {
+    fn source_package_check_round_trips_with_limits() {
         let verdict = scan_source_package(tempfile::tempdir().expect("source").path()).verdict;
-        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA_V2);
-        assert_eq!(
-            verdict.limits.as_ref().expect("v2 limits").byte_limit,
-            MAX_SOURCE_ARTIFACT_BYTES
-        );
+        assert_eq!(verdict.schema, SOURCE_PACKAGE_CHECK_SCHEMA);
+        assert_eq!(verdict.limits.byte_limit, MAX_SOURCE_ARTIFACT_BYTES);
         assert_eq!(
             serde_json::from_value::<SourcePackageCheckVerdict>(
                 serde_json::to_value(&verdict).expect("serialize v2 check")

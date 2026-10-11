@@ -3135,24 +3135,47 @@ fn routes_job_inspection_against_daemon_job_store() {
     assert_eq!(cancel.body["body"]["job"]["status"], "cancelled");
 }
 
+/// The Runner API submit document for a dispatch fixture.
+fn runner_api_submit(dispatch: Value) -> Value {
+    let request: crate::api_jobs::RemoteRunnerJobRequest =
+        serde_json::from_value(dispatch).expect("dispatch fixture");
+    serde_json::to_value(request.into_runner_api_fixture()).expect("Runner API submit JSON")
+}
+
+/// A context-free Runner API claim document carrying the given fields.
+fn runner_api_claim(fields: Value) -> Value {
+    let mut claim = serde_json::json!({
+        "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
+        "api_version": { "major": 1 },
+    });
+    claim
+        .as_object_mut()
+        .expect("claim object")
+        .extend(fields.as_object().expect("claim fields").clone());
+    claim
+}
+
 #[test]
 fn routes_remote_runner_job_broker_lifecycle() {
     let store = JobStore::default();
     let submit = route_with_job_store_and_body(
         "POST",
         "/runner/jobs",
-        Some(serde_json::json!({
+        Some(runner_api_submit(serde_json::json!({
             "runner_id": "homeboy-lab",
             "project_id": "sample-project",
             "command": ["homeboy", "test", "sample-component"],
             "cwd": "/runner/workspaces/sample-component"
-        })),
+        }))),
         &store,
     );
 
     assert_eq!(submit.status_code, 200);
     assert_eq!(submit.body["endpoint"], "runner.jobs.submit");
-    assert_eq!(submit.body["body"]["command"], "api.runner.jobs.submit");
+    assert_eq!(
+        submit.body["body"]["response"]["outcome"]["status"],
+        "accepted"
+    );
     let job_id = submit.body["body"]["job"]["id"]
         .as_str()
         .expect("job id")
@@ -3161,26 +3184,29 @@ fn routes_remote_runner_job_broker_lifecycle() {
     let claim = route_with_job_store_and_body(
         "POST",
         "/runner/jobs/claim",
-        Some(serde_json::json!({
+        Some(runner_api_claim(serde_json::json!({
             "runner_id": "homeboy-lab",
             "project_id": "sample-project",
             "lease_ms": 30000
-        })),
+        }))),
         &store,
     );
 
     assert_eq!(claim.status_code, 200);
     assert_eq!(claim.body["endpoint"], "runner.jobs.claim");
-    assert_eq!(claim.body["body"]["claim"]["job"]["id"], job_id);
-    let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+    assert_eq!(
+        claim.body["body"]["response"]["outcome"]["claim"]["job_id"],
+        job_id
+    );
+    let claim_id = claim.body["body"]["response"]["outcome"]["claim"]["claim_id"]
         .as_str()
         .expect("claim id")
         .to_string();
-    let original_expiry = claim.body["body"]["claim"]["job"]["claim_expires_at_ms"]
+    let original_expiry = claim.body["body"]["response"]["outcome"]["claim"]["claim_expires_at_ms"]
         .as_u64()
         .expect("claim expiry");
     assert_eq!(
-        claim.body["body"]["claim"]["request"]["command"],
+        claim.body["body"]["response"]["outcome"]["claim"]["envelope"]["dispatch"]["command"],
         serde_json::json!(["homeboy", "test", "sample-component"])
     );
 
@@ -3188,7 +3214,10 @@ fn routes_remote_runner_job_broker_lifecycle() {
         "POST",
         &format!("/runner/jobs/{job_id}/heartbeat"),
         Some(serde_json::json!({
+            "schema": homeboy_runner_contract::RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
+            "api_version": { "major": 1 },
             "runner_id": "homeboy-lab",
+            "job_id": job_id,
             "claim_id": claim_id.clone(),
             "lease_ms": 60000
         })),
@@ -3197,9 +3226,12 @@ fn routes_remote_runner_job_broker_lifecycle() {
 
     assert_eq!(heartbeat.status_code, 200);
     assert_eq!(heartbeat.body["endpoint"], "runner.jobs.heartbeat");
-    assert_eq!(heartbeat.body["body"]["job"]["id"], job_id);
+    assert_eq!(
+        heartbeat.body["body"]["response"]["outcome"]["status"],
+        "renewed"
+    );
     assert!(
-        heartbeat.body["body"]["job"]["claim_expires_at_ms"]
+        heartbeat.body["body"]["response"]["outcome"]["claim_expires_at_ms"]
             .as_u64()
             .expect("renewed expiry")
             > original_expiry
@@ -3254,11 +3286,11 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
         let response = route_with_job_store_and_body(
             "POST",
             "/runner/jobs",
-            Some(serde_json::json!({
+            Some(runner_api_submit(serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "submission_key": "fenced-reverse-submission",
                 "command": ["homeboy", "test", "sample-component"]
-            })),
+            }))),
             &route_store,
         );
         submitted_tx
@@ -3384,7 +3416,7 @@ fn remote_runner_broker_refuses_inline_secret_env_without_persisting_it() {
     let submit = route_with_job_store_and_body(
         "POST",
         "/runner/jobs",
-        Some(serde_json::json!({
+        Some(runner_api_submit(serde_json::json!({
             "runner_id": "homeboy-lab",
             "project_id": "sample-project",
             "command": ["homeboy", "test", "sample-component"],
@@ -3394,11 +3426,15 @@ fn remote_runner_broker_refuses_inline_secret_env_without_persisting_it() {
                 "RUNNER_SECRET_TOKEN": sentinel
             },
             "secret_env_names": ["RUNNER_SECRET_TOKEN"]
-        })),
+        }))),
         &store,
     );
 
-    assert_eq!(submit.status_code, 400, "submit body: {}", submit.body);
+    assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
+    assert_eq!(
+        submit.body["body"]["response"]["outcome"]["status"],
+        "rejected"
+    );
     assert!(!serialized_contains(&submit.body, sentinel));
     assert_eq!(store.list().len(), 0);
 }
@@ -3409,23 +3445,23 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
     let submit = route_with_job_store_and_body(
         "POST",
         "/runner/jobs",
-        Some(serde_json::json!({
+        Some(runner_api_submit(serde_json::json!({
             "runner_id": "homeboy-lab",
             "command": ["homeboy", "test", "sample-component"]
-        })),
+        }))),
         &store,
     );
     let job_id = submit.body["body"]["job"]["id"].as_str().expect("job id");
     let claim = route_with_job_store_and_body(
         "POST",
         "/runner/jobs/claim",
-        Some(serde_json::json!({
+        Some(runner_api_claim(serde_json::json!({
             "runner_id": "homeboy-lab",
             "lease_ms": 30000
-        })),
+        }))),
         &store,
     );
-    let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+    let claim_id = claim.body["body"]["response"]["outcome"]["claim"]["claim_id"]
         .as_str()
         .expect("claim id");
 
@@ -3455,10 +3491,10 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
     let expired_job = route_with_job_store_and_body(
         "POST",
         "/runner/jobs",
-        Some(serde_json::json!({
+        Some(runner_api_submit(serde_json::json!({
             "runner_id": "homeboy-lab",
             "command": ["homeboy", "test", "sample-component"]
-        })),
+        }))),
         &store,
     );
     let expired_job_id = expired_job.body["body"]["job"]["id"]
@@ -3467,13 +3503,13 @@ fn routes_remote_runner_job_updates_require_live_matching_claim_id() {
     let expired_claim = route_with_job_store_and_body(
         "POST",
         "/runner/jobs/claim",
-        Some(serde_json::json!({
+        Some(runner_api_claim(serde_json::json!({
             "runner_id": "homeboy-lab",
             "lease_ms": 1
-        })),
+        }))),
         &store,
     );
-    let expired_claim_id = expired_claim.body["body"]["claim"]["job"]["claim_id"]
+    let expired_claim_id = expired_claim.body["body"]["response"]["outcome"]["claim"]["claim_id"]
         .as_str()
         .expect("claim id");
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3509,10 +3545,10 @@ fn broker_reconcile_route_owns_expired_reverse_runner_claims() {
     let submit = route_with_job_store_and_body(
         "POST",
         "/runner/jobs",
-        Some(serde_json::json!({
+        Some(runner_api_submit(serde_json::json!({
             "runner_id": "homeboy-lab",
             "command": ["homeboy", "test", "sample-component"]
-        })),
+        }))),
         &store,
     );
     let job_id = submit.body["body"]["job"]["id"]
@@ -3523,10 +3559,10 @@ fn broker_reconcile_route_owns_expired_reverse_runner_claims() {
     let claim = route_with_job_store_and_body(
         "POST",
         "/runner/jobs/claim",
-        Some(serde_json::json!({
+        Some(runner_api_claim(serde_json::json!({
             "runner_id": "homeboy-lab",
             "lease_ms": 1
-        })),
+        }))),
         &store,
     );
     assert_eq!(claim.status_code, 200);

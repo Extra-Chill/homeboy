@@ -192,7 +192,7 @@ mod tests {
     use crate::agent_task_lifecycle::{
         AgentTaskLabHandoff, AgentTaskLabHandoffAuthority, AgentTaskLabHandoffState,
         AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, RunnerContinuationProvider,
-        RunnerContinuationSubmission, RunnerContinuationTestGuard,
+        RunnerContinuationTestGuard,
     };
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
@@ -228,7 +228,7 @@ mod tests {
         fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _submission: RunnerContinuationSubmission,
+            _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
         ) -> homeboy_core::Result<Job> {
             Err(homeboy_core::Error::internal_unexpected("not used"))
         }

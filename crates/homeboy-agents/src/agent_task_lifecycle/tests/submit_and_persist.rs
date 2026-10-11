@@ -4388,7 +4388,7 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
             durable_plan: None,
         })
         .expect("controller proxy recorded before handoff");
-        record_lab_offload_submission_request(
+        record_lab_offload_submission_envelope(
             "expired-handoff-late-acceptance",
             &replay_request("expired-handoff-late-acceptance", &command),
         )

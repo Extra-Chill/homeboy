@@ -12,10 +12,8 @@ use homeboy_core::{Error, Result};
 
 use crate::lab_staging_controller::LabStagingRecipe;
 
-pub const DIRECT_LAB_HANDOFF_SCHEMA_V1: &str = "homeboy/direct-lab-handoff/v1";
 pub const DIRECT_LAB_HANDOFF_SCHEMA: &str = "homeboy/direct-lab-handoff/v2";
 pub const DIRECT_LAB_HANDOFF_RECEIPT_SCHEMA: &str = "homeboy/direct-lab-handoff-receipt/v1";
-pub const DIRECT_LAB_HANDOFF_CAPABILITY_V1: &str = "direct-lab-handoff/v1";
 pub const DIRECT_LAB_HANDOFF_CAPABILITY: &str = "direct-lab-handoff/v2";
 
 /// Complete runner admission input. It has no controller-local attachment or
@@ -50,10 +48,8 @@ impl DirectLabHandoffEnvelope {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !matches!(
-            self.schema.as_str(),
-            DIRECT_LAB_HANDOFF_SCHEMA_V1 | DIRECT_LAB_HANDOFF_SCHEMA
-        ) || self.run_id.trim().is_empty()
+        if self.schema != DIRECT_LAB_HANDOFF_SCHEMA
+            || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()
             || self.idempotency_key != self.run_id
             || self.controller_identity.trim().is_empty()
@@ -150,16 +146,11 @@ pub fn submit_direct_lab_handoff(
     envelope: &DirectLabHandoffEnvelope,
 ) -> Result<DirectLabHandoffReceipt> {
     envelope.validate()?;
-    let capability = if envelope.schema == DIRECT_LAB_HANDOFF_SCHEMA_V1 {
-        DIRECT_LAB_HANDOFF_CAPABILITY_V1
-    } else {
-        DIRECT_LAB_HANDOFF_CAPABILITY
-    };
-    if !receiver.supports_capability(capability) {
+    if !receiver.supports_capability(DIRECT_LAB_HANDOFF_CAPABILITY) {
         return Err(Error::validation_invalid_argument(
             "runner_capabilities",
             format!(
-                "runner `{}` does not support {capability}",
+                "runner `{}` does not support {DIRECT_LAB_HANDOFF_CAPABILITY}",
                 envelope.runner_id
             ),
             Some(envelope.runner_id.clone()),
