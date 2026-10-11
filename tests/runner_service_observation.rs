@@ -20,15 +20,23 @@ impl Drop for DaemonGuard {
     }
 }
 
-struct ServiceStartGate {
+/// Releases a fixture process blocked on `release` when dropped, so a failing
+/// assertion never strands a gated service restart or job.
+struct ReleaseOnDrop {
     release: std::path::PathBuf,
 }
 
-impl Drop for ServiceStartGate {
+impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::write(&self.release, b"release\n");
     }
 }
+
+/// Upper bound for one fixture step waiting on a debug `homeboy` process.
+/// Each wait polls a condition and returns as soon as it holds; the bound only
+/// decides how long a genuinely stuck step takes to fail. It matches the
+/// runner's own 60s service-ready budget.
+const SERVICE_PROGRESS_DEADLINE_SECS: u64 = 60;
 
 struct ServiceDaemonGuard {
     child: Option<std::process::Child>,
@@ -496,7 +504,7 @@ esac
 
         // This service is a pre-existing, runner-owned unit in the isolated
         // fixture. The shim gates its restart; it never invokes host systemd.
-        let gate = ServiceStartGate {
+        let gate = ReleaseOnDrop {
             release: publish_service.clone(),
         };
         let mut install = Command::new(binary)
@@ -509,7 +517,10 @@ esac
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("start isolated runner service install");
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Generous: this bounds only a stuck install, and a debug `service
+        // install` on a saturated CI runner can take well over 10s to reach
+        // its restart. The loop returns as soon as the gate is reached.
+        let deadline = Instant::now() + Duration::from_secs(SERVICE_PROGRESS_DEADLINE_SECS);
         while !restart_waiting.exists() && Instant::now() < deadline {
             if let Some(status) = install.try_wait().expect("poll service install") {
                 let output = install.wait_with_output().expect("collect install output");
@@ -557,6 +568,18 @@ esac
             .expect("service startup token");
 
         let marker = root.join("service-exec-effect");
+        // The job blocks on a release file instead of sleeping a fixed 3s.
+        // This exec is already waiting when the lease is published, so it
+        // submits at once, while `service install` and this test's own
+        // `runner service status` are still running. On a loaded runner those
+        // took longer than 3s and the job had finished, successfully, before
+        // the first observation poll could see it active (#15756). The test
+        // releases it after its in-flight checks. The loop is bounded so a
+        // killed test cannot strand the job forever.
+        let release_job = root.join("release-service-exec");
+        let job_gate = ReleaseOnDrop {
+            release: release_job.clone(),
+        };
         let mut exec = Command::new(binary)
             .args([
                 "runner",
@@ -565,7 +588,11 @@ esac
                 "--",
                 "/bin/sh",
                 "-c",
-                &format!("sleep 3; printf 'ran\\n' >> '{}';", marker.display()),
+                &format!(
+                    "i=0; while [ ! -e '{}' ] && [ $i -lt 6000 ]; do sleep 0.05; i=$((i+1)); done; printf 'ran\\n' >> '{}';",
+                    release_job.display(),
+                    marker.display()
+                ),
             ])
             .env_clear()
             .env("HOME", root)
@@ -651,7 +678,13 @@ esac
             .timeout(Duration::from_secs(5))
             .build()
             .expect("service API client");
-        let observation_deadline = Instant::now() + Duration::from_secs(10);
+        // The gated job cannot finish before it is observed, so this window
+        // only bounds how long `runner exec` takes to notice the lease and
+        // submit. It polls the service for up to its own 60s ready budget
+        // before giving up; an exec that exits early fails the test at once
+        // with its own output.
+        let observation_deadline =
+            Instant::now() + Duration::from_secs(SERVICE_PROGRESS_DEADLINE_SECS + 30);
         let (service_job_id, mut event_cursor) = loop {
             let response: Value = service_client
                 .get(format!(
@@ -673,6 +706,14 @@ esac
                     0_u64,
                 );
             }
+            if let Some(status) = exec.try_wait().expect("poll waiting service exec") {
+                let output = exec.wait_with_output().expect("collect exec output");
+                panic!(
+                    "service runner exec exited ({status}) before publishing its job: {}\n{}\nobservation={response:#}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             assert!(
                 Instant::now() < observation_deadline,
                 "service runner exec did not publish its active job: {response:#}"
@@ -688,7 +729,9 @@ esac
             in_flight_service["daemon_lease_id"],
             service_lease["lease_id"]
         );
-        let terminal_deadline = Instant::now() + Duration::from_secs(15);
+        std::fs::write(&release_job, b"release\n").expect("release the service job");
+        let terminal_deadline =
+            Instant::now() + Duration::from_secs(SERVICE_PROGRESS_DEADLINE_SECS);
         loop {
             let response: Value = service_client
                 .get(format!(
@@ -743,6 +786,7 @@ esac
             lease,
             "status and service diagnostics retain one service generation"
         );
+        drop(job_gate);
         drop(daemon_guard);
         drop(gate);
     });
