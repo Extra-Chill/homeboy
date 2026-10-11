@@ -1,19 +1,19 @@
 //! Shared workflow types — args, results, and summary structures.
 
 use crate::extension::lint::baseline as lint_baseline;
-use homeboy_audit_contract::ExtensionPhaseTiming;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_core::finding::{FindingProducerSummary, HomeboyFinding};
 use homeboy_engine_primitives::baseline::BaselineFlags;
 pub use homeboy_extension_contract::FormattingFindings;
 pub use homeboy_extension_contract::LintSummaryOutput;
 use homeboy_extension_contract::SelfCheckCaptureMetadata;
-use homeboy_refactor_contract::AppliedRefactor;
+use homeboy_extension_contract::AppliedLintFix;
 use serde::Serialize;
 
 /// Sniff-selection filters shared by every lint entry point.
 ///
 /// The CLI args (`LintArgs`), the workflow args (`LintRunWorkflowArgs`), and
-/// the refactor-source options (`LintSourceOptions`) all carry the same
+/// the fix request (`LintFixRequest`) all carry the same
 /// `errors_only` / `sniffs` / `exclude_sniffs` triplet. Extracting it into one
 /// composed struct keeps that contract defined in a single place instead of
 /// being re-declared field-by-field across layers.
@@ -65,7 +65,7 @@ pub struct LintRunWorkflowResult {
     /// phase infrastructure status without adding a second public envelope.
     #[serde(skip)]
     pub infrastructure_failure: bool,
-    pub autofix: Option<AppliedRefactor>,
+    pub autofix: Option<AppliedLintFix>,
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,
     #[serde(skip_serializing_if = "Option::is_none")]

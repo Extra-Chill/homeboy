@@ -289,9 +289,7 @@ pub fn run_main_lint_workflow(
     // Per the contract under #1459 (issue #1507), autofixable findings never
     // fail the run; they nudge. The CTA is rendered here in core, not by each
     // extension's runner, so every language extension benefits from a single
-    // consistent prose. `homeboy review lint --fix` is the ergonomic adapter and is
-    // listed first; the canonical `homeboy refactor --from lint --write`
-    // invocation follows for users who want the longer form.
+    // consistent prose pointing at `homeboy review lint --fix`.
     if !lint_clean && !infrastructure_failure {
         hints.push(build_autofix_hint(&args));
         if args.changed_only {

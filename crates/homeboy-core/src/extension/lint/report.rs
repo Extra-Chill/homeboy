@@ -12,8 +12,9 @@ use homeboy_extension_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
-use homeboy_refactor_contract::AppliedRefactor;
-use homeboy_refactor_contract::LintFixInput;
+use homeboy_extension_contract::AppliedLintFix;
+
+use super::fix::LintFixRun;
 
 use super::run::{FormattingFindings, LintRunWorkflowResult};
 
@@ -150,16 +151,15 @@ fn producer_summary_label(producer_summaries: &[FindingProducerSummary]) -> Stri
 
 /// Build a [`LintCommandOutput`] from a `homeboy review lint --fix` dispatch.
 ///
-/// `--fix` is a thin alias for `homeboy refactor <component> --from lint
-/// --write`, so the fix path receives a `LintFixInput` (slim view) rather than the
-/// usual lint workflow result. We surface the applied autofix via the existing
-/// `autofix` field on `LintCommandOutput` so consumers see a consistent shape
-/// regardless of which mode was requested.
+/// The fix path receives a [`LintFixRun`] rather than the usual lint workflow
+/// result. The applied autofix is surfaced via the `autofix` field on
+/// `LintCommandOutput` so consumers see a consistent shape regardless of which
+/// mode was requested.
 ///
 /// Exit code semantics: autofixable findings should never fail the run, so
 /// the fix dispatch returns exit 0 even when fixes were applied. Real fixer
 /// errors propagate through `Result` and never reach this builder.
-pub fn from_lint_fix(component_label: String, run: LintFixInput) -> (LintCommandOutput, i32) {
+pub fn from_lint_fix(component_label: String, run: LintFixRun) -> (LintCommandOutput, i32) {
     let exit_code = 0;
     let phase = PhaseReport {
         phase: VerificationPhase::Lint,
@@ -188,7 +188,7 @@ pub fn from_lint_fix(component_label: String, run: LintFixInput) -> (LintCommand
     }
     let hints = if hints.is_empty() { None } else { Some(hints) };
 
-    let autofix = AppliedRefactor {
+    let autofix = AppliedLintFix {
         files_modified: run.files_modified,
         rerun_recommended: run.applied,
         changed_files: run.changed_files.clone(),
