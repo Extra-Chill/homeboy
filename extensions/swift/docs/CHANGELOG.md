@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.5] - 2026-10-11
+
+### Changed
+- drop audit and refactor extension hooks (Extra-Chill/homeboy#15774)
+
 ## [2.8.4] - 2026-08-29
 
 ### Changed
