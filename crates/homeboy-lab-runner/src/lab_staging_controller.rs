@@ -3819,47 +3819,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 None,
             )
         })?;
-        let mut public_env = request.recipe.job_override_env.clone();
-        public_env.extend(runtime_env);
-        public_env.extend(crate::lab_env::build_lab_offload_env(&lab_metadata));
-        public_env.extend(durable_runtime_rig_registry_env(&runtime.payload.output));
-        let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
-            &request.recipe.command.secret_env_sources,
-            &request.recipe.normalized_args,
-            public_env,
-        )?;
-        crate::lab::secrets::merge_agent_task_provider_secret_env(
-            &mut secret_handoff,
-            &request.durable_agent_task_plan,
-        );
-        crate::lab::secrets::merge_managed_service_secret_env(
-            &mut secret_handoff,
-            Some(&request.durable_agent_task_plan),
-        );
-        let mut env = secret_handoff.env_delta.clone();
-        env.insert(
-            "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
-            "1".to_string(),
-        );
-        env.insert(
-            homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
-            request.recipe.runner_id.clone(),
-        );
         let runner_status = Self::status_for_recipe_transport(request)?;
         let runner = crate::load(&request.recipe.runner_id)?;
-        crate::lab::secrets::preflight_lab_secret_env_handoff(
-            &request.recipe.runner_id,
-            Some(&runner),
-            &env,
-            &secret_handoff,
-        )?;
-        crate::lab::secrets::preflight_agent_task_runner_secret_env_plan(
-            &request.recipe.runner_id,
-            &runner,
-            &request.recipe.normalized_args,
-            &env,
-            &secret_handoff.secret_env_plan,
-        )?;
         let session = runner_status.session.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "runner",
@@ -3900,12 +3861,67 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )),
             ),
         };
+        // The immutable execution bundle exists only once admission is known,
+        // and must precede env derivation so oversized provenance can be
+        // staged by reference instead of failing in `child_provenance_env`.
+        let homeboy_path =
+            crate::remote_runner_homeboy_path(&runner, "durable Lab dispatch")?.to_string();
+        let verified_build_identity = runner_status
+            .configured_job_binary_build_identity
+            .clone()
+            .or_else(|| {
+                workspace
+                    .payload
+                    .homeboy_handoff_identity
+                    .as_ref()
+                    .map(|identity| identity.configured_command_build_identity.clone())
+            });
+        // The receipt keeps the recorded stage command; only the submitted argv
+        // is pinned to the admitted executable that the bundle names.
+        let mut dispatch_command = command.clone();
+        if let Some(executable) = dispatch_command.first_mut() {
+            *executable = homeboy_path.clone();
+        }
+        let execution_bundle = durable_execution_bundle(
+            request,
+            &workspace.payload.remote_cwd,
+            &runtime.payload.output,
+            &lab_metadata,
+            DurableBundleExecutable {
+                homeboy_path: &homeboy_path,
+                verified_build_identity: verified_build_identity.as_deref(),
+                dispatch_command: &dispatch_command,
+            },
+            daemon_authority
+                .as_ref()
+                .map(|authority| (authority.daemon_lease_id(), authority.reservation_job_id())),
+        );
+        lab_metadata["execution_bundle"] = execution_bundle;
+        let (secret_handoff, env) =
+            durable_dispatch_env(request, &lab_metadata, runtime_env, &runtime.payload.output)?;
+        crate::lab::secrets::preflight_lab_secret_env_handoff(
+            &request.recipe.runner_id,
+            Some(&runner),
+            &env,
+            &secret_handoff,
+        )?;
+        crate::lab::secrets::preflight_agent_task_runner_secret_env_plan(
+            &request.recipe.runner_id,
+            &runner,
+            &request.recipe.normalized_args,
+            &env,
+            &secret_handoff.secret_env_plan,
+        )?;
         Self::check_cancelled(cancellation)?;
         let submitted = crate::exec_with_status_snapshot(
             &request.recipe.runner_id,
             crate::RunnerExecOptions {
+                execution_context:
+                    homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::local(
+                        homeboy_path,
+                    ),
                 cwd: Some(workspace.payload.remote_cwd.clone()),
-                command: command.clone(),
+                command: dispatch_command,
                 env,
                 secret_env_names: secret_handoff.secret_env_names.clone(),
                 secret_env_plan: Some(secret_handoff.secret_env_plan),
@@ -4158,6 +4174,97 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         Ok(())
     }
+}
+
+/// The executable the durable job is pinned to, with the identity verified for it.
+struct DurableBundleExecutable<'a> {
+    homeboy_path: &'a str,
+    verified_build_identity: Option<&'a str>,
+    dispatch_command: &'a [String],
+}
+
+/// Build the immutable execution bundle from durable stage facts and the
+/// resolved admission. `daemon` is `None` for reverse-broker authority.
+fn durable_execution_bundle(
+    request: &LabStagingExecutionRequest,
+    remote_cwd: &str,
+    runtime_output: &Value,
+    lab_metadata: &Value,
+    executable: DurableBundleExecutable<'_>,
+    daemon: Option<(&str, &str)>,
+) -> Value {
+    let runtime_field = |name: &str| runtime_output.get(name).cloned().unwrap_or(Value::Null);
+    let runtime_str = |name: &str| {
+        runtime_output
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    crate::execution_bundle::build(crate::execution_bundle::ExecutionBundleInputs {
+        homeboy_path: executable.homeboy_path,
+        verified_build_identity: executable.verified_build_identity,
+        remote_cwd,
+        daemon_lease_id: daemon.map(|(lease_id, _)| lease_id),
+        reservation_job_id: daemon.map(|(_, job_id)| job_id),
+        rig_registry_root: runtime_str("rig_registry_root"),
+        rigs: runtime_field("synced_rigs"),
+        extensions: runtime_field("extension_overlays"),
+        extension_runtime_home: runtime_str("extension_runtime_home"),
+        workspace_mapping: lab_metadata
+            .get("workspace_mapping")
+            .cloned()
+            .unwrap_or(Value::Null),
+        required_extensions: &request.recipe.command.required_extensions,
+        requested_command: &request.recipe.normalized_args,
+        executed_argv: executable.dispatch_command,
+        runner_id: &request.recipe.runner_id,
+    })
+}
+
+/// Derive the secret handoff and submitted environment from the staged facts.
+/// `lab_metadata` must already carry the immutable `execution_bundle`: it is
+/// both embedded in the offload metadata and re-asserted last, so neither a
+/// job override nor an oversized-provenance reference can displace it.
+fn durable_dispatch_env(
+    request: &LabStagingExecutionRequest,
+    lab_metadata: &Value,
+    runtime_env: Vec<(String, String)>,
+    runtime_output: &Value,
+) -> Result<(
+    crate::lab::secrets::LabSecretEnvHandoffPlan,
+    HashMap<String, String>,
+)> {
+    let mut public_env = request.recipe.job_override_env.clone();
+    public_env.extend(runtime_env);
+    public_env.extend(crate::lab_env::build_lab_offload_env(lab_metadata));
+    public_env.extend(durable_runtime_rig_registry_env(runtime_output));
+    let mut secret_handoff = crate::lab::secrets::build_lab_secret_env_handoff_plan(
+        &request.recipe.command.secret_env_sources,
+        &request.recipe.normalized_args,
+        public_env,
+    )?;
+    crate::lab::secrets::merge_agent_task_provider_secret_env(
+        &mut secret_handoff,
+        &request.durable_agent_task_plan,
+    );
+    crate::lab::secrets::merge_managed_service_secret_env(
+        &mut secret_handoff,
+        Some(&request.durable_agent_task_plan),
+    );
+    let mut env = secret_handoff.env_delta.clone();
+    env.insert(
+        "HOMEBOY_RUNNER_PLACEMENT_RESOLVED".to_string(),
+        "1".to_string(),
+    );
+    env.insert(
+        homeboy_core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV.to_string(),
+        request.recipe.runner_id.clone(),
+    );
+    // Reassert immutable authority after the untrusted per-job overrides.
+    if let Some(bundle) = lab_metadata.get("execution_bundle") {
+        crate::execution_bundle::apply_authority_env(&mut env, bundle);
+    }
+    Ok((secret_handoff, env))
 }
 
 fn durable_runtime_rig_registry_env(output: &Value) -> HashMap<String, String> {
@@ -8941,6 +9048,156 @@ mod tests {
                 homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("record");
             std::fs::remove_file(record.plan_path).expect("remove durable plan");
             assert!(load_lab_staging_recipe(run_id).is_err());
+        });
+    }
+
+    /// Fixture for the Gutenberg-sized failure: the source snapshot alone
+    /// pushes `HOMEBOY_LAB_OFFLOAD_METADATA` past the inline env budget.
+    fn oversized_durable_dispatch_inputs(
+        remote_cwd: &str,
+        lease: Option<(&str, &str)>,
+        build_identity: Option<&str>,
+    ) -> (LabStagingExecutionRequest, Value, Vec<String>) {
+        let request = execution_request();
+        let runtime_output = json!({
+            "synced_rigs": [{ "rig_id": "fixture-rig" }],
+            "rig_registry_root": format!("{remote_cwd}/rigs"),
+            "extension_overlays": [{
+                "id": "agent-runtime",
+                "remote_path": "/runner/job/agent-runtime",
+                "content_hash": "a".repeat(64),
+            }],
+            "extension_runtime_home": "/runner/job/home",
+        });
+        let mut lab_metadata = json!({
+            "schema": "homeboy/lab-offload/v1",
+            "runner_id": "lab-1",
+            "remote_workspace": remote_cwd,
+            "workspace_mapping": { "workspaces": [] },
+            "source_snapshot": { "payload": "x".repeat(12 * 1024) },
+        });
+        let dispatch_command = vec!["/runner/bin/homeboy".to_string(), "run".to_string()];
+        lab_metadata["execution_bundle"] = durable_execution_bundle(
+            &request,
+            remote_cwd,
+            &runtime_output,
+            &lab_metadata,
+            DurableBundleExecutable {
+                homeboy_path: "/runner/bin/homeboy",
+                verified_build_identity: build_identity,
+                dispatch_command: &dispatch_command,
+            },
+            lease,
+        );
+        (request, lab_metadata, dispatch_command)
+    }
+
+    #[test]
+    fn durable_dispatch_carries_the_execution_bundle_for_oversized_provenance() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let remote_cwd = workspace.path().join("workspace");
+            std::fs::create_dir_all(crate::lab::offload::remote_lab_artifact_dir(
+                &remote_cwd.display().to_string(),
+            ))
+            .expect("artifact root");
+            let remote_cwd = remote_cwd.display().to_string();
+            let identity = homeboy_core::build_identity::current().display;
+            let (request, lab_metadata, dispatch_command) = oversized_durable_dispatch_inputs(
+                &remote_cwd,
+                Some(("lease-1", "reservation-1")),
+                Some(&identity),
+            );
+
+            let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
+                .expect("durable env");
+
+            assert!(
+                env[homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV].len() > 8 * 1024,
+                "fixture must exceed the inline provenance budget"
+            );
+            assert_eq!(env["HOMEBOY_COMMAND"], "/runner/bin/homeboy");
+            assert!(crate::execution_bundle::validate_bundle_env(
+                &env,
+                &dispatch_command,
+                &request.recipe.command.required_extensions,
+            ));
+            let staged = crate::execution::child_provenance_env(env, "{}".to_string())
+                .expect("oversized provenance is staged by reference");
+            assert!(staged[homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV].len() < 8 * 1024);
+        });
+    }
+
+    #[test]
+    fn durable_dispatch_without_a_bundle_cannot_stage_oversized_provenance() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (request, mut lab_metadata, _) =
+                oversized_durable_dispatch_inputs("/runner/ws", None, None);
+            // The pre-fix durable dispatch never published a bundle.
+            lab_metadata
+                .as_object_mut()
+                .expect("metadata object")
+                .remove("execution_bundle");
+
+            let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
+                .expect("durable env");
+            let error = crate::execution::child_provenance_env(env, "{}".to_string())
+                .expect_err("no bundle means no safe provenance reference");
+
+            assert!(error
+                .message
+                .contains("execution bundle is missing or invalid"));
+        });
+    }
+
+    #[test]
+    fn durable_dispatch_without_a_verified_build_identity_fails_actionably() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (request, lab_metadata, _) =
+                oversized_durable_dispatch_inputs("/runner/ws", None, None);
+            let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
+                .expect("durable env");
+
+            assert_eq!(
+                lab_metadata["execution_bundle"]["admission"]["authority"],
+                "reverse_broker"
+            );
+            let error = crate::execution::child_provenance_env(env, "{}".to_string())
+                .expect_err("an identity must never be invented");
+            assert!(error
+                .message
+                .contains("child build identity is unavailable"));
+        });
+    }
+
+    #[test]
+    fn durable_dispatch_bundle_beats_job_override_authority() {
+        let _serial = global_state_lock().lock().expect("lock");
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (mut request, lab_metadata, _) =
+                oversized_durable_dispatch_inputs("/runner/ws", None, Some("homeboy 1.0.0"));
+            request.recipe.job_override_env = HashMap::from([
+                ("HOMEBOY_COMMAND".to_string(), "/tmp/evil".to_string()),
+                (
+                    crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                    "{}".to_string(),
+                ),
+            ]);
+
+            let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
+                .expect("durable env");
+
+            assert_eq!(env["HOMEBOY_COMMAND"], "/runner/bin/homeboy");
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    &env[crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV]
+                )
+                .expect("bundle"),
+                lab_metadata["execution_bundle"]
+            );
         });
     }
 }
