@@ -3659,6 +3659,30 @@ impl JobHandle {
             .ok_or_else(|| Error::internal_unexpected("local child reservation is missing"))
     }
 
+    /// Whether the parent daemon has reserved this exact child but not yet
+    /// durably recorded its process identity and running state. The child is
+    /// spawned before that commit, so a fast child can read the store first.
+    /// Any mismatch or terminal state is not pending and must fail closed.
+    pub(crate) fn local_child_identity_pending(
+        &self,
+        reservation_id: &str,
+        runner_id: &str,
+    ) -> bool {
+        let inner = self.store.inner.lock().expect("job store mutex poisoned");
+        let Some(stored) = inner.jobs.get(&self.job_id) else {
+            return false;
+        };
+        let (Some(local_runner), Some(local_child)) =
+            (stored.local_runner.as_ref(), stored.local_child.as_ref())
+        else {
+            return false;
+        };
+        !stored.job.status.is_terminal()
+            && local_child.reservation_id == reservation_id
+            && local_runner.runner_id == runner_id
+            && (stored.job.status != JobStatus::Running || local_child.process.is_none())
+    }
+
     pub(crate) fn accepted_local_child_execution_context(
         &self,
         reservation_id: &str,

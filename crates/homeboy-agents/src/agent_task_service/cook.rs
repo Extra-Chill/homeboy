@@ -1138,8 +1138,22 @@ fn causal_typed_error(value: &Value) -> Option<Value> {
         fields.get("cause")
     };
     cause
-        .and_then(causal_typed_error)
+        .and_then(|cause| causal_typed_error(cause).or_else(|| plain_cause_error(cause)))
         .or_else(|| typed_error_at(value))
+}
+
+/// A named `cause` recorded directly as `{code, message}` (for example a gate
+/// setup failure's underlying hydration or Lab gate error) is the real failure;
+/// without this the projection stops at the generic wrapper message.
+fn plain_cause_error(value: &Value) -> Option<Value> {
+    let fields = value.as_object()?;
+    let code = fields.get("code")?.as_str()?;
+    let message = fields.get("message")?.as_str()?;
+    Some(serde_json::json!({
+        "code": code,
+        "field": fields.get("details").and_then(|details| details.get("field")),
+        "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(message)),
+    }))
 }
 
 fn bound_diagnostic_value(value: &mut Value, depth: usize) {
@@ -11894,5 +11908,34 @@ mod io_error_attribution_tests {
         let diagnostic = bounded_error_diagnostic(&error);
 
         assert_eq!(diagnostic["deepest_cause"]["message"], error.message);
+    }
+
+    #[test]
+    fn bounded_error_diagnostic_surfaces_a_plain_gate_setup_cause() {
+        let error = Error::dependency_step_failed(
+            "promotion.gate_setup",
+            "destination_gate_workspace".to_string(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(serde_json::json!({
+                "classification": "destination_gate_toolchain",
+                "code": "runner.lab_transport_failure",
+                "message": "Lab gate transport did not produce verified passing evidence",
+                "retry_action": "retry_dependency_hydration",
+            })),
+        );
+
+        let diagnostic = bounded_error_diagnostic(&error);
+
+        assert_eq!(
+            diagnostic["deepest_cause"]["code"],
+            "runner.lab_transport_failure"
+        );
+        assert_eq!(
+            diagnostic["deepest_cause"]["message"],
+            "Lab gate transport did not produce verified passing evidence"
+        );
     }
 }

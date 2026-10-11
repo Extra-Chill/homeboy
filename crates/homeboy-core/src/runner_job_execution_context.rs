@@ -26,6 +26,11 @@ pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
 pub const RUNNER_CHILD_RESERVATION_ENV: &str = "HOMEBOY_RUNNER_CHILD_RESERVATION";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
+/// The daemon spawns a local child before it durably records the child's
+/// process identity, so the child waits (bounded) for that commit instead of
+/// failing closed on a race it cannot lose by design.
+const DAEMON_CHILD_IDENTITY_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+const DAEMON_CHILD_IDENTITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerJobExecutionContext {
@@ -381,16 +386,23 @@ impl RunnerJobExecutionContext {
         let job_id = uuid::Uuid::parse_str(&runner_job_id).map_err(|_| {
             rejected("daemon child runner job identity is not a valid durable job id")
         })?;
-        let store = crate::api_jobs::JobStore::open_without_reconciliation(
-            crate::paths::daemon_jobs_file()?,
-        )?;
-        let evidence = store
-            .handle(job_id)
-            .accepted_local_child_execution_context(
+        let jobs_file = crate::paths::daemon_jobs_file()?;
+        let deadline = std::time::Instant::now() + DAEMON_CHILD_IDENTITY_WAIT;
+        let evidence = loop {
+            let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)?;
+            let handle = store.handle(job_id);
+            if handle.local_child_identity_pending(&reservation_id, expected_runner_id)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(DAEMON_CHILD_IDENTITY_POLL);
+                continue;
+            }
+            break handle.accepted_local_child_execution_context(
                 &reservation_id,
                 expected_runner_id,
                 &context_id,
             )?;
+        };
         let asserted = Self::from_evidence_record(&evidence)?;
         let accepted = Self::direct_daemon_with_dispatch_metadata(
             Some(&asserted.controller_run_id),
@@ -752,6 +764,89 @@ mod tests {
             assert!(
                 RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id).is_err()
             );
+        });
+    }
+
+    #[test]
+    fn daemon_child_waits_for_parent_to_record_its_identity() {
+        with_isolated_home(|_| {
+            let jobs_file = crate::paths::daemon_jobs_file().expect("jobs path");
+            let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)
+                .expect("job store");
+            let runner_id = "runner-1";
+            let job = store.create_test_local_runner_job(Some(LocalRunnerJob {
+                runner_id: runner_id.to_string(),
+                command: vec!["homeboy".to_string()],
+                cwd: None,
+                lifecycle: Some(RunnerJobLifecycleMetadata {
+                    durable_run_id: Some("controller-cook-run".to_string()),
+                    ..RunnerJobLifecycleMetadata::default()
+                }),
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
+            }));
+            store
+                .reserve_local_child_at_with_runner_capacity(
+                    job.id,
+                    crate::api_jobs::timestamp_ms(),
+                    None,
+                )
+                .map(|_| ())
+                .expect("reserve child");
+            let handle = store.handle(job.id);
+            let reservation_id = handle.local_child_reservation_id().expect("reservation id");
+            let context = RunnerJobExecutionContext::direct_daemon(
+                Some("controller-cook-run"),
+                runner_id,
+                &job.id.to_string(),
+                "homeboy",
+                &reservation_id,
+            )
+            .expect("context");
+            handle
+                .progress(serde_json::json!({
+                    "phase": "runner_job_execution_context_verified",
+                    "execution_context": context.evidence_record().expect("evidence"),
+                }))
+                .expect("record context");
+
+            // The child has been spawned but the parent has not yet recorded
+            // its process identity: this is pending, not a mismatch.
+            let child_view = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)
+                .expect("child store view");
+            assert!(child_view
+                .handle(job.id)
+                .local_child_identity_pending(&reservation_id, runner_id));
+            assert!(!child_view
+                .handle(job.id)
+                .local_child_identity_pending("forged-reservation", runner_id));
+            assert!(!child_view
+                .handle(job.id)
+                .local_child_identity_pending(&reservation_id, "other-runner"));
+
+            let _job = EnvVarGuard::set(RUNNER_JOB_ID_ENV, job.id.to_string());
+            let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, &reservation_id);
+            let _context = EnvVarGuard::set(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV, context.id());
+
+            let parent = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                handle
+                    .start_with_reserved_child_identity(
+                        std::process::id(),
+                        None,
+                        LocalChildStartDiscriminator::Unsupported {
+                            evidence: "test process".to_string(),
+                        },
+                    )
+                    .expect("start child");
+            });
+            let resolved =
+                RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id)
+                    .expect("child resolves once the parent records its identity")
+                    .expect("direct daemon authority");
+            parent.join().expect("parent thread");
+            assert_eq!(resolved.id(), context.id());
+            assert_eq!(resolved.runner_job_id(), job.id.to_string());
         });
     }
 }
