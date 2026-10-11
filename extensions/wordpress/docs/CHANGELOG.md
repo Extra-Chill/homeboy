@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.51.2] - 2026-10-11
+
+### Fixed
+- verify staged Composer vendor from inside the staging tree
+
 ## [3.51.1] - 2026-10-11
 
 ### Fixed
