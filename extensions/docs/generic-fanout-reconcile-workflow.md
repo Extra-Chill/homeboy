@@ -2,7 +2,7 @@
 
 `runtime-agent-ci/lib/generic-fanout-reconcile-workflow.js` and `runtime-agent-ci/lib/fanout-reconcile-runner.js` provide executor-neutral fanout/reconcile primitives. `runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs` exposes the shared planner/reconciler through JSON files.
 
-This helper owns generic audit fanout planning and reconciliation, not runtime execution. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and provider task schemas belong to explicit agent-task providers. The deterministic WordPress refactor hook does not select or execute a provider.
+This helper owns generic fanout planning and reconciliation, not runtime execution. Runtime packages, provider names, credentials, WordPress setup, sandbox recipes, and provider task schemas belong to explicit agent-task providers.
 
 For Codebox-backed product workflows, the product-facing path is Homeboy's
 durable `agent-task` scheduler/fanout plan. Homeboy Extensions is only the

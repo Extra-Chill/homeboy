@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Standalone JavaScript linting script using ESLint
-# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy refactor`)
+# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy review lint --fix`)
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 #
 # HOMEBOY_FIX_ONLY=1 is the single auto-fix contract: the runner executes
@@ -198,7 +198,7 @@ fi
 cd "$PLUGIN_PATH"
 
 # Fix-only mode: run ESLint --fix and exit before the validation pass.
-# Sent by `homeboy refactor --from lint --write` — the engine validates separately.
+# Sent by `homeboy review lint --fix` — the engine validates separately.
 if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     echo "Running ESLint auto-fix..."
     set +e

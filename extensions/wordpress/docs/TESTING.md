@@ -264,7 +264,7 @@ code 1.
 - **PHPCS** — `phpcs.xml.dist` applies WordPress Coding Standards (PSR-4
   adjustments applied). Text domain is auto-detected from the plugin
   header. When PHPCS reports auto-fixable findings, the runner surfaces a
-  prominent CTA showing the exact `homeboy refactor` command to clean
+  prominent CTA showing the exact `homeboy review lint --fix` command to clean
   them up. **Errors block; warnings are reported (summary + findings) but
   non-blocking by default** (`ignore_warnings_on_exit 1`), so an
   error-clean repo releases without `--skip-checks=lint`. Set

@@ -92,12 +92,12 @@ aliases select the WP Codebox provider unless a caller passes `runtimeProvider`.
 The provider owns the `wp-codebox/workspace-recipe/v1` recipe shape, recipe file
 name, runtime output file name, dispatch function, and artifact normalization.
 
-## Audit Fanout Runtime Boundary
+## Fanout Runtime Boundary
 
 Generic fanout planning and reconcile primitives live in `runtime-agent-ci/lib`.
-The WordPress extension does not select or execute an agent runtime from its
-deterministic refactor hook. WP Codebox remains available through its direct
-sandbox, browser, preview, fuzz, WP-CLI, and artifact contracts.
+The WordPress extension does not select or execute an agent runtime. WP Codebox
+remains available through its direct sandbox, browser, preview, fuzz, WP-CLI,
+and artifact contracts.
 
 ## Product Adapter Boundaries
 

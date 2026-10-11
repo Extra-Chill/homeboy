@@ -2,7 +2,7 @@
   "name": "Node.js",
   "version": "3.7.7",
   "icon": "server.rack",
-  "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
+  "description": "Node.js project type — discovery, lint/test runners, and npm release lifecycle",
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
@@ -218,99 +218,6 @@
         "workflow": "ci.yml",
         "fidelity": "local-equivalent",
         "limitations": []
-      }
-    }
-  },
-  "audit": {
-    "feature_patterns": [
-      "app\\.get\\(['\"]([^'\"]+)['\"]",
-      "app\\.post\\(['\"]([^'\"]+)['\"]",
-      "app\\.put\\(['\"]([^'\"]+)['\"]",
-      "app\\.delete\\(['\"]([^'\"]+)['\"]",
-      "app\\.patch\\(['\"]([^'\"]+)['\"]",
-      "router\\.get\\(['\"]([^'\"]+)['\"]",
-      "router\\.post\\(['\"]([^'\"]+)['\"]",
-      "router\\.put\\(['\"]([^'\"]+)['\"]",
-      "router\\.delete\\(['\"]([^'\"]+)['\"]",
-      "router\\.patch\\(['\"]([^'\"]+)['\"]",
-      "app\\.use\\(['\"]([^'\"]+)['\"]",
-      "export (?:default )?class (\\w+)",
-      "export (?:default )?function (\\w+)",
-      "export (?:default )?const (\\w+)",
-      "module\\.exports\\s*=\\s*(?:class\\s+|)(\\w+)",
-      "mongoose\\.model\\(['\"]([^'\"]+)['\"]",
-      "program\\.command\\(['\"]([^'\"]+)['\"]",
-      "yargs\\.command\\(['\"]([^'\"]+)['\"]",
-      "io\\.on\\(['\"]([^'\"]+)['\"]",
-      "socket\\.on\\(['\"]([^'\"]+)['\"]"
-    ],
-    "feature_labels": {
-      "app\\.get\\(": "Express Routes",
-      "app\\.post\\(": "Express Routes",
-      "app\\.put\\(": "Express Routes",
-      "app\\.delete\\(": "Express Routes",
-      "app\\.patch\\(": "Express Routes",
-      "router\\.get\\(": "Express Routes",
-      "router\\.post\\(": "Express Routes",
-      "router\\.put\\(": "Express Routes",
-      "router\\.delete\\(": "Express Routes",
-      "router\\.patch\\(": "Express Routes",
-      "app\\.use\\(": "Middleware",
-      "export (?:default )?class": "Exported Classes",
-      "export (?:default )?function": "Exported Functions",
-      "export (?:default )?const": "Exported Constants",
-      "module\\.exports": "Module Exports",
-      "mongoose\\.model": "Mongoose Models",
-      "program\\.command": "CLI Commands",
-      "yargs\\.command": "CLI Commands",
-      "io\\.on": "Socket Events",
-      "socket\\.on": "Socket Events"
-    },
-    "doc_targets": {
-      "Express Routes": {
-        "file": "api-reference.md",
-        "heading": "## Routes",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Middleware": {
-        "file": "api-reference.md",
-        "heading": "## Middleware",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Exported Classes": {
-        "file": "architecture.md",
-        "heading": "## Classes",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Exported Functions": {
-        "file": "architecture.md",
-        "heading": "## Functions",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Exported Constants": {
-        "file": "architecture.md",
-        "heading": "## Constants",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Module Exports": {
-        "file": "architecture.md",
-        "heading": "## Module Exports",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Mongoose Models": {
-        "file": "features.md",
-        "heading": "## Data Models",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "CLI Commands": {
-        "file": "cli-reference.md",
-        "heading": "## Commands",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Socket Events": {
-        "file": "features.md",
-        "heading": "## Socket Events",
-        "template": "- `{name}` — `{source_file}` (line {line})"
       }
     }
   },

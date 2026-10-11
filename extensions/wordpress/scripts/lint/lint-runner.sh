@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # Standalone PHP linting script using PHPCS/PHPCBF
-# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy refactor`)
+# Supports fix-only mode via HOMEBOY_FIX_ONLY=1 (sent by `homeboy review lint --fix`)
 # Supports summary mode via HOMEBOY_SUMMARY_MODE=1
 # Supports step filtering via HOMEBOY_STEP/HOMEBOY_SKIP (steps: phpcs, eslint, phpstan)
 #
 # HOMEBOY_FIX_ONLY=1 is the single auto-fix contract: the runner executes
 # fixers (phpcbf + custom) and skips its own validation pass. All auto-fix
-# flows go through `homeboy refactor --from lint --write` (#1145).
+# flows go through `homeboy review lint --fix` (#1145).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STABLE_FINGERPRINT_HELPER="${SCRIPT_DIR}/stable-fingerprint.php"
@@ -477,7 +477,7 @@ if [ -n "$PHP_VERSION" ]; then
 fi
 
 # Fix-only mode: run custom fixers, then phpcbf, then exit before validation.
-# Sent by `homeboy refactor --from lint --write` — the engine validates separately.
+# Sent by `homeboy review lint --fix` — the engine validates separately.
 if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     # Fixer confidence tiers:
     #   safe       — Mechanical token rewrite, no semantic ambiguity. Always correct.
@@ -713,7 +713,7 @@ if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
     fi
     echo "Syntax OK — all PHP files pass php -l"
 
-    # Fix-only mode always skips the validation pass — `homeboy refactor`
+    # Fix-only mode always skips the validation pass — `homeboy review lint --fix`
     # validates separately via the diagnose phase. Saves ~35s on large
     # codebases by avoiding a redundant PHPCS scan.
     echo ""
@@ -836,7 +836,7 @@ if [ -n "$json_output" ] && command -v php &> /dev/null; then
         if [ -n "${HOMEBOY_CHANGED_SINCE:-}" ]; then
             fix_scope_args=" --changed-since ${HOMEBOY_CHANGED_SINCE}"
         fi
-        echo "  Run:  homeboy refactor --from lint --write${fix_scope_args} ${fix_target}"
+        echo "  Run:  homeboy review lint ${fix_target}${fix_scope_args} --fix"
         echo "============================================"
     fi
 
@@ -1111,7 +1111,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     else
         echo "Linting found issues (see above)"
         if [ "${fixable_count:-0}" -gt 0 ] 2>/dev/null; then
-            echo "Auto-fixable findings remain; run the refactor command above before pushing."
+            echo "Auto-fixable findings remain; run the lint fix command above before pushing."
         fi
         [ "$ESLINT_EXIT" -ge 2 ] && exit 2
         exit 1
@@ -1214,7 +1214,7 @@ else
     echo ""
     echo "Linting found issues (see above)"
     if [ "${fixable_count:-0}" -gt 0 ] 2>/dev/null; then
-        echo "Auto-fixable findings remain; run the refactor command above before pushing."
+        echo "Auto-fixable findings remain; run the lint fix command above before pushing."
     fi
     [ "$ESLINT_EXIT" -ge 2 ] && exit 2
     exit 1

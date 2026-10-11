@@ -8,7 +8,6 @@ Adds first-class Go support to Homeboy for services, bridges, and command-line t
 - default build support
 - `go fmt` + `go vet` linting
 - `go test ./...` test runner
-- basic symbol fingerprinting for audit workflows
 
 ## Build behavior
 

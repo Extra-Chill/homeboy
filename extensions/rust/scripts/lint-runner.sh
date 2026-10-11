@@ -10,7 +10,7 @@ set -euo pipefail
 #   HOMEBOY_FIX_ONLY        — if "1", run cargo fmt + clippy --fix + cargo fix,
 #                             then exit without the validation pass (the engine
 #                             runs validation separately). Sent by
-#                             `homeboy refactor --from lint --write`.
+#                             `homeboy review lint --fix`.
 #   HOMEBOY_SUMMARY_MODE    — if "1", show compact output
 #   HOMEBOY_CHANGED_SINCE   — git ref to scope fmt check to changed files only
 #   HOMEBOY_LINT_GLOB       — file glob (currently unused for Rust — cargo operates on crates)

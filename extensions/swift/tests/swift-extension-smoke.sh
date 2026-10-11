@@ -29,22 +29,11 @@ assert_true("*.xcworkspace" in find_command, "discovery should include xcworkspa
 assert_true("*.swift" in find_command, "discovery should include Swift sources")
 assert_true(discovery.get("base_path_transform") == "identity", "unexpected base path transform")
 
-audit = manifest.get("audit", {})
-patterns = audit.get("feature_patterns", [])
-for pattern in ["class\\s+(\\w+)", "struct\\s+(\\w+)", "enum\\s+(\\w+)", "protocol\\s+(\\w+)", "func\\s+(\\w+)\\s*\\("]:
-    assert_true(pattern in patterns, f"missing feature pattern: {pattern}")
-
-labels = audit.get("feature_labels", {})
-for label in ["Classes", "Structs", "Enums", "Protocols", "Functions"]:
-    assert_true(label in labels.values(), f"missing feature label: {label}")
-
-assert_true("test_mapping" not in audit, "audit test_mapping must stay disabled so historical coverage gaps are advisory")
 mapping = manifest.get("test", {}).get("drift", {})
 assert_true("tests" in mapping.get("test_dirs", []), "missing lowercase tests dir")
 assert_true("Tests" in mapping.get("test_dirs", []), "missing uppercase Tests dir")
 assert_true(mapping.get("inline_tests") is False, "swift tests should not be inline")
 
-assert_true(manifest.get("scripts", {}).get("fingerprint") == "scripts/fingerprint.sh", "missing fingerprint script")
 assert_true(manifest.get("lint", {}).get("extension_script") == "scripts/lint-runner.sh", "missing lint runner")
 assert_true(manifest.get("test", {}).get("extension_script") == "scripts/test-runner.sh", "missing test runner")
 

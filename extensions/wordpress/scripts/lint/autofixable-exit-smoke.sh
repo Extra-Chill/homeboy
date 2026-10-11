@@ -101,19 +101,19 @@ run_lint() {
         exit 1
     fi
 
-    expected_command="Run:  homeboy refactor --from lint --write"
+    expected_command="Run:  homeboy review lint autofixable-fixture"
     if [ -n "$changed_since" ]; then
         expected_command="${expected_command} --changed-since ${changed_since}"
     fi
-    expected_command="${expected_command} autofixable-fixture"
+    expected_command="${expected_command} --fix"
 
     if ! grep -Fq "$expected_command" "$OUTPUT_FILE"; then
-        echo "FAIL: refactor command missing (summary=${mode})" >&2
+        echo "FAIL: lint fix command missing (summary=${mode})" >&2
         sed 's/^/  /' "$OUTPUT_FILE" >&2
         exit 1
     fi
 
-    if ! grep -Fq "Auto-fixable findings remain; run the refactor command above before pushing." "$OUTPUT_FILE"; then
+    if ! grep -Fq "Auto-fixable findings remain; run the lint fix command above before pushing." "$OUTPUT_FILE"; then
         echo "FAIL: aggregate failure message missing (summary=${mode})" >&2
         sed 's/^/  /' "$OUTPUT_FILE" >&2
         exit 1

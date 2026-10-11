@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Rust formatter for homeboy's post-write formatting.
-# Called by engine::format_write after refactor --write applies code.
+# Called by engine::format_write after `homeboy review lint --fix` applies fixes.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOLVE_CONTEXT_HELPER="${HOMEBOY_RUNTIME_RESOLVE_CONTEXT:?HOMEBOY_RUNTIME_RESOLVE_CONTEXT is required}"

@@ -20,30 +20,11 @@
     "test.coverage": false,
     "annotations": false
   },
-  "scripts": {
-    "fingerprint": "scripts/fingerprint.sh"
-  },
   "platform": {
     "discovery": {
       "find_command": "find /Users /home /var/www /srv -maxdepth 6 \\( -name 'project.yml' -o -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name '*.swift' \\) 2>/dev/null | sed -E 's#/(Sources|Tests|tests|[^/]+\\.xcodeproj|[^/]+\\.xcworkspace|[^/]+\\.swift).*##' | sort -u | head -20",
       "base_path_transform": "identity",
       "display_name_command": "basename {{basePath}}"
-    }
-  },
-  "audit": {
-    "feature_patterns": [
-      "class\\s+(\\w+)",
-      "struct\\s+(\\w+)",
-      "enum\\s+(\\w+)",
-      "protocol\\s+(\\w+)",
-      "func\\s+(\\w+)\\s*\\("
-    ],
-    "feature_labels": {
-      "class\\s+": "Classes",
-      "struct\\s+": "Structs",
-      "enum\\s+": "Enums",
-      "protocol\\s+": "Protocols",
-      "func\\s+": "Functions"
     }
   },
   "settings": [

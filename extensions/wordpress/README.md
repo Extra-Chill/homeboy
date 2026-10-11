@@ -1,7 +1,7 @@
 # Homeboy WordPress Extension
 
 Homeboy extension that gives WordPress plugins and themes a complete
-`test → lint → build → bench → trace → audit` pipeline with zero in-component
+`test → lint → build → bench → trace` pipeline with zero in-component
 configuration. PHPUnit and benchmark workloads run through [WP Codebox][wp-codebox]
 by default, so there is no host PHP, MySQL, or local WordPress install to manage.
 
@@ -20,9 +20,6 @@ extension scripts for these verbs:
 | `build` | Production ZIP with composer `--no-dev`, asset build, syntax check | `scripts/build/build.sh` |
 | `bench` | Benchmark workloads via the WordPress bench runtime backend; optional browser handoff | `scripts/bench/bench-runner.sh` |
 | `trace` | Project-owned scenario traces | `scripts/trace/trace-runner.sh` |
-| `audit` | Detector rules over PHP for lifecycle / role tagging | `scripts/audit/setup-references.sh` + rules in `wordpress.json` |
-| `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
-| `refactor` | Auto-fix pass (PHPCBF + custom fixers) | `scripts/refactor.py` |
 | `format` | Post-write formatting | `scripts/format.sh` |
 
 It also declares a WordPress platform integration in `wordpress.json`:
@@ -40,7 +37,7 @@ homeboy test <component-id>
 homeboy lint <component-id>
 
 # Apply lint auto-fixes (PHPCBF + custom fixers)
-homeboy refactor <component-id>
+homeboy review lint <component-id> --fix
 
 # Production ZIP at <component>/build/<component-id>.zip
 homeboy build <component-id>
@@ -50,9 +47,6 @@ homeboy bench <component-id>
 
 # Run a scenario trace
 homeboy trace <component-id> --scenario <name>
-
-# Audit detector pass
-homeboy audit <component-id>
 ```
 
 ## Deploy hooks
@@ -279,7 +273,7 @@ exit code 1. Files are routed by extension:
 `phpcs.xml.dist` applies WordPress Coding Standards with PSR-4
 adjustments. Text domain is auto-detected from the plugin header. When
 PHPCS reports auto-fixable findings, the runner surfaces a CTA showing
-the exact `homeboy refactor` command to clean them up.
+the exact `homeboy review lint --fix` command to clean them up.
 
 #### Shared ruleset for consumers
 
@@ -966,42 +960,7 @@ Project-owned scenarios live under one of:
 
 Run with `homeboy trace <component-id> --scenario <name>`.
 
-## Audit runner
-
-`audit` applies the detector rule sets declared under the `audit` block
-of `wordpress.json` — lifecycle path globs, utility-suffix conventions,
-convention-exception globs, and convention tag globs (e.g. tagging
-`bootstrap.php` / `register-*.php` / `*-functions.php` as
-`wordpress:php-role:procedural-helper`). The extension's own smoke
-scripts under `tests/audit-*-smoke.sh` cover regressions in the rule set.
-
-### WP Codebox audit fan-out
-
-The canonical Homeboy mutation path is `homeboy refactor --from audit --write`;
-`audit` remains read-only. WordPress-owned WP Codebox fan-out helpers live under
-`scripts/agent/` so extension orchestration can turn a structured audit report
-into sandbox task requests without teaching Homeboy core about WordPress or WP
-Codebox.
-
-When Homeboy's generic extension refactor-source seam is enabled, the WordPress
-extension handles the audit source with:
-
-```bash
-homeboy refactor <component> \
-  --from audit \
-  --setting refactor.audit.extension=wordpress \
-  --setting provider=provider-slug \
-  --setting model=provider/model \
-  --setting provider_plugin_paths=/components/ai-provider-example \
-  --setting secret_env=PROVIDER_API_KEY
-```
-
-Generic audit fanout planning and reconcile mechanics live in
-`../runtime-agent-ci`. The WordPress extension does not select or execute an AI
-runtime for `homeboy refactor`; provider orchestration belongs to an explicit
-agent-task provider rather than the deterministic refactor hook.
-
-### WordPress runtime task planner
+## WordPress runtime task planner
 
 `lib/wordpress-runtime-task-planner.js` and
 `scripts/agent/homeboy-wordpress-runtime-task-plan.cjs` keep WordPress/Codebox/DLA
@@ -1121,7 +1080,7 @@ current platform's optional native packages before checking both the CLI and the
 | `HOMEBOY_SKIP_TESTS=1` | Skip PHPUnit |
 | `HOMEBOY_SKIP_PHPSTAN=1` | Critical-only PHPStan (still blocks runtime-fatal identifiers) |
 | `HOMEBOY_PHPSTAN_LEVEL=N` | One-off PHPStan level override |
-| `HOMEBOY_FIX_ONLY=1` | Lint runner fix-only mode (set automatically by `homeboy refactor`) |
+| `HOMEBOY_FIX_ONLY=1` | Lint runner fix-only mode (set automatically by `homeboy review lint --fix`) |
 | `HOMEBOY_SUMMARY_MODE=1` | Compact summary output |
 | `HOMEBOY_STEP=phpcs` / `HOMEBOY_SKIP=eslint` | Filter lint steps |
 | `HOMEBOY_LINT_FAIL_ON=errors\|warnings` | PHPCS gate severity (default `errors`: warnings reported but non-blocking; `warnings` restores legacy block-on-warning). ESLint already gates on errors only. |
@@ -1136,7 +1095,6 @@ current platform's optional native packages before checking both the CLI and the
 | PHPUnit (Playground or host-smoke) | **Blocks** |
 | `php -l` syntax check (build) | **Blocks** |
 | PSR-4 validation (build) | **Blocks** |
-| Audit detector findings | Advisory by default (depends on rule severity) |
 
 ## Repository layout
 
@@ -1153,7 +1111,6 @@ wordpress/
 │   └── commands/
 ├── lib/                      # Node helpers: request profiler, Playground HTTP readiness
 ├── scripts/
-│   ├── audit/                # Detector setup + WP test smells
 │   ├── bench/                # WP Codebox bench runner + result artifact helpers
 │   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
 │   ├── env/detect.sh         # component_env detector
@@ -1162,9 +1119,7 @@ wordpress/
 │   ├── test/                 # test-runner*.sh, parsers, smokes
 │   ├── trace/                # trace-runner.sh
 │   ├── validation/           # syntax / PSR-4 / dependency validators
-│   ├── fingerprint.sh
-│   ├── format.sh
-│   └── refactor.py
+│   └── format.sh
 ├── stubs/
 │   └── wordpress-api-overrides.stub.php
 ├── tests/                    # Extension's own smoke tests (NOT plugin tests)
@@ -1180,7 +1135,7 @@ wordpress/
 ## Requirements
 
 - **bash 4.0+** (macOS users: `brew install bash`; system bash 3.2 is rejected at runtime)
-- **PHP** — host PHP only required for the `host-smoke` backend, lint, build, and audit verbs. PHPUnit itself runs through WP Codebox.
+- **PHP** — host PHP only required for the `host-smoke` backend, lint, and build verbs. PHPUnit itself runs through WP Codebox.
 - **Node.js 18.12+** (WP Codebox tooling and ESLint)
 - **Composer** (PHP toolchain install)
 

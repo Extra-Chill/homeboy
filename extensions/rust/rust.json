@@ -59,11 +59,7 @@
     }
   ],
   "scripts": {
-    "fingerprint": "scripts/fingerprint.sh",
-    "refactor": "scripts/refactor.sh",
-    "format": "scripts/format.sh",
-    "compiler_warnings": "scripts/compiler-warnings.py",
-    "compiler_warning_fixes": "scripts/compiler-warning-fixes.py"
+    "format": "scripts/format.sh"
   },
   "env_provider": {
     "script": "scripts/env-provider.sh"
@@ -218,61 +214,6 @@
       "description": "Opt into passing -W clippy::all during Rust lint. By default the Rust extension runs cargo clippy with the toolchain's default lint set so warning-only toolchain drift does not block release gates."
     }
   ],
-  "audit": {
-    "feature_patterns": [
-      "#\\[derive\\(.*Subcommand.*\\)\\]\\s*(?:pub\\s+)?enum\\s+(\\w+)",
-      "#\\[command\\(name\\s*=\\s*\"([^\"]+)\"\\)\\]",
-      "pub struct (\\w+Args)\\s*\\{",
-      "#\\[derive\\(.*Serialize.*Deserialize.*\\)\\]\\s*(?:pub\\s+)?struct\\s+(\\w+Config)\\b",
-      "#\\[derive\\(.*Serialize.*Deserialize.*\\)\\]\\s*(?:pub\\s+)?struct\\s+(\\w+Manifest)\\b"
-    ],
-    "feature_labels": {
-      "Subcommand": "Subcommands",
-      "command\\(name": "CLI Commands",
-      "Args)\\s*\\{": "Command Arguments",
-      "Config)\\b": "Config Structures",
-      "Manifest)\\b": "Manifest Structures"
-    },
-    "feature_context": {
-      "Subcommand": { "doc_comment": true, "block_fields": true },
-      "Args)\\s*\\{": { "doc_comment": true, "block_fields": true },
-      "Config)\\b": { "doc_comment": true, "block_fields": true },
-      "Manifest)\\b": { "doc_comment": true, "block_fields": true }
-    },
-    "doc_targets": {
-      "Subcommands": {
-        "file": "cli-reference.md",
-        "heading": "## Subcommands",
-        "template": "### `{name}`\n\n{description}\n\n{fields}"
-      },
-      "CLI Commands": {
-        "file": "cli-reference.md",
-        "heading": "## Commands",
-        "template": "- `{name}` — {description}"
-      },
-      "Command Arguments": {
-        "file": "cli-reference.md",
-        "heading": "## Command Arguments",
-        "template": "### `{name}`\n\n{description}\n\n{fields}"
-      },
-      "Config Structures": {
-        "file": "architecture.md",
-        "heading": "## Configuration",
-        "template": "### `{name}`\n\n{description}\n\n{fields}"
-      },
-      "Manifest Structures": {
-        "file": "architecture.md",
-        "heading": "## Manifests",
-        "template": "### `{name}`\n\n{description}\n\n{fields}"
-      }
-    },
-    "detector_rules": {
-      "duplication_detector": {
-        "trivial_calls": ["var", "cfg", "not", "matches"],
-        "plumbing_calls": ["internal_io", "internal_unexpected", "internal_invariant"]
-      }
-    }
-  },
   "build": {
     "cleanup_paths": [
       "target"

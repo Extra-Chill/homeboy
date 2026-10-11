@@ -40,7 +40,6 @@
     }
   ],
   "scripts": {
-    "fingerprint": "scripts/fingerprint.sh",
     "format": "scripts/format.sh"
   },
   "build": {
@@ -73,34 +72,5 @@
     "command_template": "{{cliPath}} {{args}}",
     "working_dir_template": "{{sitePath}}",
     "default_cli_path": "go"
-  },
-  "audit": {
-    "feature_patterns": [
-      "func\\s+(\\w+)\\s*\\(",
-      "type\\s+(\\w+)\\s+struct\\s*\\{",
-      "type\\s+(\\w+)\\s+interface\\s*\\{"
-    ],
-    "feature_labels": {
-      "func\\s+": "Functions",
-      "struct\\s*\\{": "Structs",
-      "interface\\s*\\{": "Interfaces"
-    },
-    "doc_targets": {
-      "Functions": {
-        "file": "api-reference.md",
-        "heading": "## Functions",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Structs": {
-        "file": "api-reference.md",
-        "heading": "## Structs",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      },
-      "Interfaces": {
-        "file": "api-reference.md",
-        "heading": "## Interfaces",
-        "template": "- `{name}` — `{source_file}` (line {line})"
-      }
-    }
   }
 }
