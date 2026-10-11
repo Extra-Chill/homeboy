@@ -84,10 +84,6 @@ pub struct TracePublicPreviewSpec {
     /// Optional concurrent static-asset fanout check for public preview tunnels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_fanout: Option<TracePreviewAssetFanoutSpec>,
-
-    /// Homeboy-native preview tunnel settings used when `mode` is `homeboy_native`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<TraceNativePublicPreviewSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,33 +112,4 @@ pub struct TracePreviewAssetFanoutSpec {
 pub enum TracePublicPreviewMode {
     #[default]
     External,
-    HomeboyNative,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct TraceNativePublicPreviewSpec {
-    /// Deterministic public host reserved by the native preview ingress.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_host: Option<String>,
-
-    /// Operator-owned wildcard domain used to derive `{session}-tunnel.<domain>`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operator_domain: Option<String>,
-
-    /// Stable session ID used for host generation and native client metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-
-    /// Native preview ingress/broker URL consumed by `homeboy tunnel preview-client start`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress_url: Option<String>,
-
-    /// Environment variable name that supplies the native preview tunnel token.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_env: Option<String>,
-
-    /// Optional path to a Homeboy binary that implements the preview-client command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_binary: Option<String>,
 }

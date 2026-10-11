@@ -1456,7 +1456,6 @@ fn lab_command_availability_checks(homeboy_path: &str) -> Vec<String> {
         format!("{binary} --version"),
         format!("{binary} runner exec --help"),
         format!("{binary} runs artifact --help"),
-        format!("{binary} tunnel artifact-origin dom-boxes --help"),
         format!("{binary} fuzz --help"),
         format!("{binary} runs evidence --help"),
         format!("{binary} extension list"),

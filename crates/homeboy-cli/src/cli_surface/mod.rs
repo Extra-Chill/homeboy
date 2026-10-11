@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, control_plane, daemon,
     db, deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project,
     refactor, release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
-    stack, status, topology, trace, tunnel, upgrade, worktree,
+    stack, status, topology, trace, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -241,8 +241,6 @@ pub enum Commands {
     Runtime(runtime::RuntimeArgs),
     /// Manage component-backed task worktrees
     Worktree(worktree::WorktreeArgs),
-    /// Manage private service tunnel declarations
-    Tunnel(tunnel::TunnelArgs),
     /// Inspect declared resource relationships without resolving effective configuration
     Topology(topology::TopologyArgs),
     /// Inspect persisted observation runs, artifacts, and typed evidence projections

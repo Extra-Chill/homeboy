@@ -100,9 +100,6 @@ pub(crate) const EXTENSION_DEV_RUN_LAB_LABEL: &str = "extension dev-run";
 pub(crate) const EXTENSION_REFRESH_LAB_LABEL: &str = "extension refresh";
 pub(crate) const EXTENSION_UPDATE_LAB_LABEL: &str = "extension update";
 pub(crate) const WORKTREE_CLEANUP_LAB_LABEL: &str = "worktree cleanup";
-pub(crate) const TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL: &str = "tunnel preview-consumer run";
-pub(crate) const TUNNEL_SERVICE_EXPOSE_LAB_LABEL: &str = "tunnel service expose";
-pub(crate) const TUNNEL_SERVICE_START_LAB_LABEL: &str = "tunnel service start";
 
 impl CommandSpec {
     pub fn docs_path(&self) -> Option<String> {
@@ -360,24 +357,6 @@ const WORKTREE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSum
     hint_label: "worktree cleanup --runner <runner-id>",
 }];
 
-const TUNNEL_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
-    CommandLabSupportSummary {
-        contract_labels: &[TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL],
-        message_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-        hint_label: TUNNEL_PREVIEW_CONSUMER_RUN_LAB_LABEL,
-    },
-    CommandLabSupportSummary {
-        contract_labels: &[TUNNEL_SERVICE_EXPOSE_LAB_LABEL],
-        message_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-        hint_label: TUNNEL_SERVICE_EXPOSE_LAB_LABEL,
-    },
-    CommandLabSupportSummary {
-        contract_labels: &[TUNNEL_SERVICE_START_LAB_LABEL],
-        message_label: TUNNEL_SERVICE_START_LAB_LABEL,
-        hint_label: TUNNEL_SERVICE_START_LAB_LABEL,
-    },
-];
-
 const DEPLOY_DANGEROUS_FLAGS: &[&str] = &["--head", "--force"];
 const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
     "--apply",
@@ -455,15 +434,6 @@ const fn with_risk_exemption(
     CommandSafetySpec {
         risk_exemption: Some(risk_exemption),
         ..safety
-    }
-}
-
-/// Operator-gated but non-mutating: an explicit operator entry point that only
-/// renders a plan.
-const fn operator_read_only() -> CommandSafetySpec {
-    CommandSafetySpec {
-        operator: true,
-        ..CommandSafetySpec::read_only()
     }
 }
 
@@ -696,43 +666,6 @@ const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         &["reclaim"],
         operator_safety(None, &["--apply"]),
         "default output is a non-mutating reclaim plan naming claimed workspaces, released stale owner leases, and reclaimable bytes; pass --apply to remove reclaimable completed-loop workspaces (every removal is reaping-audited)",
-    ),
-];
-
-const TUNNEL_SERVICE_DECLARATION_PATHS: &[&str] =
-    &["service expose", "service set", "service remove"];
-const TUNNEL_PREVIEW_RUNTIME_PATHS: &[&str] = &[
-    "preview-client start",
-    "preview-consumer run",
-    "preview-ingress serve",
-    "artifact-origin serve",
-];
-
-const TUNNEL_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        TUNNEL_SERVICE_DECLARATION_PATHS,
-        operator_safety(None, &[]),
-        "mutates private service tunnel declarations",
-    ),
-    paths_safety(
-        &["service start", "service stop"],
-        operator_safety(None, &[]),
-        "mutates private service tunnel runtime state",
-    ),
-    paths_safety(
-        TUNNEL_PREVIEW_RUNTIME_PATHS,
-        operator_safety(None, &[]),
-        "starts or supervises tunnel preview runtime state",
-    ),
-    paths_safety(
-        &["preview-ingress route", "preview-ingress unroute"],
-        operator_safety(None, &[]),
-        "mutates preview ingress route state",
-    ),
-    paths_safety(
-        &["preview-ingress install"],
-        operator_read_only(),
-        "renders a non-destructive operator install plan",
     ),
 ];
 

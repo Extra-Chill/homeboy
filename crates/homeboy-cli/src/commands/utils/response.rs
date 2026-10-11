@@ -483,7 +483,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RigNotFound
         | ErrorCode::RunnerNotFound
         | ErrorCode::ScheduleNotFound
-        | ErrorCode::ServiceTunnelNotFound
         | ErrorCode::StackNotFound
         | ErrorCode::ProjectNoActive => 4,
 

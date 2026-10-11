@@ -118,8 +118,8 @@ pub use spec::{
 pub use spec::{
     ArtifactPostprocessSpec, BenchSpec, ComponentSpec, LabStackPrSpec, LabStackRef, LabStackSpec,
     PipelineStep, RigResourcesSpec, RigSpec, TraceDependencySpec, TraceExperimentSpec,
-    TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePreviewAssetFanoutSpec,
-    TraceProfileSpec, TracePublicPreviewSpec, TraceVariantSpec,
+    TraceGuardrailSpec, TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewSpec,
+    TraceVariantSpec,
 };
 pub use stack::RigStackSyncEntry;
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root

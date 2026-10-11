@@ -69,21 +69,4 @@ pub struct TracePreviewMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_id: Option<String>,
     pub cleanup_status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub public_host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingress_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_paths: Option<TracePreviewLogPaths>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TracePreviewLogPaths {
-    pub client_stdout_path: String,
-    pub client_stderr_path: String,
 }

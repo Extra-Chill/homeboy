@@ -265,8 +265,8 @@ fn render_visual_compare(out: &mut String, variant: &BrowserEvidenceVariantCompa
         let _ = writeln!(
             out,
             "- Note: visual-compare artifact paths are local/relative operator notes, not \
-             public URLs. Do not hand-build tunnel URLs from these names; resolve a \
-             reviewer-facing URL with `homeboy tunnel artifact-origin inspect --path <file>`."
+             public URLs. Do not hand-build public URLs from these names; cite the \
+             persisted run artifact instead."
         );
     }
     out.push('\n');

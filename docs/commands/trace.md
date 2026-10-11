@@ -162,8 +162,7 @@ assets reliably:
 
 The emitted preview metadata includes `asset_fanout.schema =
 homeboy/preview-asset-fanout/v1`, expected/client request totals, status counts,
-failure buckets, and request rows. Native tunnel integrations may also fill
-ingress and local-origin request counts when those counters are available.
+failure buckets, and request rows.
 
 Keep core fanout proof generic. Sample Runtime, WooCommerce, or other product-specific
 asset lists should live in their owning rig or extension and consume this

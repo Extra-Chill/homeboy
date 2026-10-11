@@ -350,12 +350,6 @@ pub(crate) fn rewrite_runner_resident_lab_offload_args(
     args: &[String],
     remote_output_file: Option<&str>,
 ) -> Vec<String> {
-    // A runner-side `tunnel service expose` should not require a separate
-    // server declaration for the selected runner: in that context the runner
-    // itself is the server (#4606). Drop the controller-side `--server` value
-    // and mark the runner-side declaration as runner-local instead.
-    let is_service_expose = is_tunnel_service_command(args, "expose");
-    let already_runner_local = args.iter().any(|arg| arg == "--runner-local");
     let mut stripped = Vec::with_capacity(args.len());
     let mut iter = args.iter().peekable();
     let mut passthrough = false;
@@ -410,28 +404,7 @@ pub(crate) fn rewrite_runner_resident_lab_offload_args(
         if arg.starts_with("--artifact-root=") {
             continue;
         }
-        if is_service_expose && arg == "--server" {
-            let _ = iter.next();
-            continue;
-        }
-        if is_service_expose && arg.starts_with("--server=") {
-            continue;
-        }
         stripped.push(arg.clone());
     }
-    if is_service_expose && !already_runner_local {
-        stripped.push("--runner-local".to_string());
-    }
     stripped
-}
-
-/// Returns true when `args` invoke `tunnel service <subcommand>`.
-fn is_tunnel_service_command(args: &[String], subcommand: &str) -> bool {
-    args.windows(3).any(|window| {
-        matches!(
-            window,
-            [first, second, third]
-                if first == "tunnel" && second == "service" && third == subcommand
-        )
-    })
 }

@@ -1526,7 +1526,7 @@ fn skeleton_duplicate_ignores_semantically_unrelated_names_sharing_a_backbone() 
         &[("out_of_order_span_message", "6:skelSAME")],
     );
     let fp2 = make_fingerprint_with_skeleton(
-        "crates/homeboy-tunnel/src/preview_ingress/install.rs",
+        "crates/homeboy-deploy/src/install.rs",
         &["install_check_name"],
         &[("install_check_name", "structuralBBB")],
         &[("install_check_name", "6:skelSAME")],

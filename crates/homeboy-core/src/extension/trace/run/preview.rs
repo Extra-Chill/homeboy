@@ -9,13 +9,11 @@ use super::types::TraceRunWorkflowArgs;
 
 pub(super) fn start_trace_public_preview(
     args: &mut TraceRunWorkflowArgs,
-    run_dir: &RunDir,
 ) -> Result<Option<TracePublicPreviewSession>> {
     let Some(spec) = args.runner_inputs.public_preview.clone() else {
         return Ok(None);
     };
-    let artifact_dir = run_dir.path().join("artifacts");
-    let session = TracePublicPreviewSession::start_with_artifact_dir(&spec, Some(&artifact_dir))?;
+    let session = TracePublicPreviewSession::start(&spec)?;
     args.runner_inputs.env.extend(session.env_vars()?);
     Ok(Some(session))
 }

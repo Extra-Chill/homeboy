@@ -606,7 +606,7 @@ pub trait ConfigEntity: Serialize + DeserializeOwned {
     ///
     /// This is the *only* validation hook on this trait, and that is the point.
     /// Implementations routinely read *other* entities — `Project` probes its
-    /// server, `Runner` loads its server, `ServiceTunnel` probes its server —
+    /// server, `Runner` loads its server —
     /// and those reads have to land in the same home as the write they are
     /// guarding. An ambient `validate()` sibling would be overridable, and an
     /// entity that overrode only the ambient spelling would have its rules
@@ -705,8 +705,8 @@ fn entity_metadata<T: ConfigEntity>() -> ConfigEntityMetadata {
     }
 }
 
-/// Config-entity types registered by feature layers above core (e.g. the tunnel
-/// crate registers `ServiceTunnel`, the runner crate registers `Runner`). Core
+/// Config-entity types registered by feature layers above core (e.g. the
+/// runner crate registers `Runner`). Core
 /// owns the entity types it defines itself; optional feature crates register
 /// theirs at startup so core's cross-entity ID/alias collision checks stay
 /// complete without core having to depend on those feature crates.

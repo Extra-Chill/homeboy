@@ -7,9 +7,6 @@
 //! through this path are re-exported here, so the list stays honest instead of
 //! mirroring every artifact type in core.
 
-pub use super::artifact_dom_boxes::{
-    capture as capture_dom_boxes, DomBoxCaptureSpec, DomBoxReport,
-};
 pub use super::artifact_links::{
     cached_validated_viewer_links, public_artifact_path_url, public_artifact_url,
     public_artifact_url_is_reachable_or_legacy, PUBLIC_ARTIFACT_BASE_URL_ENV,
@@ -22,10 +19,6 @@ pub use super::artifact_manifest::{
     RUN_ARTIFACT_EVENTS_FILE, RUN_ARTIFACT_FANOUT_RUN_FILE, RUN_ARTIFACT_LOOP_POLICY_FILE,
     RUN_ARTIFACT_LOOP_RESULT_FILE, RUN_ARTIFACT_OUTCOME_FILE, RUN_ARTIFACT_RESULTS_FILE,
     RUN_ARTIFACT_STATUS_FILE,
-};
-pub use super::artifact_origin::{
-    inspect, serve, serve_listener, status, status_with_command, ArtifactOriginInspect,
-    ArtifactOriginServeSpec, ArtifactOriginStatus,
 };
 pub use super::artifact_postprocess::{
     record_artifact_postprocess_outputs, run_artifact_postprocess_plan_for_persisted_root,

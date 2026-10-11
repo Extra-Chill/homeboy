@@ -683,7 +683,6 @@ fn required_secret_categories(hot_label: &str) -> Vec<String> {
     match hot_label {
         label if label.starts_with("agent-task") => vec!["agent_task".to_string()],
         "trace" => vec!["trace".to_string()],
-        label if label.starts_with("tunnel") => vec!["tunnel".to_string()],
         _ => Vec::new(),
     }
 }
@@ -1582,52 +1581,6 @@ mod tests {
         .expect_err("wrong agent-task secret handoff name must fail");
         assert_eq!(err.details["field"], "runner_workload.required_secrets");
         assert!(err.message.contains("AGENT_TASK_SECRET"));
-    }
-
-    #[test]
-    fn lab_runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
-        let plan = plan();
-        let mut command = command();
-        command.hot_label = "tunnel preview-client start";
-        let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: true,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        workload.required_secrets.secret_env_plan = secret_plan(&["HOMEBOY_PREVIEW_TUNNEL_TOKEN"]);
-
-        let err = validate_lab_runner_workload_dispatch(
-            Some(&workload),
-            "lab-a",
-            Some("/srv/homeboy/work"),
-            &[
-                "homeboy".to_string(),
-                "tunnel".to_string(),
-                "preview-client".to_string(),
-                "start".to_string(),
-                "--ingress".to_string(),
-                "https://preview-broker.example.test".to_string(),
-                "--public-host".to_string(),
-                "preview.example.test".to_string(),
-                "--local-origin".to_string(),
-                "http://127.0.0.1:8888".to_string(),
-            ],
-            &SecretEnvPlan::default(),
-            true,
-        )
-        .expect_err("missing implicit tunnel secret handoff name must fail");
-        assert_eq!(err.details["field"], "runner_workload.required_secrets");
-        assert!(err.message.contains("HOMEBOY_PREVIEW_TUNNEL_TOKEN"));
     }
 
     #[test]

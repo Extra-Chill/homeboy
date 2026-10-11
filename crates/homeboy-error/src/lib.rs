@@ -122,7 +122,6 @@ pub enum ErrorCode {
     RunnerWorkspaceOwnershipConflict,
     BrokerAuthDenied,
     ScheduleNotFound,
-    ServiceTunnelNotFound,
     RigPipelineFailed,
     RigServiceFailed,
     RigResourceConflict,
@@ -198,7 +197,6 @@ impl ErrorCode {
             ErrorCode::RunnerWorkspaceOwnershipConflict => "runner.workspace_ownership_conflict",
             ErrorCode::BrokerAuthDenied => "broker.auth_denied",
             ErrorCode::ScheduleNotFound => "schedule.not_found",
-            ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
@@ -267,7 +265,6 @@ impl ErrorCode {
             "runner.workspace_ownership_conflict" => Self::RunnerWorkspaceOwnershipConflict,
             "broker.auth_denied" => Self::BrokerAuthDenied,
             "schedule.not_found" => Self::ScheduleNotFound,
-            "service_tunnel.not_found" => Self::ServiceTunnelNotFound,
             "rig.pipeline_failed" => Self::RigPipelineFailed,
             "rig.service_failed" => Self::RigServiceFailed,
             "rig.resource_conflict" => Self::RigResourceConflict,
@@ -1297,15 +1294,6 @@ impl Error {
 
     pub fn schedule_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
         Self::entity_not_found(ErrorCode::ScheduleNotFound, "Schedule", id, suggestions)
-    }
-
-    pub fn service_tunnel_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
-        Self::entity_not_found(
-            ErrorCode::ServiceTunnelNotFound,
-            "Tunnel service",
-            id,
-            suggestions,
-        )
     }
 
     pub fn stack_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
