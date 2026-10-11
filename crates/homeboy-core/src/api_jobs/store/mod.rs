@@ -647,6 +647,20 @@ impl JobStore {
         sql_store::export_legacy_snapshot(path)
     }
 
+    /// Replace the whole durable store with a legacy-shaped document. Test
+    /// fixtures use this to tamper with persisted state now that the store is
+    /// no longer a file they can edit directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn replace_with_legacy_snapshot_at_path(path: &Path, bytes: &[u8]) -> Result<()> {
+        let mut durable: DurableJobStore = serde_json::from_slice(bytes)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        sql_store::commit_sql_store(
+            path,
+            &mut durable,
+            &Mutex::new(SqlSyncState::default()),
+        )
+    }
+
     /// Count non-terminal jobs without opening or reconciling the durable store.
     ///
     /// Daemon status runs in a separate CLI process, so using [`Self::open`]

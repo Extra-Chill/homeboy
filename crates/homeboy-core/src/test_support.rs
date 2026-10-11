@@ -20,6 +20,18 @@ use crate::api_jobs::{
 use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
 use crate::error::{Error, Result};
 
+/// The durable daemon job store at `path` in its legacy `jobs.json` document
+/// shape. Fixtures compare these bytes to prove a read did not mutate state.
+pub fn durable_job_store_snapshot(path: &Path) -> Result<Vec<u8>> {
+    JobStore::export_legacy_snapshot_at_path(path)
+}
+
+/// Replace the durable daemon job store at `path` with a legacy-shaped
+/// document, for fixtures that tamper with persisted job state.
+pub fn replace_durable_job_store(path: &Path, bytes: &[u8]) -> Result<()> {
+    JobStore::replace_with_legacy_snapshot_at_path(path, bytes)
+}
+
 pub fn save_test_server(id: &str, host: &str) -> Result<()> {
     crate::server::save(&crate::server::Server {
         id: id.to_string(),

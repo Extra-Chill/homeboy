@@ -644,13 +644,13 @@ mod tests {
                 .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
                 .unwrap();
             let restarted = harness.reopen(&path, "replacement-lease").unwrap();
-            let before = std::fs::read(&path).unwrap();
+            let before = homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap();
             let evidence = restarted
                 .store()
                 .active_daemon_job_recovery_evidence(None, |_| false);
             assert_eq!(evidence[0].disposition, Disposition::ProtectedLive);
             assert_eq!(evidence[0].child_pid, Some(child.pid()));
-            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(), before);
             assert_eq!(
                 restarted
                     .store()

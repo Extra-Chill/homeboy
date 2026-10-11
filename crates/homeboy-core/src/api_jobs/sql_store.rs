@@ -758,7 +758,11 @@ pub(super) fn export_legacy_snapshot(path: &Path) -> Result<Vec<u8>> {
             durable
                 .jobs
                 .sort_by_key(|stored| (stored.job.created_at_ms, stored.job.id));
-            serde_json::to_vec_pretty(&durable)
+            // Submission maps are HashMaps; route through a Value so object
+            // keys serialize sorted and equal stores yield identical bytes.
+            let value = serde_json::to_value(&durable)
+                .map_err(|error| serialize_error(error, "daemon job store snapshot"))?;
+            serde_json::to_vec_pretty(&value)
                 .map_err(|error| serialize_error(error, "daemon job store snapshot"))
         }
         None => Ok(b"{\"jobs\":[]}".to_vec()),

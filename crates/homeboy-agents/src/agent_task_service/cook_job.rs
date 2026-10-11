@@ -1590,7 +1590,7 @@ mod tests {
                     .find(|item| item.job_id == harness.job().unwrap().id)
                     .unwrap()
             };
-            let before = std::fs::read(&path).unwrap();
+            let before = homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap();
             assert_eq!(
                 read().disposition,
                 Disposition::ProtectedLive,
@@ -1598,7 +1598,7 @@ mod tests {
             );
             assert_eq!(read().child_pid, Some(child.pid()));
             assert_eq!(
-                std::fs::read(&path).unwrap(),
+                homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(),
                 before,
                 "status must not persist"
             );
@@ -1645,13 +1645,13 @@ mod tests {
 
             checkpoint["work_version"] = json!(999);
             harness.handle().checkpoint(checkpoint).unwrap();
-            let before = std::fs::read(&path).unwrap();
+            let before = homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap();
             assert_eq!(
                 read().disposition,
                 Disposition::BlockingAmbiguous,
                 "missing handler is not death evidence"
             );
-            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap(), before);
             assert_eq!(
                 harness
                     .store()
@@ -1888,9 +1888,9 @@ mod tests {
             // A lost driver generation cannot fall back to the linked attempt
             // and erase an opaque checkpoint's still-live execution owner.
             let mut durable: Value =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                serde_json::from_slice(&homeboy_core::test_support::durable_job_store_snapshot(&path).unwrap()).unwrap();
             durable["jobs"][0]["controller_job"]["version"] = json!(999);
-            std::fs::write(&path, serde_json::to_vec(&durable).unwrap()).unwrap();
+            homeboy_core::test_support::replace_durable_job_store(&path, &serde_json::to_vec(&durable).unwrap()).unwrap();
             let unavailable = harness.reopen(&path, "replacement-lease").unwrap();
             let evidence = unavailable
                 .store()
