@@ -25,6 +25,10 @@ pub const RUNNER_JOB_EXECUTION_CONTEXT_EVIDENCE_SCHEMA: &str =
 pub const RUNNER_JOB_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_ID";
 pub const RUNNER_CHILD_RESERVATION_ENV: &str = "HOMEBOY_RUNNER_CHILD_RESERVATION";
 pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID";
+/// Build identity of the daemon that spawned a direct child. The child reads
+/// the daemon's durable job store, whose on-disk format is build-specific, so a
+/// child from any other build must refuse before it reads that store.
+pub const DAEMON_CHILD_BUILD_IDENTITY_ENV: &str = "HOMEBOY_DAEMON_CHILD_BUILD_IDENTITY";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
 /// The daemon spawns a local child before it durably records the child's
 /// process identity, so the child waits (bounded) for that commit instead of
@@ -386,6 +390,12 @@ impl RunnerJobExecutionContext {
         let job_id = uuid::Uuid::parse_str(&runner_job_id).map_err(|_| {
             rejected("daemon child runner job identity is not a valid durable job id")
         })?;
+        verify_daemon_child_build(
+            std::env::var(DAEMON_CHILD_BUILD_IDENTITY_ENV)
+                .ok()
+                .as_deref(),
+            &crate::build_identity::current().display,
+        )?;
         let jobs_file = crate::paths::daemon_jobs_file()?;
         let deadline = std::time::Instant::now() + DAEMON_CHILD_IDENTITY_WAIT;
         let evidence = loop {
@@ -554,6 +564,39 @@ fn context_id(dispatch_receipt: &str) -> String {
     )
 }
 
+/// A direct daemon child must be the daemon's own build: the two share a
+/// durable store whose format changes between releases (jobs.json became
+/// SQLite in 0.418.0). A skewed child would otherwise open a store the daemon
+/// never wrote and fail with a misleading "job not found". A daemon that
+/// predates the stamp sets no value; that child proceeds as before.
+fn verify_daemon_child_build(daemon_build: Option<&str>, child_build: &str) -> Result<()> {
+    let Some(daemon_build) = daemon_build
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    if daemon_build == child_build {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "runner execution context rejected: daemon child build skew: daemon is `{daemon_build}`, child is `{child_build}`"
+        ),
+        serde_json::json!({
+            "phase": "runner_job_execution_context",
+            "reason": "daemon_child_build_skew",
+            "daemon_build_identity": daemon_build,
+            "child_build_identity": child_build,
+        }),
+    )
+    .with_hint(
+        "The daemon launched a Homeboy child from a different binary. Refresh the runner's configured Homeboy binary and reconnect it so the daemon and its children are one build."
+            .to_string(),
+    ))
+}
+
 pub(crate) fn rejected(reason: &str) -> Error {
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
@@ -570,6 +613,36 @@ mod tests {
         LocalChildStartDiscriminator, LocalRunnerJob, RunnerJobLifecycleMetadata,
     };
     use crate::test_support::{with_isolated_home, EnvVarGuard};
+
+    #[test]
+    fn daemon_child_of_same_build_or_unstamped_daemon_is_accepted() {
+        verify_daemon_child_build(Some("homeboy 0.418.0+abc"), "homeboy 0.418.0+abc")
+            .expect("same build");
+        verify_daemon_child_build(None, "homeboy 0.418.0+abc").expect("pre-stamp daemon");
+        verify_daemon_child_build(Some("  "), "homeboy 0.418.0+abc").expect("blank stamp");
+    }
+
+    #[test]
+    fn daemon_child_of_another_build_is_rejected_with_named_skew() {
+        let error = verify_daemon_child_build(Some("homeboy 0.418.0+new"), "homeboy 0.417.20+old")
+            .expect_err("skewed child must refuse");
+
+        assert!(
+            error.message.contains("daemon child build skew"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("job not found"));
+        assert_eq!(error.details["reason"], "daemon_child_build_skew");
+        assert_eq!(
+            error.details["daemon_build_identity"],
+            "homeboy 0.418.0+new"
+        );
+        assert_eq!(
+            error.details["child_build_identity"],
+            "homeboy 0.417.20+old"
+        );
+    }
 
     #[test]
     fn local_context_is_explicit_and_never_nullable() {
