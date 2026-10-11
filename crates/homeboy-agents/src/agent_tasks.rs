@@ -380,10 +380,10 @@ pub mod scheduler {
 /// Secret-env mapping and resolution helpers.
 pub mod secrets {
     pub use super::super::agent_task_secrets::{
-        legacy_secrets_file, map_secret_to_env, map_secret_to_keychain_bundle,
-        remove_secret_mapping, resolve_secret_env, resolve_secret_env_with_fallbacks,
-        secret_env_status, secret_env_status_for_scopes, secret_env_status_with_fallbacks,
-        set_config_secret, set_keychain_bundle, set_keychain_secret, AgentTaskSecretEnvStatus,
+        map_secret_to_env, map_secret_to_keychain_bundle, remove_secret_mapping,
+        resolve_secret_env, resolve_secret_env_with_fallbacks, secret_env_status,
+        secret_env_status_for_scopes, secret_env_status_with_fallbacks, set_config_secret,
+        set_keychain_bundle, set_keychain_secret, AgentTaskSecretEnvStatus,
     };
 }
 

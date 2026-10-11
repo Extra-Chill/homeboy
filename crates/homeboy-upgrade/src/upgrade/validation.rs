@@ -324,12 +324,11 @@ mod tests {
             recovery_commands: Vec::new(),
         };
         assert!(unit("controller", "stale").blocks_convergence());
-        assert!(unit("legacy", "stale").blocks_convergence());
         assert!(unit("controller", "pending").blocks_convergence());
-        assert!(unit("legacy", "unknown").blocks_convergence());
+        assert!(unit("controller", "unknown").blocks_convergence());
         assert!(!unit("other_controller", "stale").blocks_convergence());
         assert!(!unit("controller", "current").blocks_convergence());
         assert!(!unit("controller", "refreshed").blocks_convergence());
-        assert!(!unit("legacy", "inactive").blocks_convergence());
+        assert!(!unit("controller", "inactive").blocks_convergence());
     }
 }

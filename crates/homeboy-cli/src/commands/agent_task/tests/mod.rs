@@ -6,7 +6,6 @@
 
 mod support;
 
-mod auth;
 mod contract;
 mod controller_proof;
 mod controller_run;

@@ -1,10 +1,9 @@
 //! Runner-service binary convergence (#15733).
 //!
 //! A runner host can run the Lab daemon from systemd user units: one scoped
-//! unit per controller (`runner service install`) plus, on hosts installed
-//! before controller scoping (#15160), one unscoped legacy unit. Each unit
-//! executes a stable link into an immutable `_homeboy_binaries` slot, so
-//! upgrading the runner's configured binary does not change what a unit runs.
+//! unit per controller (`runner service install`). Each unit executes a
+//! stable link into an immutable `_homeboy_binaries` slot, so upgrading the
+//! runner's configured binary does not change what a unit runs.
 //!
 //! The runner-side `homeboy upgrade` owns neither those slots nor the units,
 //! so the owner of a unit's binary is the controller-side runner convergence:
@@ -118,34 +117,6 @@ fn attach_recovery(runner_id: &str, homeboy_path: &str, entry: &mut RunnerServic
             "homeboy runner refresh-homeboy {runner} --select {} --reconnect",
             shell_arg(homeboy_path)
         )],
-        // No controller owns the unscoped unit, so nothing repoints it. Retire
-        // it once its daemon is drained; scoped units replace it.
-        "legacy" => {
-            if !entry
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("legacy"))
-            {
-                let detail = entry.reason.take().unwrap_or_default();
-                entry.reason = Some(format!(
-                    "{detail}; legacy unscoped unit predates controller-scoped runner services and no controller refreshes it"
-                ));
-            }
-            vec![
-                format!(
-                    "homeboy runner exec {runner} -- sh -c {}",
-                    shell_arg(&format!(
-                        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/{}/primary\" {} daemon status",
-                        homeboy_core::paths::sanitize_path_segment(runner_id),
-                        shell_arg(&entry.binary),
-                    ))
-                ),
-                format!(
-                    "homeboy runner exec {runner} -- systemctl --user disable --now {}",
-                    shell_arg(&entry.unit)
-                ),
-            ]
-        }
         _ => Vec::new(),
     };
 }
@@ -500,13 +471,11 @@ mod tests {
     use super::*;
 
     const OWN: &str = "homeboy-runner-homeboy-lab-own.service";
-    const LEGACY: &str = "homeboy-runner-homeboy-lab.service";
     const OTHER: &str = "homeboy-runner-homeboy-lab-other.service";
 
     fn scope(unit: &str) -> Option<&'static str> {
         match unit {
             OWN => Some("controller"),
-            LEGACY => Some("legacy"),
             OTHER => Some("other_controller"),
             _ => None,
         }
@@ -556,51 +525,6 @@ mod tests {
         panic!("a non-stale or unowned unit must not be refreshed")
     }
 
-    /// #15733 defect 2: the legacy unscoped unit still ran 0.395.1 while the
-    /// controller reported `runners.status=converged`. A stale in-scope service
-    /// binary must keep the runner out of `converged` and name the unit.
-    #[test]
-    fn stale_legacy_unit_blocks_convergence_with_remediation() {
-        let entry = converge_runner_service_binaries(
-            &runner(false),
-            converged_entry("homeboy-lab", "0.417.15"),
-            &mut |_| Ok(vec![unit(LEGACY, "0.395.1"), unit(OTHER, "0.399.21")]),
-            &scope,
-            OWN,
-            &mut never_refresh,
-        );
-
-        assert!(!entry.success, "{entry:?}");
-        assert_eq!(entry.exit_code, 1);
-        let drift = entry.path_drift.as_deref().unwrap();
-        assert!(drift.contains(LEGACY), "{drift}");
-        assert!(drift.contains("0.395.1"), "{drift}");
-        let legacy = entry
-            .service_binaries
-            .iter()
-            .find(|unit| unit.unit == LEGACY)
-            .unwrap();
-        assert_eq!(legacy.status, "stale");
-        assert_eq!(legacy.running_version.as_deref(), Some("0.395.1"));
-        assert!(legacy
-            .recovery_commands
-            .iter()
-            .any(|command| command.contains("disable --now") && command.contains(LEGACY)));
-        assert!(entry
-            .recovery_commands
-            .iter()
-            .any(|command| command.contains(LEGACY)));
-        // Another controller's stale unit is reported but not ours to converge.
-        let other = entry
-            .service_binaries
-            .iter()
-            .find(|unit| unit.unit == OTHER)
-            .unwrap();
-        assert_eq!(other.status, "stale");
-        assert!(!other.blocks_convergence());
-        assert!(other.recovery_commands.is_empty());
-    }
-
     #[test]
     fn only_other_controllers_stale_units_leave_the_runner_converged() {
         let entry = converge_runner_service_binaries(
@@ -615,11 +539,16 @@ mod tests {
         assert!(entry.success);
         assert!(entry.path_drift.is_none());
         assert_eq!(entry.service_binaries.len(), 1);
+        // Another controller's stale unit is reported but not ours to converge.
+        let other = &entry.service_binaries[0];
+        assert_eq!(other.status, "stale");
+        assert!(!other.blocks_convergence());
+        assert!(other.recovery_commands.is_empty());
     }
 
     #[test]
     fn stale_running_process_with_current_link_is_still_stale() {
-        let mut observed = unit(LEGACY, "0.417.15");
+        let mut observed = unit(OWN, "0.417.15");
         observed.running_version = Some("homeboy 0.395.1+5171701".to_string());
         let services =
             classify_service_binaries("homeboy-lab", "/b", &[observed], &scope, "0.417.15");
@@ -629,7 +558,7 @@ mod tests {
 
     #[test]
     fn inactive_units_do_not_block_and_unversioned_active_units_do() {
-        let mut inactive = unit(LEGACY, "0.395.1");
+        let mut inactive = unit(OWN, "0.395.1");
         inactive.active_state = Some("inactive".to_string());
         let mut unversioned = unit(OWN, "0.417.15");
         unversioned.binary_version = None;
@@ -753,7 +682,12 @@ mod tests {
             &runners,
             vec![converged_entry("homeboy-lab", "0.417.15")],
             Vec::new(),
-            &mut |_| Ok(vec![unit("homeboy-runner-homeboy-lab.service", "0.395.1")]),
+            &mut |_| {
+                Ok(vec![unit(
+                    &crate::connection::runner_service_unit_name("homeboy-lab"),
+                    "0.395.1",
+                )])
+            },
             &mut never_refresh,
         );
         assert!(updated.is_empty());
@@ -774,7 +708,7 @@ mod tests {
                 probed.push((runner.id.clone(), path.to_string()));
                 Ok(Some("homeboy 0.417.15+708e00a".to_string()))
             },
-            &mut |_| Ok(vec![unit(LEGACY, "0.395.1"), unit(OWN, "0.417.15")]),
+            &mut |_| Ok(vec![unit(OTHER, "0.395.1"), unit(OWN, "0.417.14")]),
             &scope,
         );
 
@@ -787,20 +721,23 @@ mod tests {
         );
         assert_eq!(check.selected_binary_version.as_deref(), Some("0.417.15"));
         assert_eq!(check.selected_binary_status, "current");
-        assert!(!check.converged, "a stale legacy unit is not converged");
-        let legacy = check
+        assert!(!check.converged, "a stale own unit is not converged");
+        let other = check
             .service_binaries
             .iter()
-            .find(|unit| unit.unit == LEGACY)
+            .find(|unit| unit.unit == OTHER)
             .unwrap();
-        assert_eq!(legacy.status, "stale");
-        assert_eq!(legacy.running_version.as_deref(), Some("0.395.1"));
+        assert_eq!(other.status, "stale");
+        assert_eq!(other.running_version.as_deref(), Some("0.395.1"));
+        assert!(!other.blocks_convergence());
         let own = check
             .service_binaries
             .iter()
             .find(|unit| unit.unit == OWN)
             .unwrap();
-        assert_eq!(own.status, "current");
+        assert_eq!(own.status, "stale");
+        assert_eq!(own.running_version.as_deref(), Some("0.417.14"));
+        assert!(own.blocks_convergence());
     }
 
     #[test]

@@ -445,19 +445,11 @@ pub(crate) struct ServiceUnitObservation {
     pub active_state: Option<String>,
 }
 
-/// The pre-controller-scoping unit name (#15160 introduced scoped units). No
-/// controller repoints or restarts it, so upgrades must report it.
-pub(crate) fn legacy_service_unit_name(runner_id: &str) -> String {
-    format!(
-        "homeboy-runner-{}.service",
-        paths::sanitize_path_segment(runner_id)
-    )
-}
-
 /// Classify a unit against this runner's naming: this controller's scoped
-/// unit, the unscoped legacy unit, another controller's scoped unit, or `None`
-/// for a unit that belongs to a different runner whose id merely shares a
-/// prefix.
+/// unit, another controller's scoped unit, or `None` for any other unit. That
+/// includes a unit for a different runner whose id merely shares a prefix and
+/// an unscoped `homeboy-runner-<runner>.service`, which Homeboy no longer
+/// manages.
 pub(crate) fn service_unit_scope(runner_id: &str, unit: &str) -> Option<&'static str> {
     service_unit_scope_for(runner_id, &controller_id(), unit)
 }
@@ -469,9 +461,6 @@ fn service_unit_scope_for(
 ) -> Option<&'static str> {
     if unit == service_unit_name_for(runner_id, controller_id) {
         return Some("controller");
-    }
-    if unit == legacy_service_unit_name(runner_id) {
-        return Some("legacy");
     }
     let scoped = unit
         .strip_prefix(&format!(
@@ -486,14 +475,15 @@ fn service_unit_scope_for(
         .then_some("other_controller")
 }
 
-/// Read-only shell that lists every Homeboy runner unit for `runner_id` with
+/// Read-only shell that lists every controller-scoped runner unit for
+/// `runner_id` with
 /// the binary its `ExecStart` runs, that binary's version, the version of the
 /// executable the main process is running, and the unit's active state. It
 /// never starts, stops, reloads, or rewrites anything.
 pub(crate) fn service_inventory_script(runner_id: &str) -> String {
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
-for unit_path in "$unit_dir"/homeboy-runner-{segment}.service "$unit_dir"/homeboy-runner-{segment}-*.service; do
+for unit_path in "$unit_dir"/homeboy-runner-{segment}-*.service; do
   [ -f "$unit_path" ] || continue
   unit=$(basename "$unit_path")
   exec_line=$(sed -n 's/^ExecStart=//p' "$unit_path" | tail -n 1)
@@ -1153,11 +1143,12 @@ mod tests {
         )));
     }
 
-    /// #15733: the inventory sees the legacy unscoped unit and every scoped
-    /// unit, resolves `%h` in `ExecStart`, reads each binary's version, and
-    /// never invokes a mutating systemctl verb.
+    /// #15733: the inventory sees every scoped unit, resolves `%h` in
+    /// `ExecStart`, reads each binary's version, and never invokes a mutating
+    /// systemctl verb. An unscoped `homeboy-runner-<runner>.service` is not a
+    /// Homeboy-managed unit and is not inventoried.
     #[test]
-    fn service_inventory_reports_legacy_and_scoped_unit_binaries_read_only() {
+    fn service_inventory_reports_scoped_unit_binaries_read_only() {
         let home = tempfile::tempdir().expect("home");
         let unit_dir = home.path().join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).unwrap();
@@ -1167,22 +1158,22 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         };
-        let legacy_slot = fake_binary("slot-legacy", "0.395.1+5171701906f7");
+        let unscoped_slot = fake_binary("slot-unscoped", "0.395.1+5171701906f7");
         let own_slot = fake_binary("slot-own", "0.417.15+708e00a1d439");
-        let legacy_link = home
+        let unscoped_link = home
             .path()
             .join(".local/share/homeboy/runner-service/homeboy-lab/homeboy");
-        std::fs::create_dir_all(legacy_link.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&legacy_slot, &legacy_link).unwrap();
+        std::fs::create_dir_all(unscoped_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&unscoped_slot, &unscoped_link).unwrap();
         let own_link = home
             .path()
             .join(service_binary_link_for("homeboy-lab", "controller-a"));
         std::fs::create_dir_all(own_link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&own_slot, &own_link).unwrap();
 
-        let legacy_unit = legacy_service_unit_name("homeboy-lab");
+        let unscoped_unit = "homeboy-runner-homeboy-lab.service";
         std::fs::write(
-            unit_dir.join(&legacy_unit),
+            unit_dir.join(unscoped_unit),
             "[Service]\nExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/homeboy daemon serve --addr 127.0.0.1:0\n",
         )
         .unwrap();
@@ -1221,24 +1212,17 @@ mod tests {
         );
         let observed = parse_service_inventory(&String::from_utf8_lossy(&output.stdout));
 
-        assert_eq!(observed.len(), 2, "{observed:?}");
-        let legacy = observed
-            .iter()
-            .find(|unit| unit.unit == legacy_unit)
-            .unwrap();
-        assert_eq!(legacy.binary, legacy_link.display().to_string());
-        assert_eq!(
-            legacy.binary_version.as_deref(),
-            Some("homeboy 0.395.1+5171701906f7")
-        );
-        assert_eq!(legacy.running_version, None);
-        assert_eq!(legacy.active_state.as_deref(), Some("active"));
-        let own = observed.iter().find(|unit| unit.unit == own_unit).unwrap();
+        assert_eq!(observed.len(), 1, "{observed:?}");
+        assert!(observed.iter().all(|unit| unit.unit != unscoped_unit));
+        let own = &observed[0];
+        assert_eq!(own.unit, own_unit);
         assert_eq!(own.binary, own_link.display().to_string());
         assert_eq!(
             own.binary_version.as_deref(),
             Some("homeboy 0.417.15+708e00a1d439")
         );
+        assert_eq!(own.running_version, None);
+        assert_eq!(own.active_state.as_deref(), Some("active"));
 
         let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
         for verb in [
@@ -1259,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn service_unit_scope_distinguishes_own_legacy_other_controllers_and_other_runners() {
+    fn service_unit_scope_distinguishes_own_other_controllers_and_unmanaged_units() {
         let own = service_unit_name_for("homeboy-lab", "controller-a");
         let other = service_unit_name_for("homeboy-lab", "controller-b");
         let other_runner = service_unit_name_for("homeboy-lab-2", "controller-a");
@@ -1273,7 +1257,8 @@ mod tests {
                 "controller-a",
                 "homeboy-runner-homeboy-lab.service"
             ),
-            Some("legacy")
+            None,
+            "an unscoped runner unit is not Homeboy-managed"
         );
         assert_eq!(
             service_unit_scope_for("homeboy-lab", "controller-a", &other),
@@ -1317,11 +1302,11 @@ mod tests {
     fn repoint_migration_enables_and_restarts_only_the_scoped_unit() {
         let home = tempfile::tempdir().expect("home");
         let scoped = service_unit_name_for("homeboy-lab", "controller-b");
-        let legacy = "homeboy-runner-homeboy-lab.service";
+        let unscoped = "homeboy-runner-homeboy-lab.service";
         let unit_dir = home.path().join(".config/systemd/user");
         std::fs::create_dir_all(&unit_dir).unwrap();
-        let legacy_path = unit_dir.join(legacy);
-        std::fs::write(&legacy_path, "legacy unit owned elsewhere\n").unwrap();
+        let unscoped_path = unit_dir.join(unscoped);
+        std::fs::write(&unscoped_path, "unmanaged unit owned elsewhere\n").unwrap();
 
         let bin_dir = home.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -1352,12 +1337,12 @@ mod tests {
 
         assert!(unit_dir.join(&scoped).exists());
         assert_eq!(
-            std::fs::read_to_string(&legacy_path).unwrap(),
-            "legacy unit owned elsewhere\n"
+            std::fs::read_to_string(&unscoped_path).unwrap(),
+            "unmanaged unit owned elsewhere\n"
         );
         let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
         assert!(commands.contains(&format!("enable {scoped}")));
         assert!(commands.contains(&format!("restart {scoped}")));
-        assert!(!commands.contains(legacy));
+        assert!(!commands.contains(unscoped));
     }
 }

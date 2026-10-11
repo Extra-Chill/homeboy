@@ -1,25 +1,15 @@
 use crate::error::{Error, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::ServerAuth;
 
-pub const LEGACY_DEFAULT_PERSIST: &str = "4h";
 pub const PERSIST_SCOPE: &str =
     "local OpenSSH ControlMaster idle lifetime; not a remote server policy";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedSshSessionPersistSource {
-    Configured,
-    Migrated,
-    LegacyDefault,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManagedSshSession {
     pub control_path: String,
     pub persist: String,
-    pub persist_source: ManagedSshSessionPersistSource,
 }
 
 impl ManagedSshSession {
@@ -31,18 +21,7 @@ impl ManagedSshSession {
                     .as_deref()
                     .unwrap_or("~/.ssh/controlmasters/%h-%p-%r"),
             ),
-            persist: auth
-                .session
-                .persist
-                .clone()
-                .unwrap_or_else(|| LEGACY_DEFAULT_PERSIST.to_string()),
-            persist_source: auth.session.persist_source.unwrap_or_else(|| {
-                if auth.session.persist.is_some() {
-                    ManagedSshSessionPersistSource::Configured
-                } else {
-                    ManagedSshSessionPersistSource::LegacyDefault
-                }
-            }),
+            persist: auth.session.persist.clone(),
         }
     }
 }
@@ -127,9 +106,7 @@ mod tests {
             mode: ServerAuthMode::KeyPlusPasswordControlmaster,
             session: ServerSessionConfig {
                 control_path: Some("/tmp/homeboy-session-%h-%p-%r".to_string()),
-                persist: Some("30m".to_string()),
-                persist_source: None,
-                legacy_persist_loaded: false,
+                persist: "30m".to_string(),
             },
         };
 
@@ -137,29 +114,6 @@ mod tests {
 
         assert_eq!(session.control_path, "/tmp/homeboy-session-%h-%p-%r");
         assert_eq!(session.persist, "30m");
-        assert_eq!(
-            session.persist_source,
-            ManagedSshSessionPersistSource::Configured
-        );
-    }
-
-    #[test]
-    fn test_from_auth_defaults() {
-        let auth = ServerAuth {
-            mode: ServerAuthMode::KeyPlusPasswordControlmaster,
-            session: ServerSessionConfig::default(),
-        };
-
-        let session = ManagedSshSession::from_auth(&auth);
-
-        assert!(session
-            .control_path
-            .ends_with("/.ssh/controlmasters/%h-%p-%r"));
-        assert_eq!(session.persist, LEGACY_DEFAULT_PERSIST);
-        assert_eq!(
-            session.persist_source,
-            ManagedSshSessionPersistSource::LegacyDefault
-        );
     }
 
     #[test]
