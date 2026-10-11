@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.2] - 2026-10-11
+
+### Changed
+- Share Lab workspace bundles across concurrent children
+- Report per-child phase in fanout progress
+- Add agent-task fanout cancel
+
 ## [0.418.1] - 2026-10-11
 
 ### Changed
