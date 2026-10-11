@@ -4594,7 +4594,7 @@ const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
     diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
 Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'homeboy review test homeboy' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
-`--provider-argv` is promotion-only: it configures the promotion apply-provider invocation and cannot select an executor.",
+`--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
 }];
 
 /// Attempt to augment a clap error with semantic argument migrations or entity suggestions.

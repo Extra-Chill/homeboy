@@ -1699,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_cook_batch_dry_run_does_not_start_hot_workloads() {
+    fn agent_task_cook_batch_preview_does_not_start_hot_workloads() {
         let cli = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -1709,7 +1709,7 @@ mod tests {
             "homeboy",
             "--verify",
             "cargo build -j 3",
-            "--dry-run",
+            "--preview",
             "https://github.com/Extra-Chill/homeboy/issues/7796",
         ]);
 

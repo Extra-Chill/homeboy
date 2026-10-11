@@ -3380,7 +3380,7 @@ fn local_fanout_warning_is_silent_for_a_dry_run_plan() {
         "r",
         "--verify",
         "cargo test",
-        "--dry-run",
+        "--preview",
         "--run-plan",
     ]);
     assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);
