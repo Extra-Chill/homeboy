@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.51.1] - 2026-10-11
+
+### Fixed
+- install Composer dependencies atomically so a failed setup keeps the working vendor
+
 ## [3.51.0] - 2026-10-11
 
 ### Added
