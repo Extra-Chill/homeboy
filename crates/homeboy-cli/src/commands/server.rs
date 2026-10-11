@@ -620,7 +620,7 @@ fn key_import(server_id: &str, private_key_path: &str) -> CmdResult<ServerOutput
 mod tests {
     use super::*;
     use clap::Parser;
-    use homeboy::core::server::{ManagedSshSessionPersistSource, RunnerSecretEnvRef, ServerRunner};
+    use homeboy::core::server::{RunnerSecretEnvRef, ServerRunner};
     use std::collections::HashMap;
 
     #[test]
@@ -675,11 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_session_output_reports_local_lifetime_provenance() {
+    fn managed_session_output_reports_local_lifetime_scope() {
         let session = ManagedSshSession {
             control_path: "/tmp/control".to_string(),
             persist: "4h".to_string(),
-            persist_source: ManagedSshSessionPersistSource::LegacyDefault,
         };
         let output = serde_json::to_value(ServerSessionOutput {
             action: "status".to_string(),
@@ -698,8 +697,7 @@ mod tests {
         .expect("serialize session policy");
 
         assert_eq!(output["persist"], "4h");
-        assert_eq!(output["persist_source"], "legacy_default");
-        assert_eq!(policy["persist_source"], "legacy_default");
+        assert_eq!(policy["persist"], "4h");
         assert_eq!(
             output["persist_scope"],
             "local OpenSSH ControlMaster idle lifetime; not a remote server policy"

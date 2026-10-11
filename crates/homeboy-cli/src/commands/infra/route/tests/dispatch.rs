@@ -1120,27 +1120,29 @@ fn explicit_runner_for_changed_scope_test_is_lab_portable() {
 
 #[test]
 fn destructive_fuzz_local_execution_requires_explicit_destructive_local_override() {
-    // Serialize against LAB_OFFLOAD_METADATA_ENV-asserting tests: this
-    // routes through route_after_parse, which mutates that global.
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy",
-        "--placement",
-        "local",
-        "fuzz",
-        "run",
-        "component-a",
-        "--allow-destructive",
-        "--isolation",
-        "isolated",
-        "--isolation-proof",
-        "proof.json",
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    assert!(destructive_fuzz_requires_lab(&cli.command));
-
+    // The isolated-home lock is taken before the route env lock, the same
+    // order every other test here nests them in; the reverse order deadlocks.
     let error = crate::test_support::with_isolated_home(|_| {
+        // Serialize against LAB_OFFLOAD_METADATA_ENV-asserting tests: this
+        // routes through route_after_parse, which mutates that global.
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
+        let normalized = vec![
+            "homeboy",
+            "--placement",
+            "local",
+            "fuzz",
+            "run",
+            "component-a",
+            "--allow-destructive",
+            "--isolation",
+            "isolated",
+            "--isolation-proof",
+            "proof.json",
+        ];
+        let cli = Cli::parse_from(&normalized);
+
+        assert!(destructive_fuzz_requires_lab(&cli.command));
+
         route_after_parse_with_provenance(
             &cli,
             &normalized
@@ -1179,8 +1181,8 @@ fn destructive_fuzz_local_override_is_command_specific_and_explicit() {
 
 #[test]
 fn rig_up_dry_run_with_runner_emits_runner_exec_plan() {
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
     crate::test_support::with_isolated_home(|home| {
+        let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
         runners::create(
             r#"{"id":"homeboy-lab","kind":"local","homeboy_path":"/runner/bin/homeboy-patched"}"#,
             false,
@@ -1625,35 +1627,37 @@ fn runner_hosted_bench_exec_skips_recursive_lab_routing_without_explicit_runner(
 
 #[test]
 fn ambient_resolved_marker_cannot_bypass_explicit_lab_placement() {
-    let _env = EnvGuard::set_many(&[
-        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
-        (homeboy::runner::RUNNER_ID_ENV, None),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--placement".to_string(),
-        "lab".to_string(),
-        "review".to_string(),
-        "lint".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-    homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
-    homeboy::core::parsed_command_preflight::capture_result(
-        homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
-            normalized.clone(),
-            resource_policy::parsed_command_preflight_input(&cli, &normalized),
-            None,
-            None,
-            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
-            homeboy::core::parsed_command_preflight::FallbackDirective::RequiredLabUnavailable,
-            crate::cli_runtime::placement_directive(&cli, None, false),
-            None,
-        ),
-    );
-
+    // Isolated-home lock before the route env lock; see
+    // `destructive_fuzz_local_execution_requires_explicit_destructive_local_override`.
     let err = crate::test_support::with_isolated_home(|_| {
+        let _env = EnvGuard::set_many(&[
+            (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
+            (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, None),
+            (homeboy::runner::RUNNER_ID_ENV, None),
+            (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
+        ]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "lab".to_string(),
+            "review".to_string(),
+            "lint".to_string(),
+        ];
+        let cli = Cli::parse_from(&normalized);
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        homeboy::core::parsed_command_preflight::capture_result(
+            homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                normalized.clone(),
+                resource_policy::parsed_command_preflight_input(&cli, &normalized),
+                None,
+                None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::RequiredLabUnavailable,
+                crate::cli_runtime::placement_directive(&cli, None, false),
+                None,
+            ),
+        );
+
         route_after_parse_with_provenance(&cli, &normalized, None, None)
             .expect_err("ambient marker must not bypass required Lab placement")
     });

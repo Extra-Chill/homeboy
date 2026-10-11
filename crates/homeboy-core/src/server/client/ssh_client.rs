@@ -1182,7 +1182,6 @@ mod bounded_probe_tests {
         client.auth = Some(ManagedSshSession {
             control_path: "/tmp/homeboy-control".to_string(),
             persist: "1h".to_string(),
-            persist_source: crate::server::ManagedSshSessionPersistSource::Configured,
         });
 
         let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);

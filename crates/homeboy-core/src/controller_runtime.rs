@@ -108,7 +108,7 @@ pub(crate) const TEST_CONTROLLER_RUNTIME_IDENTITY_ENV: &str =
     "HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY";
 
 const ACTIVE_GENERATION_FILE: &str = "active.json";
-const ADMISSION_LOCK_DIR: &str = "admission.lock";
+const ADMISSION_LOCK_FILE: &str = "admission.lock";
 const ADMISSION_QUEUE_FILE: &str = "admission-queue.json";
 const ADMISSION_QUEUE_LOCK_FILE: &str = "admission-queue.lock";
 const ADMISSION_OWNER_SCHEMA: &str = "homeboy/controller-admission-owner/v1";
@@ -718,11 +718,7 @@ fn retention_report_with_references_at(
             )
         })?;
         let path = entry.path();
-        if !path.is_dir()
-            || path
-                .file_name()
-                .is_some_and(|name| name == ADMISSION_LOCK_DIR)
-        {
+        if !path.is_dir() {
             continue;
         }
         let identity_pins = pins
@@ -813,7 +809,7 @@ pub fn cleanup_in_root(
     // Lifecycle inventory may migrate legacy records, which itself needs the
     // admission lock. Collect reachability before taking the runtime lock.
     let referenced = crate::controller_pin_reference::referenced_controller_pins()?;
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_FILE))?;
     if options.apply {
         recover_cleanup_tombstones(&root)?;
     }
@@ -1024,7 +1020,7 @@ pub(crate) fn admit_immutable_execution(runtime: &Value) -> Result<Option<Runtim
         return Ok(None);
     };
     let root = runtime_root()?;
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_FILE))?;
     let path = Path::new(pinned);
     if !content_addressed_pin_path(&root, path)
         || std::env::current_exe().ok().as_deref() != Some(path)
@@ -1075,7 +1071,7 @@ impl Drop for AdmissionLock {
 
 /// `pin_current` under an already-resolved runtime root.
 pub fn pin_current_in_root(root: &Path) -> Result<Value> {
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_FILE))?;
     pin_current_unlocked(root)
 }
 
@@ -1108,7 +1104,7 @@ pub fn pin_current_queued_in_root(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<Value> {
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let lock_path = root.join(ADMISSION_LOCK_FILE);
     let request_id = request_id.trim();
     if request_id.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1141,7 +1137,7 @@ pub fn pin_current_queued_in_root_with_timeout(
     wait_timeout: Duration,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<Value> {
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let lock_path = root.join(ADMISSION_LOCK_FILE);
     let request_id = request_id.trim();
     if request_id.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1433,7 +1429,7 @@ pub fn admit_current_for_with_cancellation_check_in_root(
     request_id: &str,
     cancellation_requested: impl Fn() -> Result<bool>,
 ) -> Result<RuntimeAdmission> {
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let lock_path = root.join(ADMISSION_LOCK_FILE);
     let request_id = request_id.trim();
     if request_id.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1486,7 +1482,7 @@ pub fn admission_status_at(runtime_root: &Path, request_id: &str) -> Result<Valu
             Some("create controller runtime directory".to_string()),
         )
     })?;
-    admission_status_at_lock_path(&runtime_root.join(ADMISSION_LOCK_DIR), request_id)
+    admission_status_at_lock_path(&runtime_root.join(ADMISSION_LOCK_FILE), request_id)
 }
 
 /// Project the admission view from an already-resolved admission lock path.
@@ -1529,7 +1525,7 @@ pub fn cancel_admission_at(runtime_root: &Path, request_id: &str) -> Result<()> 
             Some("create controller runtime directory".to_string()),
         )
     })?;
-    let lock_path = runtime_root.join(ADMISSION_LOCK_DIR);
+    let lock_path = runtime_root.join(ADMISSION_LOCK_FILE);
     update_admission_queue(&lock_path, |queue| {
         queue["requests"] = queue["requests"]
             .as_array()
@@ -1562,7 +1558,7 @@ pub fn activate_installed_generation(executable: &Path) -> Result<Value> {
 
 /// [`activate_installed_generation`] under an already-resolved runtime root.
 pub fn activate_installed_generation_in_root(root: &Path, executable: &Path) -> Result<Value> {
-    let lock_path = root.join(ADMISSION_LOCK_DIR);
+    let lock_path = root.join(ADMISSION_LOCK_FILE);
     let _lock = acquire_admission_lock(&lock_path)?;
     let runtime = pin_executable_with_source_in_root(
         root,
@@ -1661,7 +1657,7 @@ pub fn recover_pin_in_root(
     artifact: Option<&Path>,
     source: Option<&Path>,
 ) -> Result<Value> {
-    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_FILE))?;
     recover_pin_unlocked(root, runtime, artifact, source)
 }
 
@@ -1684,7 +1680,7 @@ pub fn recover_pin_and_persist_in_root(
     source: Option<&Path>,
     persist: impl FnOnce(&Value) -> Result<()>,
 ) -> Result<Value> {
-    let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_DIR))?;
+    let _lock = acquire_admission_lock(&runtime_root.join(ADMISSION_LOCK_FILE))?;
     let recovered = recover_pin_unlocked(runtime_root, runtime, artifact, source)?;
     persist(&recovered)?;
     Ok(recovered)
@@ -1918,7 +1914,6 @@ fn acquire_admission_lock_bounded(path: &Path, wait: Duration) -> Result<Admissi
 }
 
 fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<AdmissionLock> {
-    reject_legacy_admission_lock(path)?;
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -2755,21 +2750,6 @@ fn admission_lock_state_summary(path: &Path) -> String {
     } else {
         "no live owner (the advisory lock is free and the owner record is absent or unreadable, so retry immediately)".to_string()
     }
-}
-
-fn reject_legacy_admission_lock(path: &Path) -> Result<()> {
-    if !path.is_dir() {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "controller_admission",
-        format!(
-            "legacy controller admission lock directory exists at {}; it may be held by an older controller. Stop confirmed old controllers, then remove the abandoned directory explicitly before retrying",
-            path.display()
-        ),
-        Some(path.display().to_string()),
-        None,
-    ))
 }
 
 fn validate_pin(runtime: &Value) -> Result<()> {
@@ -3742,7 +3722,7 @@ mod tests {
         let error = pin_current_queued_in_root(temporary.path(), "  ", || Ok(false))
             .expect_err("empty request ID is rejected");
         assert!(error.message.contains("request ID is required"));
-        assert!(!temporary.path().join(ADMISSION_LOCK_DIR).exists());
+        assert!(!temporary.path().join(ADMISSION_LOCK_FILE).exists());
     }
 
     /// A long-lived process whose binary was replaced sees `<path> (deleted)`
@@ -4012,7 +3992,7 @@ mod tests {
     #[test]
     fn live_admission_guard_cannot_be_stolen() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let child = spawn_admission_lock_holder(&path, temporary.path(), false);
 
         let attempt = acquire_admission_lock_with_retry(&path, 2, Duration::ZERO);
@@ -4025,24 +4005,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_admission_lock_fails_closed() {
-        let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
-        fs::create_dir(&path).expect("create legacy lock directory");
-
-        let error = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
-            .expect_err("legacy directory lock must not be stolen");
-
-        assert!(error
-            .message
-            .contains("remove the abandoned directory explicitly"));
-        assert!(path.is_dir());
-    }
-
-    #[test]
     fn admission_lock_is_released_when_holder_exits_without_drop() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let mut child = spawn_admission_lock_holder(&path, temporary.path(), true);
 
         assert!(child
@@ -4074,7 +4039,7 @@ mod tests {
     #[test]
     fn admission_reclaims_a_provably_dead_owner_with_a_new_fence() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let mut child = Command::new("sh")
             .args(["-c", "exit 0"])
             .spawn()
@@ -4094,7 +4059,7 @@ mod tests {
     #[test]
     fn admission_refuses_a_live_owner() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let owner = stale_admission_owner(Some(42), Some(1), "live");
         let error = ensure_admission_owner_is_recoverable_with(&owner, |_, _| {
             crate::process::ProcessIdentityState::Live
@@ -4135,7 +4100,7 @@ mod tests {
     #[test]
     fn admission_refuses_a_changed_owner_during_reclaim_compare_and_swap() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         write_admission_owner(&path, &stale_admission_owner(None, None, "before"));
         *TEST_ADMISSION_OWNER_CAS_REPLACEMENT
             .get_or_init(|| Mutex::new(None))
@@ -4153,7 +4118,7 @@ mod tests {
     #[test]
     fn admission_handles_legacy_pidless_and_malformed_owner_records_safely() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         write_admission_owner(&path, &stale_admission_owner(None, None, "pidless"));
         let admission = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
             .expect("PID-less legacy record is recoverable");
@@ -4169,7 +4134,7 @@ mod tests {
     #[test]
     fn admission_can_be_acquired_and_released_repeatedly() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
 
         for _ in 0..3 {
             let admission = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)
@@ -4182,7 +4147,7 @@ mod tests {
     #[test]
     fn admission_guard_releases_after_post_acquisition_failure() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let result: Result<()> = (|| {
             let _guard = acquire_admission_lock_with_retry(&path, 1, Duration::ZERO)?;
             Err(Error::internal_unexpected("simulated pinning failure"))
@@ -4196,7 +4161,7 @@ mod tests {
     #[test]
     fn admission_timeout_reports_owner_and_wait_duration() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let child = spawn_admission_lock_holder(&path, temporary.path(), false);
 
         let attempt = acquire_admission_lock_with_retry(&path, 3, Duration::from_millis(1));
@@ -4214,7 +4179,7 @@ mod tests {
     #[test]
     fn admission_owner_summary_never_reports_unavailable() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
 
         let absent = admission_owner_summary(&path);
         assert!(!absent.contains("unavailable"), "{absent}");
@@ -4260,7 +4225,7 @@ mod tests {
     #[test]
     fn admission_owner_summary_falls_back_to_the_durable_queue_owner() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         update_admission_queue(&path, |queue| {
             queue["owner"] = json!({
                 "request_id": "agent-task-queued",
@@ -4284,20 +4249,20 @@ mod tests {
         let right = tempfile::tempdir().expect("right runtime root");
         let request_id = "same-run-id";
         for root in [left.path(), right.path()] {
-            enqueue_admission_request(&root.join(ADMISSION_LOCK_DIR), request_id)
+            enqueue_admission_request(&root.join(ADMISSION_LOCK_FILE), request_id)
                 .expect("enqueue isolated waiter");
         }
 
         cancel_admission_at(left.path(), request_id).expect("cancel left waiter");
 
-        assert!(read_admission_queue(&left.path().join(ADMISSION_LOCK_DIR))
+        assert!(read_admission_queue(&left.path().join(ADMISSION_LOCK_FILE))
             .expect("read left queue")["requests"]
             .as_array()
             .expect("left requests")
             .is_empty());
         assert_eq!(
-            read_admission_queue(&right.path().join(ADMISSION_LOCK_DIR)).expect("read right queue")
-                ["requests"][0]["request_id"],
+            read_admission_queue(&right.path().join(ADMISSION_LOCK_FILE))
+                .expect("read right queue")["requests"][0]["request_id"],
             request_id
         );
     }
@@ -4307,7 +4272,7 @@ mod tests {
     #[test]
     fn admission_busy_error_carries_named_owner_evidence() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         write_admission_owner(&path, &admission_owner_record("busy-token"));
 
         let error = admission_busy_error(&path);
@@ -4330,7 +4295,7 @@ mod tests {
     #[test]
     fn uncoordinated_admission_queues_for_a_bounded_window_before_reporting_contention() {
         let temporary = tempfile::tempdir().expect("temporary runtime directory");
-        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let path = temporary.path().join(ADMISSION_LOCK_FILE);
         let child = spawn_admission_lock_holder(&path, temporary.path(), false);
 
         let started = std::time::Instant::now();
@@ -4356,7 +4321,7 @@ mod tests {
     fn admission_queue_serializes_waiters_and_recovers_cancelled_and_stale_requests() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             let first = admit_current_for("first").expect("first admission");
             let (acquired, acquired_result) = std::sync::mpsc::channel();
             let (release, release_result) = std::sync::mpsc::channel();
@@ -4430,7 +4395,7 @@ mod tests {
     fn admission_status_retains_a_live_owner_after_its_lease_expires() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             let admission = admit_current_for("long-owner").expect("admit owner");
 
             update_admission_queue(&lock, |queue| {
@@ -4454,7 +4419,7 @@ mod tests {
     fn expired_head_waiter_is_reclaimed_without_blocking_later_admission() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             update_admission_queue(&lock, |queue| {
                 queue["requests"] = json!([
                     {
@@ -4489,7 +4454,7 @@ mod tests {
     fn bounded_queue_timeout_is_retryable_and_removes_its_waiter() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             let first = admit_current_for("first").expect("admit first owner");
             enqueue_admission_request(&lock, "timed-out").expect("enqueue waiting request");
 
@@ -4518,7 +4483,7 @@ mod tests {
     fn queue_timeout_names_the_wait_the_waiters_ahead_and_the_retry_command() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             let first = admit_current_for("first").expect("admit first owner");
             enqueue_admission_request(&lock, "queued-behind").expect("enqueue waiting request");
 
@@ -4631,7 +4596,7 @@ mod tests {
     fn only_the_head_of_the_queue_may_claim_ownership() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             for request_id in ["head", "middle", "tail"] {
                 enqueue_admission_request(&lock, request_id).expect("enqueue request");
             }
@@ -4779,7 +4744,7 @@ mod tests {
     fn cancellation_between_head_observation_and_claim_never_publishes_owner() {
         crate::test_support::with_isolated_home(|_| {
             let root = runtime_root().expect("runtime root");
-            let lock = root.join(ADMISSION_LOCK_DIR);
+            let lock = root.join(ADMISSION_LOCK_FILE);
             let first = admit_current_for("first").expect("admit first owner");
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             *TEST_ADMISSION_HEAD_BARRIER

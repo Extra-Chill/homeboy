@@ -29,9 +29,7 @@ pub use keys::{
     generate_key, get_public_key, import_key, unset_key, use_key, KeyGenerateResult,
     KeyImportResult,
 };
-pub use session::{
-    ManagedSshSession, ManagedSshSessionOutput, ManagedSshSessionPersistSource, PERSIST_SCOPE,
-};
+pub use session::{ManagedSshSession, ManagedSshSessionOutput, PERSIST_SCOPE};
 
 use std::collections::HashMap;
 
@@ -229,16 +227,13 @@ pub struct ServerAuth {
     pub session: ServerSessionConfig,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerSessionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persist: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persist_source: Option<ManagedSshSessionPersistSource>,
-    #[serde(skip)]
-    legacy_persist_loaded: bool,
+    /// OpenSSH `ControlPersist` lifetime. Required: every auth mode is a
+    /// managed ControlMaster session, and Homeboy never supplies a default.
+    pub persist: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -357,40 +352,7 @@ impl ConfigEntity for Server {
     /// rooted-only by design, so this cannot drift into an ambient override.
     fn validate_in_root(&self, _config_root: &std::path::Path) -> Result<()> {
         if let Some(auth) = self.auth.as_ref() {
-            if matches!(
-                auth.mode,
-                ServerAuthMode::KeyControlmaster | ServerAuthMode::KeyPlusPasswordControlmaster
-            ) {
-                match auth.session.persist.as_deref() {
-                    Some(persist) => {
-                        if auth.session.persist_source
-                            == Some(ManagedSshSessionPersistSource::LegacyDefault)
-                        {
-                            return Err(Error::validation_invalid_argument(
-                                "auth.persist_source",
-                                "legacy_default is only valid for an existing managed session without persist",
-                                None,
-                                None,
-                            ));
-                        }
-                        session::validate_persist(persist)?;
-                    }
-                    None if auth.session.persist_source
-                        == Some(ManagedSshSessionPersistSource::LegacyDefault)
-                        && auth.session.legacy_persist_loaded => {}
-                    None => {
-                        return Err(Error::validation_invalid_argument(
-                            "auth.persist",
-                            "Managed SSH sessions require an explicit OpenSSH ControlPersist lifetime",
-                            None,
-                            Some(vec![
-                                "Choose the local control-socket idle lifetime, for example: \"persist\": \"4h\"."
-                                    .to_string(),
-                            ]),
-                        ));
-                    }
-                }
-            }
+            session::validate_persist(&auth.session.persist)?;
         }
 
         if let Some(runner) = self.runner.as_ref() {
@@ -399,55 +361,6 @@ impl ConfigEntity for Server {
         }
 
         Ok(())
-    }
-
-    fn post_load(&mut self, _stored_json: &str) {
-        if let Some(auth) = self.auth.as_mut() {
-            if matches!(
-                auth.mode,
-                ServerAuthMode::KeyControlmaster | ServerAuthMode::KeyPlusPasswordControlmaster
-            ) {
-                if auth.session.persist.is_none() {
-                    auth.session.persist_source =
-                        Some(ManagedSshSessionPersistSource::LegacyDefault);
-                    auth.session.legacy_persist_loaded = true;
-                } else if auth.session.persist_source
-                    == Some(ManagedSshSessionPersistSource::LegacyDefault)
-                {
-                    auth.session.persist_source = Some(ManagedSshSessionPersistSource::Migrated);
-                    auth.session.legacy_persist_loaded = false;
-                } else {
-                    auth.session.legacy_persist_loaded = false;
-                }
-            }
-        }
-    }
-
-    fn reserved_derived_fields() -> &'static [&'static str] {
-        &["auth.persist_source"]
-    }
-
-    fn post_merge(&mut self, previous_json: &str) {
-        let was_legacy_default = serde_json::from_str::<serde_json::Value>(previous_json)
-            .ok()
-            .is_some_and(|previous| {
-                previous.pointer("/auth/persist").is_none()
-                    && previous
-                        .pointer("/auth/persist_source")
-                        .and_then(|source| source.as_str())
-                        == Some("legacy_default")
-            });
-
-        if let Some(auth) = self.auth.as_mut() {
-            auth.session.legacy_persist_loaded =
-                was_legacy_default && auth.session.persist.is_none();
-            if auth.session.persist.is_none() {
-                auth.session.persist_source =
-                    was_legacy_default.then_some(ManagedSshSessionPersistSource::LegacyDefault);
-            } else if was_legacy_default {
-                auth.session.persist_source = Some(ManagedSshSessionPersistSource::Migrated);
-            }
-        }
     }
 }
 
@@ -484,7 +397,7 @@ mod tests {
         std::path::Path::new("/unused-config-root")
     }
 
-    fn managed_server(persist: Option<&str>) -> Server {
+    fn managed_server(persist: &str) -> Server {
         Server {
             id: "sandbox".to_string(),
             aliases: Vec::new(),
@@ -497,9 +410,7 @@ mod tests {
                 mode: ServerAuthMode::KeyPlusPasswordControlmaster,
                 session: ServerSessionConfig {
                     control_path: None,
-                    persist: persist.map(str::to_string),
-                    persist_source: None,
-                    legacy_persist_loaded: false,
+                    persist: persist.to_string(),
                 },
             }),
             env: HashMap::new(),
@@ -508,85 +419,33 @@ mod tests {
     }
 
     #[test]
-    fn managed_session_requires_explicit_persist_for_new_configurations() {
-        assert!(managed_server(None)
-            .validate_in_root(unused_root())
-            .is_err());
-        assert!(managed_server(Some("30m"))
+    fn managed_session_requires_explicit_persist() {
+        for mode in ["key_plus_password_controlmaster", "key_controlmaster"] {
+            let without_persist = serde_json::from_str::<Server>(&format!(
+                r#"{{"host":"example.test","user":"deploy","auth":{{"mode":"{mode}"}}}}"#
+            ));
+            assert!(
+                without_persist.is_err(),
+                "{mode} without persist must be rejected"
+            );
+        }
+        assert!(managed_server("30m")
             .validate_in_root(unused_root())
             .is_ok());
-    }
-
-    #[test]
-    fn key_controlmaster_requires_an_explicit_persist_lifetime() {
-        let mut server = managed_server(Some("4h"));
+        let mut server = managed_server("4h");
         server.auth.as_mut().expect("auth").mode = ServerAuthMode::KeyControlmaster;
         assert!(server.validate_in_root(unused_root()).is_ok());
-
-        server.auth.as_mut().expect("auth").session.persist = None;
-        assert!(server.validate_in_root(unused_root()).is_err());
     }
 
     #[test]
-    fn user_supplied_persist_source_is_rejected_at_create_and_merge_boundaries() {
-        crate::test_support::with_isolated_home(|_| {
-            for source in ["configured", "migrated", "legacy_default"] {
-                let result = create(
-                    &format!(
-                        r#"{{"id":"{source}","host":"example.test","user":"deploy","auth":{{"mode":"key_plus_password_controlmaster","persist":"1h","persist_source":"{source}"}}}}"#
-                    ),
-                    false,
-                );
-                assert!(result.is_err(), "create should reject {source}");
-            }
-
-            create(
-                r#"{"id":"sandbox","host":"example.test","user":"deploy","auth":{"mode":"key_plus_password_controlmaster","persist":"1h"}}"#,
-                false,
-            )
-            .expect("create configured server");
-            for source in ["configured", "migrated", "legacy_default"] {
-                let result = merge(
-                    Some("sandbox"),
-                    &format!(r#"{{"auth":{{"persist_source":"{source}"}}}}"#),
-                    &[],
-                );
-                assert!(result.is_err(), "merge should reject {source}");
-            }
-        });
-    }
-
-    #[test]
-    fn legacy_managed_session_retains_default_with_provenance() {
-        let mut server = managed_server(None);
-        server.post_load("{}");
-
-        server
+    fn malformed_persist_is_rejected() {
+        assert!(managed_server("four hours")
             .validate_in_root(unused_root())
-            .expect("legacy configuration remains valid");
-        let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
-        assert_eq!(session.persist, session::LEGACY_DEFAULT_PERSIST);
-        assert_eq!(
-            session.persist_source,
-            ManagedSshSessionPersistSource::LegacyDefault
-        );
+            .is_err());
     }
 
     #[test]
-    fn migrated_persist_source_is_reported() {
-        let mut server = managed_server(Some("4h"));
-        server.auth.as_mut().expect("auth").session.persist_source =
-            Some(ManagedSshSessionPersistSource::Migrated);
-
-        let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
-        assert_eq!(
-            session.persist_source,
-            ManagedSshSessionPersistSource::Migrated
-        );
-    }
-
-    #[test]
-    fn legacy_session_update_with_explicit_persist_is_migrated() {
+    fn stored_managed_session_without_persist_does_not_load() {
         crate::test_support::with_isolated_home(|home| {
             let path = home.path().join(".config/homeboy/servers/sandbox.json");
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create server dir");
@@ -594,29 +453,14 @@ mod tests {
                 &path,
                 r#"{"host":"example.test","user":"deploy","auth":{"mode":"key_plus_password_controlmaster"}}"#,
             )
-            .expect("write legacy server");
+            .expect("write server without persist");
 
-            let loaded = load("sandbox").expect("load legacy server");
-            assert_eq!(
-                loaded.auth.expect("auth").session.persist_source,
-                Some(ManagedSshSessionPersistSource::LegacyDefault)
-            );
-
-            merge(Some("sandbox"), r#"{"auth":{"persist":"1h30m"}}"#, &[])
-                .expect("migrate legacy persist");
-
-            let migrated = load("sandbox").expect("load migrated server");
-            let session = ManagedSshSession::from_auth(migrated.auth.as_ref().expect("auth"));
-            assert_eq!(session.persist, "1h30m");
-            assert_eq!(
-                session.persist_source,
-                ManagedSshSessionPersistSource::Migrated
-            );
+            assert!(load("sandbox").is_err());
         });
     }
 
     #[test]
-    fn clearing_configured_persist_is_rejected_without_reclassifying_legacy() {
+    fn clearing_configured_persist_is_rejected() {
         crate::test_support::with_isolated_home(|_| {
             create(
                 r#"{"id":"sandbox","host":"example.test","user":"deploy","auth":{"mode":"key_plus_password_controlmaster","persist":"1h"}}"#,
@@ -628,34 +472,6 @@ mod tests {
             let server = load("sandbox").expect("reload configured server");
             let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
             assert_eq!(session.persist, "1h");
-            assert_eq!(
-                session.persist_source,
-                ManagedSshSessionPersistSource::Configured
-            );
-        });
-    }
-
-    #[test]
-    fn clearing_migrated_persist_is_rejected_without_reclassifying_legacy() {
-        crate::test_support::with_isolated_home(|home| {
-            let path = home.path().join(".config/homeboy/servers/sandbox.json");
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("create server dir");
-            std::fs::write(
-                &path,
-                r#"{"host":"example.test","user":"deploy","auth":{"mode":"key_plus_password_controlmaster"}}"#,
-            )
-            .expect("write legacy server");
-            merge(Some("sandbox"), r#"{"auth":{"persist":"1h"}}"#, &[])
-                .expect("migrate legacy server");
-
-            assert!(merge(Some("sandbox"), r#"{"auth":{"persist":null}}"#, &[]).is_err());
-            let server = load("sandbox").expect("reload migrated server");
-            let session = ManagedSshSession::from_auth(server.auth.as_ref().expect("auth"));
-            assert_eq!(session.persist, "1h");
-            assert_eq!(
-                session.persist_source,
-                ManagedSshSessionPersistSource::Migrated
-            );
         });
     }
 }

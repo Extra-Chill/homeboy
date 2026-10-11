@@ -103,9 +103,10 @@ outcomes, diagnostics, aggregate JSON, or artifacts.
 Resolution order is:
 
 - The current process environment using the declared name.
-- `~/.config/homeboy/agent-task-secrets.json` entries.
+- Mappings in the global config (`homeboy.json`) at `/agent_task/secrets`,
+  managed with `homeboy agent-task auth`.
 
-The optional local config file uses provider-agnostic sources:
+Mappings use provider-agnostic sources:
 
 ```json
 {

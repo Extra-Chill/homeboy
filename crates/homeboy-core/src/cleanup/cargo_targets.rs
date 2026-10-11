@@ -91,10 +91,6 @@ pub struct CargoTargetStorageStatus {
     pub managed_bytes: u64,
     pub protected_bytes: u64,
     pub cleanup_command: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub legacy_root: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub legacy_discovery_command: Option<String>,
 }
 
 /// A live, shared Cargo target-store lease. The shared advisory lock makes the
@@ -777,7 +773,7 @@ fn cargo_target_repository_identity(source_path: &Path) -> String {
 
 /// Resolve the one shared Cargo store used by producers, cleanup, and reports.
 /// The environment is useful for one process; the persisted setting is for the
-/// host. The historical data-root location remains the compatibility default.
+/// host. Without either, the store lives under the Homeboy data root.
 pub fn shared_cargo_target_root() -> Result<PathBuf> {
     let configured = crate::defaults::load_config().cargo_target_root;
     resolve_shared_cargo_target_root(
@@ -795,10 +791,6 @@ fn resolve_shared_cargo_target_root(
             return Ok(homeboy_paths::expand_tilde_path(path));
         }
     }
-    legacy_shared_cargo_target_root()
-}
-
-fn legacy_shared_cargo_target_root() -> Result<PathBuf> {
     homeboy_paths::cargo_targets_store()
 }
 
@@ -1088,8 +1080,6 @@ fn storage_status(
         .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
         .map(|store| store.size_bytes)
         .sum();
-    let legacy_root = legacy_shared_cargo_target_root()?;
-    let moved = legacy_root != root && legacy_root.exists();
     Ok(CargoTargetStorageStatus {
         root: root.display().to_string(),
         filesystem: capacity.filesystem,
@@ -1100,13 +1090,6 @@ fn storage_status(
         managed_bytes,
         protected_bytes,
         cleanup_command: "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
-        legacy_root: moved.then(|| legacy_root.display().to_string()),
-        legacy_discovery_command: moved.then(|| {
-            format!(
-                "HOMEBOY_CARGO_TARGET_ROOT={} homeboy cleanup --include shared-cargo-targets",
-                quote_path(&legacy_root.display().to_string())
-            )
-        }),
     })
 }
 
