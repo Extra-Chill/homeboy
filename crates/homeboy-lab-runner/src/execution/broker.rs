@@ -866,16 +866,9 @@ mod ownership_tests {
         fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            submission: homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission,
+            submission: RunnerApiSubmitRequest,
         ) -> homeboy_core::Result<Job> {
-            match submission {
-                homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission::RunnerApi(
-                    request,
-                ) => self.jobs.submit_runner_api_request(request),
-                homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission::LegacyReplay(
-                    request,
-                ) => self.jobs.submit_remote_runner_job(request),
-            }
+            self.jobs.submit_runner_api_request(submission)
         }
 
         fn lookup_reverse_broker_submission(

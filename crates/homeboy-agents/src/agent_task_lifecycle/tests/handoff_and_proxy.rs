@@ -95,7 +95,7 @@ impl RunnerContinuationProvider for ReconciliationProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }

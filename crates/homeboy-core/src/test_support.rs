@@ -2512,40 +2512,26 @@ fn handle_reverse_broker_request(
         return ok(json!({ "registered": true }));
     }
     if request.method == "POST" && request.path == "/runner/jobs" {
-        let typed_submission = serde_json::from_value::<
-            homeboy_runner_contract::RunnerApiSubmitRequest,
-        >(request.body.clone());
-        let is_typed_submission = typed_submission.is_ok();
-        let job = match typed_submission {
-            Ok(submitted) => store
-                .submit_runner_api_request(submitted)
-                .expect("submit envelope broker job"),
-            Err(_) => {
-                let submitted: RemoteRunnerJobRequest = serde_json::from_value(request.body)
-                    .expect("parse legacy reverse broker job submission");
-                store
-                    .submit_remote_runner_job(submitted)
-                    .expect("submit legacy broker job")
-            }
-        };
-        if is_typed_submission {
-            return ok(json!({
-                "response": homeboy_runner_contract::RunnerApiSubmitResponse {
-                    schema: homeboy_runner_contract::RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
-                    api_version: homeboy_runner_contract::RUNNER_API_V1,
-                    outcome: homeboy_runner_contract::RunnerApiSubmitOutcome::Accepted {
-                        job_id: job.id.to_string(),
-                        job_status: serde_json::to_value(job.status)
-                            .expect("serialize fixture job status")
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_string(),
-                    },
+        let submitted: homeboy_runner_contract::RunnerApiSubmitRequest =
+            serde_json::from_value(request.body).expect("parse Runner API broker submission");
+        let job = store
+            .submit_runner_api_request(submitted)
+            .expect("submit envelope broker job");
+        return ok(json!({
+            "response": homeboy_runner_contract::RunnerApiSubmitResponse {
+                schema: homeboy_runner_contract::RUNNER_API_SUBMIT_RESPONSE_SCHEMA.to_string(),
+                api_version: homeboy_runner_contract::RUNNER_API_V1,
+                outcome: homeboy_runner_contract::RunnerApiSubmitOutcome::Accepted {
+                    job_id: job.id.to_string(),
+                    job_status: serde_json::to_value(job.status)
+                        .expect("serialize fixture job status")
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
                 },
-                "job": job,
-            }));
-        }
-        return ok(json!({ "job": job }));
+            },
+            "job": job,
+        }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/submissions/lookup" {
         let submission_key = request.body["submission_key"]
@@ -2554,42 +2540,36 @@ fn handle_reverse_broker_request(
         return ok(json!({ "result": store.lookup_remote_runner_submission(submission_key) }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/claim" {
-        if let Ok(request) =
-            serde_json::from_value::<homeboy_runner_contract::RunnerApiClaimRequest>(request.body)
-        {
-            let claim = store
-                .claim_remote_runner_job_with_protocols(
-                    &request.runner_id,
-                    request.project_id.as_deref(),
-                    request.lease_ms.unwrap_or(30_000),
-                    request.concurrency_limit,
-                    crate::api_jobs::RemoteRunnerClaimProtocols {
-                        execution: request.execution_protocol.as_ref(),
-                        workspace_claim: request.workspace_claim_protocol.as_ref(),
-                        workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
-                    },
-                )
-                .expect("claim canonical broker job");
-            let outcome = match claim {
-                Some(claim) => homeboy_runner_contract::RunnerApiClaimOutcome::Claimed {
-                    claim: claim
-                        .runner_api_claimed_execution()
-                        .expect("project canonical broker claim"),
-                },
-                None => homeboy_runner_contract::RunnerApiClaimOutcome::Empty,
-            };
-            return ok(json!({
-                "response": homeboy_runner_contract::RunnerApiClaimResponse {
-                    schema: homeboy_runner_contract::RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
-                    api_version: homeboy_runner_contract::RUNNER_API_V1,
-                    outcome,
-                },
-            }));
-        }
+        let request: homeboy_runner_contract::RunnerApiClaimRequest =
+            serde_json::from_value(request.body).expect("parse Runner API broker claim");
         let claim = store
-            .claim_remote_runner_job(runner_id, None, 30_000, None)
-            .expect("claim broker job");
-        return ok(json!({ "claim": claim }));
+            .claim_remote_runner_job_with_protocols(
+                &request.runner_id,
+                request.project_id.as_deref(),
+                request.lease_ms.unwrap_or(30_000),
+                request.concurrency_limit,
+                crate::api_jobs::RemoteRunnerClaimProtocols {
+                    execution: request.execution_protocol.as_ref(),
+                    workspace_claim: request.workspace_claim_protocol.as_ref(),
+                    workspace_owner_lease: request.workspace_owner_lease_protocol.as_ref(),
+                },
+            )
+            .expect("claim canonical broker job");
+        let outcome = match claim {
+            Some(claim) => homeboy_runner_contract::RunnerApiClaimOutcome::Claimed {
+                claim: claim
+                    .runner_api_claimed_execution()
+                    .expect("project canonical broker claim"),
+            },
+            None => homeboy_runner_contract::RunnerApiClaimOutcome::Empty,
+        };
+        return ok(json!({
+            "response": homeboy_runner_contract::RunnerApiClaimResponse {
+                schema: homeboy_runner_contract::RUNNER_API_CLAIM_RESPONSE_SCHEMA.to_string(),
+                api_version: homeboy_runner_contract::RUNNER_API_V1,
+                outcome,
+            },
+        }));
     }
     if request.method == "POST" && request.path == "/runner/jobs/reconcile" {
         let reconciled = store

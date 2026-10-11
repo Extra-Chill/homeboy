@@ -1668,7 +1668,7 @@ mod tests {
         fn submit_runner_api_request(
             &self,
             _runner_id: &str,
-            _submission: RunnerContinuationSubmission,
+            _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
         ) -> Result<homeboy_core::api_jobs::Job> {
             Err(Error::internal_unexpected(
                 "not used by workspace claim tests",

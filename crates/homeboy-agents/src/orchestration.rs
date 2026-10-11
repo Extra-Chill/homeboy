@@ -10211,7 +10211,8 @@ mod tests {
             store
                 .mutate_record(run_id, |record| {
                     record.metadata["runner_submission_intent"]["state"] = json!("pending");
-                    record.metadata["runner_submission_intent"]["replay_request"] = json!(replay);
+                    record.metadata["runner_submission_intent"]["replay_envelope_request"] =
+                        json!(replay);
                     true
                 })
                 .expect("pending request");

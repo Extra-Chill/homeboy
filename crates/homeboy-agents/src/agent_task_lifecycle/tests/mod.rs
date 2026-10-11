@@ -95,16 +95,9 @@ impl RunnerContinuationProvider for IntentReplayProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        submission: RunnerContinuationSubmission,
+        submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
-        let job = match submission {
-            RunnerContinuationSubmission::RunnerApi(request) => {
-                self.store.submit_runner_api_request(request)?
-            }
-            RunnerContinuationSubmission::LegacyReplay(request) => {
-                self.store.submit_remote_runner_job(request)?
-            }
-        };
+        let job = self.store.submit_runner_api_request(submission)?;
         self.submitted.lock().expect("submission log").push(job.id);
         let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
         if std::mem::take(&mut *fail) {
@@ -128,8 +121,19 @@ impl RunnerContinuationProvider for IntentReplayProvider {
     }
 }
 
-pub(crate) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJobRequest {
-    RemoteRunnerJobRequest {
+/// The exact Runner API request a detached handoff persists as its replay
+/// input (`replay_envelope_request`) before it crosses the broker.
+pub(crate) fn runner_api_submission(
+    request: RemoteRunnerJobRequest,
+) -> homeboy_runner_contract::RunnerApiSubmitRequest {
+    request.into_runner_api_fixture()
+}
+
+pub(crate) fn replay_request(
+    run_id: &str,
+    command: &[String],
+) -> homeboy_runner_contract::RunnerApiSubmitRequest {
+    runner_api_submission(RemoteRunnerJobRequest {
         runner_id: "homeboy-lab".to_string(),
         project_id: None,
         operation: "runner.exec".to_string(),
@@ -152,7 +156,7 @@ pub(crate) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJo
             "submission_key": format!("agent-task:v1:homeboy-lab:{run_id}"),
             "durable_run_id": run_id,
         })),
-    }
+    })
 }
 
 /// A runner-continuation provider that reports a runner as connected and present
@@ -200,7 +204,7 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         Err(Error::internal_unexpected("no reverse broker job in test"))
     }

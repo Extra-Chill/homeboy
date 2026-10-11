@@ -180,50 +180,6 @@ impl RemoteRunnerJobRequest {
             .filter(|key| !key.is_empty())
     }
 
-    /// Fingerprint the execution inputs that a lost-response replay can
-    /// reconstruct. Transport, lifecycle, and evidence metadata deliberately
-    /// do not participate in submission identity.
-    pub fn redacted_for_durable_replay(&self) -> Self {
-        let mut request = self.clone();
-        request.normalize();
-        request.public_metadata()
-    }
-
-    pub fn submission_payload_fingerprint(&self) -> Result<String> {
-        let request = self.redacted_for_durable_replay();
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema": "homeboy/remote-runner-submission-payload/v1",
-            "runner_id": request.runner_id,
-            "project_id": request.project_id,
-            "operation": request.operation,
-            "command": request.command,
-            "cwd": request.cwd,
-            "env": request.env,
-            "secret_env_names": request.secret_env_names,
-            "secret_env_plan": request.secret_env_plan,
-            "env_materialization": request.env_materialization,
-            "capture_patch": request.capture_patch,
-            "source_snapshot": request.source_snapshot,
-            "path_materialization_plan": request.path_materialization_plan,
-            "require_paths": request.require_paths,
-            "extension_env_providers": request.extension_env_providers,
-            "runner_workload": request.lab_runner_workload,
-            "workspace_claim_binding": request.workspace_claim_binding,
-            "workspace_owner_lease": request.workspace_owner_lease,
-            "command_assets": request
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("command_assets")),
-        }))
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("fingerprint runner submission".to_string()),
-            )
-        })?;
-        Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
-    }
-
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
         let mut base_plan = self
             .lab_runner_workload
@@ -250,6 +206,25 @@ impl RemoteRunnerJobRequest {
         self.secret_env_names = secret_env_plan.secret_env_names();
         self.secret_env_plan = secret_env_plan.clone();
         secret_env_plan
+    }
+
+    /// The Runner API submission a fixture request describes. A fixture
+    /// without a caller-owned key receives a unique one.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn into_runner_api_fixture(self) -> RunnerApiSubmitRequest {
+        let submission_key = self
+            .submission_key()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("test:runner-api:{}", Uuid::new_v4()));
+        RunnerApiSubmitRequest {
+            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            submission_key,
+            envelope: self.execution_envelope(),
+            workspace_claim_binding: self.workspace_claim_binding,
+            workspace_owner_lease: self.workspace_owner_lease,
+            credential_delivery: None,
+        }
     }
 
     pub fn execution_envelope(&self) -> RunnerExecutionEnvelope {
@@ -334,34 +309,6 @@ impl RemoteRunnerJobRequest {
         envelope
     }
 
-    pub fn public_metadata(&self) -> Self {
-        let mut public = self.clone();
-        public.env.retain(|name, _| !is_internal_control_env(name));
-        let mut secret_env_name_values = self.secret_env_plan.secret_env_names();
-        secret_env_name_values.extend(self.secret_env_names.clone());
-        let secret_env_names = secret_env_name_values
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<HashSet<_>>();
-        for (name, value) in public.env.iter_mut() {
-            if secret_env_names.contains(name.as_str()) {
-                *value = "<redacted>".to_string();
-            }
-        }
-        public
-    }
-
-    /// Validate and normalize a request before it can be serialized into any
-    /// durable reverse-runner submission representation.
-    pub fn validate_durable_submission(&mut self) -> Result<()> {
-        let secret_env_plan = self.normalize();
-        reject_inline_durable_secret_env(&self.env, &secret_env_plan)
-    }
-
-    fn validate_command_assets(&self) -> Result<()> {
-        validate_command_assets(self.metadata.as_ref())
-    }
-
     fn dispatch_request(&self) -> Self {
         let mut request = self.clone();
         let secret_names = request.secret_env_plan.secret_env_names();
@@ -375,14 +322,6 @@ impl RemoteRunnerJobRequest {
             }
         }
         request
-    }
-
-    pub(crate) fn run_ref_metadata(&self) -> Option<Value> {
-        canonical_run_ref_metadata(
-            self.lifecycle.as_ref(),
-            self.lab_runner_workload.as_ref(),
-            self.metadata.as_ref(),
-        )
     }
 }
 
@@ -1376,29 +1315,10 @@ impl JobStore {
         RemoteRunnerSubmissionLookup::Absent
     }
 
-    /// Test-only alias for compatibility fixtures. Shipped legacy wire decoding
-    /// enters through the crate-private method below.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn submit_remote_runner_job(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
-        self.submit_legacy_remote_runner_job(request)
-    }
-
     /// Submits existing request fixtures through the canonical Runner API.
     #[cfg(any(test, feature = "test-support"))]
     pub fn submit_runner_api_fixture(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
-        let submission_key = request
-            .submission_key()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("test:runner-api:{}", Uuid::new_v4()));
-        self.submit_runner_api_request(RunnerApiSubmitRequest {
-            schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            submission_key,
-            envelope: request.execution_envelope(),
-            workspace_claim_binding: request.workspace_claim_binding,
-            workspace_owner_lease: request.workspace_owner_lease,
-            credential_delivery: None,
-        })
+        self.submit_runner_api_request(request.into_runner_api_fixture())
     }
 
     pub fn submit_runner_api_request(&self, submission: RunnerApiSubmitRequest) -> Result<Job> {
@@ -1628,76 +1548,6 @@ impl JobStore {
             .lock()
             .expect("credential delivery mutex poisoned")
             .remove(&job_id);
-    }
-
-    pub(crate) fn submit_legacy_remote_runner_job(
-        &self,
-        mut request: RemoteRunnerJobRequest,
-    ) -> Result<Job> {
-        if request.runner_id.trim().is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "runner_id",
-                "remote runner job requires a runner id",
-                None,
-                None,
-            ));
-        }
-        if request.command.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "command",
-                "remote runner job requires a command",
-                None,
-                None,
-            ));
-        }
-        request.validate_command_assets()?;
-        if let Some(binding) = request.workspace_claim_binding.as_ref() {
-            binding.verify()?;
-        }
-        if let Some(lease) = request.workspace_owner_lease.as_ref() {
-            lease.verify_shape(timestamp_ms())?;
-        }
-        request.validate_durable_submission()?;
-        let secret_env_plan = request.secret_env_plan.clone();
-        super::with_runner_job_preparation(|p| {
-            p.validate_lab_runner_workload_dispatch(
-                request.lab_runner_workload.as_ref(),
-                &request.runner_id,
-                request.cwd.as_deref(),
-                &request.command,
-                &secret_env_plan,
-                request.capture_patch,
-            )
-        })?;
-
-        let now = timestamp_ms();
-        let public_request = request.public_metadata();
-        let submission_key = request.submission_key().map(str::to_string);
-        let submission_fingerprint = submission_key
-            .as_ref()
-            .map(|_| request.submission_payload_fingerprint())
-            .transpose()?;
-        let envelope = public_request.execution_envelope();
-        let admission = RemoteRunnerAdmission {
-            job_id: None,
-            operation: request.operation.clone(),
-            runner_id: request.runner_id.clone(),
-            project_id: request.project_id.clone(),
-            source_snapshot: request.source_snapshot.clone(),
-            path_materialization_plan: request.path_materialization_plan.clone(),
-            run_ref_metadata: public_request.run_ref_metadata(),
-            submission_key,
-            submission_fingerprint,
-            stored_remote_runner: StoredRemoteRunnerJob {
-                envelope,
-                workspace_claim_binding: public_request.workspace_claim_binding,
-                workspace_owner_lease: public_request.workspace_owner_lease,
-                execution_context_id: None,
-                execution_receipt: None,
-                direct_execution_selected: false,
-            },
-        };
-        self.admit_remote_runner_job(admission, now)
     }
 
     fn admit_remote_runner_job(&self, admission: RemoteRunnerAdmission, now: u64) -> Result<Job> {

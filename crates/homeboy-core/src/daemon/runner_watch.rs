@@ -157,6 +157,16 @@ mod tests {
     };
     use serde_json::json;
 
+    fn submit_body() -> serde_json::Value {
+        let request: crate::api_jobs::RemoteRunnerJobRequest = serde_json::from_value(json!({
+            "runner_id": "homeboy-lab",
+            "command": ["homeboy", "test"],
+            "cwd": "/tmp/x"
+        }))
+        .expect("dispatch fixture");
+        serde_json::to_value(request.into_runner_api_fixture()).expect("Runner API submit JSON")
+    }
+
     fn watch_request(job_id: &str, after_sequence: u64) -> RunnerApiWatchRequest {
         RunnerApiWatchRequest {
             schema: RUNNER_API_WATCH_REQUEST_SCHEMA.to_string(),
@@ -225,11 +235,7 @@ mod tests {
         let submit = remote_runner::route(
             "POST",
             "/runner/jobs",
-            Some(json!({
-                "runner_id": "homeboy-lab",
-                "command": ["homeboy", "test"],
-                "cwd": "/tmp/x"
-            })),
+            Some(submit_body()),
             &store,
             &BrokerAuthContext::trusted_local(),
         );
@@ -355,11 +361,7 @@ mod tests {
         let submit = remote_runner::route(
             "POST",
             "/runner/jobs",
-            Some(json!({
-                "runner_id": "homeboy-lab",
-                "command": ["homeboy", "test"],
-                "cwd": "/tmp/x"
-            })),
+            Some(submit_body()),
             &store,
             &BrokerAuthContext::trusted_local(),
         );

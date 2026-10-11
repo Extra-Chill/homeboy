@@ -70,11 +70,16 @@ fn submit_claimed_broker_job(client: &Client, daemon_url: &str) -> (String, Stri
         client,
         daemon_url,
         "/runner/jobs",
-        json!({
-            "runner_id": "lab",
-            "command": ["homeboy", "test"],
-            "cwd": "/tmp/watch-parity"
-        }),
+        serde_json::to_value(
+            serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerJobRequest>(json!({
+                "runner_id": "lab",
+                "command": ["homeboy", "test"],
+                "cwd": "/tmp/watch-parity"
+            }))
+            .expect("dispatch fixture")
+            .into_runner_api_fixture(),
+        )
+        .expect("Runner API submit JSON"),
     );
     let job_id = submitted["job"]["id"]
         .as_str()
@@ -84,9 +89,14 @@ fn submit_claimed_broker_job(client: &Client, daemon_url: &str) -> (String, Stri
         client,
         daemon_url,
         "/runner/jobs/claim",
-        json!({ "runner_id": "lab", "lease_ms": 60_000 }),
+        json!({
+            "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
+            "api_version": { "major": 1 },
+            "runner_id": "lab",
+            "lease_ms": 60_000,
+        }),
     );
-    let claim_id = claim["claim"]["job"]["claim_id"]
+    let claim_id = claim["response"]["outcome"]["claim"]["claim_id"]
         .as_str()
         .expect("claim id")
         .to_string();

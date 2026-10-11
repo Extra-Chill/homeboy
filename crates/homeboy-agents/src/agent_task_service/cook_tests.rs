@@ -14945,8 +14945,11 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
                 "metadata": { "submission_key": "historical-orphan-submission" }
             }))
             .expect("fixture runner submission request");
-        agent_task_lifecycle::record_lab_offload_submission_request(run_id, &submission_request)
-            .expect("persist pending handoff request");
+        agent_task_lifecycle::record_lab_offload_submission_envelope(
+            run_id,
+            &crate::agent_task_lifecycle::tests::runner_api_submission(submission_request),
+        )
+        .expect("persist pending handoff request");
         agent_task_lifecycle::record_cook_attempt_in_store(
             &test_lifecycle_store(),
             cook_id,

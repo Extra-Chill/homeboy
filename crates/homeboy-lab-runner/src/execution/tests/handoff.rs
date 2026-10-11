@@ -1791,6 +1791,8 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
                 let response: Value = client
                     .post(format!("{}/runner/jobs/claim", worker_broker_url))
                     .json(&json!({
+                        "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
+                        "api_version": { "major": 1 },
                         "runner_id": "lab",
                         "lease_ms": 30_000,
                     }))
@@ -1798,17 +1800,15 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
                     .expect("claim response")
                     .json()
                     .expect("claim json");
-                let claim = response["data"]["body"]["claim"].clone();
-                if !claim.is_null() {
-                    break claim;
+                let outcome = &response["data"]["body"]["response"]["outcome"];
+                assert!(outcome.is_object(), "claim response: {response}");
+                if outcome["status"] == "claimed" {
+                    break outcome["claim"].clone();
                 }
                 std::thread::sleep(Duration::from_millis(20));
             };
-            let job_id = claim["job"]["id"].as_str().expect("job id").to_string();
-            let claim_id = claim["job"]["claim_id"]
-                .as_str()
-                .expect("claim id")
-                .to_string();
+            let job_id = claim["job_id"].as_str().expect("job id").to_string();
+            let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
             client
                 .post(format!("{}/runner/jobs/{job_id}/events", worker_broker_url))
                 .json(&json!({

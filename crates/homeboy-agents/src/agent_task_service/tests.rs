@@ -3839,9 +3839,9 @@ fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() 
                 "metadata": { "submission_key": "controller-handoff-unaccepted" }
             }))
             .expect("fixture runner submission request");
-        agent_task_lifecycle::record_lab_offload_submission_request(
+        agent_task_lifecycle::record_lab_offload_submission_envelope(
             "controller-handoff-unaccepted",
-            &submission_request,
+            &crate::agent_task_lifecycle::tests::runner_api_submission(submission_request),
         )
         .expect("persist complete pending handoff request");
         agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
@@ -3984,7 +3984,7 @@ impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture
     fn submit_runner_api_request(
         &self,
         _runner_id: &str,
-        _submission: crate::agent_task_lifecycle::RunnerContinuationSubmission,
+        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> homeboy_core::Result<homeboy_core::api_jobs::Job> {
         Err(homeboy_core::Error::internal_unexpected(
             "unused in fixture",

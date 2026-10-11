@@ -6,8 +6,7 @@
 //! execution, and evidence functions.
 
 use homeboy_agents::agent_task_lifecycle::{
-    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationSubmission,
-    RunnerJobReconciliation, RunnerLiveJobAuthority,
+    RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
 use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
 use std::time::Duration;
@@ -290,7 +289,7 @@ impl RunnerContinuationProvider for RunnerContinuation {
     fn submit_runner_api_request(
         &self,
         runner_id: &str,
-        submission: RunnerContinuationSubmission,
+        submission: homeboy_runner_contract::RunnerApiSubmitRequest,
     ) -> Result<Job> {
         super::connection::submit_runner_api_request(runner_id, submission)
     }

@@ -4,8 +4,6 @@
 
 use serde_json::{json, Value};
 
-#[cfg(test)]
-use homeboy_core::api_jobs::RemoteRunnerJobRequest;
 use homeboy_core::api_jobs::{JobStatus, RunnerJobLogSnapshot};
 use homeboy_core::observation::RunStatus;
 use homeboy_core::redaction::redact_argv;
@@ -1274,50 +1272,6 @@ pub fn record_lab_offload_submission_intent_in_store(
     metadata.insert(
         "phase_activity".to_string(),
         json!("durable broker submission intent recorded; waiting for runner capacity"),
-    );
-    lifecycle_store.write_record_in_place(&mut record)?;
-    Ok(record)
-}
-
-/// Replace a preflight intent with the exact normalized, redacted request that
-/// will cross the broker boundary. This is the final durable write before POST.
-#[cfg(test)]
-pub fn record_lab_offload_submission_request(
-    run_id: &str,
-    request: &RemoteRunnerJobRequest,
-) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    // As above: the lock and the record write it guards resolve one root once.
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
-    let mut record = lifecycle_store.read_record(&run_id)?;
-    if record.state.is_terminal() {
-        return Ok(record);
-    }
-    let submission_key = request.submission_key().ok_or_else(|| {
-        Error::internal_unexpected("Lab runner submission request has no stable submission key")
-    })?;
-    let replay_request = request.redacted_for_durable_replay();
-    let payload_fingerprint = replay_request.submission_payload_fingerprint()?;
-    let now = chrono::Utc::now();
-    let mut handoff = AgentTaskLabHandoff::pending(
-        &replay_request.runner_id,
-        now.to_rfc3339(),
-        (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds())).to_rfc3339(),
-    );
-    handoff.submission_key = Some(submission_key.to_string());
-    handoff.payload_fingerprint = Some(payload_fingerprint.clone());
-    record.lab_handoff = Some(handoff);
-    let metadata = record.ensure_metadata_object();
-    metadata.insert(
-        "runner_submission_intent".to_string(),
-        json!({
-            "state": "pending",
-            "submission_key": submission_key,
-            "payload_fingerprint": payload_fingerprint,
-            "runner_id": replay_request.runner_id,
-            "replay_request": replay_request,
-        }),
     );
     lifecycle_store.write_record_in_place(&mut record)?;
     Ok(record)
