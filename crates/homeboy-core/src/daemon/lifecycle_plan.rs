@@ -55,8 +55,8 @@ pub enum WaitCause {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockCause {
-    /// The registry or a lease could not be read. Another repair (legacy
-    /// lease migration, corrupt-lease handling) may still apply.
+    /// The registry or a lease could not be read. Another repair
+    /// (corrupt-lease handling) may still apply.
     Unreadable,
     /// A live daemon process holds no lease; anything could race it.
     UnleasedProcess,

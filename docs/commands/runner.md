@@ -16,17 +16,6 @@ Runner configuration separates printable environment from secrets:
 
 ## Subcommands
 
-## Daemon Recovery Migration
-
-For daemon child recovery, use the canonical exact-evidence command:
-
-```sh
-homeboy daemon recover-missing-child-identity --lease-id <expected-lease> \
-  --recorded-daemon-pid <recorded-daemon-pid> \
-  --recorded-daemon-endpoint <recorded-daemon-endpoint> --job-id <job-id> \
-  --child-pid <child-pid> --child-starttime-ticks <child-starttime-ticks>
-```
-
 ### `lifecycle`
 
 Inspect runner workspace lifecycle and finalization readiness.

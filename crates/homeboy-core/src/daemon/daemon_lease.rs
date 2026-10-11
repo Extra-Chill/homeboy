@@ -94,8 +94,8 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
     };
 
     let running = pid_is_running(state.pid);
-    // A dead owner is safe to recover even when its persisted schema was
-    // omitted. Keeping the parsed lease identity makes explicit adoption
+    // A dead owner is safe to recover even when its persisted schema is
+    // unsupported. Keeping the parsed lease identity makes explicit adoption
     // possible; a live invalid lease remains protected by schema validation.
     if !running {
         return Ok(stale_lease(
