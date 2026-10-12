@@ -150,16 +150,12 @@ pub(crate) fn provision_provider_file_secret_sources_for_runner(
     candidate_names.extend(route_names);
     candidate_names.sort();
     candidate_names.dedup();
-    let provisions = provider_file_secret_source_provisions(&candidate_names, &fallback_sources);
-    let pending = provisions
-        .into_iter()
-        .filter(|provision| {
-            !provision
-                .env_names
-                .iter()
-                .all(|name| request_env.contains_key(name.as_str()))
-        })
-        .collect::<Vec<_>>();
+    // A forwarded env value does not make the declared file redundant: a
+    // runtime such as OpenCode reads its credential store, not the env. The
+    // delivery is a projection of declared fields, so syncing it every run is
+    // safe and keeps the runner's copy current (#15783).
+    let _ = request_env;
+    let pending = provider_file_secret_source_provisions(&candidate_names, &fallback_sources);
     if pending.is_empty() {
         return Ok(());
     }
