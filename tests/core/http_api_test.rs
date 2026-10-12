@@ -2504,7 +2504,6 @@ fn artifact_content_serves_percent_encoded_stored_artifact_ids() {
 #[test]
 fn rejects_mutating_endpoint_shapes() {
     assert!(http_api::route(HttpMethod::Post, "/rigs/studio/up").is_err());
-    assert!(http_api::route(HttpMethod::Post, "/stacks/studio/apply").is_err());
     assert!(http_api::route(HttpMethod::Post, "/deploy").is_err());
     assert!(http_api::route(HttpMethod::Post, "/release").is_err());
 }

@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_policy_value() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Refactor, "fixture")
+        let plan = HomeboyPlan::builder_for_component(PlanKind::Build, "fixture")
             .policy_value("blocked", serde_json::json!(false))
             .build();
 
