@@ -1,54 +1,6 @@
 use std::collections::BTreeMap;
 
-use clap::Args;
 use serde::Serialize;
-
-#[derive(Args, Debug, Clone)]
-pub struct BrowserEvidenceCompareArgs {
-    /// Directory containing baseline browser evidence JSON artifacts
-    #[arg(long, value_name = "DIR")]
-    pub baseline_dir: String,
-
-    /// Directory containing candidate browser evidence JSON artifacts
-    #[arg(long, value_name = "DIR")]
-    pub candidate_dir: String,
-
-    /// Label for the baseline artifact set
-    #[arg(long, default_value = "baseline")]
-    pub baseline_label: String,
-
-    /// Label for the candidate artifact set
-    #[arg(long, default_value = "candidate")]
-    pub candidate_label: String,
-
-    /// Include local filesystem paths in Markdown output. By default Markdown only uses relative artifact names and URLs.
-    #[arg(long)]
-    pub include_local_paths: bool,
-
-    /// Output format. Markdown is direct-rendered; JSON uses the normal command envelope.
-    #[arg(long, value_parser = ["markdown", "json"], default_value = "markdown")]
-    pub format: String,
-
-    /// Run visual screenshot comparisons through a declared visual compare provider.
-    #[arg(long)]
-    pub visual_compare: bool,
-
-    /// Directory where visual compare artifacts should be written.
-    #[arg(long, value_name = "DIR")]
-    pub visual_artifacts_dir: Option<String>,
-
-    /// Executable implementing the generic Homeboy visual compare provider contract.
-    #[arg(long, value_name = "COMMAND")]
-    pub visual_compare_provider: Option<String>,
-
-    /// Extra argument forwarded to the visual compare provider before the input JSON path.
-    #[arg(long = "visual-provider-arg", value_name = "ARG")]
-    pub visual_provider_args: Vec<String>,
-
-    /// Visual mismatch threshold forwarded to the visual compare provider.
-    #[arg(long, value_name = "RATIO")]
-    pub visual_threshold: Option<f64>,
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct BrowserEvidenceCompareReport {

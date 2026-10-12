@@ -1737,83 +1737,6 @@ pub(crate) fn project_runner_evidence_refs(
 
 /// The authoritative model recorded on an aggregate outcome, if any.
 ///
-/// Locates the outcome for `task_id` and reads its concrete model through the
-/// canonical [`AgentTaskOutcome::selected_model`] reader, so aggregate → task
-/// model reconciliation uses the same present/non-blank definition as every
-/// other model-resolution site.
-fn aggregate_selected_model(aggregate: &AgentTaskAggregate, task_id: &str) -> Option<String> {
-    aggregate
-        .outcomes
-        .iter()
-        .find(|outcome| outcome.task_id == task_id)
-        .and_then(|outcome| outcome.selected_model())
-        .map(str::to_string)
-}
-
-/// True when a terminal record's durable lifecycle provider model is missing but
-/// the authoritative aggregate outcome recorded a concrete model — the exact
-/// stale-terminal state that blocks `finalize-pr` after the #9404/#9405 repair
-/// (#9411). The nonterminal `status()` path already normalizes this via
-/// `apply_aggregate_to_record`, but a record that went terminal *before* that
-/// repair never gets reprojected on read.
-pub(crate) fn terminal_provider_model_reconciliation_needed(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> bool {
-    record.tasks.iter().any(|task| {
-        let durable_missing = task
-            .model
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(str::is_empty);
-        durable_missing && aggregate_selected_model(aggregate, &task.task_id).is_some()
-    })
-}
-
-/// Reproject authoritative aggregate model evidence onto a terminal record when
-/// the durable lifecycle model is stale-null (#9411).
-///
-/// Fills only the previously-null provider model — on the run tasks, provider
-/// handles, and the rebuilt lifecycle projection — and persists. Terminal state,
-/// promotion evidence, gates, totals, and artifact projections are preserved:
-/// `set_run_state` re-asserts the existing terminal state and only the
-/// model-bearing lifecycle projection is rebuilt from the record's own tasks.
-///
-/// The persist at the end is the whole point of taking a store: it is the only
-/// durable effect, so a reconciliation driven from injected roots must land its
-/// repaired model in the same installation the record and aggregate were read
-/// from. There is no ambient wrapper — `reconcile_status_in_store` is the only caller,
-/// and the store it hands down is the one its own caller injected.
-pub(crate) fn reconcile_terminal_provider_model_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &mut AgentTaskRunRecord,
-    plan: &AgentTaskPlan,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let mut changed = false;
-    for task in &mut record.tasks {
-        if task
-            .model
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|model| !model.is_empty())
-        {
-            continue;
-        }
-        if let Some(model) = aggregate_selected_model(aggregate, &task.task_id) {
-            task.model = Some(model);
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(());
-    }
-    persist_provider_handle_models(&mut record.provider_handles, plan);
-    update_lifecycle_from_record(record, plan);
-    record.updated_at = Some(now_timestamp());
-    lifecycle_store.write_record(record)
-}
-
 /// Recover the runner identity for canonical legacy patch artifacts. Diagnostic
 /// artifacts can share an aggregate without participating in promotion.
 fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<String> {
@@ -2231,15 +2154,15 @@ fn project_terminal_artifacts_in_store(
                 // before the idempotency check below.
                 metadata["agent_task"]["projection"] = json!("controller_local");
             }
-            // Prefer pre-existing executor-finalized bytes over a legacy
-            // direct import. The import remains evidence, while the finalized
+            // Prefer pre-existing executor-finalized bytes over a direct
+            // import. The import remains evidence, while the finalized
             // projection keeps its established derived controller identity.
             let finalized_path = remote_runner
                 .map(|_| controller_finalized_artifact_path(store, artifact))
                 .transpose()?
                 .flatten();
             if finalized_path.is_some() {
-                stamp_legacy_artifact_provenance(
+                stamp_imported_artifact_lineage(
                     store,
                     &record.run_id,
                     &outcome.task_id,
@@ -2296,14 +2219,6 @@ fn project_terminal_artifacts_in_store(
                         &outcome.task_id,
                         logical_id,
                     );
-                    let preserved_logical_alias = historical_logical_runner_alias(
-                        store,
-                        &artifact_id,
-                        &record.run_id,
-                        &outcome.task_id,
-                        artifact,
-                        &remote_ref,
-                    )?;
                     let mirror_result = if requires_durable_lab_projection(artifact) {
                         (|| -> Result<()> {
                             let mirror = tempfile::NamedTempFile::new().map_err(|error| {
@@ -2371,29 +2286,24 @@ fn project_terminal_artifacts_in_store(
                         Ok(())
                     };
 
-                    // A historical remote_file may already occupy the persisted id
-                    // with a logical token path. Leave that row as evidence and
-                    // publish the controller-owned bytes under a derived id.
-                    if !preserved_logical_alias {
-                        store.import_artifact(&homeboy_core::observation::ArtifactRecord {
-                            id: artifact_id,
-                            run_id: record.run_id.clone(),
-                            kind: artifact.kind.clone(),
-                            artifact_type: "remote_file".to_string(),
-                            path: remote_ref,
-                            url: None,
-                            public_url: None,
-                            viewer_url: None,
-                            viewer_links: Vec::new(),
-                            sha256: artifact.sha256.clone(),
-                            size_bytes: artifact
-                                .size_bytes
-                                .and_then(|value| i64::try_from(value).ok()),
-                            mime: artifact.mime.clone(),
-                            metadata_json: metadata,
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                        })?;
-                    }
+                    store.import_artifact(&homeboy_core::observation::ArtifactRecord {
+                        id: artifact_id,
+                        run_id: record.run_id.clone(),
+                        kind: artifact.kind.clone(),
+                        artifact_type: "remote_file".to_string(),
+                        path: remote_ref,
+                        url: None,
+                        public_url: None,
+                        viewer_url: None,
+                        viewer_links: Vec::new(),
+                        sha256: artifact.sha256.clone(),
+                        size_bytes: artifact
+                            .size_bytes
+                            .and_then(|value| i64::try_from(value).ok()),
+                        mime: artifact.mime.clone(),
+                        metadata_json: metadata,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    })?;
                     if let Err(error) = mirror_result {
                         projection_error.get_or_insert(error);
                     }
@@ -2557,7 +2467,7 @@ fn reusable_terminal_artifact(
         // declarations the pair is indistinguishable from two unrelated
         // artifacts and friendly `runs artifact <run> <name>` selection must
         // refuse it as ambiguous (Extra-Chill/homeboy#15712).
-        stamp_legacy_artifact_provenance(store, run_id, task_id, artifact, artifact_id)?;
+        stamp_imported_artifact_lineage(store, run_id, task_id, artifact, artifact_id)?;
         let path = controller_projected_local_artifact_path(
             store,
             run_id,
@@ -2647,33 +2557,6 @@ pub(crate) fn persisted_observation_artifact_id(
     format!("agent-task-{:x}", id_hash.finalize())
 }
 
-fn historical_logical_runner_alias(
-    store: &homeboy_core::observation::ObservationStore,
-    artifact_id: &str,
-    run_id: &str,
-    task_id: &str,
-    artifact: &AgentTaskArtifact,
-    canonical_ref: &str,
-) -> Result<bool> {
-    let Some(existing) = store.get_artifact(artifact_id)? else {
-        return Ok(false);
-    };
-    let Some((prefix, _)) = canonical_ref.rsplit_once('/') else {
-        return Ok(false);
-    };
-    Ok(existing.artifact_type == "remote_file"
-        && existing.run_id == run_id
-        && existing.kind == artifact.kind
-        && existing.path == format!("{prefix}/{}", artifact.id)
-        && existing.sha256 == artifact.sha256
-        && existing.size_bytes
-            == artifact
-                .size_bytes
-                .and_then(|size| i64::try_from(size).ok())
-        && existing.metadata_json["agent_task"]["task_id"] == task_id
-        && existing.metadata_json["agent_task"]["logical_artifact_id"] == artifact.id)
-}
-
 pub(crate) fn canonical_runner_artifact_ref(
     runner_id: &str,
     run_id: &str,
@@ -2697,9 +2580,16 @@ fn controller_projection_artifact_id(artifact_id: &str) -> String {
     format!("agent-task-{:x}", controller_hash.finalize())
 }
 
-/// Retain legacy imported evidence while making its lifecycle association
-/// explicit. This never grants projection authority to its external path.
-fn stamp_legacy_artifact_provenance(
+/// Stamp lifecycle lineage onto a verified record that already occupies the
+/// persisted artifact id. This is not legacy repair: current generic writers
+/// store such a record without knowing the task and logical artifact it
+/// belongs to. The Lab terminal-job mirror publishes runner job artifacts into
+/// the controller-owned run under their runner ids with runner/job metadata
+/// only, and `runs import` writes bundle rows verbatim. Terminal projection is
+/// the first point where the association is known, so lineage is attached
+/// here. The record is retained as evidence and never gains projection
+/// authority over its external path.
+fn stamp_imported_artifact_lineage(
     store: &homeboy_core::observation::ObservationStore,
     run_id: &str,
     task_id: &str,
@@ -3155,6 +3045,9 @@ pub(crate) fn apply_aggregate_to_record(
     persist_provider_handle_models(&mut record.provider_handles, plan);
     record.latest_executor_evidence = latest_executor_evidence(&record.run_id, plan, aggregate);
     update_lifecycle_from_record(record, plan);
+    // The model each provider actually ran is aggregate evidence; it is
+    // projected with the aggregate it came from, not repaired on a later read.
+    project_outcome_models(record, aggregate);
     let provider_run_ids: Vec<String> = record
         .provider_handles
         .iter()

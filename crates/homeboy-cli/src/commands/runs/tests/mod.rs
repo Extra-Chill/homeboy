@@ -2109,7 +2109,7 @@ fn artifacts_command_suppresses_viewer_links_when_public_url_is_unreachable() {
 }
 
 #[test]
-fn findings_commands_list_and_show_records() {
+fn findings_command_lists_records() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
@@ -2148,13 +2148,11 @@ fn findings_commands_list_and_show_records() {
         assert_eq!(output.findings.len(), 1);
         assert_eq!(output.findings[0].id, recorded.id);
         assert_eq!(output.findings[0].finding.message, "Missing escaping");
-
-        let (output, _) = findings::finding(&test_store(), &recorded.id).expect("show finding");
-        let RunsOutput::Finding(output) = output else {
-            panic!("expected finding output");
-        };
-        assert_eq!(output.finding.finding.category.as_deref(), Some("security"));
-        assert_eq!(output.finding.finding.fix.fixable, Some(true));
+        assert_eq!(
+            output.findings[0].finding.category.as_deref(),
+            Some("security")
+        );
+        assert_eq!(output.findings[0].finding.fix.fixable, Some(true));
     });
 }
 
@@ -2189,66 +2187,6 @@ fn latest_run_command_returns_newest_matching_run() {
         };
         assert_eq!(output.command, "runs.latest-run");
         assert_eq!(output.run.id, latest.id);
-    });
-}
-
-#[test]
-fn latest_finding_command_uses_latest_matching_run() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let old_run = store
-            .start_run(sample_run("lint", "homeboy", "studio", Value::Null))
-            .expect("old run");
-        store
-            .record_finding(&NewFindingRecord {
-                run_id: old_run.id.clone(),
-                tool: "lint".to_string(),
-                rule: Some("security".to_string()),
-                file: Some("src/foo.php".to_string()),
-                line: Some(12),
-                severity: Some("error".to_string()),
-                fingerprint: Some("old".to_string()),
-                message: "Old finding".to_string(),
-                fixable: Some(true),
-                metadata_json: serde_json::json!({}),
-            })
-            .expect("old finding");
-        let latest_run = store
-            .start_run(sample_run("lint", "homeboy", "studio", Value::Null))
-            .expect("latest run");
-        let latest_finding = store
-            .record_finding(&NewFindingRecord {
-                run_id: latest_run.id.clone(),
-                tool: "lint".to_string(),
-                rule: Some("security".to_string()),
-                file: Some("src/foo.php".to_string()),
-                line: Some(12),
-                severity: Some("error".to_string()),
-                fingerprint: Some("latest".to_string()),
-                message: "Latest finding".to_string(),
-                fixable: Some(true),
-                metadata_json: serde_json::json!({}),
-            })
-            .expect("latest finding");
-
-        let (output, _) = findings::latest_finding(findings::RunsLatestFindingArgs {
-            kind: Some("lint".to_string()),
-            component_id: Some("homeboy".to_string()),
-            rig: Some("studio".to_string()),
-            status: None,
-            tool: Some("lint".to_string()),
-            file: Some("src/foo.php".to_string()),
-        })
-        .expect("latest finding command");
-
-        let RunsOutput::LatestFinding(output) = output else {
-            panic!("expected latest finding output");
-        };
-        assert_eq!(output.command, "runs.latest-finding");
-        assert_eq!(output.run.id, latest_run.id);
-        assert_eq!(output.finding.id, latest_finding.id);
-        assert_eq!(output.finding.finding.message, "Latest finding");
     });
 }
 

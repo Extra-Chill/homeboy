@@ -48,8 +48,7 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
     let mut pending_intent_run_ids = Vec::new();
     let mut expired_run_ids = Vec::new();
     // Scan the stored snapshot so this operation owns and reports its expiry
-    // mutations. `list_records` refreshes through `status`, which also expires
-    // pending handoffs as a user-visible read-side convergence guarantee.
+    // mutations. Reads never expire a handoff (#15718).
     for record in lifecycle_store.read_records()? {
         if record.state == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
             accepted_run_ids.push(record.run_id);
@@ -72,7 +71,7 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
         }
     }
     for run_id in accepted_run_ids {
-        // `status` owns snapshot validation, persistence, and the exact
+        // `reconcile_status_in_store` owns snapshot validation, persistence, and the exact
         // no-PID daemon-loss projection. A bad remote record must not prevent
         // unrelated activity from being listed. This is the rooted body the
         // ambient `status` entry point delegates to, with its own defaults:

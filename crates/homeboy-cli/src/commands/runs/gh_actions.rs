@@ -16,9 +16,7 @@
 //! # Schema-blind
 //!
 //! The ingestor does not parse, interpret, or validate artifact contents
-//! beyond `serde_json::from_str` succeeding. The downstream `runs query` /
-//! `runs drift` primitives project arbitrary JSONPath expressions over the
-//! resulting artifact corpus.
+//! beyond `serde_json::from_str` succeeding.
 
 use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;

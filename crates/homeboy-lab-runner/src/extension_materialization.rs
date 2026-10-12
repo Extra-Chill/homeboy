@@ -805,7 +805,6 @@ pub(crate) fn dev_extension_lifecycle(
             shell::quote_path(extension_id)
         )),
         status: ResourceLifecycleResourceStatus::Active,
-        migration_provenance: None,
     }
 }
 
@@ -828,7 +827,6 @@ fn installed_extension_lifecycle(
         cleanup_intent: Default::default(),
         cleanup_command: None,
         status: ResourceLifecycleResourceStatus::Retained,
-        migration_provenance: None,
     }
 }
 

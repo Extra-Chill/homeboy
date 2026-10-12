@@ -311,12 +311,9 @@ impl ObservationStore {
             roots,
         };
         if maintain_artifacts {
-            // Evidence projections expose opaque handles and failure ranks, so
-            // they only receive a store after bounded maintenance completes.
             // Failure is returned to the caller and the next normal open
             // deterministically retries; no detached work can be lost.
             store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
-            store.backfill_artifact_handles_with_retry(|| {})?;
         }
         Ok(store)
     }

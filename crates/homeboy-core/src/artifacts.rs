@@ -39,8 +39,7 @@ pub use super::artifact_postprocess::{
 };
 pub use super::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 pub use super::matrix_artifact_summary::{
-    generic_matrix_summary_from_artifacts, is_matrix_summary_artifact,
-    render_matrix_artifact_summary_markdown, summarize_matrix_artifacts, GenericMatrixSummary,
+    generic_matrix_summary_from_artifacts, summarize_matrix_artifacts, GenericMatrixSummary,
     MatrixArtifactSummary,
 };
 pub use super::publication_artifacts::index_remote_published_artifact_refs_for_run;

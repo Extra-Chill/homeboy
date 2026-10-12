@@ -306,7 +306,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         0
     };
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
-    if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
+    // Status is a pure projection (#13697, #15718): every read below is
+    // bounded and never initializes, migrates, or reconciles durable state.
+    if let Ok(record) = bounded_exact_record(&target.run_id) {
         attach_lab_snapshot_failure_projection(&mut value, &record);
         if let Some(diagnostic) = lab_staging_root_cause(&record) {
             value["blocker_summary"] = json!(diagnostic.message);
@@ -709,8 +711,15 @@ mod compact_status_tests {
     }
 }
 
+fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {
+    homeboy::agents::agent_task_lifecycle::exact_record_bounded_in_store(
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        run_id,
+    )
+}
+
 fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
-    let Ok(record) = agent_task_lifecycle::exact_record(run_id) else {
+    let Ok(record) = bounded_exact_record(run_id) else {
         return;
     };
     let recoverable = matches!(
