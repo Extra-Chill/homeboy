@@ -141,7 +141,10 @@ fn workspace_materializer_fetches_only_the_exact_sha_for_a_fresh_checkout() {
     // operates in place.
     assert!(command.contains("git init \"$tmp\""));
     assert!(command.contains("remote add origin https://github.com/Extra-Chill/homeboy.git"));
-    assert!(command.contains("fetch --filter=blob:none origin abc123"));
+    // Objects come from the runner's shared per-remote mirror (#15690).
+    assert!(command
+        .contains("git clone --mirror https://github.com/Extra-Chill/homeboy.git \"$mirror\""));
+    assert!(command.contains("fetch --no-tags \"$mirror\" abc123"));
     assert!(command.contains("checkout --detach abc123"));
     // The fresh clone validates HEAD, then atomically publishes tmp -> dest.
     assert!(command.contains("git -C \"$tmp\" rev-parse --verify -q HEAD"));

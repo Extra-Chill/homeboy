@@ -4669,6 +4669,7 @@ pub(crate) use service::{
     service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
 };
 use session_store::*;
+pub(crate) use session_store::controller_id;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 
 #[cfg(test)]

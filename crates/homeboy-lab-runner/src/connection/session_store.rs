@@ -170,7 +170,7 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
     paths::runner_session_file(runner_id)
 }
 
-pub(super) fn controller_id() -> String {
+pub(crate) fn controller_id() -> String {
     // Resolved once per process: the id names this controller's Lab service
     // unit, daemon state and sessions, so it must not change mid-run.
     static DERIVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
