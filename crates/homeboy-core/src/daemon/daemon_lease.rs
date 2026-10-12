@@ -123,6 +123,19 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
             "unsupported daemon lease schema",
         ));
     }
+    // A daemon whose executable was replaced in place (e.g. by `homeboy
+    // upgrade`) keeps running the old, now-deleted inode. The on-disk binary
+    // can match this build while the live process does not, so the binary
+    // hash check below would report a fresh lease to the CLI while the daemon
+    // itself rejects work as stale (homeboy#15806). Inspect the live process.
+    if pid_executable_replaced(state.pid) {
+        return Ok(stale_lease(
+            state,
+            true,
+            DaemonStaleReasonCode::BinaryHashMismatch,
+            "daemon process is running a replaced (deleted) executable; restart required",
+        ));
+    }
     let current_identity = build_identity::current();
     if state.build_identity.version != current_identity.version
         || state.build_identity.display != current_identity.display
@@ -160,6 +173,19 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
         stale_reason_code: None,
         invalid_pid: None,
     })
+}
+
+/// Whether the live process `pid` executes a binary that has since been
+/// replaced or removed on disk. Linux reports this as a `/proc/<pid>/exe`
+/// link target ending in ` (deleted)`; elsewhere this is never detected.
+pub(crate) fn pid_executable_replaced(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|target| exe_link_target_is_replaced(&target))
+        .unwrap_or(false)
+}
+
+fn exe_link_target_is_replaced(target: &Path) -> bool {
+    target.to_string_lossy().ends_with(" (deleted)")
 }
 
 pub(crate) fn stale_lease(
@@ -335,6 +361,46 @@ pub(crate) fn runtime_snapshot_stale_reason(snapshot: &DaemonRuntimeSnapshot) ->
             "daemon runtime path fingerprints changed: {}",
             stale.join(", ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod replaced_executable_tests {
+    use super::*;
+
+    #[test]
+    fn deleted_exe_link_is_replaced() {
+        assert!(exe_link_target_is_replaced(Path::new(
+            "/usr/local/lib/wp-coding-agents/bin/homeboy (deleted)"
+        )));
+        assert!(!exe_link_target_is_replaced(Path::new(
+            "/usr/local/lib/wp-coding-agents/bin/homeboy"
+        )));
+    }
+
+    #[test]
+    fn current_process_is_not_replaced_and_missing_pid_is_not_flagged() {
+        assert!(!pid_executable_replaced(std::process::id()));
+        assert!(!pid_executable_replaced(u32::MAX));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn detects_a_process_whose_binary_was_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("sleeper");
+        std::fs::copy("/bin/sleep", &exe).expect("copy sleep");
+        let mut child = std::process::Command::new(&exe)
+            .arg("30")
+            .spawn()
+            .expect("spawn copied sleep");
+        let pid = child.id();
+        assert!(!pid_executable_replaced(pid));
+        std::fs::remove_file(&exe).expect("remove binary");
+        let replaced = pid_executable_replaced(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(replaced, "deleted executable must be detected");
     }
 }
 
