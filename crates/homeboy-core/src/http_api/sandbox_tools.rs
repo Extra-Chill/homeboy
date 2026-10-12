@@ -49,8 +49,6 @@ const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
             "coverage",
             "coverage_min",
             "analyze",
-            "drift",
-            "since",
             "changed_since",
             "args",
         ],

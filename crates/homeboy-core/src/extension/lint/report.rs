@@ -7,12 +7,12 @@ use homeboy_core::ci_profile::CiContext;
 use homeboy_core::finding::FindingProducerSummary;
 #[cfg(test)]
 use homeboy_core::finding::HomeboyFinding;
+use homeboy_extension_contract::AppliedLintFix;
 pub use homeboy_extension_contract::LintCommandOutput;
 use homeboy_extension_contract::{
     phase_failure_category_from_exit_code, phase_status_from_exit_code, PhaseFailure,
     PhaseFailureCategory, PhaseReport, VerificationPhase,
 };
-use homeboy_extension_contract::AppliedLintFix;
 
 use super::fix::LintFixRun;
 

@@ -1596,10 +1596,7 @@ fn missing_required_extensions(args: &[String], required_extensions: &[String]) 
 }
 
 fn command_accepts_extension_override(arg: &str) -> bool {
-    matches!(
-        arg,
-        "bench" | "fuzz" | "lint" | "review" | "test"
-    )
+    matches!(arg, "bench" | "fuzz" | "lint" | "review" | "test")
 }
 
 #[cfg(test)]

@@ -18,10 +18,6 @@ fn extension_capability_owns_labels_and_scripts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
-        "scripts": {
-            "compiler_warnings": "compiler-warnings.sh",
-            "compiler_warning_fixes": "compiler-warning-fixes.sh"
-        },
         "runtime": { "runtimes": { "node": { "version": "24" } } },
         "lint": { "extension_script": "lint.sh" },
         "test": {
@@ -746,34 +742,6 @@ fn archive_install_required_header_rejects_missing_selector() {
     .expect_err("required_header must declare a selector");
 
     assert!(err.to_string().contains("exactly one of file or file_glob"));
-}
-
-#[test]
-fn retired_audit_and_script_keys_are_ignored_by_manifest_parsing() {
-    // Extension manifests published before the code audit and refactor engines
-    // were removed still carry `audit`, `scripts.fingerprint`, and
-    // `scripts.refactor`; unknown keys are dropped, so they keep loading.
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "scripts": {
-            "fingerprint": "fingerprint.sh",
-            "refactor": "refactor.sh",
-            "compiler_warnings": "warnings.sh",
-            "format": "format.sh"
-        },
-        "audit": {
-            "test_mapping": {
-                "source_dirs": ["src"],
-                "test_dirs": ["tests"],
-                "inline_tests": true
-            }
-        }
-    }))
-    .unwrap();
-
-    assert_eq!(manifest.format_script(), Some("format.sh"));
-    assert_eq!(manifest.test_drift(), None);
 }
 
 #[test]

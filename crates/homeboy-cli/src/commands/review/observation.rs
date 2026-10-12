@@ -644,10 +644,7 @@ mod tests {
             "homeboy",
             "origin/main",
             "abc123",
-            vec![
-                artifact_command(&lint),
-                artifact_command(&test),
-            ],
+            vec![artifact_command(&lint), artifact_command(&test)],
         );
         let output = ReviewCommandOutput {
             command: "review".to_string(),

@@ -394,9 +394,9 @@ fn advertised_fixable_with_no_local_changes_fails() {
     let error = reject_unapplied_fixable_findings(&findings, &[])
         .expect_err("advertised-fixable + no local change must fail");
     assert!(
-        error.message.contains(
-            "2 auto-fixable finding(s), but the fixer did not modify the local worktree"
-        ),
+        error
+            .message
+            .contains("2 auto-fixable finding(s), but the fixer did not modify the local worktree"),
         "error must report the discrepancy: {error}"
     );
     assert!(error

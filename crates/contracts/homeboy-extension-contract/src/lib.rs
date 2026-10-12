@@ -121,8 +121,7 @@ pub use test_parsing::{CoverageOutput, TestFailureSummaryItem, TestSummaryOutput
 pub use test_result::{TestCounts, TestScopeOutput};
 pub use test_results::{MainTestWorkflowResult, TestCommandOutput, TestRunWorkflowResult};
 pub use test_workflow::{
-    ChangeType, DriftReport, DriftedTest, ProductionChange, RawTestOutput,
-    TestBaselineComparison,
+    ChangeType, DriftReport, DriftedTest, ProductionChange, RawTestOutput, TestBaselineComparison,
 };
 pub use trace_parsing::{
     TraceArtifact, TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck,

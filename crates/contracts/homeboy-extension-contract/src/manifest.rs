@@ -410,7 +410,6 @@ impl ExtensionManifest {
         self.test.as_ref().and_then(|t| t.drift.clone())
     }
 
-
     /// Convenience: get deploy verifications (empty if no deploy capability).
     pub fn deploy_verifications(&self) -> &[DeployVerification] {
         self.deploy

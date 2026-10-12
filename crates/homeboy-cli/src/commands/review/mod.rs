@@ -1018,9 +1018,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     };
 
     if args.changed.changed_only {
-        top_hints.push(
-            "--changed-only scopes lint; test runs on the full component".to_string(),
-        );
+        top_hints.push("--changed-only scopes lint; test runs on the full component".to_string());
     }
 
     let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());

@@ -1,13 +1,13 @@
 //! Shared workflow types — args, results, and summary structures.
 
 use crate::extension::lint::baseline as lint_baseline;
-use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_core::finding::{FindingProducerSummary, HomeboyFinding};
 use homeboy_engine_primitives::baseline::BaselineFlags;
+use homeboy_extension_contract::AppliedLintFix;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 pub use homeboy_extension_contract::FormattingFindings;
 pub use homeboy_extension_contract::LintSummaryOutput;
 use homeboy_extension_contract::SelfCheckCaptureMetadata;
-use homeboy_extension_contract::AppliedLintFix;
 use serde::Serialize;
 
 /// Sniff-selection filters shared by every lint entry point.

@@ -17,7 +17,6 @@ path = "src/lib.rs"
 # cache-reset helpers it needs) to other crates' test builds. Enabled as a
 # dev-dependency feature by the CLI and feature crates; never in production.
 test-support = []
-slow-tests = []
 
 [dependencies]
 homeboy-artifact-ref-contract = { version = "0.1.0", path = "../contracts/homeboy-artifact-ref-contract" }

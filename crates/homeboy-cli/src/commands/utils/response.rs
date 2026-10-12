@@ -3627,7 +3627,6 @@ mod tests {
         for (step, expected) in [
             ("preflight.lint", "homeboy review lint fixture"),
             ("preflight.test", "homeboy review test fixture"),
-            ("preflight.audit", "homeboy review audit fixture"),
             ("preflight.package", "homeboy review build fixture"),
         ] {
             let digest = release_failure_digest(&release_failure_payload(step, step))

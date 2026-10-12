@@ -699,8 +699,7 @@ const HERMETIC_SUBPROCESS_HEARTBEAT: Duration = Duration::from_secs(30);
 /// test, and every other test in the binary still runs and still reports.
 ///
 /// Prefer this over `Command::output`/`wait_with_output` in every subprocess
-/// test; it is the test-side counterpart of the `unbounded_output_capture`
-/// audit rule.
+/// test.
 pub fn bounded_output(mut command: Command) -> Output {
     let argv = rendered_argv(&command);
     let budget = hermetic_subprocess_budget();
@@ -931,16 +930,6 @@ pub struct HomeGuard {
 const TEST_DAEMON_BINARY_SHA: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-pub struct AuditGuard {
-    _guard: MutexGuard<'static, ()>,
-    _home_guard: MutexGuard<'static, ()>,
-}
-
-pub struct AuditHomeGuard {
-    home: HomeGuard,
-    _guard: MutexGuard<'static, ()>,
-}
-
 pub struct ArtifactRootOverrideGuard;
 
 impl ArtifactRootOverrideGuard {
@@ -953,40 +942,6 @@ impl ArtifactRootOverrideGuard {
 impl Drop for ArtifactRootOverrideGuard {
     fn drop(&mut self) {
         crate::set_artifact_root_override(None);
-    }
-}
-
-impl AuditGuard {
-    pub fn new() -> Self {
-        let home_guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let guard = audit_lock().lock().unwrap_or_else(|e| e.into_inner());
-        Self {
-            _guard: guard,
-            _home_guard: home_guard,
-        }
-    }
-}
-
-impl Default for AuditGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AuditHomeGuard {
-    pub fn new() -> Self {
-        let home = HomeGuard::new();
-        let guard = audit_lock().lock().unwrap_or_else(|e| e.into_inner());
-        Self {
-            _guard: guard,
-            home,
-        }
-    }
-}
-
-impl Default for AuditHomeGuard {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1783,11 +1738,6 @@ pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     body(&home.context.root)
 }
 
-pub fn with_isolated_audit_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
-    let guard = AuditHomeGuard::new();
-    body(&guard.home.context.root)
-}
-
 /// Additional cache-reset hooks registered by layers above core (e.g. the CLI
 /// crate resets its entity-suggestion cache). Core's test isolation resets its
 /// own caches and then invokes these, so higher layers don't need core to know
@@ -1817,36 +1767,6 @@ fn reset_cached_test_state() {
         .clone();
     for hook in hooks {
         hook();
-    }
-}
-
-pub fn write_source_extension(home: &std::path::Path, id: &str, file_extension: &str) {
-    let extension_dir = home.join(".config/homeboy/extensions").join(id);
-    std::fs::create_dir_all(&extension_dir).expect("extension dir");
-    std::fs::write(
-        extension_dir.join(format!("{id}.json")),
-        serde_json::json!({
-            "name": id,
-            "version": "0.0.0",
-            "provides": {
-                "file_extensions": [file_extension]
-            },
-            "scripts": {
-                "fingerprint": "fingerprint.sh"
-            }
-        })
-        .to_string(),
-    )
-    .expect("source extension manifest");
-    std::fs::write(
-        extension_dir.join("fingerprint.sh"),
-        "#!/usr/bin/env sh\nexit 1\n",
-    )
-    .expect("fingerprint script");
-
-    if matches!(file_extension, "rs" | "fixture") {
-        std::fs::write(extension_dir.join("grammar.toml"), minimal_source_grammar())
-            .expect("source grammar");
     }
 }
 
@@ -2033,83 +1953,6 @@ pub fn git_fixture_output(repo: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
-fn minimal_source_grammar() -> &'static str {
-    r#"
-[language]
-id = "source"
-extensions = ["rs", "fixture"]
-
-[comments]
-line = ["//"]
-block = [["/*", "*/"]]
-doc = ["///", "//!"]
-
-[strings]
-quotes = ['"']
-escape = "\\"
-
-[blocks]
-open = "{"
-close = "}"
-
-[fingerprint]
-keywords = ["fn", "let", "if", "for", "return", "true", "false", "pub", "struct", "impl", "trait", "Self", "Result", "String", "bool", "i32", "usize"]
-skip_calls = ["if", "for", "return", "println", "write", "assert"]
-contract_method_names = []
-contract_type_hints = []
-registration_concepts = ["macro_invocation"]
-registration_skip_names = ["println", "assert", "write"]
-registration_skip_prefixes = ["test"]
-
-[fingerprint.namespace_derivation]
-prefix = "crate::"
-strip_leading_segments = 1
-separator = "::"
-include_file_stem_when_root = true
-
-[patterns.function]
-regex = '^\s*(pub(?:\(crate\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*\(([^)]*)\)'
-context = "any"
-
-[patterns.function.captures]
-visibility = 1
-name = 2
-params = 3
-
-[patterns.struct]
-regex = '^\s*(pub(?:\(crate\))?\s+)?(struct|enum|trait)\s+(\w+)'
-context = "top_level"
-
-[patterns.struct.captures]
-visibility = 1
-kind = 2
-name = 3
-
-[patterns.import]
-regex = '^use\s+([\w:]+(?:::\{[^}]+\})?)\s*;'
-context = "top_level"
-
-[patterns.import.captures]
-path = 1
-
-[patterns.impl_block]
-regex = '^\s*impl(?:<[^>]*>)?\s+(?:(\w+)\s+for\s+)?(\w+)'
-context = "any"
-
-[patterns.impl_block.captures]
-trait_name = 1
-type_name = 2
-
-[patterns.test_attribute]
-regex = '#\[test\]'
-context = "any"
-
-[patterns.cfg_test]
-regex = '#\[cfg\(test\)\]'
-context = "any"
-"#
-}
-
 pub fn home_env_guard() -> MutexGuard<'static, ()> {
     env_lock()
 }
@@ -2210,11 +2053,6 @@ impl Drop for EnvVarGuard {
 }
 
 fn home_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn audit_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }

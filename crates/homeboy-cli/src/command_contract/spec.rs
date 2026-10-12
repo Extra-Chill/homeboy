@@ -1036,13 +1036,11 @@ const UPGRADE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "inspects a persisted upgrade operation without mutating the controller",
 )];
 
-const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["cleanup-runtime-tmp"],
-        operator_safety(None, &["--apply"]),
-        "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
-    ),
-];
+const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["cleanup-runtime-tmp"],
+    operator_safety(None, &["--apply"]),
+    "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
+)];
 
 macro_rules! declare_command_specs {
     ($(($variant:ident, $handler:path, $value:expr),)*) => {

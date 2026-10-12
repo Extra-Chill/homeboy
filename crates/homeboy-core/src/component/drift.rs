@@ -114,11 +114,8 @@ fn normalize_relative_drift_path(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Top-level coverage entry for `drift_file_paths` — the audit
-    /// convention `test_coverage::missing_test_method` expects a
-    /// `test_<fn_name>` test for every public function. The detailed
-    /// behavior is exercised by the named tests below; this one asserts
-    /// the public contract.
+    /// Asserts the public contract of `drift_file_paths`; the detailed
+    /// behavior is exercised by the named tests below.
     #[test]
     fn test_drift_file_paths() {
         let mut component = Component::default();
@@ -126,7 +123,7 @@ mod tests {
 
         let paths = drift_file_paths(&component);
 
-        // Audit baseline always comes first.
+        // The portable config always comes first.
         assert_eq!(paths.first().map(String::as_str), Some("homeboy.json"));
         // Component extras land in the deduped tail.
         assert!(paths.iter().any(|p| p == "build/version.txt"));

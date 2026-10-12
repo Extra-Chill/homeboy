@@ -99,7 +99,7 @@ fn scoped_command_tree_has_valid_argument_relationships() {
 ///
 /// Help visibility is per-PATH; a Lab contract is resolved per-INVOCATION.
 /// Several commands only carry a contract for a particular argument shape
-/// (`retry --run`, `controller from-spec --resume`, `refactor --all`,
+/// (`retry --run`, `controller from-spec --resume`,
 /// `fuzz list --remote-discovery`), which is precisely why the flags are
 /// advertised on the path: the operator needs them discoverable in order to
 /// reach that shape. So the claim under test is "there exists an invocation at

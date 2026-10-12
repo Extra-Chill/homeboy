@@ -1378,12 +1378,7 @@ mod tests {
 
     #[test]
     fn lab_runner_workload_validation_accepts_nested_review_quality_labels() {
-        for label in [
-            "review lint",
-            "review test",
-            "review build",
-            "review ci",
-        ] {
+        for label in ["review lint", "review test", "review build", "review ci"] {
             let plan = plan();
             let mut command = command();
             command.hot_label = label;

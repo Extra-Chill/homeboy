@@ -2099,11 +2099,8 @@ impl AnalysisJobRequest {
                 parser.push_bool_flag("coverage", "--coverage", &mut args)?;
                 parser.push_optional_number("coverage_min", "--coverage-min", &mut args)?;
                 parser.push_bool_flag("analyze", "--analyze", &mut args)?;
-                parser.push_bool_flag("drift", "--drift", &mut args)?;
-                parser.push_optional_flag_value("since", "--since", &mut args)?;
                 parser.push_optional_flag_value("changed_since", "--changed-since", &mut args)?;
                 parser.push_passthrough_args(&mut args)?;
-                parser.reject_present("write", "POST /test jobs do not expose mutating --write")?;
             }
             JobReadyRunKind::Bench => {
                 parser.push_optional_string("component", &mut args)?;

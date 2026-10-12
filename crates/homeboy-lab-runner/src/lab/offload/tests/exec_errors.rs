@@ -30,7 +30,7 @@ fn retry_hint_is_suppressed_until_controller_replay_admission() {
 
 #[test]
 fn apply_patch_step_accepts_noop_mutation_return() {
-    let plan = base_lab_plan(Some(&portable_lab_command("refactor")));
+    let plan = base_lab_plan(Some(&portable_lab_command("review lint")));
 
     let plan = with_lab_apply_patch_step(plan, None);
 
@@ -301,11 +301,10 @@ fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
         mode: RunnerExecMode::Daemon,
         argv: vec![
             "homeboy".to_string(),
-            "refactor".to_string(),
-            "--from".to_string(),
+            "review".to_string(),
             "lint".to_string(),
-            "--write".to_string(),
             "sample-plugin-code".to_string(),
+            "--fix".to_string(),
         ],
         remote_cwd: "/srv/homeboy/_lab_workspaces/sample-plugin-code".to_string(),
         exit_code: 0,
@@ -333,13 +332,12 @@ fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
     let err = missing_mutation_patch_error(
         &[
             "homeboy".to_string(),
-            "refactor".to_string(),
-            "--from".to_string(),
+            "review".to_string(),
             "lint".to_string(),
-            "--write".to_string(),
             "sample-plugin-code".to_string(),
+            "--fix".to_string(),
         ],
-        Some("--write"),
+        Some("--fix"),
         &exec_output,
     );
 
@@ -364,7 +362,7 @@ fn missing_mutation_patch_error_points_to_runner_evidence_and_retry() {
         .any(|hint| hint.contains("homeboy runs artifacts runner-exec-lab-default-job-123")));
     assert!(hints
         .iter()
-        .any(|hint| hint.contains("homeboy refactor --from lint --write sample-plugin-code")));
+        .any(|hint| hint.contains("homeboy review lint sample-plugin-code --fix")));
 }
 
 #[test]

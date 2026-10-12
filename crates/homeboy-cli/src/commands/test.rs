@@ -9,8 +9,8 @@ use homeboy::core::observation::{
 };
 use homeboy_core::extension::test as extension_test;
 use homeboy_core::extension::test::{
-    build_test_summary, parse_test_failures_from_text,
-    parse_test_results_failures_file, parse_test_results_file, parse_test_results_text, report,
+    build_test_summary, parse_test_failures_from_text, parse_test_results_failures_file,
+    parse_test_results_file, parse_test_results_text, report,
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
@@ -2379,16 +2379,18 @@ mod tests {
                     test_scope: None,
                     summary: None,
                     raw_output: None,
-                    extension_phase_timings: vec![homeboy_extension_contract::ExtensionPhaseTiming {
-                        name: "provider-test".to_string(),
-                        duration_ms: 1,
-                        status: Some("completed".to_string()),
-                        message: None,
-                        artifacts: vec![serde_json::json!({
-                            "ref": "artifact://files/test-results.json"
-                        })],
-                        metadata: Default::default(),
-                    }],
+                    extension_phase_timings: vec![
+                        homeboy_extension_contract::ExtensionPhaseTiming {
+                            name: "provider-test".to_string(),
+                            duration_ms: 1,
+                            status: Some("completed".to_string()),
+                            message: None,
+                            artifacts: vec![serde_json::json!({
+                                "ref": "artifact://files/test-results.json"
+                            })],
+                            metadata: Default::default(),
+                        },
+                    ],
                     cargo_target: None,
                 };
 
@@ -2730,7 +2732,6 @@ mod tests {
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
     }
-
 }
 #[cfg(test)]
 #[path = "../../../../tests/core/extension/component_script_test.rs"]

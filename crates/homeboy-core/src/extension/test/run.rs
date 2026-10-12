@@ -11,7 +11,6 @@ use crate::extension::test::{
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
 };
-use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, ErrorCode};
@@ -28,6 +27,7 @@ pub use homeboy_extension_contract::test_results::{
 };
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_extension_contract::ExtensionCapability;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -2390,7 +2390,8 @@ pub fn ensure_clean_review_checkout(path: &Path) -> homeboy_core::Result<()> {
         None,
         Some(vec![
             format!("Dirty files: {}", files.join(", ")),
-            "For dirty changed-file review, run `homeboy review --changed-only lint` separately.".to_string(),
+            "For dirty changed-file review, run `homeboy review --changed-only lint` separately."
+                .to_string(),
         ]),
     ))
 }

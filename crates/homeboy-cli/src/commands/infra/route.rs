@@ -418,8 +418,7 @@ pub(crate) fn route_after_parse_with_provenance(
     let capture_mutation_patch = cli.command.lab_offload_captures_mutation_patch();
     let mutation_flag = cli.command.lab_offload_mutation_flag();
 
-    // For component-targeted write/fix commands (`homeboy review lint --fix <component>`,
-    // `homeboy refactor --from lint --write <component>`), the component is
+    // For component-targeted fix commands (`homeboy review lint --fix <component>`), the component is
     // resolved on the controller to its source checkout and the args are
     // rewritten to `--path <source>`. Without this, the offload syncs and
     // diff-captures the controller's working directory while the remote re-resolves

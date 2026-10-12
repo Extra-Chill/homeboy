@@ -2,16 +2,16 @@ use clap::Args;
 
 use homeboy::core::ci_profile;
 use homeboy::core::git;
-use homeboy_core::extension::lint::{
-    report, run_lint_fix, run_main_lint_workflow, run_self_check_lint_workflow_with_progress,
-    LintCommandOutput, LintFixRequest, LintRunWorkflowArgs,
-};
-use homeboy_extension_contract::ExtensionCapability;
 use homeboy::core::observation::{
     finding_records_from_lint, merge_metadata, ActiveObservation, NewFindingRecord, NewRunRecord,
     RunStatus,
 };
 use homeboy::core::validation_progress::validation_progress_metadata;
+use homeboy_core::extension::lint::{
+    report, run_lint_fix, run_main_lint_workflow, run_self_check_lint_workflow_with_progress,
+    LintCommandOutput, LintFixRequest, LintRunWorkflowArgs,
+};
+use homeboy_extension_contract::ExtensionCapability;
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
@@ -500,9 +500,9 @@ mod tests {
     use clap::Parser;
     use homeboy::core::component::Component;
     use homeboy::core::engine::run_dir::RunDir;
-    use homeboy_core::extension::lint::LintFixRun;
     use homeboy_core::extension::lint as extension_lint;
     use homeboy_core::extension::lint::report;
+    use homeboy_core::extension::lint::LintFixRun;
 
     #[derive(Parser)]
     struct TestCli {
@@ -637,7 +637,8 @@ mod tests {
     fn lint_fix_report_passes_with_zero_exit_when_fixes_applied() {
         // The contract under #1507: autofixable findings never fail the run.
         // Even when --fix actually modifies files, the lint command exits 0.
-        let (output, exit_code) = report::from_lint_fix("demo".to_string(), fixture_fix_run(true, 3));
+        let (output, exit_code) =
+            report::from_lint_fix("demo".to_string(), fixture_fix_run(true, 3));
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);

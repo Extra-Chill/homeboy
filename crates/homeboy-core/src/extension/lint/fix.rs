@@ -251,10 +251,7 @@ fn fix_lint_findings(
             let route_glob = lint_scope_glob(&root_str, &route.files);
             let runner = lint_runner(route_glob.as_deref(), route.step.as_deref())?
                 .env("HOMEBOY_FIX_ONLY", "1");
-            let phase = format!(
-                "lint fixer {}",
-                route.step.as_deref().unwrap_or("default")
-            );
+            let phase = format!("lint fixer {}", route.step.as_deref().unwrap_or("default"));
             let index = progress.append(phase.clone(), route_glob.clone().unwrap_or_default())?;
             run_fix_phase(
                 &mut progress,

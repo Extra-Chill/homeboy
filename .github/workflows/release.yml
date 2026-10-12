@@ -187,7 +187,6 @@ jobs:
           # release-profile optimization before the real build job.
           source-build-profile: dev
           commands: release
-          expected-commands: review lint,review test
           args: --skip-checks=lint,test
           release-dry-run: 'true'
 
@@ -581,7 +580,6 @@ jobs:
         with:
           binary-path: .homeboy-bin/homeboy
           commands: release
-          expected-commands: review lint,review test
           args: --skip-checks=lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
           release-branch: ${{ needs.check.outputs['verified-release-branch'] }}
@@ -1438,11 +1436,6 @@ jobs:
           # action must install the Linux archive a downstream consumer
           # resolves from latest.
           commands: review lint
-          expected-commands: review lint
-          # This job only proves which release a consumer resolves. Its token is
-          # read-only, and filing findings belongs to the release lint job, so
-          # auto-issue (on by default for push events) must stay off here.
-          auto-issue: 'false'
 
       - name: Verify Homeboy Action installed the published version
         env:

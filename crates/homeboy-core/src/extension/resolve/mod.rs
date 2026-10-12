@@ -17,8 +17,8 @@ use catalog_resolution::CapabilityCatalog;
 
 pub use requirements::{validate_extension_requirements, validate_required_extensions};
 pub use surface::{
-    find_installed_capability_provider, FILE_EXTENSIONS_SURFACE,
-    REMOTE_PATH_SURFACE, SINCE_TAG_SURFACE,
+    find_installed_capability_provider, FILE_EXTENSIONS_SURFACE, REMOTE_PATH_SURFACE,
+    SINCE_TAG_SURFACE,
 };
 
 /// Whether an extension's declared dependencies are available in this context.
