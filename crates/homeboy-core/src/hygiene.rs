@@ -816,6 +816,17 @@ fn verify_validation_dependency_outputs(component: &Component, path: &Path) -> R
     Ok(())
 }
 
+/// Repository-relative paths a component declares as validation-dependency
+/// outputs (`validation_dependency_outputs` in its extension settings). These
+/// are the artifacts its install/build lifecycle must produce, so transports
+/// shipping the prepared dependency must keep them.
+pub fn validation_dependency_output_paths(component: &Component) -> Vec<String> {
+    validation_dependency_output_declarations(component)
+        .into_iter()
+        .map(|output| output.path_ref)
+        .collect()
+}
+
 fn validation_dependency_output_declarations(
     component: &Component,
 ) -> Vec<ValidationDependencyOutputDeclaration> {

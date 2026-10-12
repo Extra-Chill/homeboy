@@ -51,7 +51,7 @@ pub(super) fn sync_validation_dependency_workspaces(
             runner,
             &dependency.prepared_path,
             &remote_dependency_path,
-            excludes,
+            &dependency.snapshot_excludes,
             None,
             control,
         )?;
@@ -71,6 +71,9 @@ struct PreparedValidationDependencyWorkspace {
     remote_name: String,
     local_path: PathBuf,
     prepared_path: PathBuf,
+    /// Excludes for shipping this prepared tree (#15797). See
+    /// [`prepared_dependency_snapshot_excludes`].
+    snapshot_excludes: Vec<String>,
     prepared: crate::validation_dependency_cache::PreparedDependencyCopy,
 }
 
@@ -182,14 +185,53 @@ fn prepare_validation_dependency_workspace(
     )?;
 
     let prepared_path = canonicalize_dependency_path(&prepared.path, dependency_id)?;
+    let snapshot_excludes = prepared_dependency_snapshot_excludes(
+        excludes,
+        &homeboy_core::hygiene::validation_dependency_output_paths(&component),
+    );
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
         local_path: path,
         prepared_path,
+        snapshot_excludes,
         prepared,
     })
 }
+
+/// Excludes for shipping a prepared validation dependency to the runner.
+///
+/// The inherited `excludes` come from the *source* checkout, so they never name
+/// paths inside the dependency. Its install/build lifecycle has just populated
+/// package-manager trees, and a WordPress plugin with several block builds
+/// carries one `node_modules` per block: hundreds of thousands of files that
+/// the controller copied and fingerprinted four times per stage, exhausting
+/// memory (#15797). The runner needs the built outputs, not the build tooling,
+/// so `node_modules` is dropped at every depth unless the dependency declares
+/// a validation output inside one.
+fn prepared_dependency_snapshot_excludes(
+    excludes: &[String],
+    declared_outputs: &[String],
+) -> Vec<String> {
+    let mut excludes = excludes.to_vec();
+    let ships_node_modules = declared_outputs.iter().any(|output| {
+        output
+            .trim_start_matches("./")
+            .split('/')
+            .any(|segment| segment == PACKAGE_MANAGER_TREE)
+    });
+    if !ships_node_modules {
+        let pattern = format!("**/{PACKAGE_MANAGER_TREE}/");
+        if !excludes.contains(&pattern) {
+            excludes.push(pattern);
+        }
+    }
+    excludes
+}
+
+/// Build-tooling tree populated by the dependency lifecycle and never shipped
+/// with a prepared validation dependency unless declared as an output.
+const PACKAGE_MANAGER_TREE: &str = "node_modules";
 
 fn resolve_managed_dependency_workspace(
     parent: &Path,
@@ -389,6 +431,93 @@ mod tests {
     };
 
     use homeboy_core::test_support::run_git_command as git;
+
+    fn shipped_paths(root: &Path, excludes: &[String]) -> Vec<String> {
+        crate::workspace_content_manifest_for_policy(
+            root,
+            excludes,
+            crate::WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        )
+        .expect("content manifest")
+        .entries
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+    }
+
+    #[test]
+    fn prepared_dependency_excludes_add_node_modules_at_every_depth() {
+        let inherited = vec!["./.git".to_string(), ".DS_Store".to_string()];
+
+        let excludes = prepared_dependency_snapshot_excludes(&inherited, &[]);
+
+        assert_eq!(excludes[..2], inherited[..]);
+        assert!(excludes.contains(&"**/node_modules/".to_string()));
+        assert_eq!(
+            prepared_dependency_snapshot_excludes(&excludes, &[]),
+            excludes,
+            "the rule is added once"
+        );
+    }
+
+    #[test]
+    fn declared_node_modules_output_keeps_the_tree() {
+        let excludes = prepared_dependency_snapshot_excludes(
+            &[],
+            &["./node_modules/@scope/runtime/index.js".to_string()],
+        );
+
+        assert!(!excludes.contains(&"**/node_modules/".to_string()));
+    }
+
+    /// The #15797 shape: a WordPress plugin whose lifecycle built several
+    /// blocks, each leaving its own `node_modules` next to `build/`.
+    #[test]
+    fn prepared_plugin_ships_builds_and_vendor_without_block_node_modules() {
+        let root = tempfile::tempdir().expect("prepared dependency");
+        let root = root.path();
+        for block in ["Calendar", "EventDetails", "EventsMap"] {
+            let block_dir = root.join("inc/Blocks").join(block);
+            fs::create_dir_all(block_dir.join("build")).expect("block build");
+            fs::create_dir_all(block_dir.join("node_modules/react/cjs")).expect("block deps");
+            fs::write(block_dir.join("build/index.js"), "built\n").expect("build output");
+            fs::write(block_dir.join("node_modules/react/cjs/react.js"), "dep\n")
+                .expect("block dependency");
+        }
+        fs::create_dir_all(root.join("node_modules/lodash")).expect("root deps");
+        fs::write(root.join("node_modules/lodash/index.js"), "dep\n").expect("root dependency");
+        fs::create_dir_all(root.join("vendor/composer")).expect("vendor");
+        fs::write(root.join("vendor/autoload.php"), "<?php\n").expect("autoload");
+        fs::write(root.join("plugin.php"), "<?php\n").expect("plugin");
+
+        let excludes = prepared_dependency_snapshot_excludes(&[], &[]);
+        let shipped = shipped_paths(root, &excludes);
+
+        assert!(
+            shipped
+                .iter()
+                .all(|path| !path.split('/').any(|part| part == "node_modules")),
+            "no node_modules entry ships: {shipped:?}"
+        );
+        for kept in [
+            "plugin.php",
+            "vendor/autoload.php",
+            "inc/Blocks/Calendar/build/index.js",
+            "inc/Blocks/EventDetails/build/index.js",
+            "inc/Blocks/EventsMap/build/index.js",
+        ] {
+            assert!(
+                shipped.iter().any(|path| path == kept),
+                "{kept} ships: {shipped:?}"
+            );
+        }
+        assert!(
+            shipped_paths(root, &[])
+                .iter()
+                .any(|path| path.contains("node_modules")),
+            "fixture really contains node_modules without the rule"
+        );
+    }
 
     fn init_checkout_with_upstream(path: &Path) -> tempfile::TempDir {
         let remote = tempfile::tempdir().expect("remote");
