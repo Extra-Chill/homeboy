@@ -2638,7 +2638,7 @@ mod tests {
     #[test]
     fn filter_strips_value_flags_equals_form() {
         let args = vec![
-            "--since=v0.36.0".to_string(),
+            "--changed-since=v0.36.0".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);

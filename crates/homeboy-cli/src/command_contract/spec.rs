@@ -385,6 +385,7 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
 const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const API_REQUEST_DANGEROUS_FLAGS: &[&str] = &["--apply", "METHOD!=GET"];
@@ -863,6 +864,12 @@ const GIT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "reports by default or with --dry-run; apply/merge flags mutate PR state",
     ),
 ];
+
+const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["rename"],
+    guarded_mutating_safety(REFACTOR_DANGEROUS_FLAGS),
+    "reports a plan by default; pass --write to rewrite source files",
+)];
 
 const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     &["delete-row", "drop-table"],

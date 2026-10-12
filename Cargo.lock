@@ -801,6 +801,7 @@ dependencies = [
  "clap",
  "fs4",
  "glob",
+ "glob-match",
  "homeboy-agents",
  "homeboy-command-contract",
  "homeboy-control-plane-contract",

@@ -249,6 +249,7 @@ pub mod logs;
 pub(crate) mod operator_projection;
 pub mod project;
 pub mod raw_output;
+pub mod refactor;
 pub mod release;
 pub mod resources;
 pub mod review;

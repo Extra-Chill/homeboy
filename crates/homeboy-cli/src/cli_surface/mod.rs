@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, control_plane, daemon,
     db, deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project,
-    release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, stack,
-    status, topology, trace, tunnel, upgrade, worktree,
+    refactor, release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
+    stack, status, topology, trace, tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -229,6 +229,8 @@ pub enum Commands {
     Release(release::ReleaseArgs),
     /// Run scoped lint + test umbrella against PR-style changes
     Review(review::ReviewArgs),
+    /// Structural refactoring (rename terms across codebase)
+    Refactor(refactor::RefactorArgs),
     /// Manage local dev rigs (reproducible multi-component environments)
     Rig(rig::RigArgs),
     /// Manage local and SSH execution runners

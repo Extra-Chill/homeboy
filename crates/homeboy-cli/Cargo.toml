@@ -48,6 +48,7 @@ serde_path_to_error = "0.1"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
 shellexpand = "3.1"
 glob = "0.3"
+glob-match = "0.2"
 zip = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
 chrono = "0.4"
