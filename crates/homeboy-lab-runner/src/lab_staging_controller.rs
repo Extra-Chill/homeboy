@@ -1548,9 +1548,18 @@ fn post_controller_job_with_retries(
 
 fn controller_job_from_response(value: &Value, status: u16) -> Result<homeboy_core::api_jobs::Job> {
     if status >= 400 || value.get("success").and_then(Value::as_bool) != Some(true) {
-        return Err(Error::internal_unexpected(format!(
+        let error = Error::internal_unexpected(format!(
             "controller daemon rejected Lab staging job: {value}"
-        )));
+        ));
+        // A stale daemon lease is a control-plane condition (e.g. the daemon
+        // still serving a replaced binary), not bad Cook input. Mark it
+        // retryable so the Cook is not terminated as `invalid_input`
+        // (homeboy#15806).
+        return Err(if controller_rejection_is_stale_lease(value) {
+            error.with_retryable(true)
+        } else {
+            error
+        });
     }
     serde_json::from_value(
         value
@@ -1561,6 +1570,13 @@ fn controller_job_from_response(value: &Value, status: u16) -> Result<homeboy_co
     .map_err(|error| {
         Error::internal_json(error.to_string(), Some("parse controller job".to_string()))
     })
+}
+
+fn controller_rejection_is_stale_lease(value: &Value) -> bool {
+    ["/error/message", "/data/message", "/message"]
+        .iter()
+        .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .any(|message| message.contains("daemon lease is not fresh"))
 }
 
 fn validate_controller_job(job: &homeboy_core::api_jobs::Job) -> Result<()> {
@@ -4923,6 +4939,29 @@ pub fn register() {
         controller_job_driver::register_controller_job_driver(Arc::new(LabStagingDispatchDriver))
             .expect("register Lab staging controller driver");
     });
+}
+
+#[cfg(test)]
+mod stale_lease_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn stale_lease_rejection_is_retryable() {
+        let value = serde_json::json!({
+            "success": false,
+            "data": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"},
+            "error": {"details": {}, "error": "internal.unexpected", "hints": [], "message": "daemon lease is not fresh"}
+        });
+        let error = controller_job_from_response(&value, 500).expect_err("rejected");
+        assert_eq!(error.retryable, Some(true));
+    }
+
+    #[test]
+    fn other_rejections_stay_non_retryable() {
+        let value = serde_json::json!({"success": false, "error": {"message": "invalid request"}});
+        let error = controller_job_from_response(&value, 400).expect_err("rejected");
+        assert_ne!(error.retryable, Some(true));
+    }
 }
 
 #[cfg(test)]
