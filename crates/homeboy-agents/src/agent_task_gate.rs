@@ -752,6 +752,11 @@ pub struct AgentTaskGateEnvironment {
     pub package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_inputs: Vec<AgentTaskGateExtensionInputProvenance>,
+    /// The admitted component's linked extensions, resolved on the host that
+    /// runs the gate and exposed read-only (symlinked) under the isolated HOME
+    /// (#15383). Explicit `extension_inputs` take precedence by id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_extensions: Vec<AgentTaskGateLinkedExtensionProvenance>,
     /// Controller-owned Rust cache setup evidence. This deliberately records
     /// cache state rather than exposing a controller filesystem path to gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -851,6 +856,18 @@ pub struct AgentTaskGateExtensionInputProvenance {
     pub destination: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_assets: Vec<AgentTaskGateSharedAssetProvenance>,
+}
+
+/// A runner-installed extension linked into an isolated gate HOME.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateLinkedExtensionProvenance {
+    pub id: String,
+    /// Canonical installed extension directory on the executing host.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    /// Destination relative to the isolated HOME.
+    pub destination: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2052,6 +2069,7 @@ fn run_gate_argv_local(
         selected_gate_environment(&gate_environment, execution.runtime_tmpdir)?;
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
+    selected_environment.configure_linked_extensions(cwd)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if let Some(plan) = declared_plan {
@@ -2391,11 +2409,71 @@ struct SelectedGateEnvironment {
     values: BTreeMap<String, String>,
     hydrate_rust_cache: bool,
     admitted_component_id: Option<String>,
+    /// Isolated HOME, when the policy isolates it.
+    isolated_home: Option<PathBuf>,
     _cargo_target: Option<homeboy_core::cleanup::ManagedCargoTarget>,
     _scratch: Option<tempfile::TempDir>,
 }
 
 impl SelectedGateEnvironment {
+    /// Expose the admitted component's linked extensions inside an isolated
+    /// gate HOME (#15383).
+    ///
+    /// HOME isolation keeps host config and credentials out of gates, but it
+    /// also hid every installed extension, so the canonical gate for an
+    /// extension-backed component (`homeboy review test <component>`) could
+    /// never run. Extensions are resolved on the host executing the gate (the
+    /// Lab runner for Lab gates), so no controller path crosses the boundary.
+    /// They are symlinked, not copied: installed extension trees carry
+    /// `vendor/` and `node_modules/` (hundreds of MB) and the extension loader
+    /// already follows linked extension directories. Sibling non-extension
+    /// directories under `extensions/` are shared assets (e.g. `scripts/`,
+    /// `dependency-adapters/`) referenced by extensions and are linked too.
+    /// Ids already materialized from explicit `extension_inputs` are kept.
+    fn configure_linked_extensions(&mut self, cwd: &Path) -> Result<()> {
+        let Some(home) = self.isolated_home.clone() else {
+            return Ok(());
+        };
+        let Ok(component) = homeboy_core::component::resolve_effective(
+            self.admitted_component_id.as_deref(),
+            Some(&cwd.to_string_lossy()),
+            None,
+        ) else {
+            return Ok(());
+        };
+        let Some(linked) = component.extensions.as_ref() else {
+            return Ok(());
+        };
+        let Ok(host_extensions) = homeboy_core::paths::extensions() else {
+            return Ok(());
+        };
+        let ids: std::collections::BTreeSet<String> = linked.keys().cloned().collect();
+        let explicit: std::collections::BTreeSet<String> = self
+            .report
+            .extension_inputs
+            .iter()
+            .map(|input| input.id.clone())
+            .collect();
+        let destination_root = home.join(".config/homeboy/extensions");
+        let report = link_runner_extensions(&host_extensions, &destination_root, &ids, &explicit)?;
+        for linked in report {
+            self.report
+                .linked_extensions
+                .push(AgentTaskGateLinkedExtensionProvenance {
+                    destination: linked
+                        .destination
+                        .strip_prefix(&home)
+                        .unwrap_or(&linked.destination)
+                        .display()
+                        .to_string(),
+                    id: linked.id,
+                    source: linked.source.display().to_string(),
+                    source_revision: linked.source_revision,
+                });
+        }
+        Ok(())
+    }
+
     fn apply(&self, process: &mut Command) {
         if self.report.mode == AgentTaskGateEnvironmentMode::Replace {
             process.env_clear();
@@ -3329,6 +3407,7 @@ fn selected_gate_environment(
         None
     };
     let root = runtime_tmpdir.or_else(|| scratch.as_ref().map(|dir| dir.path()));
+    let mut isolated_home = None;
     if policy.isolate_home {
         let root = root.expect("isolated gate environment scratch root");
         let home = root.join("gate-home");
@@ -3339,6 +3418,7 @@ fn selected_gate_environment(
             )
         })?;
         materialize_extension_inputs(&mut report, &home, &policy.extension_inputs)?;
+        isolated_home = Some(home.clone());
         set_isolated_environment_variable(&mut report, &mut values, "HOME", home);
     } else if !policy.extension_inputs.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -3366,6 +3446,7 @@ fn selected_gate_environment(
         values,
         hydrate_rust_cache: policy.hydrate_rust_cache,
         admitted_component_id: policy.admitted_component_id.clone(),
+        isolated_home,
         _cargo_target: None,
         _scratch: scratch,
     })
@@ -3394,6 +3475,97 @@ fn preserve_playwright_cache(
             .preserved
             .insert(NAME.to_string(), format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"));
     }
+}
+
+struct LinkedRunnerExtension {
+    id: String,
+    source: PathBuf,
+    source_revision: Option<String>,
+    destination: PathBuf,
+}
+
+/// Symlink the requested installed extensions, plus the sibling shared-asset
+/// directories they reference, from `host_extensions` into
+/// `destination_root`. Ids in `skip` (explicit gate inputs) and ids not
+/// installed on this host are left alone; a missing extension surfaces later
+/// as the command's own "extension not installed" error.
+fn link_runner_extensions(
+    host_extensions: &Path,
+    destination_root: &Path,
+    ids: &std::collections::BTreeSet<String>,
+    skip: &std::collections::BTreeSet<String>,
+) -> Result<Vec<LinkedRunnerExtension>> {
+    let wanted: Vec<&String> = ids
+        .iter()
+        .filter(|id| !skip.contains(*id))
+        .filter(|id| !id.is_empty() && !id.contains(['/', '\\']) && *id != "." && *id != "..")
+        .filter(|id| host_extensions.join(id).is_dir())
+        .collect();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(destination_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(destination_root.display().to_string()),
+        )
+    })?;
+    let link = |source: &Path, destination: &Path| -> Result<()> {
+        if fs::symlink_metadata(destination).is_ok() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(source, destination).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(destination.display().to_string()))
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (source, destination);
+            Err(Error::invalid_argument(
+                "gate_environment.linked_extensions",
+                "linking runner extensions requires a Unix host",
+            ))
+        }
+    };
+    let mut linked = Vec::new();
+    for id in wanted {
+        let source = host_extensions.join(id).canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(host_extensions.join(id).display().to_string()),
+            )
+        })?;
+        let destination = destination_root.join(id);
+        link(&source, &destination)?;
+        linked.push(LinkedRunnerExtension {
+            id: id.clone(),
+            source_revision: homeboy_core::extension::lifecycle::read_source_revision_at(&source),
+            source,
+            destination,
+        });
+    }
+    // Shared assets are sibling directories that are not themselves
+    // extensions (no `<name>/<name>.json` manifest). Link them so extension
+    // scripts resolving `../scripts` or `../dependency-adapters` still work.
+    if let Ok(entries) = fs::read_dir(host_extensions) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with('.') || ids.contains(name) || skip.contains(name) {
+                continue;
+            }
+            let path = entry.path();
+            if !path.is_dir() || path.join(format!("{name}.json")).is_file() {
+                continue;
+            }
+            if let Ok(source) = path.canonicalize() {
+                link(&source, &destination_root.join(name))?;
+            }
+        }
+    }
+    Ok(linked)
 }
 
 fn materialize_extension_inputs(
@@ -8863,5 +9035,69 @@ mod tests {
         for kept in ["current", "recent", "locked"] {
             assert!(root.path().join(kept).is_dir(), "{kept} was removed");
         }
+    }
+
+    /// Regression for #15383: the admitted component's linked extensions and
+    /// their sibling shared assets are linked into the isolated HOME from the
+    /// executing host, without copying; other installed extensions are not.
+    #[cfg(unix)]
+    #[test]
+    fn linked_runner_extensions_are_exposed_under_isolated_home() {
+        let host = tempfile::tempdir().expect("host extensions");
+        let ext = host.path();
+        std::fs::create_dir_all(ext.join("wordpress/vendor")).expect("wordpress");
+        std::fs::write(ext.join("wordpress/wordpress.json"), "{}").expect("manifest");
+        std::fs::create_dir_all(ext.join("rust")).expect("rust");
+        std::fs::write(ext.join("rust/rust.json"), "{}").expect("rust manifest");
+        std::fs::create_dir_all(ext.join("scripts/lib")).expect("shared scripts");
+        std::fs::create_dir_all(ext.join("dependency-adapters")).expect("shared adapters");
+        let home = tempfile::tempdir().expect("gate home");
+        let destination = home.path().join(".config/homeboy/extensions");
+
+        let ids = ["wordpress".to_string(), "missing".to_string()]
+            .into_iter()
+            .collect();
+        let linked = link_runner_extensions(ext, &destination, &ids, &Default::default())
+            .expect("link extensions");
+
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id, "wordpress");
+        let wordpress = destination.join("wordpress");
+        assert!(std::fs::symlink_metadata(&wordpress)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(
+            wordpress.join("wordpress.json").is_file(),
+            "linked tree is readable"
+        );
+        assert!(
+            destination.join("scripts/lib").is_dir(),
+            "shared assets are linked"
+        );
+        assert!(destination.join("dependency-adapters").is_dir());
+        assert!(
+            !destination.join("rust").exists(),
+            "unrequested extensions stay hidden"
+        );
+        assert!(!destination.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_extension_inputs_take_precedence_over_linked_extensions() {
+        let host = tempfile::tempdir().expect("host extensions");
+        std::fs::create_dir_all(host.path().join("wordpress")).expect("wordpress");
+        std::fs::write(host.path().join("wordpress/wordpress.json"), "{}").expect("manifest");
+        let home = tempfile::tempdir().expect("gate home");
+        let destination = home.path().join(".config/homeboy/extensions");
+        let ids = ["wordpress".to_string()].into_iter().collect();
+        let skip = ["wordpress".to_string()].into_iter().collect();
+
+        let linked = link_runner_extensions(host.path(), &destination, &ids, &skip)
+            .expect("link extensions");
+
+        assert!(linked.is_empty());
+        assert!(!destination.join("wordpress").exists());
     }
 }
