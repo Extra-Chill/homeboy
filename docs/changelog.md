@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.9] - 2026-10-12
+
+### Changed
+- delete triage, stack, fleet, db, logs, api and topology
+
+### Fixed
+- never ship package-manager trees with prepared validation dependencies
+
 ## [0.418.8] - 2026-10-12
 
 ### Changed
