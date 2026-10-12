@@ -114,14 +114,44 @@ pub(super) fn open_sql_store_readonly(path: &Path) -> Result<Option<Connection>>
     if !journal.exists() {
         return Ok(None);
     }
-    let connection = Connection::open_with_flags(&journal, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| store_error(path, "open daemon job store read-only", error))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| store_error(path, "bound daemon job store read", error))?;
-    let initialized = store_state_exists(&connection)
-        .map_err(|error| store_error(path, "inspect daemon job store", error))?;
+    let opened = match inspect_sql_store_readonly(&journal) {
+        // A writer that died mid-transaction leaves a hot rollback journal. A
+        // read-only connection may not replay it, so every reader would fail
+        // until some writer reopened the store. Replaying it restores the last
+        // committed state, which is exactly what this read must observe.
+        Err(error) if is_hot_journal_refusal(&error) => {
+            roll_back_hot_journal(&journal)
+                .map_err(|error| store_error(path, "roll back daemon job store journal", error))?;
+            inspect_sql_store_readonly(&journal)
+        }
+        opened => opened,
+    };
+    let (connection, initialized) =
+        opened.map_err(|error| store_error(path, "inspect daemon job store", error))?;
     Ok(initialized.then_some(connection))
+}
+
+fn inspect_sql_store_readonly(journal: &Path) -> rusqlite::Result<(Connection, bool)> {
+    let connection = Connection::open_with_flags(journal, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    let initialized = store_state_exists(&connection)?;
+    Ok((connection, initialized))
+}
+
+fn is_hot_journal_refusal(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK
+    )
+}
+
+/// The first read on a writable connection replays a hot journal. A journal a
+/// live writer still holds is not hot, so this only recovers a dead writer.
+fn roll_back_hot_journal(journal: &Path) -> rusqlite::Result<()> {
+    let connection = Connection::open_with_flags(journal, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_| Ok(()))
 }
 
 pub(super) fn sql_store_initialized(path: &Path) -> Result<bool> {

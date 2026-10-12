@@ -1004,3 +1004,58 @@ fn status_evidence_reports_linked_active_and_unresolved_as_blocking() {
         Some(DaemonLinkedDurableRunState::Unresolved)
     );
 }
+
+#[test]
+fn read_only_open_recovers_a_hot_journal_left_by_a_dead_writer() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let live = temp.path().join("live/jobs.json");
+    let crashed = temp.path().join("crashed/jobs.json");
+    fs::create_dir_all(crashed.parent().unwrap()).expect("crashed dir");
+    let store = JobStore::open(&live).expect("store opens");
+    store.create("bench");
+    let committed = JobStore::store_generation_at_path(&live)
+        .expect("generation reads")
+        .expect("store is migrated");
+
+    // Capture the files mid-transaction: the copy is what a writer killed
+    // before commit leaves behind, a database plus a hot rollback journal.
+    let database = super::persistence::tombstone_path(&live);
+    let journal = database.with_file_name(format!(
+        "{}-journal",
+        database.file_name().unwrap().to_str().unwrap()
+    ));
+    let writer = rusqlite::Connection::open(&database).expect("writer opens");
+    // A one-page cache spills the transaction: SQLite syncs the journal header
+    // and then overwrites database pages, so the journal becomes hot.
+    writer
+        .execute_batch(
+            "PRAGMA cache_size=1; BEGIN IMMEDIATE;
+             UPDATE daemon_store_state SET generation = generation + 1;
+             CREATE TABLE spill (body TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 64)
+             INSERT INTO spill SELECT printf('%.3000c', 'x') FROM n;",
+        )
+        .expect("uncommitted write");
+    assert_ne!(
+        fs::read(&journal).expect("the open transaction writes a journal")[0],
+        0,
+        "the spilled journal carries a synced header"
+    );
+    let crashed_database = super::persistence::tombstone_path(&crashed);
+    fs::copy(&database, &crashed_database).expect("copy database");
+    fs::copy(
+        &journal,
+        crashed_database.with_file_name(format!(
+            "{}-journal",
+            crashed_database.file_name().unwrap().to_str().unwrap()
+        )),
+    )
+    .expect("copy journal");
+    drop(writer);
+
+    assert_eq!(
+        JobStore::store_generation_at_path(&crashed).expect("read-only open recovers"),
+        Some(committed),
+        "the reader observes the last committed state"
+    );
+}
