@@ -42,6 +42,8 @@ pub mod controller_pin_reference_provider;
 mod conversion;
 mod cook_workspace_restore;
 mod durable_progress;
+#[cfg(any(test, feature = "test-support"))]
+mod durable_state_probe;
 mod failure_recording;
 mod health;
 mod lab_handoff_reconciliation;
@@ -78,6 +80,11 @@ pub use control_plane_identities::{
     canonical_fanout_mission, canonical_mission, CanonicalControlPlaneIdentities,
 };
 pub use durable_progress::{record_promotion_progress, record_promotion_progress_in_store};
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use durable_state_probe::{
+    durable_state_for_test, seed_status_purity_fixtures_for_test, StatusPurityFixture,
+};
 pub use failure_recording::*;
 pub use health::*;
 pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;

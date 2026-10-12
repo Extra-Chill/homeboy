@@ -1172,7 +1172,7 @@ fn classify_liveness(
     }
 
     // A record can carry a stale-running condition that has not yet been
-    // annotated onto its metadata (annotation happens on the `status` path, not
+    // annotated onto its metadata (annotation happens on convergence, not
     // at rest). Detect a dead owner process directly here so discovery agrees
     // with `status` and `reconcile_stale_active_runs` actually terminalizes the
     // ghost `running` record instead of classifying it Active because the

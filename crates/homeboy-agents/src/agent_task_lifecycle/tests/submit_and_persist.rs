@@ -4518,15 +4518,14 @@ fn reserve_pressure_pre_execution_failure_is_classified_as_capacity() {
     assert_eq!(outcome.outputs["error_code"], "resource.capacity_reserve");
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The repair is a write: status rewrites `plan_path` back to the
-/// controller-owned file. Deciding that repair from one home and committing it
-/// into another is exactly the split #7505 exists to stop, and the durable
-/// read-back below would still pass while it happened. The file removed in the
-/// second half is the one this store wrote, so the fail-closed diagnostic is
-/// about this installation's missing plan.
+/// The controller owns the plan: submission stamps the controller plan path,
+/// and a status read reports it as stored. `plan_path` used to be rewritten on
+/// read for records that carried a runner transport path; no current writer
+/// stores one (Lab offload and remote-dispatch import both stamp the controller
+/// path), so that repair is deleted (#15718, #15742). Convergence still fails
+/// closed when the controller-owned plan is missing.
 #[test]
-fn status_repairs_runner_plan_projection_and_missing_controller_plan_fails_closed() {
+fn controller_plan_path_is_written_by_submission_and_missing_plan_fails_closed() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -4534,28 +4533,16 @@ fn status_repairs_runner_plan_projection_and_missing_controller_plan_fails_close
     let record = lifecycle_store
         .submit_plan_with_runtime_admission(&plan, "runner-projected-status", |_| Ok(json!({})))
         .expect("controller plan submitted");
-    rewrite_record_for_test_in_store(&lifecycle_store, &record.run_id, |projected| {
-        projected.plan_path =
-            "/runner/agent-task-runs/runner-projected-status/plan.json".to_string();
-    })
-    .expect("runner transport path projected");
-
     assert_eq!(
-        reconcile_status_in_store(
-            &lifecycle_store,
-            &record.run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        )
-        .expect("controller status")
-        .record
-        .plan_path,
-        record.plan_path
+        record.plan_path,
+        lifecycle_store
+            .controller_plan_path(&record.run_id)
+            .display()
+            .to_string()
     );
     assert_eq!(
-        lifecycle_store
-            .read_record(&record.run_id)
-            .expect("repaired record")
+        status_in_store(&lifecycle_store, &record.run_id)
+            .expect("controller status")
             .plan_path,
         record.plan_path
     );

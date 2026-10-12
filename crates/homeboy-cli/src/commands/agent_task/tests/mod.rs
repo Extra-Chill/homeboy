@@ -13,3 +13,4 @@ mod dispatch;
 mod lifecycle;
 mod loop_compile;
 mod promotion_review;
+mod status_purity;
