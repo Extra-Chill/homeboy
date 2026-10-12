@@ -13,7 +13,7 @@ explicit.
 ## TL;DR
 
 - **Canonical proof command:** `homeboy review [component] --changed-since=<base>`
-  — the audit → lint → test umbrella, run through normal routing.
+  — the lint → test umbrella, run through normal routing.
 - **Routing:** let automatic Lab routing handle it, or pass `--runner <id>`
   explicitly. Never run the gate locally on a warm/hot machine.
 - **`--placement local` is a debugging aid, not proof.** A gate result produced
@@ -28,7 +28,7 @@ explicit.
 homeboy review --changed-since=<base-ref>
 ```
 
-`homeboy review` is the thin umbrella that fans out scoped `audit`, `lint`, and
+`homeboy review` is the thin umbrella that fans out scoped `lint` and
 `test` against the same changed-file set and prints one consolidated report — the
 canonical verification order a reviewer would see for your diff. See
 [review](../commands/review.md) for scope flags, output shapes, and exit codes.
@@ -45,7 +45,7 @@ homeboy --output "$RUNNER_TEMP/homeboy-results/review.json" \
   review my-component --changed-since=origin/main --summary
 ```
 
-Run individual stages (`homeboy review audit`, `homeboy review lint`, `homeboy review test`) only for a
+Run individual stages (`homeboy review lint`, `homeboy review test`) only for a
 deep dive into one stage. The umbrella `review` run is the proof artifact.
 
 ## Routing: keep it non-local
@@ -136,8 +136,7 @@ use that routed result as the proof.
 
 ## Related
 
-- [review](../commands/review.md) — the audit + lint + test umbrella (canonical proof command)
+- [review](../commands/review.md) — the lint + test umbrella (canonical proof command)
 - [runner](../commands/runner.md) — Lab runner selection, offload routing, and managed follow-ups
 - [Controller to runner reverse-runner setup](controller-runner-reverse-runner.md) — gated reverse-runner path
 - [agent-task](../commands/agent-task.md) — durable lifecycle and runner-side gate dispatch
-- [Code Factory](../concepts/code-factory.md) — the lint → test → audit → release pipeline this proof feeds

@@ -8,14 +8,13 @@ A component is the buildable, testable, reviewable unit. Portable component conf
 
 ## Extension
 
-Extensions provide ecosystem-specific behavior while Homeboy core stays generic. For example, an extension can teach Homeboy how to run Cargo, WP-CLI, Node.js, GitHub releases, or platform-specific audit rules.
+Extensions provide ecosystem-specific behavior while Homeboy core stays generic. For example, an extension can teach Homeboy how to run Cargo, WP-CLI, Node.js, GitHub releases, or platform-specific lint rules.
 
 ## Command Surface
 
 Homeboy exposes one operational surface for local developers, CI, scheduled jobs, and coding agents:
 
 ```bash
-homeboy review audit
 homeboy review lint
 homeboy review test
 homeboy review

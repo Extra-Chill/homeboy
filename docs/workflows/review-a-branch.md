@@ -1,11 +1,11 @@
 # Review A Branch
 
-Use `homeboy review` when you need the PR-shaped quality gate for a branch. It runs scoped audit, lint, and test checks against the same changed-file set and reports one consolidated result.
+Use `homeboy review` when you need the PR-shaped quality gate for a branch. It runs scoped lint and test checks against the same changed-file set and reports one consolidated result.
 
 ## Use This When
 
 - You want to know whether a branch is review-ready.
-- You need one proof artifact instead of separate audit, lint, and test logs.
+- You need one proof artifact instead of separate lint and test logs.
 - A coding agent needs a stable JSON result to inspect.
 - A PR comment should summarize the branch status for reviewers.
 
@@ -54,7 +54,6 @@ homeboy review my-component \
 Treat `review` as the summary layer. When one stage fails, deep dive with the same scope:
 
 ```bash
-homeboy review audit my-component --changed-since origin/main
 homeboy review lint my-component --changed-since origin/main
 homeboy review test my-component --changed-since origin/main
 ```
@@ -91,7 +90,6 @@ See [Release-gate proof path](../operations/release-gate-proof-path.md) when the
 ## Reference
 
 - [review command](../commands/review.md)
-- [audit command](../commands/audit.md)
 - [lint command](../commands/lint.md)
 - [test command](../commands/test.md)
 - [CI reproduction workflow](reproduce-ci.md)

@@ -11,28 +11,14 @@ Homeboy keeps the CLI layer thin:
 - `crates/homeboy-cli/src/cli_surface/` owns clap command shape, hidden compatibility aliases, and command-surface introspection.
 - `crates/homeboy-cli/src/command_contract/` owns command registry metadata, output families, and Lab portability contracts.
 - `crates/homeboy-cli/src/commands/` maps parsed arguments to responses and delegates durable behavior.
-- `tests/core/` owns reusable services, persistence, runner dispatch, artifact lifecycles, release/test/audit workflows, and extension contracts.
+- `tests/core/` owns reusable services, persistence, runner dispatch, artifact lifecycles, release/lint/test workflows, and extension contracts.
 
 New command work should introduce or reuse a `core` service boundary before it
 adds orchestration. Command modules may contain small glue, validation, and
 response mapping. They should not become the owner of direct process execution,
 filesystem mutation, run artifact persistence, or runner dispatch.
 
-## Current Thin-Command Cleanup Map
-
-`homeboy.json` already enables `audit.thin_command_adapter` for `crates/homeboy-cli/src/commands/`.
-The configured orchestration markers are:
-
-- Direct process execution: `std::process::Command`, `Command::new(...)`.
-- Direct filesystem mutation: `std::fs` or `fs` writes, directory creation, removal, rename, or copy.
-- Direct file writer construction: `File::create(...)`, `OpenOptions::new(...)`.
-- Run artifact persistence: `RunDir::create`, `write_to_run_dir`, `ObservationBuilder`, `finish_run`, and `persist_*` helpers.
-- Runner execution orchestration: `runner::exec`, `execute_*`, and `dispatch_*` calls.
-
-The policy allows a small amount of adapter glue (`max_orchestration_weight: 3`)
-and supports explicit allowlist comments for known intentional adapters. Cleanup
-should retire existing findings by moving behavior behind core services, then
-ratchet the audit baseline. New command modules should not add new findings.
+## Service Boundaries
 
 Recommended service boundaries:
 
@@ -40,10 +26,6 @@ Recommended service boundaries:
 - Filesystem mutation: keep path normalization and mutation in `core`, with commands passing requested intent.
 - Runner dispatch: route through `core::runners` facades rather than command-owned dispatch loops.
 - Artifact persistence: persist through `core::artifacts` or operation-specific core result writers.
-
-## Static Guards
-
-`homeboy.json` `audit.thin_command_adapter` is the ratchet for command-layer orchestration density.
 
 ## Compatibility-Removal Inventory
 
@@ -56,7 +38,7 @@ docs cleanup PR.
 | Legacy component fields such as `build_command` | `crates/homeboy-cli/src/commands/component.rs`, `tests/core/extension/build/mod.rs`, `tests/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Legacy CLI aliases rejected by argument normalization | `crates/homeboy-cli/src/commands/utils/args.rs` | Rejection tests protect known old aliases from silently routing. | Keep rejection coverage until the aliases are old enough to delete from compatibility messaging. |
 | Legacy `node_script` extension fields | Extension/runtime manifests and config migrations, if still observed in downstream configs. | Historical extension runtime field name; modern manifests should use runtime command/script contracts. | Inventory live configs, migrate any remaining manifests, then add a rejection or schema cleanup PR. |
-| Old deleted command names | Command docs, shell completions, user scripts. | Some removed commands may still appear in docs or automation outside the command surface. | Run a command-surface/docs audit, update references to supported commands, then remove compatibility notes. |
+| Old deleted command names | Command docs, shell completions, user scripts. | Some removed commands may still appear in docs or automation outside the command surface. | Run a command-surface/docs review, update references to supported commands, then remove compatibility notes. |
 
 ## Tracking Rules
 

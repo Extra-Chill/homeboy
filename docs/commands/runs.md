@@ -28,9 +28,6 @@ homeboy runs artifact postprocess [OPTIONS] <PLAN>
 homeboy runs artifact cleanup-downloads [--runner <runner-id>] [--run-id <run-id>] [--apply]
 homeboy runs artifact cleanup-persisted [--older-than-days <days>] [--run-id <run-id>] [--apply]
 homeboy runs findings <run-id> [--tool <tool>] [--file <path>] [--fingerprint <fingerprint>] [--limit 100]
-homeboy runs findings reconcile <component> [--findings <path>|--from-output <command=path>] [--apply]
-homeboy runs findings reconcile-run <component> [--output-dir <dir>] [--apply]
-homeboy runs findings build --from-output <command=path> [--run-url <url>]
 homeboy runs finding <finding-id>
 homeboy runs latest-finding [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>] [--tool <tool>] [--file <path>]
 homeboy runs export --run <run-id> --output <dir>
@@ -158,17 +155,7 @@ or finding that matches the provided filters. `latest-run` is useful when automa
 starts from component/kind/status context instead of a known run id.
 
 `homeboy runs findings` lists recorded findings for a run, while `homeboy runs
-finding` reads one finding by id. The `runs findings reconcile`, `reconcile-run`,
-and `build` subcommands normalize finding streams and reconcile them against an
-issue tracker from the evidence pillar. They default to dry-run planning; pass
-`--apply` on reconcile commands to mutate tracker state.
-
-Reconciliation owns one rolling findings issue per component, identified by the
-standalone body marker `<!-- homeboy:issues-reconcile-key=findings:<component> -->`.
-Discovery uses that component marker, independently of titles and optional labels.
-Lint, audit, and test retain independently keyed sections; narrowed measurements
-preserve unmeasured sections. Old category issues and markerless titles are not
-migrated or matched, and remain outside the canonical reconciliation contract.
+finding` reads one finding by id.
 
 `homeboy runs query` projects JSONPath expressions over imported run artifact
 rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or

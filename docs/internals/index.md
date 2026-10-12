@@ -20,7 +20,6 @@ Internals docs are for people maintaining Homeboy itself: architecture, implemen
 
 ## Development Contracts
 
-- [Compiler warning extension](development/contracts/compiler-warning-extension.md)
 - [Command argument provenance](development/contracts/command-argument-provenance.md)
 - [PathRoots injection](development/contracts/path-roots-injection.md)
 - [Resource topology v1](development/contracts/resource-topology-v1.md)

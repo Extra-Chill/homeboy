@@ -13,7 +13,6 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
   "description": "string",
   "provides": {},
   "scripts": {},
-  "audit": {},
   "deploy": {},
   "deployment_providers": [],
   "executable": {},
@@ -44,8 +43,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`description`** (string): Extension description
 - **`id`** (string): Optional compatibility field for external consumers; Homeboy derives the authoritative extension ID from the directory name.
 - **`provides`** (object): File extensions and capabilities this extension handles
-- **`scripts`** (object): Scripts that implement extension capabilities (fingerprint, refactor)
-- **`audit`** (object): Audit capability config, including docs, test mapping, and typed detector rules
+- **`scripts`** (object): Scripts that implement extension capabilities (`format`)
 - **`deploy`** (object): Deploy lifecycle — verifications, overrides, version patterns
 - **`deployment_providers`** (array): Generic extension-owned deployment provider descriptors invoked through Extension API v1
 - **`executable`** (object): Standalone tool runtime and inputs
@@ -66,13 +64,12 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 
 ## Provides Configuration
 
-Declares what file types and capabilities this extension handles. Used by the audit system to route files to the correct extension for fingerprinting.
+Declares what file types this extension handles and how Homeboy can suggest it for a component.
 
 ```json
 {
   "provides": {
     "file_extensions": ["php", "inc"],
-    "capabilities": ["fingerprint", "refactor"],
     "discovery_markers": [
       { "all": ["style.css", "functions.php"] },
       { "all": ["package.json"], "any": ["src/**/*.ts", "*.ts"] }
@@ -84,7 +81,6 @@ Declares what file types and capabilities this extension handles. Used by the au
 ### Provides Fields
 
 - **`file_extensions`** (array): File extensions this extension can process (e.g., `["php", "inc"]`, `["rs"]`)
-- **`capabilities`** (array): Capabilities this extension supports (e.g., `["fingerprint", "refactor"]`)
 - **`discovery_markers`** (array): Component-root marker rules used by diagnostics and gap reporting to suggest an extension without core knowing ecosystem-specific files.
 
 Each `discovery_markers` rule supports:
@@ -94,29 +90,6 @@ Each `discovery_markers` rule supports:
 
 Core treats marker strings generically. Exact strings are checked as paths relative to the component root; strings containing `*`, `?`, or `[` are evaluated as globs relative to the component root.
 
-## Grammar Fingerprint Metadata Contract
-
-Extension-owned `grammar.toml` files may declare fingerprint metadata consumed by Homeboy's generic fingerprint engine. Language and framework semantics belong here, not in core.
-
-Path-derived namespaces are declared with `fingerprint.namespace_derivation`:
-
-```toml
-[fingerprint.namespace_derivation]
-prefix = "crate::"
-strip_leading_segments = 1
-separator = "::"
-include_file_stem_when_root = true
-```
-
-### Namespace Derivation Fields
-
-- **`prefix`** (string): Optional prefix prepended to the derived namespace.
-- **`strip_leading_segments`** (integer): Number of leading path segments to remove before deriving the namespace.
-- **`separator`** (string): Separator used to join remaining namespace segments. Defaults to `::`.
-- **`include_file_stem_when_root`** (boolean): Whether a root-level source file contributes its file stem as the namespace.
-
-If an extension needs path-derived namespaces, it must ship this grammar metadata. Core does not provide language-specific fallbacks.
-
 ## Scripts Configuration
 
 Scripts that implement extension capabilities. Each script path is relative to the extension directory.
@@ -124,16 +97,14 @@ Scripts that implement extension capabilities. Each script path is relative to t
 ```json
 {
   "scripts": {
-    "fingerprint": "scripts/fingerprint.sh",
-    "refactor": "scripts/refactor.sh"
+    "format": "scripts/format.sh"
   }
 }
 ```
 
 ### Scripts Fields
 
-- **`fingerprint`** (string): Script that extracts structural fingerprints from source files. Receives file content on stdin, outputs `FileFingerprint` JSON on stdout.
-- **`refactor`** (string): Script that applies refactoring edits to source files. Receives edit instructions on stdin, outputs transformed content on stdout.
+- **`format`** (string): Script that formats source files after automated writes such as `homeboy review lint --fix`. Runs from the project root.
 
 ## Deploy Configuration
 
@@ -576,70 +547,9 @@ Extensions declare fuzz workload metadata with a top-level `fuzz` capability blo
 - **`fuzz.artifact_retention`** (string): Optional retention policy label for campaign artifacts.
 - **`fuzz.workloads[].lifecycle`** (object): Optional `homeboy/lifecycle-contract/v1` declaration with `prepare`, `seed`, `snapshot`, `reset`, `rollback`, and `teardown` phases. Extension hooks implement the runtime behavior; Homeboy core owns the contract and result metadata shape.
 
-## Audit Configuration
-
-Configuration for documentation-reference analysis, feature detection, and structural test coverage analysis.
-
-```json
-{
-  "audit": {
-    "ignore_claim_patterns": ["/wp-json/**", "*.min.js"],
-    "feature_patterns": ["register_post_type\\(\\s*['\"]([^'\"]+)['\"]"],
-    "feature_labels": {
-      "register_post_type": "Post Types",
-      "register_rest_route": "REST API Routes"
-    },
-    "doc_targets": {
-      "Post Types": {
-        "file": "api-reference.md",
-        "heading": "## Post Types"
-      }
-    },
-    "feature_context": {
-      "register_post_type": {
-        "doc_comment": true,
-        "block_fields": true
-      }
-    },
-    "test_mapping": {
-      "source_dirs": ["src"],
-      "test_dirs": ["tests"],
-      "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
-      "method_prefix": "test_",
-      "inline_tests": true,
-      "critical_patterns": ["src/core/"]
-    },
-    "detector_rules": {
-      "policy_flow": {
-        "rules": []
-      }
-    }
-  }
-}
-```
-
-### Audit Fields
-
-- **`ignore_claim_patterns`** (array): Glob patterns for paths to ignore during documentation-reference analysis
-- **`feature_patterns`** (array): Regex patterns to detect features in source code (must have a capture group for the feature name)
-- **`feature_labels`** (object): Maps pattern substrings to human-readable labels for grouping
-- **`doc_targets`** (object): Maps feature labels to documentation file paths and headings
-- **`feature_context`** (object): Context extraction rules per feature pattern (doc comments, block fields)
-- **`test_mapping`** (object): Test coverage mapping convention
-- **`detector_rules`** (object): Typed extension-owned detector declarations merged into project audit config. See [Policy-flow detector](../../audit/policy-flow.md) for `policy_flow`.
-
-### Test Mapping Fields
-
-- **`source_dirs`** (array): Source directories to scan (e.g., `["src"]`, `["inc"]`)
-- **`test_dirs`** (array): Test directories to scan (e.g., `["tests"]`)
-- **`test_file_pattern`** (string): How source paths map to test paths. Variables: `{dir}`, `{name}`, `{ext}`
-- **`method_prefix`** (string): Prefix for test method names (default: `"test_"`)
-- **`inline_tests`** (boolean): Whether the language uses inline tests (e.g., Rust `#[cfg(test)]`)
-- **`critical_patterns`** (array): Directory patterns that indicate high-priority test coverage (get `Warning` severity instead of `Info`)
-
 ## Test Drift Configuration
 
-Changed-test and drift workflows use the canonical `test.drift` contract. `audit.test_mapping` is only for structural test coverage checks and does not declare drift behavior.
+Changed-test selection uses the canonical `test.drift` contract.
 
 ### Conditional Test Secrets
 

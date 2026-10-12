@@ -75,7 +75,6 @@ The expected graph impact is structural and measurable before timing claims:
 | --- | --- | --- | --- |
 | Current CLI composition | 23 | all command crates compile for normal binary/test builds | no capability isolation |
 | Dynamic optional command packages for Fuzz, Issues/Triage, and Tunnel | 19 or fewer in the kernel CLI package | those packages and their tests leave a kernel-only build | fewer Rust units and fewer command registrations; exact time/size measured by the implementation PR with one shared target |
-| Remove audit/refactor from core | core loses 1 domain implementation edge and 2 domain contract edges | code-audit no longer compiles for a kernel-only consumer | removes the current upward domain edge, not merely source relocation |
 | Move only one-consumer modules inside CLI | unchanged | unchanged | namespace cleanup only; no graph benefit |
 
 Clean/warm duration and binary-size deltas are intentionally not asserted here.
@@ -93,12 +92,10 @@ workflows succeeded, but do not report a capability-isolated build delta.
 
 | Violation | Exact evidence | Required correction |
 | --- | --- | --- |
-| Core imports an Audit implementation | `homeboy-core/Cargo.toml:37-39` imports `homeboy-audit-contract` and `homeboy-code-audit`; `core/src/lib.rs:75-78` re-exports it | move Audit adapters/projections above core; retain generic findings/artifacts only |
-| Core owns Audit-specific observation adapters | `core/src/observation/audit_artifact_provider.rs:3-25`, `observation/finding_records.rs:5-202` | Audit owns the conversion/provider and writes generic finding records through a core port |
-| Core imports Refactor and Release domain contracts | `homeboy-core/Cargo.toml:36-39`; `refactor_transform_provider.rs:14`; `release_provider.rs:14`; `context/report.rs:14-755` | move capability adapters outward; keep a generic capability-provider port only if multiple independent consumers need it |
+| Core imports Release domain contracts | `homeboy-core/Cargo.toml:36-39`; `release_provider.rs:14`; `context/report.rs:14-755` | move capability adapters outward; keep a generic capability-provider port only if multiple independent consumers need it |
 | Static CLI links every capability | `homeboy-cli/Cargo.toml:28-42` | optional capability packages register typed command descriptors/handlers; selected packages alone link into a given product build |
 | CLI re-exports are mistaken for an architecture boundary | `homeboy-cli/src/lib.rs:10-31`; `homeboy-core/src/lib.rs:49-219` | delete aliases after callers migrate; retain only a documented compatibility window where external source consumers prove a need |
-| Runtime registration is a hand-maintained all-capability list | `cli_runtime.rs:159-228` registers Tunnel, Audit, Rig, Stack, Refactor, and Runner adapters directly | registration follows installed/compiled capability descriptors and has a completeness test |
+| Runtime registration is a hand-maintained all-capability list | `cli_runtime.rs:159-228` registers Tunnel, Rig, Stack, and Runner adapters directly | registration follows installed/compiled capability descriptors and has a completeness test |
 | Generic core has ecosystem-specific code | [#6855](https://github.com/Extra-Chill/homeboy/issues/6855) documents 275 true-positive core-boundary findings; [#11350](https://github.com/Extra-Chill/homeboy/issues/11350) covers Playwright | extensions supply grammars, readiness probes, and remediation metadata |
 
 ## Capability Decisions
@@ -107,7 +104,6 @@ workflows succeeded, but do not report a capability-isolated build delta.
 | --- | --- | --- |
 | Agent Task | Retain generic contracts and dispatch/lifecycle ports in core; keep `homeboy-agents` controller and capability implementation above core | extensions consume `homeboy/agent-task-*/v1` schemas in `homeboy-extensions/agent-runtimes/fixtures/homeboy-agent-task-core-contract.json:1-84`; no shell-only replacement is acceptable |
 | Lab Runner | Retain placement, job handoff, and evidence ports; runner implementation remains a capability | CLI route and runner commands use `homeboy-lab-runner-contract` (`commands/infra/route.rs:653-3326`); runner adapters already register through seams at `cli_runtime.rs:210-227` |
-| Audit / Refactor | Extract adapters and language/domain implementations outward | core directly imports Audit; its provider registrations are explicit at `cli_runtime.rs:170-209`; existing [#2240](https://github.com/Extra-Chill/homeboy/issues/2240) and [#6855](https://github.com/Extra-Chill/homeboy/issues/6855) track ecosystem removal |
 | Rig | Retain generic materialization contract; no package extraction now | Runner, Lab, and agent-task consume rig data. `cli_runtime.rs:197-200` shows a provider seam, but a separate package would not reduce the default graph until CLI composition changes |
 | Fuzz | Accepted first optional command package | extension manifests supply `homeboy/fuzz-campaign/v1` (`homeboy-extensions/nodejs/nodejs.json:91-98`); retain the generic artifact/evidence contract; reuse [#6766](https://github.com/Extra-Chill/homeboy/issues/6766) for schema cleanup |
 | Issues / Triage | Accepted as one optional automation package | `homeboy-triage` is directly linked only by CLI; persisted `triage_items` records are owned by the generic observation store (`observation/store/schema.rs:122-151`) and need a compatibility reader before package removal |
@@ -149,18 +145,16 @@ to a package-location move without rollback-compatible readers.
 
 1. Add descriptor-driven capability registration and a test that fails when a
    compiled capability has no registration. This is the prerequisite for deletion.
-2. Move Audit/Refactor adapters and ecosystem grammar knowledge above core through
-   the existing #2240/#6855 tracks; remove core's direct Audit edges.
-3. Establish optional command-package composition for Fuzz, Issues/Triage, and
+2. Establish optional command-package composition for Fuzz, Issues/Triage, and
    Tunnel while preserving their command/result schemas and generated help.
-4. Measure the default graph, warm/clean build, focused tests, and binary size
+3. Measure the default graph, warm/clean build, focused tests, and binary size
    against the same shared target before claiming a reduction.
-5. Migrate proven external Rust callers off `homeboy-core`/`homeboy-cli`
+4. Migrate proven external Rust callers off `homeboy-core`/`homeboy-cli`
    re-exports; delete aliases rather than preserving a second permanent API.
-6. Relocate CLI-only core modules under their owner only when it enables a deleted
+5. Relocate CLI-only core modules under their owner only when it enables a deleted
    dependency or public API. Otherwise leave them unchanged: pure reshuffling has
    no kernel outcome.
-7. Re-evaluate Rig and remote operations after optional composition exists. Keep
+6. Re-evaluate Rig and remote operations after optional composition exists. Keep
    Release/Deploy and Runs/Evidence unchanged unless new consumer evidence shows a
    graph reduction without breaking operations.
 

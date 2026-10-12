@@ -32,7 +32,7 @@ homeboy --output /tmp/homeboy-results/review.json review my-component --changed-
 
 Resource policy warnings are stderr-only preflight notices. They currently apply
 to hot commands such as `bench`, `rig up`, `fleet exec`, full-workspace
-`audit` / `lint` / `test` runs, and changed-scope `audit` / `lint` / `test`
+`lint` / `test` runs, and changed-scope `lint` / `test`
 runs when `homeboy self doctor` sees a warm or hot machine. Non-interactive
 hot commands fail fast unless the work is routed through Lab/runner-hosted
 execution or the caller explicitly accepts local pressure. For portable hot

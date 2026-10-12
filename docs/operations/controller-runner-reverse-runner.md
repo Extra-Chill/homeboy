@@ -121,7 +121,6 @@ Run this on the controller machine.
      --peer <controller-server-id> \
      --project <project-id> \
      --command runner.exec \
-     --command audit \
      --command lint \
      --command test \
      --command bench \
