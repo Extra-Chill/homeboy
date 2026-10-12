@@ -1362,6 +1362,11 @@ fn review_form_from_aggregate(
 /// Project the PR-dossier contract before the first finalizing provider attempt
 /// is persisted or executed. Standalone and no-finalize requests retain their
 /// caller-defined contract.
+///
+/// The contract is data, not prose (#15818): the `review_form` output
+/// declaration carries the schema and the publication metadata records that
+/// the controller owns publication. Presenting either to the model is the
+/// operator's `agent_task.prompt_templates` concern.
 fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
     if options.finalization.no_finalize {
         return;
@@ -1375,11 +1380,6 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
         request
             .output_declarations
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
-        if !request.instructions.contains("reviewer-facing PR dossier") {
-            request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `pr_title` (a specific PR title for the actual change, at most 256 characters), `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Bounded checks are allowed when they reproduce the reported behavior, test a hypothesis, or help develop a regression; describe those as observations, never as authoritative final gate results. Homeboy runs the declared deterministic gates itself after harvest and records that evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
-            );
-        }
         let form_timeout_ms = review_form_timeout_ms(request);
         if !request.metadata.is_object() {
             request.metadata = serde_json::json!({});
@@ -1389,61 +1389,44 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
         }
         request.metadata["cook_loop"]["review_form_timeout_ms"] =
             serde_json::json!(form_timeout_ms);
-        if !request
-            .instructions
-            .contains("controller-owned publication")
-        {
-            request.instructions.push_str(
-                "\n\nThis is a non-publishable attempt workspace. controller-owned publication is not attempted by this provider: produce the commit or patch and reviewer-facing dossier, but do not push, create a pull request, release, or deploy. Homeboy's controller finalization handles any authorized publication after this attempt.",
-            );
-        }
+        crate::agent_task_prompt_template::merge_homeboy_facts(
+            request,
+            serde_json::json!({ "publication": { "owner": "controller" } }),
+        );
     }
 }
 
-/// Make the controller/provider verification boundary explicit before the
-/// immutable Cook recipe is persisted. This keeps a provider attempt focused
-/// on a patch instead of duplicating the final gate population in its isolated
-/// workspace. Private gate programs deliberately remain undisclosed.
+/// Record the controller-owned gate population as structured request data
+/// before the immutable Cook recipe is persisted. Private gate programs
+/// deliberately remain undisclosed; only their count is recorded.
 fn project_controller_owned_gate_contract(options: &mut CookRequest) {
-    let public_gates = options
-        .gates
-        .verify
-        .iter()
-        .map(|command| format!("`{command}`"))
-        .collect::<Vec<_>>();
-    let private_gate_count = options.gates.private_verify.len();
-    if public_gates.is_empty() && private_gate_count == 0 {
+    let verify = options.gates.verify.clone();
+    let private_verify_count = options.gates.private_verify.len();
+    if verify.is_empty() && private_verify_count == 0 {
         return;
     }
-
-    let mut instructions = vec![
-        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate. Use this attempt for the source change and, when useful, bounded checks to reproduce behavior, test a hypothesis, or develop regression coverage. Treat those results as observations for this attempt, not as authoritative final gate results.".to_string(),
-    ];
-    if !public_gates.is_empty() {
-        instructions.push(format!(
-            "Controller-owned final gates: {}.",
-            public_gates.join(", ")
-        ));
-    }
-    if private_gate_count > 0 {
-        instructions.push(format!(
-            "Homeboy also owns {private_gate_count} private deterministic gate(s); their programs are intentionally withheld from this attempt."
-        ));
-    }
-    instructions.push(
-        "Do not claim a focused check is a final gate result. Homeboy records the authoritative gate evidence separately after harvest."
-            .to_string(),
-    );
-    let contract = instructions.join("\n");
-
     for request in &mut options.identity.initial_plan.tasks {
-        if !request
-            .instructions
-            .contains("Declared deterministic gates are controller-owned.")
-        {
-            request.instructions.push_str("\n\n");
-            request.instructions.push_str(&contract);
-        }
+        crate::agent_task_prompt_template::merge_homeboy_facts(
+            request,
+            serde_json::json!({
+                "gates": {
+                    "owner": "controller",
+                    "verify": verify,
+                    "private_verify_count": private_verify_count,
+                }
+            }),
+        );
+    }
+}
+
+/// Render the operator's attempt template (if any) once every Cook fact has
+/// been projected onto the initial tasks. Homeboy appends no prose of its own.
+fn project_attempt_prompt_template(options: &mut CookRequest) {
+    for request in &mut options.identity.initial_plan.tasks {
+        crate::agent_task_prompt_template::apply_prompt_template(
+            request,
+            crate::agent_task_prompt_template::PromptPurpose::Attempt,
+        );
     }
 }
 
@@ -6909,6 +6892,7 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
+    project_attempt_prompt_template(&mut options);
     if !options.gates.verify.is_empty()
         && !options.gates.verify.iter().any(|command| {
             crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
