@@ -1529,9 +1529,7 @@ fn run_component_deps_script(
             format!(
                 "Dependency provider command failed with status {}: {}",
                 output.exit_code,
-                first_non_empty_line(&output.stderr)
-                    .or_else(|| first_non_empty_line(&output.stdout))
-                    .unwrap_or("no output")
+                failure_output_tail(&output.stderr, &output.stdout)
             ),
             None,
             Some(vec![format!(
@@ -1606,9 +1604,7 @@ pub(crate) fn run_dependency_provider_command(
                 "Dependency provider {} failed with status {}: {}",
                 operation,
                 output.status,
-                first_non_empty_line(&stderr)
-                    .or_else(|| first_non_empty_line(&stdout))
-                    .unwrap_or("no output")
+                failure_output_tail(&stderr, &stdout)
             ),
             None,
             Some(vec![format!(
@@ -1655,9 +1651,7 @@ fn run_adapter_command(
                 "Dependency adapter {} failed with status {}: {}",
                 operation,
                 output.status,
-                first_non_empty_line(&stderr)
-                    .or_else(|| first_non_empty_line(&stdout))
-                    .unwrap_or("no output")
+                failure_output_tail(&stderr, &stdout)
             ),
             None,
             Some(vec![format!(
@@ -1771,8 +1765,72 @@ fn parse_extension_output<T: for<'de> Deserialize<'de>>(stdout: &str, action: &s
     })
 }
 
-fn first_non_empty_line(output: &str) -> Option<&str> {
-    output.lines().find(|line| !line.trim().is_empty())
+/// Maximum number of trailing output lines kept in a dependency failure message.
+const FAILURE_OUTPUT_TAIL_LINES: usize = 20;
+
+/// Failure detail for a dependency command: the last non-empty lines of
+/// stderr, falling back to stdout.
+///
+/// Tools such as Composer print warnings first and the actual error last
+/// (e.g. "Composer could not detect the root package version" precedes
+/// the real install failure), so the first line is usually the least
+/// useful one. Keep the tail instead (homeboy#15802).
+fn failure_output_tail(stderr: &str, stdout: &str) -> String {
+    tail_non_empty_lines(stderr, FAILURE_OUTPUT_TAIL_LINES)
+        .or_else(|| tail_non_empty_lines(stdout, FAILURE_OUTPUT_TAIL_LINES))
+        .unwrap_or_else(|| "no output".to_string())
+}
+
+fn tail_non_empty_lines(output: &str, max_lines: usize) -> Option<String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    let mut tail = lines[start..].join("\n");
+    if start > 0 {
+        tail = format!("[... {start} earlier line(s) omitted]\n{tail}");
+    }
+    Some(tail)
+}
+
+#[cfg(test)]
+mod failure_output_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_real_error_after_a_leading_warning() {
+        let stderr = "Composer could not detect the root package (chubes/datamachine) version, defaulting to '1.0.0'.\n\nIn GitDownloader.php line 82:\n  Failed to execute git clone --no-checkout -- 'https://github.com/Automattic/blocks-engine.git'\n";
+        let detail = failure_output_tail(stderr, "");
+        assert!(detail.contains("Failed to execute git clone"), "{detail}");
+        assert!(
+            detail.contains("could not detect the root package"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_stdout_then_no_output() {
+        assert_eq!(failure_output_tail("", "only stdout\n"), "only stdout");
+        assert_eq!(failure_output_tail("  \n", "\n"), "no output");
+    }
+
+    #[test]
+    fn bounds_long_output_to_the_tail() {
+        let stderr: String = (1..=50).map(|n| format!("line {n}\n")).collect();
+        let detail = failure_output_tail(&stderr, "");
+        assert!(
+            detail.starts_with("[... 30 earlier line(s) omitted]"),
+            "{detail}"
+        );
+        assert!(detail.ends_with("line 50"), "{detail}");
+        assert!(!detail.contains("line 30\n"), "{detail}");
+        assert_eq!(detail.lines().count(), FAILURE_OUTPUT_TAIL_LINES + 1);
+    }
 }
 
 #[cfg(test)]
