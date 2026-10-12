@@ -807,9 +807,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
-    // different configured executable halfway through the transaction.
-    let promotion_lease =
-        homeboy_core::runtime_promotion::acquire("runner daemon reconnect", runner_id.to_string())?;
+    // different configured executable halfway through the transaction. The
+    // lease lives below the injected data root, like binary selection's, so an
+    // isolated reconnect never waits on the host's live Cook pins (#14362).
+    let promotion_lease = homeboy_core::runtime_promotion::acquire_in_root(
+        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
+        "runner daemon reconnect",
+        runner_id.to_string(),
+    )?;
     promotion_lease.assert_generation()?;
     let runner = load_in_roots(roots, runner_id)?;
     let session_path = session_path_in_root(roots.config(), runner_id);
