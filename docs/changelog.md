@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.14] - 2026-10-12
+
+### Changed
+- compare-and-swap non-terminal run transitions
+
+### Fixed
+- keep a first-attempt Cook baseline alive for detached Lab staging
+
 ## [0.418.13] - 2026-10-12
 
 ### Fixed
