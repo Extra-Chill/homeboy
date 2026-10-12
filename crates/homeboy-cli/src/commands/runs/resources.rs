@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -497,7 +496,7 @@ fn load_observation_store_index(
     store: &ObservationStore,
     run_id: Option<&str>,
 ) -> Result<Vec<LoadedResourceIndex>> {
-    let mut artifacts = if let Some(run_id) = run_id {
+    let artifacts = if let Some(run_id) = run_id {
         store.list_artifacts(run_id)?
     } else {
         store
@@ -512,31 +511,6 @@ fn load_observation_store_index(
             .map(|run_artifact| run_artifact.artifact)
             .collect()
     };
-
-    let run_ids = artifacts
-        .iter()
-        .map(|artifact| artifact.run_id.clone())
-        .collect::<BTreeSet<_>>();
-    for run_id in &run_ids {
-        store.reconcile_resource_lifecycle_index_metadata(run_id)?;
-    }
-    if !run_ids.is_empty() {
-        artifacts = if let Some(run_id) = run_id {
-            store.list_artifacts(run_id)?
-        } else {
-            store
-                .list_run_artifacts(
-                    RunListFilter {
-                        limit: Some(1000),
-                        ..Default::default()
-                    },
-                    None,
-                )?
-                .into_iter()
-                .map(|run_artifact| run_artifact.artifact)
-                .collect()
-        };
-    }
 
     let mut index = resource_lifecycle_index_from_artifacts(&artifacts)?.unwrap_or_else(|| {
         ResourceLifecycleIndex {
@@ -644,7 +618,6 @@ fn rig_lease_resource_record(
             .or_else(|| diagnostic.inspect_command.clone())
             .or_else(|| Some(diagnostic.reconcile_command.clone())),
         status,
-        migration_provenance: None,
     }
 }
 
@@ -768,7 +741,6 @@ fn executor_evidence_resource(
             "homeboy runs resources --run-id {run_id} --cleanup-plan --cleanup-eligible"
         )),
         status,
-        migration_provenance: None,
     })
 }
 
@@ -882,7 +854,6 @@ fn sample_resource_lifecycle_index() -> ResourceLifecycleIndex {
                 "homeboy runs resources --run-id sample-run-1 --cleanup-plan".to_string(),
             ),
             status: ResourceLifecycleResourceStatus::CleanupPending,
-            migration_provenance: None,
         }],
     }
 }
@@ -928,7 +899,6 @@ mod tests {
             cleanup_intent: ResourceCleanupIntent::DryRun,
             cleanup_command: None,
             status,
-            migration_provenance: None,
         }
     }
 
@@ -944,8 +914,10 @@ mod tests {
                 "runner-workspace",
                 artifact_path,
                 serde_json::json!({
-                    "resource_lifecycle": serde_json::to_value(resource)
-                        .expect("resource lifecycle metadata"),
+                    "resource_lifecycle_index": ResourceLifecycleIndex {
+                        schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+                        resources: vec![resource],
+                    },
                 }),
             )
             .expect("artifact with resource lifecycle metadata");
@@ -1107,17 +1079,7 @@ mod tests {
 
             assert_eq!(indexes.len(), 1);
             assert_eq!(indexes[0].source, "observation-store");
-            let migrated = &indexes[0].index.resources[0];
-            let mut expected = resource;
-            expected.migration_provenance = migrated.migration_provenance.clone();
-            assert_eq!(migrated, &expected);
-            assert_eq!(
-                migrated
-                    .migration_provenance
-                    .as_ref()
-                    .map(|provenance| provenance.source_key.as_str()),
-                Some("resource_lifecycle")
-            );
+            assert_eq!(&indexes[0].index.resources[0], &resource);
         });
     }
 
@@ -1624,7 +1586,12 @@ mod tests {
                 &run.id,
                 "lab-metadata",
                 &artifact_path,
-                serde_json::json!({ "workspace_resource_lifecycle": resource }),
+                serde_json::json!({
+                    "resource_lifecycle_index": ResourceLifecycleIndex {
+                        schema: RESOURCE_LIFECYCLE_INDEX_SCHEMA.to_string(),
+                        resources: vec![resource],
+                    },
+                }),
             )
             .expect("artifact with resource lifecycle metadata");
 
@@ -1643,21 +1610,6 @@ mod tests {
             ResourceLifecycleResourceStatus::CleanupPending
         );
         assert!(resource_lifecycle_record_is_cleanup_eligible(transitioned));
-        let artifact = store
-            .list_artifacts(&run.id)
-            .expect("artifacts")
-            .into_iter()
-            .next()
-            .expect("lifecycle artifact");
-        assert!(artifact
-            .metadata_json
-            .get("workspace_resource_lifecycle")
-            .is_none());
-        assert_eq!(
-            artifact.metadata_json["resource_lifecycle_index"]["resources"][0]
-                ["migration_provenance"]["source_key"],
-            "workspace_resource_lifecycle"
-        );
     }
 
     #[test]

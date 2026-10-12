@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::*;
-use crate::resource_lifecycle_index::migrate_resource_lifecycle_index_metadata;
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactListFilter {
@@ -56,6 +55,41 @@ fn artifact_handle(run_id: &str, artifact_id: &str) -> String {
     hasher.update([0]);
     hasher.update(artifact_id.as_bytes());
     format!("ah_{:x}", hasher.finalize())
+}
+
+/// SQLite columns derived from an artifact's identity and metadata. Every
+/// writer stores them with the row, so bounded evidence projections and
+/// opaque-handle lookups never see an artifact without them. The handle is
+/// stable (`run_id`, `artifact.id`) and the unique index makes a collision a
+/// hard integrity failure instead of resolving another artifact.
+struct ArtifactIndexColumns {
+    handle: String,
+    diagnostic: i64,
+    rank: String,
+}
+
+impl ArtifactIndexColumns {
+    fn of(run_id: &str, artifact_id: &str, metadata: &serde_json::Value) -> Self {
+        let (diagnostic, rank) = failure_diagnostic_columns(metadata);
+        Self {
+            handle: artifact_handle(run_id, artifact_id),
+            diagnostic,
+            rank,
+        }
+    }
+}
+
+/// The failure-diagnostic columns projected from artifact metadata, with the
+/// same `as_u64().unwrap_or_default()` rank semantics as the full evidence
+/// report.
+fn failure_diagnostic_columns(metadata: &serde_json::Value) -> (i64, String) {
+    (
+        i64::from(metadata["failure_diagnostic"] == serde_json::Value::Bool(true)),
+        metadata["failure_diagnostic_rank"]
+            .as_u64()
+            .unwrap_or_default()
+            .to_string(),
+    )
 }
 
 fn bounded_artifact_record(
@@ -123,66 +157,6 @@ pub struct BoundedArtifactProjection {
 }
 
 impl ObservationStore {
-    /// Backfill the stable opaque handle for legacy rows. The source identity is
-    /// immutable (`run_id`, `artifact.id`), and the unique index makes a hash
-    /// collision a hard integrity failure instead of resolving another artifact.
-    pub(super) fn backfill_artifact_handles_with_retry(
-        &self,
-        mut on_retry: impl FnMut(),
-    ) -> Result<()> {
-        // This maintenance work uses its own zero-timeout connection. Retrying
-        // a five-second SQLite busy handler would turn the bounded retry policy
-        // into a roughly thirty-second startup stall.
-        let connection = schema::open_maintenance_connection(&self.path)?;
-        execute_with_retry_inner(
-            "backfill artifact handles".to_string(),
-            SQLITE_WRITE_MAX_ATTEMPTS,
-            SQLITE_WRITE_BASE_BACKOFF_MS,
-            |_, backoff_ms| {
-                on_retry();
-                std::thread::sleep(Duration::from_millis(backoff_ms));
-            },
-            &mut || {
-                // Keep the read and updates in one retryable transaction. In
-                // rollback-journal mode a read-to-write upgrade
-                // can fail after another writer commits; retrying only UPDATE
-                // would leave that failure outside the recovery boundary.
-                let tx = connection.unchecked_transaction()?;
-                let mut statement = tx.prepare(
-                    "SELECT id, run_id, metadata_json FROM artifacts WHERE artifact_handle IS NULL OR failure_diagnostic IS NULL OR failure_diagnostic_rank IS NULL",
-                )?;
-                let rows = statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                drop(statement);
-
-                for (id, run_id, metadata_json) in rows {
-                    let metadata = serde_json::from_str::<serde_json::Value>(&metadata_json)
-                        .unwrap_or(serde_json::Value::Null);
-                    let diagnostic =
-                        i64::from(metadata["failure_diagnostic"] == serde_json::Value::Bool(true));
-                    let rank = metadata["failure_diagnostic_rank"]
-                        .as_u64()
-                        .unwrap_or_default()
-                        .to_string();
-                    // Only fill diagnostics if their source metadata is still
-                    // the snapshot we read. A concurrent metadata update must
-                    // never receive values derived from an older row.
-                    tx.execute(
-                        "UPDATE artifacts SET artifact_handle = COALESCE(artifact_handle, ?1), failure_diagnostic = CASE WHEN metadata_json = ?4 THEN COALESCE(failure_diagnostic, ?2) ELSE failure_diagnostic END, failure_diagnostic_rank = CASE WHEN metadata_json = ?4 THEN COALESCE(failure_diagnostic_rank, ?3) ELSE failure_diagnostic_rank END WHERE id = ?5 AND run_id = ?6",
-                        params![artifact_handle(&run_id, &id), diagnostic, rank, metadata_json, id, run_id],
-                    )?;
-                }
-                tx.commit()
-            },
-        )
-    }
     /// Publish a run and all of its filesystem artifacts as one reader-visible unit.
     ///
     /// Files are copied and verified before the SQLite transaction begins. The
@@ -431,9 +405,14 @@ impl ObservationStore {
                 if staged_path.is_none() {
                     continue;
                 }
+                let index = ArtifactIndexColumns::of(
+                    &artifact.run_id,
+                    &artifact.id,
+                    &artifact.metadata_json,
+                );
                 tx.execute(
-                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                    params![artifact.id, artifact.run_id, artifact.kind, artifact.artifact_type, artifact.path, artifact.url, artifact.public_url, artifact.viewer_url, serialize_metadata(&serde_json::json!(artifact.viewer_links))?, artifact.sha256, artifact.size_bytes, artifact.mime, serialize_metadata(&artifact.metadata_json)?, artifact.created_at],
+                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    params![artifact.id, artifact.run_id, artifact.kind, artifact.artifact_type, artifact.path, artifact.url, artifact.public_url, artifact.viewer_url, serialize_metadata(&serde_json::json!(artifact.viewer_links))?, artifact.sha256, artifact.size_bytes, artifact.mime, serialize_metadata(&artifact.metadata_json)?, artifact.created_at, index.handle, index.diagnostic, index.rank],
                 ).map_err(sqlite_error("publish observation artifact"))?;
             }
             tx.commit()
@@ -619,11 +598,13 @@ impl ObservationStore {
         }
         let metadata_json = serialize_metadata(&artifact.metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
+        let index =
+            ArtifactIndexColumns::of(&artifact.run_id, &artifact.id, &artifact.metadata_json);
         execute_with_retry("import artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 "#,
                 params![
                     artifact.id,
@@ -640,6 +621,9 @@ impl ObservationStore {
                     artifact.mime,
                     metadata_json,
                     artifact.created_at,
+                    index.handle,
+                    index.diagnostic,
+                    index.rank,
                 ],
             )
         })?;
@@ -987,11 +971,12 @@ impl ObservationStore {
 
         let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
+        let index = ArtifactIndexColumns::of(run_id, &id, &artifact.metadata_json);
         if let Err(error) = execute_with_retry("insert artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 "#,
                 params![
                     id,
@@ -1008,6 +993,9 @@ impl ObservationStore {
                     mime,
                     metadata_json_str,
                     created_at,
+                    index.handle,
+                    index.diagnostic,
+                    index.rank,
                 ],
             )
         }) {
@@ -1151,11 +1139,12 @@ impl ObservationStore {
 
         let metadata_json_str = serialize_metadata(&metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
+        let index = ArtifactIndexColumns::of(run_id, &id, &metadata_json);
         if let Err(error) = execute_with_retry("insert directory artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 "#,
                 params![
                     id,
@@ -1172,6 +1161,9 @@ impl ObservationStore {
                     Option::<String>::None,
                     metadata_json_str,
                     created_at,
+                    index.handle,
+                    index.diagnostic,
+                    index.rank,
                 ],
             )
         }) {
@@ -1219,11 +1211,12 @@ impl ObservationStore {
 
         let metadata_json_str = serialize_metadata(&metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
+        let index = ArtifactIndexColumns::of(run_id, &id, &metadata_json);
         execute_with_retry("insert URL artifact record", || {
             self.connection.execute(
                 r#"
-                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 "#,
                 params![
                     id,
@@ -1240,6 +1233,9 @@ impl ObservationStore {
                     Option::<String>::None,
                     metadata_json_str,
                     created_at,
+                    index.handle,
+                    index.diagnostic,
+                    index.rank,
                 ],
             )
         })?;
@@ -1459,7 +1455,7 @@ impl ObservationStore {
                 let (handle, kind, artifact_type, path, created_at, marked, rank) = row
                     .map_err(|error| self.read_error("collect bounded artifact metadata", error))?;
                 let handle = handle.ok_or_else(|| {
-                    Error::internal_unexpected("artifact handle backfill is incomplete")
+                    Error::internal_unexpected("artifact row has no opaque handle")
                 })?;
                 let artifact =
                     bounded_artifact_record(handle.clone(), kind, artifact_type, path, created_at);
@@ -1532,14 +1528,18 @@ impl ObservationStore {
     ) -> Result<ArtifactRecord> {
         validate_required("artifact_id", artifact_id)?;
         let serialized = serialize_metadata(&metadata_json)?;
+        // The diagnostic columns are projections of this document, so they
+        // change in the same statement. The handle derives from immutable
+        // identity and is left untouched.
+        let (diagnostic, rank) = failure_diagnostic_columns(&metadata_json);
         let rows = execute_with_retry("update artifact metadata", || {
             self.connection.execute(
                 r#"
                 UPDATE artifacts
-                SET metadata_json = ?1
-                WHERE id = ?2
+                SET metadata_json = ?1, failure_diagnostic = ?2, failure_diagnostic_rank = ?3
+                WHERE id = ?4
                 "#,
-                params![serialized, artifact_id],
+                params![serialized, diagnostic, rank, artifact_id],
             )
         })?;
         if rows == 0 {
@@ -1555,47 +1555,6 @@ impl ObservationStore {
                 "Updated artifact record {artifact_id} but could not read it back"
             ))
         })
-    }
-
-    /// Persist canonical resource lifecycle metadata for a run's legacy artifacts.
-    ///
-    /// Each replacement writes the complete metadata document in one SQLite
-    /// statement. The compare-and-swap predicate preserves canonical-wins when
-    /// another writer updates an artifact between the scan and replacement.
-    pub fn reconcile_resource_lifecycle_index_metadata(&self, run_id: &str) -> Result<usize> {
-        let mut migrated = 0;
-        for artifact in self.list_artifacts(run_id)? {
-            let Some(replacement) =
-                migrate_resource_lifecycle_index_metadata(&artifact.metadata_json)?
-            else {
-                continue;
-            };
-            if self.replace_artifact_metadata_if_current(
-                &artifact.id,
-                &artifact.metadata_json,
-                &replacement,
-            )? {
-                migrated += 1;
-            }
-        }
-        Ok(migrated)
-    }
-
-    fn replace_artifact_metadata_if_current(
-        &self,
-        artifact_id: &str,
-        current: &serde_json::Value,
-        replacement: &serde_json::Value,
-    ) -> Result<bool> {
-        let current = serialize_metadata(current)?;
-        let replacement = serialize_metadata(replacement)?;
-        let rows = execute_with_retry("replace artifact metadata", || {
-            self.connection.execute(
-                "UPDATE artifacts SET metadata_json = ?1 WHERE id = ?2 AND metadata_json = ?3",
-                params![replacement, artifact_id, current],
-            )
-        })?;
-        Ok(rows == 1)
     }
 
     pub fn list_artifacts_for_runs(
@@ -3220,125 +3179,126 @@ mod tests {
         });
     }
 
+    /// Every writer stores the opaque handle and the failure-diagnostic columns
+    /// with the row itself. No reopen or maintenance pass stands between a
+    /// write and a bounded projection or handle lookup that sees it, and a
+    /// metadata update moves the diagnostic columns in the same statement.
     #[test]
-    fn reconciles_legacy_resource_lifecycle_metadata_once_across_restart() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let database = tempdir.path().join("observation.sqlite3");
-        let store = ObservationStore::open_initialized_at(&database).expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("test")
-                    .cwd_path(tempdir.path())
-                    .build(),
-            )
-            .expect("run");
-        let metadata: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../tests/fixtures/resource_lifecycle_migration/resource_lifecycle.json"
-        ))
-        .expect("legacy fixture");
-        store
-            .import_artifact(&ArtifactRecord {
-                id: "legacy-lifecycle".to_string(),
-                run_id: run.id.clone(),
-                kind: "metadata".to_string(),
-                artifact_type: "metadata".to_string(),
-                path: "legacy.json".to_string(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: None,
-                size_bytes: None,
-                mime: Some("application/json".to_string()),
-                metadata_json: metadata,
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-            })
-            .expect("legacy artifact");
+    fn every_artifact_writer_stores_handle_and_diagnostic_columns_with_the_row() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let log = home.path().join("diagnostic.log");
+            fs::write(&log, b"failure").expect("write log");
+            let tree = home.path().join("tree");
+            fs::create_dir_all(&tree).expect("create tree");
+            fs::write(tree.join("a.txt"), b"a").expect("write tree file");
+            let published = home.path().join("published.txt");
+            fs::write(&published, b"published").expect("write published");
 
-        assert_eq!(
+            let diagnostic_id = store
+                .record_artifact_with_metadata(
+                    &run.id,
+                    "log",
+                    &log,
+                    serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 3 }),
+                )
+                .expect("file writer")
+                .id;
+            let directory_id = store
+                .record_directory_artifact(&run.id, "tree", &tree)
+                .expect("directory writer")
+                .id;
+            let url_id = store
+                .record_url_artifact(&run.id, "link", "https://example.com/report")
+                .expect("url writer")
+                .id;
             store
-                .reconcile_resource_lifecycle_index_metadata(&run.id)
-                .expect("migrate legacy metadata"),
-            1
-        );
-        drop(store);
+                .import_artifact(&ArtifactRecord {
+                    id: "imported".to_string(),
+                    run_id: run.id.clone(),
+                    kind: "imported".to_string(),
+                    artifact_type: "file".to_string(),
+                    path: published.display().to_string(),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: None,
+                    size_bytes: None,
+                    mime: None,
+                    metadata_json: serde_json::json!({}),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .expect("import writer");
+            store
+                .publish_run_artifacts_atomically(
+                    &run,
+                    &[ArtifactPublication {
+                        id: "published".to_string(),
+                        kind: "report".to_string(),
+                        source_path: published.clone(),
+                        mime: None,
+                        metadata_json: serde_json::json!({}),
+                        expected_size_bytes: None,
+                        expected_sha256: None,
+                        artifact_type: ArtifactPublicationType::File,
+                    }],
+                )
+                .expect("atomic publication writer");
 
-        let restarted = ObservationStore::open_initialized_at(&database).expect("restart store");
-        assert_eq!(
-            restarted
-                .reconcile_resource_lifecycle_index_metadata(&run.id)
-                .expect("idempotent restart reconciliation"),
-            0
-        );
-        let artifact = restarted
-            .get_artifact("legacy-lifecycle")
-            .expect("read artifact")
-            .expect("artifact exists");
-        assert!(artifact.metadata_json.get("resource_lifecycle").is_none());
-        assert_eq!(
-            artifact.metadata_json["resource_lifecycle_index"]["resources"][0]
-                ["migration_provenance"]["source_key"],
-            "resource_lifecycle"
-        );
-    }
+            let missing: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifacts WHERE artifact_handle IS NULL OR failure_diagnostic IS NULL OR failure_diagnostic_rank IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count rows without index columns");
+            assert_eq!(missing, 0, "every writer stores its index columns");
 
-    #[test]
-    fn resource_lifecycle_reconciliation_does_not_overwrite_a_concurrent_writer() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let store =
-            ObservationStore::open_initialized_at(tempdir.path().join("observation.sqlite3"))
-                .expect("store");
-        let run = store
-            .start_run(
-                NewRunRecord::builder("test")
-                    .cwd_path(tempdir.path())
-                    .build(),
-            )
-            .expect("run");
-        let legacy: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../../tests/fixtures/resource_lifecycle_migration/resource_lifecycle.json"
-        ))
-        .expect("legacy fixture");
-        store
-            .import_artifact(&ArtifactRecord {
-                id: "racing-lifecycle".to_string(),
-                run_id: run.id,
-                kind: "metadata".to_string(),
-                artifact_type: "metadata".to_string(),
-                path: "legacy.json".to_string(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: None,
-                size_bytes: None,
-                mime: Some("application/json".to_string()),
-                metadata_json: legacy.clone(),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-            })
-            .expect("legacy artifact");
-        let replacement = migrate_resource_lifecycle_index_metadata(&legacy)
-            .expect("migration")
-            .expect("replacement");
-        let winner = serde_json::json!({
-            "resource_lifecycle_index": replacement["resource_lifecycle_index"].clone(),
-            "writer": "concurrent"
+            let ids = [
+                diagnostic_id.as_str(),
+                directory_id.as_str(),
+                url_id.as_str(),
+                "imported",
+                "published",
+            ];
+            for id in ids {
+                let resolved = store
+                    .get_artifact_for_handle(&artifact_handle(&run.id, id))
+                    .expect("handle lookup")
+                    .expect("handle resolves without a reopen");
+                assert_eq!(resolved.id, id);
+            }
+            let projection = store
+                .bounded_artifact_projection_for_runs(std::slice::from_ref(&run.id), 10)
+                .expect("bounded projection");
+            assert_eq!(projection.count, ids.len());
+            assert_eq!(
+                projection.diagnostic_handle,
+                Some(artifact_handle(&run.id, &diagnostic_id))
+            );
+
+            store
+                .update_artifact_metadata(
+                    &directory_id,
+                    serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 9 }),
+                )
+                .expect("promote directory diagnostic");
+            store
+                .update_artifact_metadata(&diagnostic_id, serde_json::json!({}))
+                .expect("clear log diagnostic");
+            let projection = store
+                .bounded_artifact_projection_for_runs(std::slice::from_ref(&run.id), 10)
+                .expect("bounded projection after update");
+            assert_eq!(
+                projection.diagnostic_handle,
+                Some(artifact_handle(&run.id, &directory_id))
+            );
         });
-        store
-            .update_artifact_metadata("racing-lifecycle", winner.clone())
-            .expect("concurrent update");
-
-        assert!(!store
-            .replace_artifact_metadata_if_current("racing-lifecycle", &legacy, &replacement)
-            .expect("losing compare-and-swap"));
-        assert_eq!(
-            store
-                .get_artifact("racing-lifecycle")
-                .expect("read artifact")
-                .expect("artifact exists")
-                .metadata_json,
-            winner
-        );
     }
 
     #[test]

@@ -226,112 +226,11 @@ mod store_init_tests {
         );
     }
 
+    /// The lifecycle opener skips startup maintenance, yet an artifact it
+    /// writes is ready for a bounded projection: every writer stores the
+    /// opaque handle and diagnostic columns with the row.
     #[test]
-    fn artifact_handle_backfill_recovers_after_a_transient_writer_lock() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let path = crate::paths::observation_db_in_root(roots.data());
-        std::fs::create_dir_all(path.parent().expect("database parent"))
-            .expect("create database parent");
-        let connection = super::super::schema::open_connection(&path).expect("open schema");
-        super::super::schema::ensure_schema(&connection, &path).expect("apply schema");
-        drop(connection);
-        let writer = rusqlite::Connection::open(&path).expect("open locking connection");
-        writer
-            .execute_batch("PRAGMA journal_mode=DELETE;")
-            .expect("use rollback journal mode");
-        // Hand-built because the test owns the connection's journal mode, but
-        // the store is still rooted: `roots` carries the artifact tree, so no
-        // handle here can resolve an ambient one (#7505).
-        let store = ObservationStore {
-            connection: rusqlite::Connection::open(&path).expect("open test store"),
-            path: path.clone(),
-            readonly: false,
-            roots: Some(roots.clone()),
-        };
-        let run = store
-            .start_run(sample_run("test", "homeboy"))
-            .expect("start run");
-        let artifact_id = "legacy-artifact";
-        writer
-            .execute(
-                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
-                rusqlite::params![artifact_id, run.id],
-            )
-            .expect("insert legacy artifact");
-        writer
-            .execute_batch("BEGIN EXCLUSIVE;")
-            .expect("hold writer lock");
-
-        let (retry_started_tx, retry_started_rx) = std::sync::mpsc::sync_channel(0);
-        let (release_retry_tx, release_retry_rx) = std::sync::mpsc::sync_channel(0);
-        let worker = std::thread::spawn(move || {
-            store.backfill_artifact_handles_with_retry(|| {
-                retry_started_tx.send(()).expect("report retry");
-                release_retry_rx.recv().expect("release retry");
-            })
-        });
-        retry_started_rx
-            .recv()
-            .expect("backfill attempted while locked");
-        writer
-            .execute_batch("COMMIT;")
-            .expect("release writer lock");
-        release_retry_tx.send(()).expect("resume backfill");
-
-        worker
-            .join()
-            .expect("backfill worker joined")
-            .expect("backfill recovers after lock release");
-
-        let check = rusqlite::Connection::open(path).expect("open check connection");
-        let (handle, diagnostic, rank): (String, i64, String) = check
-            .query_row(
-                "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = ?1",
-                [artifact_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read backfilled artifact");
-        assert!(handle.starts_with("ah_"));
-        assert_eq!(diagnostic, 0);
-        assert_eq!(rank, "0");
-    }
-
-    #[test]
-    fn artifact_handle_backfill_does_not_replace_materialized_diagnostic_metadata() {
-        let context = HermeticTestContext::new();
-        let roots = context.path_roots();
-        let store = ObservationStore::open_initialized_in_roots(&roots).expect("initialize store");
-        let run = store
-            .start_run(sample_run("test", "homeboy"))
-            .expect("start run");
-        store
-            .connection
-            .execute(
-                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES (?1, ?2, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":1}', '2026-01-01T00:00:00Z', NULL, 0, '99')",
-                rusqlite::params!["materialized-artifact", run.id],
-            )
-            .expect("insert partially backfilled artifact");
-
-        store
-            .backfill_artifact_handles_with_retry(|| {})
-            .expect("backfill artifact handle");
-
-        let (handle, diagnostic, rank): (String, i64, String) = store
-            .connection
-            .query_row(
-                "SELECT artifact_handle, failure_diagnostic, failure_diagnostic_rank FROM artifacts WHERE id = 'materialized-artifact'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read backfilled artifact");
-        assert!(handle.starts_with("ah_"));
-        assert_eq!(diagnostic, 0);
-        assert_eq!(rank, "99");
-    }
-
-    #[test]
-    fn normal_open_backfills_artifact_handles_before_a_bounded_projection() {
+    fn lifecycle_written_artifacts_are_ready_for_a_bounded_projection() {
         let context = HermeticTestContext::new();
         let roots = context.path_roots();
         let lifecycle = ObservationStore::open_initialized_for_lifecycle_in_roots(&roots)
@@ -340,19 +239,19 @@ mod store_init_tests {
             .start_run(sample_run("test", "homeboy"))
             .expect("start run");
         lifecycle
-            .connection
-            .execute(
-                "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, viewer_links_json, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank) VALUES ('legacy-projection-artifact', ?1, 'evidence', 'url', 'https://example.test/evidence', '[]', '{\"failure_diagnostic\":true,\"failure_diagnostic_rank\":2}', '2026-01-01T00:00:00Z', NULL, NULL, NULL)",
-                [run.id.as_str()],
+            .record_url_artifact_with_metadata(
+                &run.id,
+                "evidence",
+                "https://example.test/evidence",
+                serde_json::json!({ "failure_diagnostic": true, "failure_diagnostic_rank": 2 }),
             )
-            .expect("insert legacy artifact");
+            .expect("record lifecycle artifact");
         drop(lifecycle);
 
-        let store =
-            ObservationStore::open_initialized_in_roots(&roots).expect("normal open backfills");
+        let store = ObservationStore::open_initialized_in_roots(&roots).expect("normal open");
         let projection = store
             .bounded_artifact_projection_for_runs(&[run.id], 10)
-            .expect("project backfilled artifact");
+            .expect("project lifecycle artifact");
 
         assert_eq!(projection.artifacts.len(), 1);
         assert!(projection.artifacts[0].id.starts_with("ah_"));

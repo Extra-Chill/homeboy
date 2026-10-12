@@ -356,7 +356,7 @@ impl AgentTaskLifecycleStore {
     /// are not interchangeable: the lifecycle opener defers report-only artifact
     /// maintenance so a lifecycle transition can proceed while another process
     /// owns SQLite's writer lock, while this one first reconciles unfinished
-    /// artifact publications and backfills artifact handles. Rooting a caller
+    /// artifact publications. Rooting a caller
     /// that used the ambient `open_initialized()` therefore has to come here, or
     /// the reroot would silently change what that caller sees — the hazard
     /// #12618 recorded against `substantive_candidate_in_aggregate` (#7505).

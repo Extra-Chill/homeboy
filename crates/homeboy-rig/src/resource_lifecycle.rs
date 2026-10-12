@@ -114,7 +114,6 @@ pub(crate) fn dependency_materialization_cache_lifecycle_record(
             options.run_id
         )),
         status: options.status,
-        migration_provenance: None,
     }
 }
 
@@ -172,7 +171,6 @@ pub(crate) fn lifecycle_snapshot_lifecycle_records<'a>(
                     options.run_id
                 )),
                 status: options.status,
-                migration_provenance: None,
             }
         })
         .collect()
@@ -227,7 +225,6 @@ fn record(
             options.run_id
         )),
         status: options.status,
-        migration_provenance: None,
     }
 }
 
