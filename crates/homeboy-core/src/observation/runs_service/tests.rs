@@ -353,129 +353,6 @@ fn classify_artifact_storage_recognizes_local_remote_and_metadata_only() {
     assert_eq!(classify_artifact_storage(&artifact), ArtifactStorage::Other);
 }
 
-fn remote_artifact(id: &str, kind: &str) -> ArtifactRecord {
-    ArtifactRecord {
-        id: id.into(),
-        run_id: "run-1".into(),
-        kind: kind.into(),
-        artifact_type: "remote_file".into(),
-        path: format!("runner-artifact://homeboy-lab/run-1/{id}"),
-        url: None,
-        public_url: None,
-        viewer_url: None,
-        viewer_links: Vec::new(),
-        sha256: None,
-        size_bytes: None,
-        mime: None,
-        metadata_json: serde_json::json!({ "role": "matrix-finding-packets" }),
-        created_at: "2026-06-26T00:00:00Z".into(),
-    }
-}
-
-#[test]
-fn hydrate_remote_artifacts_rewrites_remote_packets_into_readable_files() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let packet_path = temp.path().join("finding-packets.json");
-    std::fs::write(
-        &packet_path,
-        br#"{"finding_packets":[{"diagnostic_kind":"missing_title","fixture_id":"home"}]}"#,
-    )
-    .expect("write packet");
-
-    let local = ArtifactRecord {
-        id: "local".into(),
-        run_id: "run-1".into(),
-        kind: "summary".into(),
-        artifact_type: "file".into(),
-        path: temp.path().join("summary.json").display().to_string(),
-        url: None,
-        public_url: None,
-        viewer_url: None,
-        viewer_links: Vec::new(),
-        sha256: None,
-        size_bytes: None,
-        mime: None,
-        metadata_json: Value::Null,
-        created_at: "2026-06-26T00:00:00Z".into(),
-    };
-    let remote = remote_artifact("finding-packets", "bench_artifact");
-
-    let mut downloads = 0;
-    let (hydrated, diagnostics) = hydrate_remote_artifacts(
-        vec![local.clone(), remote.clone()],
-        |_| true,
-        |artifact| {
-            downloads += 1;
-            assert_eq!(artifact.id, "finding-packets");
-            Ok(ArtifactFetchOutcome {
-                run_id: artifact.run_id.clone(),
-                artifact_id: artifact.id.clone(),
-                output_path: packet_path.clone(),
-                content_type: Some("application/json".into()),
-                size_bytes: Some(42),
-                sha256: None,
-                artifact_ref: None,
-            })
-        },
-    );
-
-    // Only the remote artifact triggers a download; the local file is left
-    // untouched.
-    assert_eq!(downloads, 1);
-    assert!(diagnostics.is_empty());
-    assert_eq!(hydrated[0].artifact_type, "file");
-    assert_eq!(hydrated[0].path, local.path);
-    let hydrated_remote = &hydrated[1];
-    assert_eq!(hydrated_remote.artifact_type, "file");
-    assert_eq!(hydrated_remote.path, packet_path.display().to_string());
-    assert_eq!(hydrated_remote.mime.as_deref(), Some("application/json"));
-
-    // The hydrated record now parses into a non-zero matrix summary, where
-    // the un-hydrated `remote_file` record would have summarized 0.
-    let summary =
-        crate::artifacts::summarize_matrix_artifacts("run-1", &hydrated, &[]).expect("summary");
-    assert_eq!(summary.finding_count, 1);
-    assert_eq!(summary.top_diagnostic_kinds[0].key, "missing_title");
-    assert_eq!(summary.top_fixtures[0].key, "home");
-
-    let zero =
-        crate::artifacts::summarize_matrix_artifacts("run-1", &[remote], &[]).expect("summary");
-    assert_eq!(zero.finding_count, 0);
-}
-
-#[test]
-fn hydrate_remote_artifacts_records_diagnostic_without_aborting() {
-    let remote = remote_artifact("finding-packets", "bench_artifact");
-    let (hydrated, diagnostics) = hydrate_remote_artifacts(
-        vec![remote.clone()],
-        |_| true,
-        |_| Err(Error::internal_unexpected("runner offline")),
-    );
-    assert_eq!(hydrated.len(), 1);
-    // The original record is preserved on failure.
-    assert_eq!(hydrated[0].artifact_type, "remote_file");
-    assert_eq!(diagnostics.len(), 1);
-    assert!(diagnostics[0].contains("could not be hydrated"));
-    assert!(diagnostics[0].contains("runner offline"));
-}
-
-#[test]
-fn hydrate_remote_artifacts_skips_non_selected_remote_artifacts() {
-    let remote = remote_artifact("trace.zip", "trace");
-    let mut downloads = 0;
-    let (hydrated, diagnostics) = hydrate_remote_artifacts(
-        vec![remote],
-        |artifact| artifact.kind == "bench_artifact",
-        |_| {
-            downloads += 1;
-            Err(Error::internal_unexpected("should not download"))
-        },
-    );
-    assert_eq!(downloads, 0);
-    assert!(diagnostics.is_empty());
-    assert_eq!(hydrated[0].artifact_type, "remote_file");
-}
-
 fn labeled_run(id: &str, command: &str, metadata: Value) -> RunRecord {
     RunRecord {
         id: id.into(),
@@ -576,17 +453,6 @@ fn match_run_label_resolves_label_from_command_id_and_metadata() {
 }
 
 #[test]
-fn resolve_run_id_or_label_returns_local_run_id_unchanged() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store.start_run(sample_run("bench.matrix")).expect("run");
-        let resolved = resolve_run_id_or_label(&store, &run.id).expect("resolve existing run id");
-        assert_eq!(resolved, run.id);
-    });
-}
-
-#[test]
 fn require_run_resolves_requested_run_id_metadata_alias() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -605,10 +471,6 @@ fn require_run_resolves_requested_run_id_metadata_alias() {
 
         let resolved = require_run(&store, "proof-label").expect("alias resolves");
         assert_eq!(resolved.id, run.id);
-        assert_eq!(
-            resolve_run_id_or_label(&store, "proof-label").expect("alias id"),
-            run.id
-        );
     });
 }
 

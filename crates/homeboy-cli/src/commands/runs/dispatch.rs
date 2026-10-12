@@ -13,8 +13,8 @@ use super::types::{
 };
 use super::CmdResult;
 use super::{
-    bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
-    hotspots, latest, loop_sync, proof, query, reconcile, refs, report, resources, watch,
+    bench, compare, distribution, dossier, evidence, findings, fuzz_compare, handlers, hotspots,
+    latest, proof, reconcile, refs, report, resources, watch,
 };
 
 impl RunsArgs {
@@ -152,7 +152,6 @@ impl RunsArgs {
             RunsCommand::Show { run_id, .. }
             | RunsCommand::Proof { run_id, .. }
             | RunsCommand::Dossier { run_id, .. }
-            | RunsCommand::ResumePlan { run_id }
             | RunsCommand::Evidence { run_id, .. }
             | RunsCommand::Env { run_id } => (
                 format!(
@@ -225,7 +224,6 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             json: _,
             presentation: _,
         } => dossier::runs_dossier_in_store(&store, &run_id),
-        RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&store, &run_id),
         RunsCommand::Evidence {
             run_id,
             full,
@@ -242,17 +240,12 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Artifacts(args) => handlers::artifacts_from_args(&store, args),
         RunsCommand::Artifact(args) => handlers::artifact_command(&store, args),
         RunsCommand::Findings(args) => findings::findings(&store, args),
-        RunsCommand::Finding { finding_id } => findings::finding(&store, &finding_id),
-        RunsCommand::LatestFinding(args) => findings::latest_finding(args),
         RunsCommand::Export(args) => super::bundle::export_runs(&store, args),
         RunsCommand::Import(args) => super::bundle::import_runs(&store, args),
-        RunsCommand::Query(args) => query::runs_query(&store, args),
         RunsCommand::Refs(args) => refs::runs_refs(&store, args),
         RunsCommand::Resources(args) => {
             resources::runs_resources_in_store(&store, roots.config(), args)
         }
-        RunsCommand::Drift(args) => drift::runs_drift(&store, args),
-        RunsCommand::LoopSync(args) => loop_sync::loop_sync(args),
         RunsCommand::Report(args) => {
             report::run(args).map(|(output, exit_code)| (RunsOutput::Report(output), exit_code))
         }
@@ -342,12 +335,6 @@ mod presentation_tests {
             r#"{"audit":"pass"}"#,
         ]);
         assert!(report.is_markdown_mode());
-
-        let json = parse(&[
-            "runs", "report", "compare", "--old", "old.json", "--new", "new.json", "--format",
-            "json",
-        ]);
-        assert!(!json.is_markdown_mode());
     }
 
     #[test]

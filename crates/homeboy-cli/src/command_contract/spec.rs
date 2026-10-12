@@ -885,14 +885,7 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
 
 const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
-        &[
-            "report failure-digest",
-            "report performance-digest",
-            "report bench-coverage",
-            "report browser-evidence-compare",
-            "report matrix-artifacts",
-            "report compare",
-        ],
+        &["report failure-digest"],
         CommandSafetySpec::read_only(),
         "renders read-only evidence projections from supplied or persisted artifacts",
     ),
@@ -905,11 +898,6 @@ const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         &["import"],
         mutating_safety(),
         "imports observation bundle or GitHub Actions artifacts into the local run store",
-    ),
-    paths_safety(
-        &["loop-sync"],
-        with_dry_run(mutating_safety(), "--dry-run"),
-        "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed",
     ),
     paths_safety(
         &["artifact cleanup-downloads", "artifact cleanup-persisted"],

@@ -265,88 +265,11 @@ fn evidence_ref_from_value(value: &Value, default_kind: &str) -> Option<Evidence
     Some(EvidenceRef::new(kind, target, label))
 }
 
-pub fn render_matrix_artifact_summary_markdown(summary: &MatrixArtifactSummary) -> String {
-    let mut lines = vec![
-        format!("# Matrix Artifact Summary"),
-        String::new(),
-        format!("Run: `{}`", summary.run_id),
-        format!("Fixtures: {}", summary.fixture_count),
-        format!(
-            "Status: {} passed / {} failed / {} not run",
-            summary.passed_count, summary.failed_count, summary.not_run_count
-        ),
-        format!("Findings: {}", summary.finding_count),
-    ];
-    push_count_section(&mut lines, "Group Counts", &summary.group_counts);
-    push_count_section(
-        &mut lines,
-        "Top Diagnostic Kinds",
-        &summary.top_diagnostic_kinds,
-    );
-    push_count_section(&mut lines, "Top Fixtures", &summary.top_fixtures);
-    push_count_section(
-        &mut lines,
-        "Candidate Repositories",
-        &summary.candidate_repo_counts,
-    );
-    push_ref_section(&mut lines, "Result Artifacts", &summary.result_refs);
-    push_ref_section(
-        &mut lines,
-        "Finding Packet Artifacts",
-        &summary.finding_packet_refs,
-    );
-    if !summary.parse_diagnostics.is_empty() {
-        lines.push(String::new());
-        lines.push("## Parse Diagnostics".to_string());
-        for diagnostic in &summary.parse_diagnostics {
-            lines.push(format!("- {diagnostic}"));
-        }
-    }
-    lines.push(String::new());
-    lines.join("\n")
-}
-
-fn push_count_section(lines: &mut Vec<String>, title: &str, counts: &[MatrixSummaryCount]) {
-    lines.push(String::new());
-    lines.push(format!("## {title}"));
-    if counts.is_empty() {
-        lines.push("None".to_string());
-        return;
-    }
-    for count in counts {
-        lines.push(format!("- {}: {}", count.key, count.count));
-    }
-}
-
-fn push_ref_section(lines: &mut Vec<String>, title: &str, refs: &[ArtifactRef]) {
-    lines.push(String::new());
-    lines.push(format!("## {title}"));
-    if refs.is_empty() {
-        lines.push("None".to_string());
-        return;
-    }
-    for artifact in refs {
-        lines.push(format!(
-            "- `{}` ({}, {})",
-            artifact.id, artifact.kind, artifact.artifact_type
-        ));
-    }
-}
-
 #[derive(Default)]
 struct ArtifactClass {
     is_matrix: bool,
     is_result: bool,
     is_finding_packet: bool,
-}
-
-/// Returns true when an artifact looks like a matrix result or finding-packet
-/// JSON artifact whose remote bytes are worth hydrating before summarizing.
-/// Used to scope remote-artifact hydration to the packets the matrix summary
-/// actually reads, instead of pulling unrelated runner binaries.
-pub fn is_matrix_summary_artifact(artifact: &ArtifactRecord) -> bool {
-    let class = classify_artifact(artifact);
-    class.is_matrix || class.is_result || class.is_finding_packet
 }
 
 fn classify_artifact(artifact: &ArtifactRecord) -> ArtifactClass {

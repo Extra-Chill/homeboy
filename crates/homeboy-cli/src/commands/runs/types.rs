@@ -17,7 +17,6 @@ use homeboy::core::observation::evidence_report::DirectoryArtifactPublicationGui
 use homeboy::core::observation::runs_service;
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex;
-use homeboy::core::validation_progress::ValidationCommandSummary;
 use homeboy::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::RunnerArtifactRef;
@@ -28,17 +27,14 @@ use super::common::RunSummary;
 use super::compare::{RunsCompareArgs, RunsCompareOutput};
 use super::distribution::{RunsDistributionArgs, RunsDistributionOutput};
 use super::dossier::RunsDossierOutput;
-use super::drift::{RunsDriftArgs, RunsDriftOutput};
 use super::evidence::RunsEvidenceOutput;
 use super::findings;
-use super::findings::{RunsFindingOutput, RunsFindingsOutput};
+use super::findings::RunsFindingsOutput;
 use super::fuzz_compare::RunsFuzzCompareArgs;
 use super::gh_actions::GhActionsImportOutput;
 use super::hotspots::{RunsHotspotsArgs, RunsHotspotsOutput};
-use super::latest::{RunsLatestFindingOutput, RunsLatestRunArgs, RunsLatestRunOutput};
-use super::loop_sync::{RunsLoopSyncArgs, RunsLoopSyncOutput};
+use super::latest::{RunsLatestRunArgs, RunsLatestRunOutput};
 use super::proof::RunsProofOutput;
-use super::query::{RunsQueryArgs, RunsQueryOutput};
 use super::reconcile::{RunsReconcileArgs, RunsReconcileOutput};
 use super::refs::{RunsRefsArgs, RunsRefsOutput};
 use super::report::{ReportArgs, ReportOutput};
@@ -146,8 +142,6 @@ pub(super) enum RunsCommand {
         #[command(flatten)]
         presentation: PresentationArgs,
     },
-    /// Show a generic resume plan for a validation-progress run
-    ResumePlan { run_id: String },
     /// Show bounded, actionable evidence for one run; use --full for the complete registry report
     Evidence {
         run_id: String,
@@ -169,25 +163,15 @@ pub(super) enum RunsCommand {
     Artifact(RunsArtifactArgs),
     /// List findings recorded for one run
     Findings(findings::RunsFindingsArgs),
-    /// Show one recorded finding
-    Finding { finding_id: String },
-    /// Show the latest finding from the latest run matching filters
-    LatestFinding(findings::RunsLatestFindingArgs),
     /// Export observation records as an inspectable directory bundle
     Export(RunsExportArgs),
     /// Import an observation bundle (default) or ingest GitHub Actions artifacts
     /// (`--from-gh-actions`).
     Import(RunsImportArgs),
-    /// Project JSONPath expressions over imported run artifact rows.
-    Query(RunsQueryArgs),
     /// Emit stable run/artifact refs for matching runs.
     Refs(RunsRefsArgs),
     /// Inspect resource lifecycle records from resource index files.
     Resources(RunsResourcesArgs),
-    /// Window-based distribution drift over a JSONPath metric.
-    Drift(RunsDriftArgs),
-    /// Sync continuous-loop archive directories into observation artifacts.
-    LoopSync(RunsLoopSyncArgs),
     /// Render typed projections from Homeboy structured output artifacts.
     Report(ReportArgs),
 }
@@ -280,7 +264,6 @@ pub enum RunsOutput {
     Proof(RunsProofOutput),
     FieldSelection(RunsFieldSelectionOutput),
     Dossier(RunsDossierOutput),
-    ResumePlan(RunsResumePlanOutput),
     Evidence(Box<RunsEvidenceOutput>),
     EvidenceSummary(RunsEvidenceSummaryOutput),
     Env(RunsEnvOutput),
@@ -294,8 +277,6 @@ pub enum RunsOutput {
     ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessCommandOutput),
     Findings(RunsFindingsOutput),
     FindingsReconcile(issues::IssuesCommandOutput),
-    Finding(RunsFindingOutput),
-    LatestFinding(RunsLatestFindingOutput),
     BenchCompare(BenchCompareOutput),
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
@@ -305,11 +286,8 @@ pub enum RunsOutput {
     Export(RunsExportOutput),
     Import(RunsImportOutput),
     ImportFromGhActions(GhActionsImportOutput),
-    Query(RunsQueryOutput),
     Refs(RunsRefsOutput),
     Resources(RunsResourcesOutput),
-    Drift(RunsDriftOutput),
-    LoopSync(RunsLoopSyncOutput),
     Report(ReportOutput),
 }
 
@@ -679,20 +657,6 @@ pub struct RunsArtifactsArgs {
     /// Retain the exhaustive legacy listing and derived summaries.
     #[arg(long)]
     pub full: bool,
-}
-
-#[derive(Serialize)]
-pub struct RunsResumePlanOutput {
-    pub command: &'static str,
-    pub run_id: String,
-    pub status: String,
-    pub completed_count: usize,
-    pub command_count: usize,
-    pub failed_count: usize,
-    pub last_completed_command: Option<ValidationCommandSummary>,
-    pub active_command: Option<ValidationCommandSummary>,
-    pub next_command: Option<ValidationCommandSummary>,
-    pub hints: Vec<String>,
 }
 
 #[derive(Serialize)]

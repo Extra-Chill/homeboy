@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use homeboy::commands::runs::report::{
-    browser_evidence_compare_from_args, browser_evidence_compare_from_dirs,
-    browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareArgs,
+    browser_evidence_compare_from_dirs,
+    browser_evidence_compare_from_dirs_with_visual_and_adapters, BrowserEvidenceCompareReport,
     VisualCompareOptions,
 };
 use homeboy_extension_contract::trace_config::{
@@ -47,20 +47,15 @@ fn browser_evidence_adapter() -> TraceBrowserEvidenceAdapterConfig {
     }
 }
 
-fn args(root: &Path, include_local_paths: bool) -> BrowserEvidenceCompareArgs {
-    BrowserEvidenceCompareArgs {
-        baseline_dir: root.join("baseline").to_string_lossy().to_string(),
-        candidate_dir: root.join("candidate").to_string_lossy().to_string(),
-        baseline_label: "baseline-main".to_string(),
-        candidate_label: "candidate-pr".to_string(),
+fn compare(root: &Path, include_local_paths: bool) -> BrowserEvidenceCompareReport {
+    browser_evidence_compare_from_dirs(
+        &[root.join("baseline")],
+        &[root.join("candidate")],
+        "baseline-main",
+        "candidate-pr",
         include_local_paths,
-        format: "markdown".to_string(),
-        visual_compare: false,
-        visual_artifacts_dir: None,
-        visual_compare_provider: None,
-        visual_provider_args: Vec::new(),
-        visual_threshold: None,
-    }
+    )
+    .expect("report renders")
 }
 
 #[test]
@@ -156,7 +151,7 @@ fn compares_repeats_matrix_variants_and_browser_deltas() {
         }"#,
     );
 
-    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
+    let report = compare(root, false);
 
     assert_eq!(report.totals.baseline_samples, 3);
     assert_eq!(report.totals.candidate_samples, 2);
@@ -213,7 +208,7 @@ fn can_include_local_paths_when_requested() {
         r#"{"scenario_id":"home","assertions":[],"request_count":2}"#,
     );
 
-    let report = browser_evidence_compare_from_args(&args(root, true)).expect("report renders");
+    let report = compare(root, true);
 
     assert!(report.markdown.contains(root.to_string_lossy().as_ref()));
 }
@@ -298,7 +293,7 @@ fn surfaces_failed_advisory_assertions_in_json_and_markdown() {
         }"##,
     );
 
-    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
+    let report = compare(root, false);
     let variant = report.variants.first().expect("variant should exist");
 
     assert_eq!(variant.assertions.baseline.advisory_failed, 0);
@@ -582,7 +577,7 @@ fn ingests_metrics_from_declared_artifact_files() {
         );
     }
 
-    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
+    let report = compare(root, false);
 
     assert_eq!(report.totals.baseline_samples, 1);
     assert_eq!(report.totals.candidate_samples, 1);
@@ -660,7 +655,7 @@ fn keeps_runtime_and_artifact_manifests_out_of_variant_matrix() {
         );
     }
 
-    let report = browser_evidence_compare_from_args(&args(root, false)).expect("report renders");
+    let report = compare(root, false);
 
     assert_eq!(report.totals.baseline_samples, 1);
     assert_eq!(report.totals.candidate_samples, 1);

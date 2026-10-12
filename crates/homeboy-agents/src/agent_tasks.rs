@@ -357,6 +357,13 @@ pub mod provider {
         provider_secret_credential_mappings_for_plan_with_providers,
         provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
     };
+    /// Controller-owned credential refresh before Lab delivery (#15783).
+    pub use crate::agent_task_provider::{
+        provider_controller_refreshes_for_plan_with_providers,
+        provider_route_secret_env_for_plan_with_providers,
+        provider_route_secret_sources_for_plan_with_providers, run_provider_controller_refresh,
+        ProviderControllerRefresh,
+    };
 }
 
 /// Scheduling primitives: plans, scheduler, execution context, retry/concurrency.

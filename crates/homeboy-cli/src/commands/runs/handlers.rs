@@ -1,7 +1,7 @@
 //! Observation-store handlers for the `runs` subcommands.
 //!
 //! These functions own the local observation-store reads and the mirrored
-//! runner-job composition that back `runs list/show/resume-plan/artifacts` and
+//! runner-job composition that back `runs list/show/artifacts` and
 //! the `runs artifact` retrieval/cleanup subcommands.
 
 use std::collections::{HashMap, HashSet};
@@ -19,7 +19,6 @@ use homeboy::core::observation::{
     RunListFilter, RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
 };
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
-use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners as runner;
@@ -34,8 +33,7 @@ use super::types::{
     RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs, RunsArtifactsOutput,
     RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
     RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
-    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
-    RunsStaleRunSummary,
+    RunsListOutput, RunsOutput, RunsSelectedField, RunsShowOutput, RunsStaleRunSummary,
 };
 use super::{remote, remote_artifact, CmdResult};
 
@@ -801,50 +799,6 @@ pub(crate) fn show_run_in_store(store: &ObservationStore, run_id: &str) -> CmdRe
         }),
         0,
     ))
-}
-
-pub(crate) fn resume_plan(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
-    runs_service::reconcile_owned_stale_running_runs(store, 1000)?;
-    let run = runs_service::require_run(store, run_id)?;
-    let Some(ledger) = validation_progress_ledger_for_run(&run) else {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!("run `{run_id}` does not contain validation progress metadata"),
-            Some(run_id.to_string()),
-            Some(vec![
-                "Run `homeboy runs show <run-id>` to inspect available metadata.".to_string(),
-                "Validation progress is recorded for Homeboy-managed validation command sets with a run directory.".to_string(),
-            ]),
-        ));
-    };
-
-    Ok((
-        RunsOutput::ResumePlan(RunsResumePlanOutput {
-            command: "runs.resume-plan",
-            run_id: run_id.to_string(),
-            status: ledger.status.clone(),
-            completed_count: ledger.completed_count,
-            command_count: ledger.command_count,
-            failed_count: ledger.failed_count,
-            last_completed_command: ledger.last_completed_command.clone(),
-            active_command: ledger.active_command.clone(),
-            next_command: ledger.next_command.clone(),
-            hints: ledger.resume_hints(),
-        }),
-        0,
-    ))
-}
-
-fn validation_progress_ledger_for_run(run: &RunRecord) -> Option<ValidationProgressLedger> {
-    ValidationProgressLedger::from_run(run).or_else(|| {
-        run.metadata_json
-            .get("run_dir")
-            .and_then(Value::as_str)
-            .and_then(|path| {
-                homeboy::core::engine::run_dir::RunDir::from_existing(PathBuf::from(path)).ok()
-            })
-            .and_then(|run_dir| ValidationProgressLedger::read_from_run_dir(&run_dir))
-    })
 }
 
 #[cfg(test)]

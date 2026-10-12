@@ -1,5 +1,5 @@
 //! Integration tests for the schema-blind corpus primitives
-//! (`runs query`, `runs drift`, and the gh-actions branch of `runs import`).
+//! (bundle export/import and the gh-actions branch of `runs import`).
 //!
 //! These exercise the primitives end-to-end against a real `ObservationStore`
 //! with on-disk JSON artifact files, imitating the corpus an ingestor would
@@ -12,7 +12,7 @@ use homeboy::test_support::with_isolated_home;
 use serde_json::Value;
 
 use super::bundle::{RunsExportArgs, RunsImportArgs};
-use super::{bundle::import_runs, drift, query, RunsOutput};
+use super::{bundle::import_runs, RunsOutput};
 
 /// The observation store the enclosing isolated home installs.
 ///
@@ -53,150 +53,6 @@ fn install_artifact(
         .record_artifact(&run.id, artifact_kind, &path)
         .expect("record artifact");
     run
-}
-
-#[test]
-fn runs_query_projects_select_jsonpath_over_artifact_corpus() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        install_artifact(
-            &store,
-            home.path(),
-            "gh-actions",
-            "wc-site-generator",
-            serde_json::json!({ "theme": "noir", "fonts": ["serif", "mono"] }),
-            "design-distribution",
-        );
-        install_artifact(
-            &store,
-            home.path(),
-            "gh-actions",
-            "wc-site-generator",
-            serde_json::json!({ "theme": "vivid", "fonts": ["sans"] }),
-            "design-distribution",
-        );
-
-        let (output, _) = query::runs_query(
-            &test_store(),
-            query::RunsQueryArgs {
-                component_id: Some("wc-site-generator".into()),
-                kind: Some("gh-actions".into()),
-                since: None,
-                select: vec!["$.theme".into()],
-                group_by: None,
-                count: false,
-                format: query::QueryFormat::Json,
-                limit: 200,
-            },
-        )
-        .expect("query");
-
-        let RunsOutput::Query(output) = output else {
-            panic!("expected query output");
-        };
-        assert_eq!(output.matched_artifact_count, 2);
-        assert_eq!(output.rows.len(), 2);
-        let themes: std::collections::HashSet<_> = output
-            .rows
-            .iter()
-            .map(|row| row.values[0].as_str().unwrap().to_string())
-            .collect();
-        assert!(themes.contains("noir"));
-        assert!(themes.contains("vivid"));
-    });
-}
-
-#[test]
-fn runs_query_groups_by_jsonpath_with_count() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        for theme in ["noir", "noir", "vivid"] {
-            install_artifact(
-                &store,
-                home.path(),
-                "gh-actions",
-                "wc-site-generator",
-                serde_json::json!({ "theme": theme }),
-                "design-distribution",
-            );
-        }
-
-        let (output, _) = query::runs_query(
-            &test_store(),
-            query::RunsQueryArgs {
-                component_id: Some("wc-site-generator".into()),
-                kind: Some("gh-actions".into()),
-                since: None,
-                select: vec!["$.theme".into()],
-                group_by: Some("$.theme".into()),
-                count: true,
-                format: query::QueryFormat::Json,
-                limit: 200,
-            },
-        )
-        .expect("query");
-
-        let RunsOutput::Query(output) = output else {
-            panic!("expected query output");
-        };
-        assert_eq!(output.matched_artifact_count, 3);
-        assert_eq!(output.groups.len(), 2);
-        assert_eq!(output.groups[0].group, "noir");
-        assert_eq!(output.groups[0].count, 2);
-        assert_eq!(output.groups[1].group, "vivid");
-        assert_eq!(output.groups[1].count, 1);
-    });
-}
-
-#[test]
-fn runs_drift_reports_dominant_value_above_threshold() {
-    with_isolated_home(|home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let store = ObservationStore::open_initialized().expect("store");
-        for theme in ["noir", "noir", "noir", "vivid"] {
-            install_artifact(
-                &store,
-                home.path(),
-                "gh-actions",
-                "wc-site-generator",
-                serde_json::json!({ "theme": theme }),
-                "design-distribution",
-            );
-        }
-
-        let (output, _) = drift::runs_drift(
-            &test_store(),
-            drift::RunsDriftArgs {
-                component_id: Some("wc-site-generator".into()),
-                kind: Some("gh-actions".into()),
-                metric: "$.theme".into(),
-                window: "30d".into(),
-                threshold: 0.6,
-                baseline: None,
-                format: drift::DriftFormat::Json,
-            },
-        )
-        .expect("drift");
-
-        let RunsOutput::Drift(output) = output else {
-            panic!("expected drift output");
-        };
-        assert_eq!(output.window_observations, 4);
-        let noir = output
-            .values
-            .iter()
-            .find(|v| v.value == "noir")
-            .expect("noir present");
-        assert!(noir.dominant);
-        let vivid = output
-            .values
-            .iter()
-            .find(|v| v.value == "vivid")
-            .expect("vivid present");
-        assert!(!vivid.dominant);
-    });
 }
 
 #[test]
@@ -241,7 +97,7 @@ fn import_from_gh_actions_requires_workflow_or_run_id() {
 }
 
 #[test]
-fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
+fn bundle_import_restores_file_artifacts() {
     let bundle_dir = tempfile::tempdir().expect("bundle dir");
     let mut run_id = String::new();
     let mut source_home_path = String::new();
@@ -293,71 +149,5 @@ fn bundle_import_restores_file_artifacts_and_query_reads_embedded_bytes() {
         assert_eq!(artifacts[0].artifact_type, "file");
         assert!(!artifacts[0].path.contains(&source_home_path));
         assert!(std::path::Path::new(&artifacts[0].path).is_absolute());
-
-        let (output, _) = query::runs_query(
-            &test_store(),
-            query::RunsQueryArgs {
-                component_id: Some("homeboy".into()),
-                kind: Some("observe".into()),
-                since: None,
-                select: vec!["$.component_id".into()],
-                group_by: None,
-                count: false,
-                format: query::QueryFormat::Json,
-                limit: 200,
-            },
-        )
-        .expect("query");
-        let RunsOutput::Query(output) = output else {
-            panic!("expected query output");
-        };
-        assert_eq!(output.matched_artifact_count, 1);
-        assert_eq!(output.skipped_artifact_count, 0);
-        assert_eq!(output.rows[0].values[0], "homeboy");
-    });
-}
-
-#[test]
-fn runs_query_rejects_invalid_jsonpath() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let err = query::runs_query(
-            &test_store(),
-            query::RunsQueryArgs {
-                component_id: None,
-                kind: None,
-                since: None,
-                select: vec!["definitely not a jsonpath".into()],
-                group_by: None,
-                count: false,
-                format: query::QueryFormat::Json,
-                limit: 10,
-            },
-        )
-        .err()
-        .expect("must reject invalid jsonpath");
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    });
-}
-
-#[test]
-fn runs_drift_rejects_threshold_outside_unit_interval() {
-    with_isolated_home(|_home| {
-        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
-        let err = drift::runs_drift(
-            &test_store(),
-            drift::RunsDriftArgs {
-                component_id: None,
-                kind: None,
-                metric: "$.theme".into(),
-                window: "7d".into(),
-                threshold: 1.5,
-                baseline: None,
-                format: drift::DriftFormat::Json,
-            },
-        )
-        .err()
-        .expect("must reject threshold > 1");
-        assert_eq!(err.code.as_str(), "validation.invalid_argument");
     });
 }

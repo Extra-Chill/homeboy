@@ -9,9 +9,12 @@
 use std::collections::{BTreeMap, HashMap};
 
 use homeboy_agents::agent_tasks::provider::{
+    provider_controller_refreshes_for_plan_with_providers,
+    provider_route_secret_env_for_plan_with_providers,
+    provider_route_secret_sources_for_plan_with_providers,
     provider_runner_secret_env_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
-    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
+    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor, ProviderControllerRefresh,
 };
 use homeboy_agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
@@ -880,6 +883,57 @@ pub(crate) fn agent_task_controller_credential_sources_with_providers(
         );
     }
     Ok(sources)
+}
+
+/// Controller refreshes for the plan's selected routes, resolved from the same
+/// args as [`agent_task_controller_credential_sources`] so a refresh runs for
+/// exactly the accounts whose sources are about to be delivered (#15783).
+pub(crate) fn agent_task_controller_credential_refreshes(
+    args: &[String],
+) -> Result<Vec<ProviderControllerRefresh>> {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    agent_task_controller_credential_refreshes_with_providers(args, providers.providers())
+}
+
+pub(crate) fn agent_task_controller_credential_refreshes_with_providers(
+    args: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Result<Vec<ProviderControllerRefresh>> {
+    Ok(agent_task_credential_plan_from_args(args)?
+        .map(|plan| provider_controller_refreshes_for_plan_with_providers(&plan, providers))
+        .unwrap_or_default())
+}
+
+/// Rotation-fallback credentials for best-effort Lab delivery (#15783): the
+/// secret env names of every route the plan may dispatch, and their declared
+/// sources. Admission keeps using the admitted route only.
+pub(crate) fn agent_task_controller_route_credentials(
+    args: &[String],
+) -> Result<(
+    Vec<String>,
+    HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
+)> {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    let Some(plan) = agent_task_credential_plan_from_args(args)? else {
+        return Ok((Vec::new(), HashMap::new()));
+    };
+    Ok((
+        provider_route_secret_env_for_plan_with_providers(&plan, providers.providers()),
+        provider_route_secret_sources_for_plan_with_providers(&plan, providers.providers()),
+    ))
+}
+
+fn agent_task_credential_plan_from_args(args: &[String]) -> Result<Option<AgentTaskPlan>> {
+    let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
+        return Ok(None);
+    };
+    if args.get(agent_task_index + 1).map(String::as_str) == Some("providers") {
+        return Ok(None);
+    }
+    Ok(match agent_task_dispatch_provider_plan_from_args(args)? {
+        Some(plan) => Some(plan),
+        None => agent_task_run_plan_from_args(args),
+    })
 }
 
 fn declared_agent_task_controller_secret_sources_with_providers(

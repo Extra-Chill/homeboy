@@ -171,33 +171,79 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn controller_id() -> String {
+    // The identity is resolved once per process: it names this controller's
+    // service unit, daemon state and sessions, so it must not change mid-run
+    // even if the config root's environment does.
+    static PERSISTED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let persisted = PERSISTED.get_or_init(|| {
+        let root = paths::homeboy().expect("resolve Homeboy config root");
+        persisted_controller_id(&root, system_hostname().as_deref())
+            .expect("persist controller identity")
+    });
     controller_id_from_scope(
         std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
-        controller_scope(),
+        persisted.clone(),
     )
 }
 
-fn controller_id_from_scope(explicit_scope: Option<&str>, controller_scope: String) -> String {
-    explicit_scope
+fn controller_id_from_scope(explicit: Option<&str>, persisted: String) -> String {
+    explicit
         .map(str::trim)
-        .filter(|scope| !scope.is_empty())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        // A controller may promote its binary or change cwd while a daemon
-        // tunnel remains authenticated. Keep that tunnel in one OS-derived,
-        // per-user scope rather than trusting optional shell environment.
-        .unwrap_or(controller_scope)
+        .unwrap_or(persisted)
 }
 
-fn controller_scope() -> String {
-    controller_scope_from_host_and_uid(system_hostname().as_deref(), effective_uid())
-}
-
-fn controller_scope_from_host_and_uid(hostname: Option<&str>, uid: u32) -> String {
+fn persisted_controller_id(config_root: &Path, hostname: Option<&str>) -> std::io::Result<String> {
+    let path = config_root.join("controller-id");
+    if let Ok(value) = std::fs::read_to_string(&path) {
+        return Ok(value.trim().to_string());
+    }
+    std::fs::create_dir_all(config_root)?;
     let host = hostname
         .map(str::trim)
         .filter(|hostname| !hostname.is_empty())
         .unwrap_or("local");
-    format!("{host}-uid-{uid}")
+    let slug = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let slug = slug.trim_matches('-');
+    let id = format!(
+        "{}-{}",
+        if slug.is_empty() { "local" } else { slug },
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    let temporary = config_root.join(format!(".controller-id.{}.tmp", uuid::Uuid::new_v4()));
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(id.as_bytes())?;
+        file.sync_all()?;
+    }
+    match std::fs::hard_link(&temporary, &path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temporary);
+            Ok(id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(temporary);
+            std::fs::read_to_string(path).map(|value| value.trim().to_string())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temporary);
+            Err(error)
+        }
+    }
 }
 
 fn system_hostname() -> Option<String> {
@@ -226,15 +272,36 @@ fn system_hostname() -> Option<String> {
     }
 }
 
-fn effective_uid() -> u32 {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() }
+fn retire_superseded_controller_sessions(
+    config_root: &Path,
+    runner_id: &str,
+    current: &str,
+) -> Result<()> {
+    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
+    for path in peer_session_paths(&directory)? {
+        if let Some(session) = read_session_at(&path)? {
+            if session.controller_id.as_deref() != Some(current)
+                && session
+                    .controller_id
+                    .as_deref()
+                    .is_some_and(is_hostname_uid_controller_id)
+            {
+                std::fs::remove_file(&path).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(format!("delete superseded session {}", path.display())),
+                    )
+                })?;
+            }
+        }
     }
-    #[cfg(not(unix))]
-    {
-        0
-    }
+    Ok(())
+}
+
+fn is_hostname_uid_controller_id(value: &str) -> bool {
+    value
+        .rsplit_once("-uid-")
+        .is_some_and(|(_, uid)| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()))
 }
 
 pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -761,6 +828,7 @@ pub(super) fn read_session_for_controller_in_root(
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
+    retire_superseded_controller_sessions(config_root, runner_id, controller_id)?;
     read_session_at(&paths::runner_controller_session_file_in_root(
         config_root,
         runner_id,
@@ -790,6 +858,7 @@ pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
     } else {
         controller_id()
     };
+    retire_superseded_controller_sessions(&paths::homeboy()?, &session.runner_id, &controller_id)?;
     write_session_at(
         &paths::runner_controller_session_file(&session.runner_id, &controller_id)?,
         session,
@@ -1436,7 +1505,7 @@ mod tests {
     #[test]
     fn sequential_daemon_phases_keep_the_os_scoped_live_session_across_runtime_churn() {
         let root = TempDir::new().expect("session directory");
-        let controller = controller_scope_from_host_and_uid(Some("macbook-pro"), 501);
+        let controller = "macbook-pro-a1b2c3d4";
         let connected = session(&controller, "lease-live");
         let session_path = root.path().join(format!("{controller}.json"));
         write_session_at(&session_path, &connected).expect("write connected session");
@@ -1580,27 +1649,67 @@ mod tests {
     }
 
     #[test]
-    fn controller_scope_ignores_runtime_path_and_cwd_churn() {
+    fn controller_id_is_persisted_independent_of_hostname_and_concurrent_first_use() {
+        let root = TempDir::new().expect("config root");
+        let threads = (0..8)
+            .map(|index| {
+                let root = root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    persisted_controller_id(
+                        &root,
+                        Some(if index % 2 == 0 {
+                            "mac.lan"
+                        } else {
+                            "MacBook.local"
+                        }),
+                    )
+                    .expect("controller id")
+                })
+            })
+            .collect::<Vec<_>>();
+        let ids = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("thread"))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 1);
+        let id = ids.into_iter().next().expect("id");
+        assert!(id.starts_with("mac-lan-") || id.starts_with("macbook-local-"));
         assert_eq!(
-            controller_scope_from_host_and_uid(Some("controller-host"), 501),
-            "controller-host-uid-501"
+            persisted_controller_id(root.path(), Some("changed-host")).expect("persisted id"),
+            id
         );
+    }
+
+    #[test]
+    fn explicit_controller_id_override_is_preserved() {
         assert_eq!(
-            controller_id_from_scope(
-                Some("  controller-a  "),
-                "controller-host-uid-501".to_string()
-            ),
+            controller_id_from_scope(Some(" controller-a "), "generated".into()),
             "controller-a"
         );
         assert_eq!(
-            controller_id_from_scope(Some("   "), "controller-host-uid-501".to_string()),
-            "controller-host-uid-501"
+            controller_id_from_scope(Some("  "), "generated".into()),
+            "generated"
         );
+    }
+
+    #[test]
+    fn old_hostname_uid_sessions_are_retired_before_session_lookup() {
+        let root = TempDir::new().expect("config root");
+        let runner = paths::runner_sessions_dir_in_root(root.path()).join("lab");
+        std::fs::create_dir_all(&runner).expect("runner session dir");
+        let old = session("mac.lan-uid-501", "orphan");
+        let current = session("stable-controller-a1b2c3d4", "current");
+        write_session_at(&runner.join("mac.lan-uid-501.json"), &old).expect("write old session");
+        write_session_at(&runner.join("stable-controller-a1b2c3d4.json"), &current)
+            .expect("write current");
+        retire_superseded_controller_sessions(root.path(), "lab", "stable-controller-a1b2c3d4")
+            .expect("retire old session");
+        assert!(!runner.join("mac.lan-uid-501.json").exists());
         assert_eq!(
-            controller_scope_from_host_and_uid(None, 501),
-            "local-uid-501",
-            "the scope remains per-user when hostname lookup is unavailable"
+            read_session_at(&runner.join("stable-controller-a1b2c3d4.json")).expect("read current"),
+            Some(current)
         );
+        assert!(!is_hostname_uid_controller_id("peer-controller"));
     }
 
     #[test]
