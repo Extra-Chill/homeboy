@@ -34,9 +34,15 @@ pub const REMOTE_RUNNER_SOURCE_ARTIFACT_SYMLINK_CAPABILITY: &str =
 pub const SEALED_SOURCE_AUTHORITY_SCHEMA: &str = "homeboy/sealed-source-authority/v1";
 pub const SOURCE_ARTIFACT_TRANSFER_SCHEMA: &str = "homeboy/runner-source-artifact-transfer/v1";
 pub const RUNNER_SOURCE_ARTIFACT_SCHEMA: &str = "homeboy/runner-source-artifact/v1";
-pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
+/// Bound on one inline source artifact, measured on the Base64 transfer
+/// envelope. 4 MiB was smaller than ordinary WordPress plugins: three block
+/// `package-lock.json` files alone are ~2.5 MB, and data-machine-events crossed
+/// the old bound by 5 KB through routine growth, blocking every Cook whose
+/// worktree was not clean enough for the Git-authority fallback (#15811).
+pub const MAX_SOURCE_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_ENTRIES: usize = 1024;
-pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 1024 * 1024;
+/// Per-file bound inside a source package (a single lockfile can exceed 1 MiB).
+pub const MAX_SOURCE_PACKAGE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_SOURCE_PACKAGE_EXCLUSIONS: usize = 1024;
 pub const SOURCE_PACKAGE_CHECK_SCHEMA: &str = "homeboy/source-package-check/v2";
 const SOURCE_PACKAGE_LIMIT_DIAGNOSTIC_SCHEMA: &str = "homeboy/source-package-limit-diagnostic/v1";
@@ -1084,10 +1090,65 @@ impl SourceArtifactTransfer {
                     .collect::<BTreeSet<_>>();
                 Ok(links)
             }
+            /// Paths Git reports as ignored (`--directory` collapses wholly
+            /// ignored trees to one `dir/` entry). They are not source
+            /// content: a reused Cook worktree can carry hydrated
+            /// `node_modules/` or `vendor/` from an earlier attempt, which
+            /// blew the source bounds and would ship build tooling (#15811).
+            /// Non-Git roots have no ignore inventory.
+            fn ignored_paths(
+                root: &std::fs::File,
+                control: &crate::workspace::WorkspaceControl,
+            ) -> Result<BTreeSet<String>> {
+                use std::os::fd::AsRawFd;
+                use std::os::unix::process::CommandExt;
+
+                let root_fd = root.as_raw_fd();
+                let mut command = Command::new("git");
+                command.args([
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "-z",
+                    "--",
+                    ".",
+                ]);
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::fchdir(root_fd) == 0 {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    });
+                }
+                let output = match control
+                    .output_exact(&mut command, "read source package Git ignore inventory")
+                {
+                    Ok(output) => output,
+                    Err(error) if error.details["workspace_sync"]["program_missing"] == true => {
+                        return Ok(BTreeSet::new())
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !output.status.success() {
+                    return Ok(BTreeSet::new());
+                }
+                Ok(output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|record| !record.is_empty())
+                    .filter_map(|record| std::str::from_utf8(record).ok())
+                    .map(|path| source_package_path_text(path.trim_end_matches('/')))
+                    .collect())
+            }
             struct ScanControl<'a> {
                 root: &'a Path,
                 control: &'a crate::workspace::WorkspaceControl,
                 bytes_used: u64,
+                ignored: BTreeSet<String>,
             }
             #[cfg(unix)]
             fn collect(
@@ -1118,6 +1179,9 @@ impl SourceArtifactTransfer {
                     };
                     // Git metadata is controller-local state, never source content.
                     if relative == ".git" {
+                        continue;
+                    }
+                    if scan.ignored.contains(&relative) {
                         continue;
                     }
                     let mode = source_directory::mode_at(directory, &name)?;
@@ -1222,10 +1286,15 @@ impl SourceArtifactTransfer {
             let tracked_links = tracked_symlinks(&root_directory, control)?;
             let mut payloads = BTreeMap::new();
             let mut exclusions = Vec::new();
+            #[cfg(unix)]
+            let ignored = ignored_paths(&root_directory, control)?;
+            #[cfg(not(unix))]
+            let ignored = BTreeSet::new();
             let mut scan = ScanControl {
                 root,
                 control,
                 bytes_used: 0,
+                ignored,
             };
             #[cfg(unix)]
             collect(
@@ -2535,6 +2604,78 @@ pub(crate) mod tests_support {
         assert!(verdict.accepted.is_none());
         assert_eq!(verdict.blocked.len(), 1);
         assert!(verdict.blocked[0].message.contains("exclusion bound"));
+    }
+
+    /// Regression for #15811: hydrated, gitignored trees in a reused worktree
+    /// (node_modules/, vendor/, an ignored lockfile) are not source content.
+    #[cfg(unix)]
+    #[test]
+    fn gitignored_paths_are_not_packaged() {
+        let source = tempfile::tempdir().expect("source");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .status()
+                .expect("git")
+                .success())
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            source.path().join(".gitignore"),
+            "node_modules/\nvendor/\ncomposer.lock\n",
+        )
+        .expect("gitignore");
+        std::fs::write(source.path().join("plugin.php"), b"<?php\n").expect("plugin");
+        git(&["add", ".gitignore", "plugin.php"]);
+        std::fs::create_dir_all(source.path().join("node_modules/pkg")).expect("nm");
+        for index in 0..=MAX_SOURCE_PACKAGE_ENTRIES {
+            std::fs::write(
+                source
+                    .path()
+                    .join(format!("node_modules/pkg/{index:04}.js")),
+                b"x",
+            )
+            .expect("nm file");
+        }
+        std::fs::create_dir_all(source.path().join("vendor")).expect("vendor");
+        std::fs::write(source.path().join("vendor/autoload.php"), b"<?php\n").expect("vendor file");
+        std::fs::write(source.path().join("composer.lock"), b"{}").expect("lock");
+        std::fs::write(source.path().join("untracked.txt"), b"keep").expect("untracked");
+
+        let transfer = SourceArtifactTransfer::from_directory("source-ignored", source.path())
+            .expect("ignored trees do not count against source bounds");
+        let paths = transfer
+            .package
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec![".gitignore", "plugin.php", "untracked.txt"]);
+    }
+
+    /// Regression for #15811: a plugin-sized tree (three ~0.9 MB block
+    /// lockfiles plus docs, ~4.6 MB total) must stage inline.
+    #[test]
+    fn plugin_sized_source_with_block_lockfiles_fits_the_inline_artifact() {
+        let source = tempfile::tempdir().expect("source");
+        for block in ["Calendar", "EventDetails", "EventsMap"] {
+            let dir = source.path().join("inc/Blocks").join(block);
+            std::fs::create_dir_all(&dir).expect("block dir");
+            std::fs::write(dir.join("package-lock.json"), vec![b'x'; 920 * 1024])
+                .expect("lockfile");
+        }
+        std::fs::create_dir_all(source.path().join("docs")).expect("docs");
+        std::fs::write(
+            source.path().join("docs/CHANGELOG.md"),
+            vec![b'y'; 1_700 * 1024],
+        )
+        .expect("changelog");
+
+        let transfer = SourceArtifactTransfer::from_directory("source-plugin", source.path())
+            .expect("plugin-sized source stages inline");
+        assert_eq!(transfer.package.entries.len(), 4);
+        assert!(transfer.content_base64.len() as u64 <= MAX_SOURCE_ARTIFACT_BYTES);
     }
 
     #[cfg(unix)]
