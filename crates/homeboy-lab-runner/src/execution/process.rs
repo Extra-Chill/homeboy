@@ -528,7 +528,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
     require_child_identity_acknowledgement: bool,
-    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     #[cfg(unix)] verified_cwd_fd: Option<std::os::fd::RawFd>,
 ) -> Result<ProcessOutput> {
     let temp_owner = runner_temp_owner(&plan.env)?;
@@ -1522,7 +1522,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
     is_cancelled: impl FnMut() -> bool,
     progress_sink: Option<RunnerCommandProgressSink>,
     require_child_identity_acknowledgement: bool,
-    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     env: &HashMap<String, String>,
     resource_guard_env: &HashMap<String, String>,
     secret_env_names: &[String],

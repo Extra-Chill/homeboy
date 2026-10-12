@@ -4347,13 +4347,18 @@ fn enqueue_exec_request(
                 });
                 let started_job = job.clone();
                 let started_liveness = Arc::clone(&liveness);
-                let child_started = Arc::new(move |pid| {
-                    let process_group_id = crate::process::isolated_process_group_id(pid)
-                        .map_err(Error::internal_unexpected)?;
-                    let discriminator = match crate::process::linux_process_starttime_ticks(pid) {
-                        Ok(Some(ticks)) => crate::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
-                        Ok(None) => return Err(Error::internal_unexpected("runner child exited before Linux start identity was captured")),
-                        Err(evidence) => crate::api_jobs::LocalChildStartDiscriminator::Unsupported { evidence },
+                let child_started = Arc::new(move |identity: runner_exec_driver::RunnerChildIdentity| {
+                    // The execution owner captured this identity before the
+                    // root could be reaped. Re-probing `/proc` here raced the
+                    // Linux supervisor reaping a short-lived command.
+                    let pid = identity.pid;
+                    let process_group_id = identity.process_group_id;
+                    let discriminator = match identity.starttime_ticks {
+                        Some(ticks) => crate::api_jobs::LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks },
+                        None if cfg!(target_os = "linux") => return Err(Error::internal_unexpected("runner child Linux start identity was not captured at spawn")),
+                        None => crate::api_jobs::LocalChildStartDiscriminator::Unsupported {
+                            evidence: "Linux /proc starttime identity is unsupported on this platform".to_string(),
+                        },
                     };
                     started_liveness
                         .lock()
@@ -7125,13 +7130,27 @@ mod tests {
                 let mut child = command.spawn().map_err(|error| {
                     Error::internal_io(error.to_string(), Some("spawn test child".to_string()))
                 })?;
-                child_started.expect("daemon supplies child acknowledgement")(child.id())?;
+                child_started.expect("daemon supplies child acknowledgement")(
+                    runner_exec_driver::RunnerChildIdentity {
+                        pid: child.id(),
+                        process_group_id: Some(child.id()),
+                        starttime_ticks: crate::process::linux_process_starttime_ticks(child.id())
+                            .ok()
+                            .flatten(),
+                    },
+                )?;
                 child.wait().map_err(|error| {
                     Error::internal_io(error.to_string(), Some("reap test child".to_string()))
                 })?;
             }
             #[cfg(not(unix))]
-            child_started.expect("daemon supplies child acknowledgement")(std::process::id())?;
+            child_started.expect("daemon supplies child acknowledgement")(
+                runner_exec_driver::RunnerChildIdentity {
+                    pid: std::process::id(),
+                    process_group_id: None,
+                    starttime_ticks: None,
+                },
+            )?;
             Ok(DaemonExecOutput::default())
         }
     }

@@ -130,7 +130,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     progress_sink: Option<RunnerCommandProgressSink>,
     require_child_identity_acknowledgement: bool,
     stdout_line_observer: Option<StdoutLineObserver>,
-    child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     resource_guard_env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
@@ -141,9 +141,10 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     let started = Instant::now();
     let mut owner = ExecutionOwner::spawn(command)
         .map_err(|error| runner_command_spawn_error(command, &error))?;
-    let pid = owner.identity().root_pid;
+    let identity = owner.identity();
+    let pid = identity.root_pid;
     if let Some(child_started) = child_started {
-        if let Err(error) = child_started(pid) {
+        if let Err(error) = child_started(identity.into()) {
             let cleanup = owner
                 .drain_and_reap()
                 .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
@@ -1095,6 +1096,7 @@ fn clock_ticks_per_second() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::daemon::runner_exec_driver::RunnerChildIdentity;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[cfg(target_os = "linux")]
@@ -1173,8 +1175,8 @@ mod tests {
             None,
             false,
             None,
-            Some(Arc::new(move |child_pid| {
-                callback_pid.store(child_pid, Ordering::SeqCst);
+            Some(Arc::new(move |identity: RunnerChildIdentity| {
+                callback_pid.store(identity.pid, Ordering::SeqCst);
                 Err(Error::internal_unexpected("persist child identity"))
             })),
             &HashMap::new(),
@@ -1230,7 +1232,8 @@ mod tests {
             None,
             false,
             None,
-            Some(Arc::new(move |root_pid| {
+            Some(Arc::new(move |identity: RunnerChildIdentity| {
+                let root_pid = identity.pid;
                 callback_pid.store(root_pid, Ordering::SeqCst);
                 callback_cleanup
                     .lock()

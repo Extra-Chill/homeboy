@@ -149,8 +149,28 @@ pub struct DaemonExecOutput {
 pub type ExecCancellationProbe = Box<dyn FnMut() -> bool + Send>;
 /// A progress sink the driver invokes with structured progress events.
 pub type ExecProgressSink = Arc<dyn Fn(Value) -> Result<()> + Send + Sync + 'static>;
-/// A child-started acknowledgement callback invoked with the child pid.
-pub type ExecChildStarted = Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>;
+/// Identity of a spawned runner workload root, captured when it was spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunnerChildIdentity {
+    pub pid: u32,
+    pub process_group_id: Option<u32>,
+    /// Linux `/proc/<pid>/stat` start time; `None` off Linux.
+    pub starttime_ticks: Option<u64>,
+}
+
+impl From<crate::engine::command::ExecutionIdentity> for RunnerChildIdentity {
+    fn from(identity: crate::engine::command::ExecutionIdentity) -> Self {
+        Self {
+            pid: identity.root_pid,
+            process_group_id: identity.root_pgid,
+            starttime_ticks: identity.starttime_ticks(),
+        }
+    }
+}
+
+/// A child-started acknowledgement callback invoked with the workload root's
+/// identity as captured by its execution owner at spawn.
+pub type ExecChildStarted = Arc<dyn Fn(RunnerChildIdentity) -> Result<()> + Send + Sync + 'static>;
 
 /// The runner process prepare+execute contract the daemon depends on.
 pub trait RunnerExecDriver: Send + Sync {
