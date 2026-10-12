@@ -26,6 +26,6 @@ scope_flags_for() {
     lint|test|review)
       printf '%s' "--changed-since ${SCOPE_BASE_REF}"
       ;;
-    # release, fleet, deploy, git, and other operations are never scoped
+    # release, deploy, git, and other operations are never scoped
   esac
 }
