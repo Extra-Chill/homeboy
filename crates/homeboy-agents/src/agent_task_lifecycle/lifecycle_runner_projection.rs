@@ -142,7 +142,8 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
     // through here, so binding cannot diverge across callers. Both steps no-op
     // once the run is already bound / no longer queued.
     bind_pending_lab_handoff_snapshot_in_store(lifecycle_store, record, snapshot)?;
-    if record.state == AgentTaskRunState::Queued {
+    let started = record.state == AgentTaskRunState::Queued;
+    if started {
         set_run_state(record, AgentTaskRunState::Running);
         for task in &mut record.tasks {
             if task.state == AgentTaskState::Queued {
@@ -272,17 +273,32 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
                 metadata.insert("active_provider".to_string(), provider.clone());
             }
             merge_live_provider_handles(&mut reconciled, &snapshot.events);
-            lifecycle_store.write_record(&reconciled)?;
+            commit_projected_runner_snapshot(lifecycle_store, &mut reconciled, started)?;
         }
         homeboy_core::api_jobs::JobStatus::Succeeded
         | homeboy_core::api_jobs::JobStatus::Failed
         | homeboy_core::api_jobs::JobStatus::Cancelled => {
             record_pending_runner_synchronization(&mut reconciled, snapshot);
-            lifecycle_store.write_record(&reconciled)?;
+            commit_projected_runner_snapshot(lifecycle_store, &mut reconciled, started)?;
         }
     }
     *record = reconciled;
     Ok(())
+}
+
+/// Commit a live runner snapshot projected onto the caller's record, at the
+/// revision that record was read at (#15718). A run still queued in the store
+/// is started by the projection, which is a typed transition.
+fn commit_projected_runner_snapshot(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    reconciled: &mut AgentTaskRunRecord,
+    started: bool,
+) -> Result<()> {
+    if started {
+        lifecycle_store.advance_record(reconciled, AgentTaskAdvance::Start)
+    } else {
+        lifecycle_store.commit_record(reconciled)
+    }
 }
 
 /// Project an authoritative terminal daemon snapshot into its persisted run.
@@ -747,7 +763,7 @@ fn project_terminal_runner_pre_provider_failure_in_store(
     let sequence = event.sequence;
     if !failed.state.is_terminal() {
         annotate_runner_pre_provider_failure(&mut failed, events, sequence);
-        lifecycle_store.write_record(&failed)?;
+        lifecycle_store.commit_record(&mut failed)?;
         *record = failed;
         return Ok(true);
     }

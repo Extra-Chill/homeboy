@@ -87,7 +87,7 @@ pub fn record_interrupted_local_owner_in_store(
         if matches!(decision, LocalProviderOwnerDecision::StayRunning)
             && record.local_owner_liveness() == LocalOwnerLiveness::Live
         {
-            lifecycle_store.write_record(&record)?;
+            lifecycle_store.commit_record(&mut record)?;
             return Ok((record, None));
         }
         record_interrupted_local_owner_locked(lifecycle_store, record, decision)
@@ -931,7 +931,7 @@ fn record_transport_follow_up_failure_in_store(
     // must not be reaped as a clean success when its follow-up failed.
     metadata.insert("candidate_preserved".to_string(), json!(true));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    lifecycle_store.write_record_locked_without_terminal_projection(&record)
+    lifecycle_store.commit_record_locked_without_terminal_projection(&record)
 }
 
 pub(crate) fn build_pre_execution_failure_outcome(
@@ -1404,9 +1404,9 @@ pub fn record_remote_dispatch_failure_in_store(
     metadata.insert("provider_run_ids".to_string(), json!(provider_run_ids));
 
     if needs_atomic_terminal_commit {
-        lifecycle_store.write_aggregate_and_record(&record, &aggregate)?;
+        lifecycle_store.import_record_with_aggregate(&mut record, &aggregate)?;
     } else {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.commit_record(&mut record)?;
     }
     Ok(Some(record))
 }
@@ -1641,7 +1641,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
                         },
                     }),
                 );
-                return lifecycle_store.write_record_in_place(record);
+                return lifecycle_store.commit_record(record);
             }
         }
     }
@@ -1672,7 +1672,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
             );
         }
     }
-    lifecycle_store.write_record_in_place(record)
+    lifecycle_store.commit_record(record)
 }
 
 /// Replace runner-local file references with controller-resolvable aggregate

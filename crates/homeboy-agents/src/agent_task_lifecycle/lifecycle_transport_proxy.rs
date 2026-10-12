@@ -100,7 +100,7 @@ pub fn recover_transport_proxy_in_store(
     }) {
         Ok(snapshot) => {
             reconcile_transport_proxy_snapshot_in_store(lifecycle_store, &mut record, &snapshot)?;
-            lifecycle_store.write_record(&record)?;
+            lifecycle_store.commit_record(&mut record)?;
             Ok(Some(TransportProxyRecovery::Reconciled {
                 record,
                 next_action: format!(
@@ -110,7 +110,7 @@ pub fn recover_transport_proxy_in_store(
         }
         Err(_) => {
             record.annotate_runner_disconnected();
-            lifecycle_store.write_record(&record)?;
+            lifecycle_store.commit_record(&mut record)?;
             Ok(Some(TransportProxyRecovery::ReconnectRequired {
                 record,
                 next_action: format!("homeboy runner connect {runner_id}"),
@@ -172,7 +172,7 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
         return Ok(false);
     }
     reconcile_runner_job_snapshot(&mut record, &snapshot)?;
-    store::write_record(&record)?;
+    AgentTaskLifecycleStore::from_current_environment()?.commit_record(&mut record)?;
     Ok(store::read_aggregate(&record.run_id).is_ok())
 }
 
@@ -206,7 +206,7 @@ fn resume_transport_proxy_on_runner_in_store(
         .and_then(Value::as_str)
         .filter(|path| !path.trim().is_empty())
     else {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.commit_record(&mut record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),
@@ -225,7 +225,7 @@ fn resume_transport_proxy_on_runner_in_store(
         })
         .filter(|command| !command.is_empty())
     else {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.commit_record(&mut record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),
@@ -235,7 +235,7 @@ fn resume_transport_proxy_on_runner_in_store(
     if !super::runner_continuation::with_runner_continuation(|p| {
         p.runner_authority(&runner_id).is_configured()
     }) {
-        lifecycle_store.write_record(&record)?;
+        lifecycle_store.commit_record(&mut record)?;
         return Ok(Some(TransportProxyRecovery::ReconnectRequired {
             record,
             next_action: format!("homeboy runner connect {runner_id}"),

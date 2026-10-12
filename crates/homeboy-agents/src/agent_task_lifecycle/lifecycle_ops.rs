@@ -530,7 +530,7 @@ pub fn record_detached_cook_handoff_parent_in_store(
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
-    lifecycle_store.write_record_without_events(&record)?;
+    lifecycle_store.commit_record_without_events(&mut record)?;
     record_cook_progress_in_store(
         lifecycle_store,
         &record.run_id,
@@ -2422,7 +2422,7 @@ pub fn normalize_missing_execution_placement_decision_in_store(
         "reason": reason,
         "adopted_decision_id": decision.decision_id,
     });
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.commit_record(&mut record)?;
     Ok(true)
 }
 
@@ -2485,7 +2485,7 @@ pub fn record_execution_placement_outcome_in_store(
                 Some("serialize placement outcome".to_string()),
             )
         })?;
-    lifecycle_store.write_record(&record)
+    lifecycle_store.commit_record(&mut record)
 }
 
 /// `transition_execution_placement_for_continuation` against an explicitly
@@ -2556,7 +2556,7 @@ pub fn transition_execution_placement_for_continuation_in_store(
         "replacement_decision_id": replacement.decision_id,
         "reason": "explicit_local_continuation_after_pre_provider_failure",
     });
-    lifecycle_store.write_record(&record)
+    lifecycle_store.commit_record(&mut record)
 }
 
 // The ambient `normalize_local_execution_placement()` shim that used to sit here is gone;
@@ -2596,7 +2596,7 @@ pub fn normalize_local_execution_placement_in_store(
         "execution_placement_normalization".to_string(),
         json!({ "source": "controller_plan", "reason": "legacy_or_null_record_decision" }),
     );
-    lifecycle_store.write_record_in_place(&mut record)?;
+    lifecycle_store.commit_record(&mut record)?;
     Ok(record)
 }
 
@@ -3369,6 +3369,9 @@ where
     // already committed to SQLite; historical Cook index import never
     // affects that lookup, so it must not run on this hot path (#14962).
     if let Ok(existing) = lifecycle_store.read_record_bounded(&run_id) {
+        // The submission replaces exactly this record: it is fenced at the
+        // revision the merge below reads from (#15718).
+        record.revision = existing.revision;
         // A resubmission for this exact run id always rebuilds `record` fresh
         // above, defaulting `state` to `Queued`. That discards a `Running`
         // existing record's state before the caller's subsequent
@@ -3506,14 +3509,19 @@ where
         record.record_runner_metadata(false);
     }
     require_record_workspace_owner_in_store(&workspace_claim_store, &record)?;
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::Submit)?;
 
     // The queue is durable independently of this foreground controller. Status
     // and cancellation can therefore resolve a waiter after a restart.
     if admit_runtime.is_some() {
         if let Some(admission) = admission_status.and_then(|project| project(&run_id)) {
-            record.metadata["controller_admission"] = admission;
-            lifecycle_store.write_record(&record)?;
+            record.metadata["controller_admission"] = admission.clone();
+            if let Some(updated) = lifecycle_store.mutate_record(&run_id, |stored| {
+                stored.metadata["controller_admission"] = admission;
+                true
+            })? {
+                record.revision = updated.revision;
+            }
         }
     }
 
@@ -3554,7 +3562,25 @@ where
                 // controller pin to the runner's executable (#13552).
                 record = lifecycle_store.rearm_pre_execution_record(&record)?;
             } else {
-                lifecycle_store.write_record(&record)?;
+                // Admission may have waited in the queue. Apply the runtime
+                // provenance to the record read under the lock, so a
+                // cancellation request or progress committed meanwhile is
+                // kept rather than overwritten by this pre-wait copy (#15718).
+                let key = homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY;
+                let runtime = record.metadata[key].clone();
+                let runner_runtime = record.metadata.get("runner_execution_runtime").cloned();
+                if let Some(updated) = lifecycle_store.mutate_record(&run_id, |stored| {
+                    if stored.state.is_terminal() {
+                        return false;
+                    }
+                    stored.metadata[key] = runtime;
+                    if let Some(runner_runtime) = runner_runtime {
+                        stored.metadata["runner_execution_runtime"] = runner_runtime;
+                    }
+                    true
+                })? {
+                    record = updated;
+                }
             }
         }
         Err(error) => {
@@ -3643,9 +3669,11 @@ pub fn persist_notification_route(
     run_id: &str,
     route: &homeboy_core::notification_route::NotificationRoute,
 ) -> Result<()> {
-    let mut record = store::read_record(run_id)?;
-    route.insert_into_metadata(&mut record.metadata);
-    store::write_record(&record)
+    store::mutate_record(run_id, |record| {
+        route.insert_into_metadata(&mut record.metadata);
+        true
+    })
+    .map(|_| ())
 }
 
 /// Read back the route a run was launched with.
@@ -4035,7 +4063,7 @@ pub fn recover_controller_runtime_in_store(
         |recovered| {
             record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] =
                 recovered.clone();
-            lifecycle_store.write_record(&record)
+            lifecycle_store.commit_record(&mut record)
         },
     )?;
     Ok(recovered)
@@ -4057,7 +4085,9 @@ pub fn mark_running_in_store(
         &homeboy_core::build_identity::current().display,
     )?;
     let mut error = None;
-    lifecycle_store.mutate_record(&run_id, |record| {
+    lifecycle_store.transition_when(&run_id, |stored| {
+        let mut prepared = stored.clone();
+        let record = &mut prepared;
         if record.metadata.get("queue_quarantine").is_some() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
@@ -4065,7 +4095,7 @@ pub fn mark_running_in_store(
                 Some(record.run_id.clone()),
                 None,
             ));
-            return false;
+            return None;
         }
         if record.state == AgentTaskRunState::Running && record.owner_process_is_running() {
             error = Some(Error::validation_invalid_argument(
@@ -4078,7 +4108,7 @@ pub fn mark_running_in_store(
                 Some(record.run_id.clone()),
                 None,
             ));
-            return false;
+            return None;
         }
         if record.state.is_terminal() {
             error = Some(Error::validation_invalid_argument(
@@ -4090,7 +4120,7 @@ pub fn mark_running_in_store(
                 Some(record.run_id.clone()),
                 None,
             ));
-            return false;
+            return None;
         }
         let reclaimed_stale = record.state == AgentTaskRunState::Running;
         record.updated_at = Some(now_timestamp());
@@ -4102,7 +4132,10 @@ pub fn mark_running_in_store(
             }
         }
         record.record_runner_metadata(reclaimed_stale);
-        true
+        Some(AgentTaskTransition::Advance {
+            kind: AgentTaskAdvance::Start,
+            prepared: Box::new(prepared),
+        })
     })?
     .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
@@ -4118,13 +4151,15 @@ pub fn defer_cook_runtime_admission_in_store(
 ) -> Result<bool> {
     let run_id = sanitize_run_id(run_id);
     let now = now_timestamp();
-    let deferred = lifecycle_store.mutate_record(&run_id, |record| {
+    let deferred = lifecycle_store.transition_when(&run_id, |stored| {
+        let mut prepared = stored.clone();
+        let record = &mut prepared;
         if !matches!(
             record.state,
             AgentTaskRunState::Queued | AgentTaskRunState::Running
         ) || !crate::agent_task_service::has_unambiguous_zero_execution(record)
         {
-            return false;
+            return None;
         }
         let fence = record.metadata["cook_runtime_admission"]["fence"]
             .as_u64()
@@ -4155,7 +4190,10 @@ pub fn defer_cook_runtime_admission_in_store(
                 .as_object_mut()
                 .map(|metadata| metadata.remove(key));
         }
-        true
+        Some(AgentTaskTransition::Advance {
+            kind: AgentTaskAdvance::Requeue,
+            prepared: Box::new(prepared),
+        })
     })?;
     Ok(deferred.is_some())
 }
@@ -6017,8 +6055,19 @@ pub fn reconcile_status_in_store(
     } else {
         resolve_run_id_in_store(lifecycle_store, run_id)?
     };
-    let (mut record, runner_probe) =
-        converge_resolved_run_in_store(lifecycle_store, &resolved_run_id, options)?;
+    // Every convergence write is fenced on the revision it decided from. A
+    // concurrent writer (a runner, the daemon's staging worker) makes one fail
+    // without writing; the pass is re-decided from the fresh record (#15718).
+    let mut attempts = 0;
+    let (mut record, runner_probe) = loop {
+        attempts += 1;
+        match converge_resolved_run_in_store(lifecycle_store, &resolved_run_id, options) {
+            Err(error)
+                if attempts < super::terminal_transition::TRANSITION_RETRY_ATTEMPTS
+                    && super::terminal_transition::is_transition_conflict(&error) => {}
+            converged => break converged?,
+        }
+    };
     project_cook_alias_view_in_store(lifecycle_store, &mut record, &requested_run_id, exact);
     Ok(AgentTaskStatusOutcome {
         record,
@@ -6092,7 +6141,7 @@ fn converge_resolved_run_in_store(
                 }
             };
         } else {
-            lifecycle_store.write_record_in_place(&mut record)?;
+            lifecycle_store.commit_record(&mut record)?;
         }
     }
     if !record.state.is_terminal() {
@@ -6116,8 +6165,10 @@ fn converge_resolved_run_in_store(
                     lifecycle_store
                         .project_terminal_aggregate(&reconciled, record.state, &aggregate)
                         .map(|committed| reconciled = committed)
+                } else if reconciled.state != record.state {
+                    lifecycle_store.advance_record(&mut reconciled, AgentTaskAdvance::Start)
                 } else {
-                    lifecycle_store.write_record_in_place(&mut reconciled)
+                    lifecycle_store.commit_record(&mut reconciled)
                 };
                 if let Err(error) = committed {
                     reconciled
@@ -6130,7 +6181,7 @@ fn converge_resolved_run_in_store(
         }
     }
     if reconcile_local_provider_ownership(lifecycle_store, &mut record)? {
-        lifecycle_store.write_record_in_place(&mut record)?;
+        lifecycle_store.commit_record(&mut record)?;
     }
     // The only genuinely-remote step. Skipping it for a controller-local
     // record is what keeps this answerable while the Lab is wedged (#10418).
@@ -6141,7 +6192,7 @@ fn converge_resolved_run_in_store(
     }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
-        lifecycle_store.write_record_in_place(&mut record)?;
+        lifecycle_store.commit_record(&mut record)?;
     }
     // A `CandidateRecoverable` latch whose adoption (and any dispatched
     // remediation) concluded resolves to the record's true terminal fact,
@@ -6240,7 +6291,7 @@ fn converge_resolved_run_in_store(
                                     "repair_command": repair_command,
                                 }),
                             );
-                            lifecycle_store.write_record_in_place(&mut record)?;
+                            lifecycle_store.commit_record(&mut record)?;
                             return Ok((record, runner_probe));
                         }
                         let existing_scheduler_status = record
@@ -6300,7 +6351,7 @@ fn converge_resolved_run_in_store(
                                         "message": error.message,
                                     }),
                                 );
-                                lifecycle_store.write_record_in_place(&mut record)?;
+                                lifecycle_store.commit_record(&mut record)?;
                             }
                         }
                     }
@@ -6313,7 +6364,7 @@ fn converge_resolved_run_in_store(
                                 "message": error.message,
                             }),
                         );
-                        lifecycle_store.write_record_in_place(&mut record)?;
+                        lifecycle_store.commit_record(&mut record)?;
                     }
                 }
             }
@@ -6327,7 +6378,7 @@ fn converge_resolved_run_in_store(
                         "message": error.message,
                     }),
                 );
-                lifecycle_store.write_record_in_place(&mut record)?;
+                lifecycle_store.commit_record(&mut record)?;
             }
         }
     }
@@ -6558,7 +6609,7 @@ pub(crate) fn mark_resuming_in_store(
 
     let metadata = record.ensure_metadata_object();
     metadata.insert("resume_requested_at".to_string(), json!(now_timestamp()));
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.commit_record(&mut record)?;
     mark_running_in_store(lifecycle_store, run_id)
 }
 
@@ -7659,7 +7710,7 @@ pub(crate) fn record_cook_attempt_locked_in_store(
             }
         }
     }
-    let committed = lifecycle_store.write_record_locked_without_terminal_projection(&record)?;
+    let committed = lifecycle_store.commit_record_locked_without_terminal_projection(&record)?;
     // Completion can precede Cook registration during handoff recovery. Re-read
     // its persisted aggregate after the Cook identity is durable, then commit the
     // attempt and substantive pointer in the same index write.

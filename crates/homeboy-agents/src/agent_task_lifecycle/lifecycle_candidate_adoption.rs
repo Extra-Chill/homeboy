@@ -255,25 +255,31 @@ pub(crate) fn checkpoint_candidate_adoption_remediation_in_store(
     run_id: &str,
     remediation_run_id: &str,
 ) -> Result<()> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let Some(attempt) = record.candidate_adoption.as_mut() else {
+    // Decided from the record read under the lock, so the checkpoint can never
+    // replace adoption progress another writer committed (#15718).
+    let checkpointed = lifecycle_store.mutate_record(&sanitize_run_id(run_id), |record| {
+        let Some(attempt) = record.candidate_adoption.as_mut() else {
+            return false;
+        };
+        let now = now_timestamp();
+        attempt.state = "verification_running".to_string();
+        attempt.phase = "provider_remediation".to_string();
+        attempt.active_gate = "provider remediation".to_string();
+        attempt.updated_at = now.clone();
+        attempt.heartbeat_at = now;
+        attempt.remediation_run_id = Some(remediation_run_id.to_string());
+        attempt.remediation_status_command =
+            Some(format!("homeboy agent-task status {remediation_run_id}"));
+        true
+    })?;
+    if checkpointed.is_none() {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "candidate adoption remediation requires an active adoption",
             Some(run_id.to_string()),
             None,
         ));
-    };
-    let now = now_timestamp();
-    attempt.state = "verification_running".to_string();
-    attempt.phase = "provider_remediation".to_string();
-    attempt.active_gate = "provider remediation".to_string();
-    attempt.updated_at = now.clone();
-    attempt.heartbeat_at = now;
-    attempt.remediation_run_id = Some(remediation_run_id.to_string());
-    attempt.remediation_status_command =
-        Some(format!("homeboy agent-task status {remediation_run_id}"));
-    lifecycle_store.write_record(&record)?;
+    }
     Ok(())
 }
 

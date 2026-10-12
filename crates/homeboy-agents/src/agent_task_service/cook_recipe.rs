@@ -2198,7 +2198,10 @@ fn reconstruct_missing_attempt_record(
                 Some(format!("reconstruct lifecycle record for {run_id}")),
             )
         })?;
-    lifecycle_store.write_record(&record)?;
+    // Fenced at revision 0: it creates the record, and never replaces one
+    // another writer published meanwhile (#15718).
+    let mut record = record;
+    lifecycle_store.advance_record(&mut record, agent_task_lifecycle::AgentTaskAdvance::Submit)?;
     Ok(true)
 }
 
