@@ -138,7 +138,7 @@ impl homeboy_core::http_api::AnalysisJobRunner for GatedAnalysis {
         let store = ObservationStore::open_initialized()?;
         let run = RunRecord {
             id: "retained-a".to_string(),
-            kind: "audit".to_string(),
+            kind: "lint".to_string(),
             started_at: "2026-09-15T00:00:00Z".to_string(),
             finished_at: Some("2026-09-15T00:00:01Z".to_string()),
             status: "pass".to_string(),
@@ -239,7 +239,7 @@ fn sessions() -> [RunnerSession; 3] {
 fn controller_lifecycle_process() {
     watchdog();
     let [a, b, c] = sessions();
-    let job = post(&a, "/audit", json!({}));
+    let job = post(&a, "/lint", json!({}));
     let job_id = job
         .pointer("/data/body/job/id")
         .and_then(Value::as_str)
@@ -256,7 +256,7 @@ fn controller_lifecycle_process() {
     )
     .unwrap();
     assert_eq!(admission_session("runner-a").unwrap(), Some(b.clone()));
-    let new_job = post(&b, "/audit", json!({"component": "new"}));
+    let new_job = post(&b, "/lint", json!({"component": "new"}));
     let new_id = new_job
         .pointer("/data/body/job/id")
         .and_then(Value::as_str)
@@ -283,7 +283,7 @@ fn controller_lifecycle_process() {
     write("runner-a", &valid_registry).unwrap();
 
     // A second active job remains cancellable on A while B admits new work.
-    let cancel = post(&a, "/audit", json!({"component": "cancel"}));
+    let cancel = post(&a, "/lint", json!({"component": "cancel"}));
     let cancel_id = cancel
         .pointer("/data/body/job/id")
         .and_then(Value::as_str)

@@ -133,6 +133,10 @@ pub struct RunnerReconciliationOutcome {
     /// verification failure it was released despite (#15653).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
+    /// Job owners released from proven-stopped draining generations under
+    /// `--confirm-workload-processes-absent`, by retired generation (#15779).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
     /// IDs retired by this reconciliation operation under the generation lock.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub retired_generation_ids: Vec<String>,

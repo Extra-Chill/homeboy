@@ -357,15 +357,37 @@ pub(super) fn reconcile(
 ) -> CmdResult<RunnerOutput> {
     let policy = runner::GenerationReconcilePolicy {
         release_unverified_evidence,
+        release_stopped_generation_jobs: confirm_workload_processes_absent,
     };
     let (reconcile_outcome, attested_recovery) = if confirm_workload_processes_absent {
-        let with_attestation = runner::reconcile_status_with_outcome_with_remote_attestation(id)?;
-        let outcome = if release_unverified_evidence {
-            runner::reconcile_status_with_outcome_with_policy(id, policy)?
+        // The attestation first releases what the controller can prove: job
+        // owners pinning a draining generation whose daemon is proven stopped
+        // (#15779). Only remaining blockers go on to the runner's own
+        // lifecycle plan, and a plan that needs no attestation is not an error
+        // once the controller-side release has run.
+        let controller = runner::reconcile_status_with_outcome_with_policy(id, policy)?;
+        if controller.retirement_blockers.is_empty() {
+            (controller, None)
         } else {
-            with_attestation.outcome
-        };
-        (outcome, with_attestation.attested)
+            match runner::reconcile_status_with_outcome_with_remote_attestation(id) {
+                Ok(with_attestation) => {
+                    let outcome = if release_unverified_evidence {
+                        runner::reconcile_status_with_outcome_with_policy(id, policy)?
+                    } else {
+                        with_attestation.outcome
+                    };
+                    (outcome, with_attestation.attested)
+                }
+                Err(error)
+                    if error
+                        .message
+                        .contains("does not call for a workload-absence attestation") =>
+                {
+                    (controller, None)
+                }
+                Err(error) => return Err(error),
+            }
+        }
     } else {
         (
             runner::reconcile_status_with_outcome_with_policy(id, policy)?,
@@ -374,6 +396,8 @@ pub(super) fn reconcile(
     };
     let evidence_blocked = reconcile_outcome.evidence_blocked_generation_ids.clone();
     let released = reconcile_outcome.released_unverified_evidence.clone();
+    let released_stopped_jobs = reconcile_outcome.released_stopped_generation_jobs.clone();
+    let stopped_job_blocked = reconcile_outcome.stopped_generation_job_owner_ids.clone();
     let (mut output, mut exit_code) = reconcile_output(
         id,
         reconcile_outcome.status,
@@ -391,7 +415,29 @@ pub(super) fn reconcile(
                 RunnerReconciliationStatus::Blocked
             };
             if reconciliation.remaining_blocker.is_none() {
-                if evidence_only_blockers(&reconciliation.retirement_blockers, &evidence_blocked) {
+                if !stopped_job_blocked.is_empty()
+                    && reconciliation
+                        .retirement_blockers
+                        .keys()
+                        .all(|generation| stopped_job_blocked.contains_key(generation))
+                {
+                    // Every blocker is a proven-stopped generation pinned only
+                    // by job owners its dead daemon can never settle. Name the
+                    // one operator action that releases them (#15779) rather
+                    // than the reconnect/reconcile loop.
+                    reconciliation.remaining_blocker =
+                        Some("stopped_generation_job_owners".to_string());
+                    reconciliation.next_action = Some(format!(
+                        "homeboy runner reconcile {} --confirm-workload-processes-absent",
+                        shell_arg(id)
+                    ));
+                    reconciliation.retry_predicate = Some(
+                        "the operator attests that no workload process from the stopped daemon survives on the runner".to_string(),
+                    );
+                } else if evidence_only_blockers(
+                    &reconciliation.retirement_blockers,
+                    &evidence_blocked,
+                ) {
                     // Every blocker is an idle generation whose retained
                     // evidence cannot be verified. Name the one explicit
                     // operator action instead of dead-ending (#15653).
@@ -416,6 +462,7 @@ pub(super) fn reconcile(
             exit_code = 1;
         }
         reconciliation.released_unverified_evidence = released.clone();
+        reconciliation.released_stopped_generation_jobs = released_stopped_jobs;
     }
     if !released.is_empty() {
         output.extra.operator_hints.push(format!(
@@ -511,6 +558,7 @@ pub(crate) fn reconciliation_outcome(
             retirement_blockers: Default::default(),
             retained_evidence_generation_count: 0,
             released_unverified_evidence: Default::default(),
+            released_stopped_generation_jobs: Default::default(),
         };
     }
 
@@ -621,6 +669,7 @@ pub(crate) fn reconciliation_outcome(
         retirement_blockers: Default::default(),
         retained_evidence_generation_count: 0,
         released_unverified_evidence: Default::default(),
+        released_stopped_generation_jobs: Default::default(),
     }
 }
 

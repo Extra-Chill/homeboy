@@ -11,15 +11,12 @@ pub struct QualityPlanOptions {
     /// while the rest still run. Honored independently of `skip_checks` (which
     /// skips everything). Used by `--skip-checks=lint` to bypass only the broken
     /// gate without disabling working_tree/remote_sync/test.
-    pub skip_audit: bool,
     pub skip_lint: bool,
     pub skip_test: bool,
     pub granular_skip_reason: String,
     pub lint_needs: Vec<String>,
     pub test_needs: Vec<String>,
     pub needs_kind: PlanStepDependencyKind,
-    pub audit_policy_available: bool,
-    pub audit_label: String,
     pub lint_label: String,
     pub test_label: String,
 }
@@ -32,15 +29,12 @@ impl QualityPlanOptions {
             step_prefix: "preflight".to_string(),
             skip_checks,
             skip_reason: "--skip-checks".to_string(),
-            skip_audit: false,
             skip_lint: false,
             skip_test: false,
             granular_skip_reason: "--skip-checks=<check>".to_string(),
             lint_needs: vec!["preflight.bump_policy".to_string()],
             test_needs: vec!["preflight.lint".to_string()],
             needs_kind: PlanStepDependencyKind::Execution,
-            audit_policy_available: false,
-            audit_label: "Run release audit".to_string(),
             lint_label: "Run release lint".to_string(),
             test_label: "Run release tests".to_string(),
         }
@@ -48,12 +42,11 @@ impl QualityPlanOptions {
 
     /// Apply granular per-check skips from a list of check names.
     ///
-    /// Recognized names: `audit`, `lint`, `test`. Unknown names are ignored by
+    /// Recognized names: `lint`, `test`. Unknown names are ignored by
     /// this method (validation happens at the CLI boundary).
     pub fn with_granular_skips(mut self, checks: &[String]) -> Self {
         for check in checks {
             match check.to_ascii_lowercase().as_str() {
-                "audit" => self.skip_audit = true,
                 "lint" => self.skip_lint = true,
                 "test" | "tests" => self.skip_test = true,
                 _ => {}
@@ -69,15 +62,12 @@ impl QualityPlanOptions {
             step_prefix: "review".to_string(),
             skip_checks: false,
             skip_reason: "skipped".to_string(),
-            skip_audit: false,
             skip_lint: false,
             skip_test: false,
             granular_skip_reason: "--skip-checks=<check>".to_string(),
-            lint_needs: vec!["review.audit".to_string()],
+            lint_needs: Vec::new(),
             test_needs: vec!["review.lint".to_string()],
             needs_kind: PlanStepDependencyKind::DisplayOrder,
-            audit_policy_available: true,
-            audit_label: "Run review audit".to_string(),
             lint_label: "Run review lint".to_string(),
             test_label: "Run review tests".to_string(),
         }
@@ -107,12 +97,6 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
         return vec![
             disabled_step(
                 &options.step_prefix,
-                "audit",
-                &options.audit_label,
-                &options.skip_reason,
-            ),
-            disabled_step(
-                &options.step_prefix,
                 "lint",
                 &options.lint_label,
                 &options.skip_reason,
@@ -125,30 +109,6 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
             ),
         ];
     }
-
-    let audit = if options.skip_audit {
-        disabled_step(
-            &options.step_prefix,
-            "audit",
-            &options.audit_label,
-            &options.granular_skip_reason,
-        )
-    } else if options.audit_policy_available {
-        ready_step(
-            &options.step_prefix,
-            "audit",
-            &options.audit_label,
-            Vec::new(),
-            PlanStepDependencyKind::Execution,
-        )
-    } else {
-        disabled_step(
-            &options.step_prefix,
-            "audit",
-            &options.audit_label,
-            "no-release-audit-policy",
-        )
-    };
 
     let skippable_step = |skip: bool, name: &str, label: &str, needs: &[String]| {
         if skip {
@@ -183,7 +143,7 @@ pub fn build_quality_steps(options: &QualityPlanOptions) -> Vec<PlanStep> {
         &options.test_needs,
     );
 
-    vec![audit, lint, test]
+    vec![lint, test]
 }
 
 fn ready_step(
@@ -227,7 +187,6 @@ mod tests {
         assert_eq!(options.skip_reason, "--skip-checks");
         assert_eq!(options.lint_needs, vec!["preflight.bump_policy"]);
         assert_eq!(options.test_needs, vec!["preflight.lint"]);
-        assert!(!options.audit_policy_available);
     }
 
     #[test]
@@ -237,10 +196,9 @@ mod tests {
         assert_eq!(options.component_id, "fixture");
         assert_eq!(options.mode.as_deref(), Some("review"));
         assert_eq!(options.step_prefix, "review");
-        assert_eq!(options.lint_needs, vec!["review.audit"]);
+        assert!(options.lint_needs.is_empty());
         assert_eq!(options.test_needs, vec!["review.lint"]);
         assert_eq!(options.needs_kind, PlanStepDependencyKind::DisplayOrder);
-        assert!(options.audit_policy_available);
     }
 
     #[test]
@@ -270,28 +228,20 @@ mod tests {
         assert_eq!(plan.kind, PlanKind::Quality);
         assert_eq!(plan.subject.component_id.as_deref(), Some("fixture"));
         assert_eq!(plan.mode.as_deref(), Some("release-preflight"));
-        assert_eq!(
-            ids,
-            vec!["preflight.audit", "preflight.lint", "preflight.test"]
-        );
-        assert_eq!(plan.steps[0].status, PlanStepStatus::Disabled);
-        assert_eq!(plan.steps[1].needs, vec!["preflight.bump_policy"]);
-        assert_eq!(plan.steps[2].needs, vec!["preflight.lint"]);
-        assert_eq!(plan.steps[1].needs_kind, PlanStepDependencyKind::Execution);
+        assert_eq!(ids, vec!["preflight.lint", "preflight.test"]);
+        assert_eq!(plan.steps[0].needs, vec!["preflight.bump_policy"]);
+        assert_eq!(plan.steps[1].needs, vec!["preflight.lint"]);
+        assert_eq!(plan.steps[0].needs_kind, PlanStepDependencyKind::Execution);
     }
 
     #[test]
     fn review_quality_edges_are_display_order_only() {
         let plan = build_quality_plan(QualityPlanOptions::review("fixture"));
 
-        assert_eq!(plan.steps[1].needs, vec!["review.audit"]);
-        assert_eq!(plan.steps[2].needs, vec!["review.lint"]);
+        assert!(plan.steps[0].needs.is_empty());
+        assert_eq!(plan.steps[1].needs, vec!["review.lint"]);
         assert_eq!(
             plan.steps[1].needs_kind,
-            PlanStepDependencyKind::DisplayOrder
-        );
-        assert_eq!(
-            plan.steps[2].needs_kind,
             PlanStepDependencyKind::DisplayOrder
         );
     }
@@ -313,7 +263,7 @@ mod tests {
 
     #[test]
     fn granular_skip_disables_only_named_checks() {
-        // --skip-checks=lint disables only lint; audit and test stay active.
+        // --skip-checks=lint disables only lint; test stays active.
         let options = QualityPlanOptions::release_preflight("fixture", false)
             .with_granular_skips(&["lint".to_string()]);
         let steps = build_quality_steps(&options);
@@ -337,7 +287,6 @@ mod tests {
             .with_granular_skips(&["LINT".to_string(), "Tests".to_string()]);
         assert!(options.skip_lint);
         assert!(options.skip_test);
-        assert!(!options.skip_audit);
     }
 
     #[test]

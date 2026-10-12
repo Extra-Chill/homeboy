@@ -1021,10 +1021,6 @@ fn changed_scope_lint_is_lab_portable() {
 fn nested_review_quality_subcommands_use_specific_lab_labels() {
     for (args, expected_label) in [
         (
-            vec!["homeboy", "review", "audit", "data-machine"],
-            "review audit",
-        ),
-        (
             vec!["homeboy", "review", "lint", "data-machine"],
             "review lint",
         ),

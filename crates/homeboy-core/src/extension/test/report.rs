@@ -1,7 +1,6 @@
 //! Test command output builders — owns the unified test output envelope.
 //!
-//! All test sub-workflows (main run, drift detection, auto-fix drift)
-//! produce domain-specific result types. This module provides the unified output
+//! Test workflows produce domain-specific result types. This module provides the unified output
 //! envelope and builder functions that assemble results into command-ready output.
 
 use crate::extension::test::TestCounts;
@@ -15,7 +14,6 @@ use homeboy_extension_contract::{
 };
 
 use super::run::TestRunWorkflowResult;
-use super::workflow::{AutoFixDriftWorkflowResult, DriftWorkflowResult};
 
 /// Exit status Homeboy assigns when it terminates a child that exhausted its
 /// execution budget (`timed_out_exit_code` in `homeboy-core`).
@@ -105,10 +103,7 @@ pub fn from_main_workflow_with_ci_context(
             coverage: result.coverage,
             baseline_comparison: result.baseline_comparison,
             analysis: result.analysis,
-            autofix: result.autofix,
             hints: result.hints,
-            drift: None,
-            auto_fix_drift: None,
             test_scope: result.test_scope,
             summary: result.summary,
             raw_output: result.raw_output,
@@ -119,92 +114,6 @@ pub fn from_main_workflow_with_ci_context(
             actionable: None,
         },
         exit_code,
-    )
-}
-
-/// Build output from a drift detection workflow result.
-pub fn from_drift_workflow(result: DriftWorkflowResult) -> (TestCommandOutput, i32) {
-    let exit_code = result.exit_code;
-    (
-        TestCommandOutput {
-            passed: exit_code == 0,
-            status: "drift".to_string(),
-            component: result.component,
-            exit_code: result.exit_code,
-            phase: None,
-            failure: None,
-            test_counts: None,
-            test_inventory: None,
-            test_inventory_rejection: None,
-            test_runtime_evidence: None,
-            test_durations: None,
-            findings: None,
-            coverage: None,
-            baseline_comparison: None,
-            analysis: None,
-            autofix: None,
-            hints: None,
-            drift: Some(result.report),
-            auto_fix_drift: None,
-            test_scope: None,
-            summary: None,
-            raw_output: None,
-            cargo_target: None,
-            ci_context: None,
-            differential: None,
-            extension_phase_timings: Vec::new(),
-            actionable: None,
-        },
-        exit_code,
-    )
-}
-
-/// Build output from an auto-fix drift workflow result.
-pub fn from_auto_fix_drift_workflow(
-    result: AutoFixDriftWorkflowResult,
-) -> (TestCommandOutput, i32) {
-    let status = if result.output.replacements > 0 || !result.hints.is_empty() {
-        if result.output.written {
-            "fixed"
-        } else {
-            "planned"
-        }
-        .to_string()
-    } else {
-        "passed".to_string()
-    };
-
-    (
-        TestCommandOutput {
-            passed: true,
-            status,
-            component: result.component,
-            exit_code: 0,
-            phase: None,
-            failure: None,
-            test_counts: None,
-            test_inventory: None,
-            test_inventory_rejection: None,
-            test_runtime_evidence: None,
-            test_durations: None,
-            findings: None,
-            coverage: None,
-            baseline_comparison: None,
-            analysis: None,
-            autofix: None,
-            hints: Some(result.hints),
-            drift: result.report,
-            auto_fix_drift: Some(result.output),
-            test_scope: None,
-            summary: None,
-            raw_output: None,
-            cargo_target: None,
-            ci_context: None,
-            differential: None,
-            extension_phase_timings: Vec::new(),
-            actionable: None,
-        },
-        0,
     )
 }
 
@@ -362,7 +271,6 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
             test_scope: None,
             summary: None,
@@ -388,7 +296,6 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
             test_scope: None,
             summary: None,
@@ -414,7 +321,6 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
             test_scope: None,
             summary: None,
@@ -620,7 +526,7 @@ mod tests {
     #[test]
     fn serializes_extension_phase_timings_as_opaque_metadata() {
         let mut result = workflow_result(None);
-        result.extension_phase_timings = vec![homeboy_audit_contract::ExtensionPhaseTiming {
+        result.extension_phase_timings = vec![homeboy_extension_contract::ExtensionPhaseTiming {
             name: "opaque-provider-phase".to_string(),
             duration_ms: 4321,
             status: Some("waiting".to_string()),

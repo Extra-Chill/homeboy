@@ -40,12 +40,12 @@ use super::refs::{RunsRefsArgs, RunsRefsOutput};
 use super::report::{ReportArgs, ReportOutput};
 use super::resources::{RunsResourcesArgs, RunsResourcesOutput};
 use super::watch::{RunsWatchArgs, RunsWatchOutput};
+use crate::commands::artifact_postprocess;
 use crate::commands::fuzz::FuzzCompareOutput;
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandArtifactRef, CommandNextAction, CommandNextActionKind,
     CommandResultRefs, CommandRunRef,
 };
-use crate::commands::{artifact_postprocess, issues};
 
 pub(super) const DEFAULT_LIMIT: i64 = 20;
 
@@ -276,7 +276,6 @@ pub enum RunsOutput {
     ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput),
     ArtifactPostprocess(artifact_postprocess::ArtifactPostprocessCommandOutput),
     Findings(RunsFindingsOutput),
-    FindingsReconcile(issues::IssuesCommandOutput),
     BenchCompare(BenchCompareOutput),
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),

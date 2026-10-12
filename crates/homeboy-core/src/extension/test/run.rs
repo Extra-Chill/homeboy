@@ -11,7 +11,6 @@ use crate::extension::test::{
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
     parse_test_results_file_with_spec, parse_test_results_text, parse_test_results_text_with_spec,
 };
-use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, ErrorCode};
@@ -28,7 +27,7 @@ pub use homeboy_extension_contract::test_results::{
 };
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_extension_contract::ExtensionCapability;
-use homeboy_refactor_contract::AppliedRefactor;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1487,7 +1486,6 @@ fn run_main_test_workflow_inner(
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
-                    autofix: None,
                     hints,
                     test_scope: Some(scope.clone()),
                     summary: if args.json_summary {
@@ -1540,7 +1538,6 @@ fn run_main_test_workflow_inner(
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
-                autofix: None,
                 hints: Some(hints),
                 test_scope: Some(scope.clone()),
                 summary: if args.json_summary {
@@ -1619,7 +1616,6 @@ fn run_main_test_workflow_inner(
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
-                    autofix: None,
                     hints,
                     test_scope: Some(scope.clone()),
                     summary: if args.json_summary {
@@ -1905,9 +1901,6 @@ fn run_main_test_workflow_inner(
         test_counts.as_ref(),
     );
 
-    // Autofix is owned by `refactor --from test --write`; the test command is read-only.
-    let test_autofix: Option<AppliedRefactor> = None;
-
     #[cfg(unix)]
     let (test_inventory, test_inventory_rejection) = if inventory_mode {
         match inventory_binding.as_ref() {
@@ -2065,7 +2058,7 @@ fn run_main_test_workflow_inner(
 
     if !args.skip_lint {
         hints.push(format!(
-            "Auto-fix lint issues: homeboy refactor {} --from lint --write",
+            "Auto-fix lint issues: homeboy review lint {} --fix",
             args.component_id
         ));
     }
@@ -2196,7 +2189,6 @@ fn run_main_test_workflow_inner(
         coverage,
         baseline_comparison,
         analysis,
-        autofix: test_autofix,
         hints,
         test_scope: changed_scope,
         summary,
@@ -2398,7 +2390,8 @@ pub fn ensure_clean_review_checkout(path: &Path) -> homeboy_core::Result<()> {
         None,
         Some(vec![
             format!("Dirty files: {}", files.join(", ")),
-            "For dirty changed-file review, run `homeboy review --changed-only audit` and `homeboy review --changed-only lint` separately.".to_string(),
+            "For dirty changed-file review, run `homeboy review --changed-only lint` separately."
+                .to_string(),
         ]),
     ))
 }
@@ -2426,7 +2419,6 @@ fn failed_test_workflow(
         coverage: None,
         baseline_comparison: None,
         analysis: None,
-        autofix: None,
         hints: Some(vec![
             "The test runner failed during setup or execution; inspect raw_output.stderr_tail"
                 .to_string(),
@@ -2783,7 +2775,6 @@ pub fn run_self_check_test_workflow_with_progress(
         coverage: None,
         baseline_comparison: None,
         analysis: None,
-        autofix: None,
         hints: (!output.success).then(|| {
             vec![format!(
                 "Fix the failing self-check command declared in {}'s homeboy.json scripts.test",
@@ -3676,7 +3667,6 @@ mod tests {
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
-                autofix: None,
                 hints: None,
                 test_scope: None,
                 summary: Some(build_test_summary(
@@ -3785,7 +3775,6 @@ mod tests {
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
-                autofix: None,
                 hints: None,
                 test_scope: None,
                 summary: None,

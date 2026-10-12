@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.418.4"
+version = "0.418.7"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -46,14 +46,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "homeboy"
 path = "src/main.rs"
-
-# Bench binaries follow the homeboy-extensions/rust convention:
-# any [[bin]] whose name starts with `bench-` is discoverable by
-# `homeboy bench homeboy`. See src/bin/bench-*.rs for the workload
-# contract (reads HOMEBOY_BENCH_ITERATIONS, emits timings plus optional memory evidence).
-[[bin]]
-name = "bench-audit-self"
-path = "src/bin/bench-audit-self.rs"
 
 [dependencies]
 homeboy-product-identity = { path = "crates/homeboy-product-identity" }
@@ -100,7 +92,6 @@ shlex = "1.3"
 
 [features]
 default = []
-slow-tests = []
 # Enables the shared hermetic test fixtures (homeboy-core's test_support), used by
 # this crate's integration tests, plus the `fixture` agent-task executor double.
 # `cargo run --features test-support` is what makes the deterministic agent-task

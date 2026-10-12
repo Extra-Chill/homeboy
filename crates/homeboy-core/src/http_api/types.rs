@@ -58,7 +58,6 @@ pub enum HttpEndpoint {
     RunFindings {
         id: String,
     },
-    AuditRuns,
     BenchRuns,
     Activity,
     ActivityItem {
@@ -197,7 +196,6 @@ pub struct RunDetail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobReadyRunKind {
-    Audit,
     Lint,
     Test,
     Bench,
@@ -220,7 +218,6 @@ impl HttpEndpoint {
             Self::RunArtifacts { .. } => "runs.artifacts",
             Self::RunArtifactContent { .. } => "runs.artifact.content",
             Self::RunFindings { .. } => "runs.findings",
-            Self::AuditRuns => "audit.runs",
             Self::BenchRuns => "bench.runs",
             Self::Activity => "activity.list",
             Self::ActivityItem { .. } => "activity.show",

@@ -4,18 +4,13 @@ use serde::Serialize;
 use homeboy::core::observation::{
     runs_service, FindingListFilter, ObservationStore, RecordedHomeboyFinding,
 };
-use homeboy::core::Error;
 
-use crate::commands::{issues, runs::RunsOutput, CmdResult};
+use crate::commands::{runs::RunsOutput, CmdResult};
 
 #[derive(Args, Clone, Default)]
-#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct RunsFindingsArgs {
-    #[command(subcommand)]
-    pub command: Option<issues::IssuesCommand>,
-
     /// Observation run ID
-    pub run_id: Option<String>,
+    pub run_id: String,
     /// Finding tool, for example lint
     #[arg(long)]
     pub tool: Option<String>,
@@ -38,14 +33,7 @@ pub struct RunsFindingsOutput {
 }
 
 pub fn findings(store: &ObservationStore, args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
-    if let Some(command) = args.command {
-        let (output, exit_code) = issues::run(issues::IssuesArgs { command })?;
-        return Ok((RunsOutput::FindingsReconcile(output), exit_code));
-    }
-
-    let run_id = args
-        .run_id
-        .ok_or_else(|| Error::validation_missing_argument(vec!["run_id".to_string()]))?;
+    let run_id = args.run_id;
     // Route run lookup through the observation facade so `runs findings` shares
     // the one activity-aware surface: durable label aliases, Lab mirror
     // resolution, and the stable missing-run error with runner guidance (#6768).
@@ -139,7 +127,7 @@ mod tests {
             let (output, exit) = findings(
                 &test_store(),
                 RunsFindingsArgs {
-                    run_id: Some("findings-label".to_string()),
+                    run_id: "findings-label".to_string(),
                     limit: 100,
                     ..Default::default()
                 },
@@ -168,7 +156,7 @@ mod tests {
             let (output, _) = findings(
                 &test_store(),
                 RunsFindingsArgs {
-                    run_id: Some(run_id.clone()),
+                    run_id: run_id.clone(),
                     limit: 100,
                     ..Default::default()
                 },
@@ -192,7 +180,7 @@ mod tests {
             let error = match findings(
                 &test_store(),
                 RunsFindingsArgs {
-                    run_id: Some("definitely-missing-run".to_string()),
+                    run_id: "definitely-missing-run".to_string(),
                     limit: 100,
                     ..Default::default()
                 },

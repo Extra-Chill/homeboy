@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::CommandOutput;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use serde_json::json;
 
 use super::{FAILURE_TAIL_LINES, STALE_VALIDATION_DEPENDENCY_PREFIX};

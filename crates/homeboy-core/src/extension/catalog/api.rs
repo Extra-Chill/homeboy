@@ -15,10 +15,7 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
     ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
     ExtensionApiToolRequirement, ExtensionApiVersion, ACTION_CAPABILITY_PREFIX,
-    AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX, COMPILER_WARNINGS_CAPABILITY_ID,
-    COMPILER_WARNINGS_INPUT_SCHEMA, COMPILER_WARNINGS_OUTPUT_SCHEMA,
-    COMPILER_WARNING_FIXES_CAPABILITY_ID, COMPILER_WARNING_FIXES_INPUT_SCHEMA,
-    COMPILER_WARNING_FIXES_OUTPUT_SCHEMA, COMPONENT_ENV_CAPABILITY_ID,
+    AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX, COMPONENT_ENV_CAPABILITY_ID,
     DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID, EXECUTE_CAPABILITY_ID,
     EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA, EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
     EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
@@ -33,10 +30,8 @@ use homeboy_extension_contract::api::v1::{
     EXTENSION_API_READINESS_RESPONSE_SCHEMA, EXTENSION_API_RECIPE_RUN_PLAN_REQUEST_SCHEMA,
     EXTENSION_API_RECIPE_RUN_PLAN_RESPONSE_SCHEMA, EXTENSION_API_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_V1,
-    EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX, FINGERPRINT_INPUT_SCHEMA,
-    FINGERPRINT_OUTPUT_SCHEMA, FORMAT_FILE_CAPABILITY_PREFIX,
-    RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX, REFACTOR_ANALYSIS_INPUT_SCHEMA,
-    REFACTOR_ANALYSIS_OUTPUT_SCHEMA, REFACTOR_FILE_CAPABILITY_PREFIX,
+    EXTERNAL_CHECK_DETAIL_RESOLVER_CAPABILITY_PREFIX, FORMAT_FILE_CAPABILITY_PREFIX,
+    RECIPE_RUN_PROVIDER_CAPABILITY_PREFIX,
 };
 use homeboy_extension_contract::{
     evaluate_core_compatibility, ExtensionCapability, ExtensionManifest,
@@ -65,7 +60,6 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
         ExtensionCapability::Fuzz,
         ExtensionCapability::Trace,
         ExtensionCapability::Deps,
-        ExtensionCapability::Audit,
     ]
     .into_iter()
     .filter(|capability| capability.has_manifest_support(&extension))
@@ -140,13 +134,6 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
             EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA,
         ));
     }
-    // Advertised JSON-stdin capabilities come from the manifest contract, which
-    // is the same source API invocation resolves through, so an advertised
-    // capability is always invocable.
-    capabilities.extend(extension.json_capability_ids().iter().map(|capability_id| {
-        let (input_schema, output_schema) = json_capability_schemas(capability_id);
-        schema_capability_descriptor(capability_id, input_schema, output_schema)
-    }));
     if extension.format_script().is_some() {
         capabilities.extend(
             extension
@@ -263,28 +250,6 @@ fn negotiate_api(
 ) -> Result<ExtensionApiHandshakeResponse> {
     let descriptor = api_descriptor(extension_id)?;
     Ok(negotiate_descriptor(descriptor, request))
-}
-
-/// Input and output schema references for one JSON-stdin capability id.
-fn json_capability_schemas(capability_id: &str) -> (&'static str, &'static str) {
-    if capability_id == COMPILER_WARNINGS_CAPABILITY_ID {
-        (
-            COMPILER_WARNINGS_INPUT_SCHEMA,
-            COMPILER_WARNINGS_OUTPUT_SCHEMA,
-        )
-    } else if capability_id == COMPILER_WARNING_FIXES_CAPABILITY_ID {
-        (
-            COMPILER_WARNING_FIXES_INPUT_SCHEMA,
-            COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
-        )
-    } else if capability_id.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) {
-        (
-            REFACTOR_ANALYSIS_INPUT_SCHEMA,
-            REFACTOR_ANALYSIS_OUTPUT_SCHEMA,
-        )
-    } else {
-        (FINGERPRINT_INPUT_SCHEMA, FINGERPRINT_OUTPUT_SCHEMA)
-    }
 }
 
 fn negotiate_descriptor(
@@ -851,11 +816,7 @@ mod tests {
                     "version": "1.2.3",
                     "test": { "extension_script": "test.sh" },
                     "scripts": {
-                        "compiler_warnings": "warnings.sh",
-                        "compiler_warning_fixes": "warning-fixes.sh",
-                        "fingerprint": "fingerprint.sh",
-                        "format": "format.sh",
-                        "refactor": "refactor.sh"
+                        "format": "format.sh"
                     },
                     "provides": { "file_extensions": ["rs", "php"] },
                     "executable": { "runtime": { "run_command": "fixture", "ready_check": "fixture --ready" } },
@@ -893,21 +854,15 @@ mod tests {
                     .map(|capability| capability.id.as_str())
                     .collect::<Vec<_>>(),
                 vec![
-                    COMPILER_WARNING_FIXES_CAPABILITY_ID,
-                    COMPILER_WARNINGS_CAPABILITY_ID,
                     EXECUTE_CAPABILITY_ID,
-                    "fingerprint.php",
-                    "fingerprint.rs",
                     "format.php",
                     "format.rs",
                     "recipe-run-provider.fixture.recipe",
-                    "refactor.php",
-                    "refactor.rs",
                     "test"
                 ]
             );
             assert_eq!(
-                descriptor.capabilities[7].contract_version.as_deref(),
+                descriptor.capabilities[3].contract_version.as_deref(),
                 Some("2")
             );
             let execute = descriptor
@@ -928,63 +883,6 @@ mod tests {
                     .as_ref()
                     .map(|schema| schema.schema.as_str()),
                 Some(EXTENSION_API_EXECUTE_RESPONSE_SCHEMA)
-            );
-            let warnings = descriptor
-                .capabilities
-                .iter()
-                .find(|capability| capability.id == COMPILER_WARNINGS_CAPABILITY_ID)
-                .expect("compiler warnings capability");
-            assert_eq!(
-                warnings
-                    .input_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(COMPILER_WARNINGS_INPUT_SCHEMA)
-            );
-            assert_eq!(
-                warnings
-                    .output_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(COMPILER_WARNINGS_OUTPUT_SCHEMA)
-            );
-            let fingerprint = descriptor
-                .capabilities
-                .iter()
-                .find(|capability| capability.id == "fingerprint.rs")
-                .expect("fingerprint capability");
-            assert_eq!(
-                fingerprint
-                    .input_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(FINGERPRINT_INPUT_SCHEMA)
-            );
-            assert_eq!(
-                fingerprint
-                    .output_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(FINGERPRINT_OUTPUT_SCHEMA)
-            );
-            let refactor = descriptor
-                .capabilities
-                .iter()
-                .find(|capability| capability.id == "refactor.rs")
-                .expect("refactor capability");
-            assert_eq!(
-                refactor
-                    .input_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(REFACTOR_ANALYSIS_INPUT_SCHEMA)
-            );
-            assert_eq!(
-                refactor
-                    .output_schema
-                    .as_ref()
-                    .map(|schema| schema.schema.as_str()),
-                Some(REFACTOR_ANALYSIS_OUTPUT_SCHEMA)
             );
             assert!(descriptor.readiness.runtime_probe);
             assert_eq!(descriptor.readiness.toolchain_probe_ids, ["alpha", "zeta"]);

@@ -116,8 +116,8 @@ diagnostics from one v1 catalog snapshot. Explicit ownership,
 over those stable descriptors; execution-context assembly loads the selected
 manifest only for internal script paths and settings.
 
-File-type providers use open capability IDs: `fingerprint.<extension>`,
-`format.<extension>`, and `refactor.<extension>`. Resolution matches those IDs
+File-type providers use open capability IDs such as `format.<extension>`.
+Resolution matches those IDs
 in the same catalog and returns only the selected extension ID. Manifest paths
 and script declarations remain private execution details.
 
@@ -170,17 +170,8 @@ codes. Process failures optionally include `process` evidence with the exit
 code, bounded stdout and stderr, and parsed stdout when it was valid JSON. The
 optional field is omitted for existing successful invocation responses.
 
-The `compiler-warnings`, `compiler-warning-fixes`, `fingerprint.<file-extension>`,
-and `refactor.<file-extension>` capabilities are adopters. Their descriptors
-reference versioned input and output schemas; audit and refactor consume
-invocation responses rather than loading manifests or running scripts directly.
-Fingerprint scripts consume `homeboy/fingerprint-input/v1` and produce
-`homeboy/fingerprint-output/v1`.
-Refactor commands remain extension-owned JSON payloads under the shared
-`homeboy/refactor-analysis-input/v1` and `homeboy/refactor-analysis-output/v1`
-schema references. Component-linked providers take precedence when they offer
-the requested capability, with installed providers as the deterministic
-fallback.
+Component-linked providers take precedence when they offer the requested
+capability, with installed providers as the deterministic fallback.
 
 This synchronous operation is intentionally limited to analysis. It does not
 perform durable mutation and therefore has no idempotency, cancellation,

@@ -3,8 +3,8 @@
 //! `is_test_path` heuristically classifies whether a relative path points to a
 //! test file (test directories, `*_test.rs` / `*Test.php` / `*.spec.ts`
 //! filenames, etc.). It is a pure, language-agnostic string classifier with no
-//! dependencies, consumed by both `code_audit` and `extension` — so it lives in
-//! the primitives crate to keep those two feature layers off each other.
+//! dependencies, consumed by changed-test selection, so it lives in the
+//! primitives crate.
 
 /// Check if a relative path points to a test file using heuristic patterns.
 ///

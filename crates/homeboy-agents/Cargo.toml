@@ -56,4 +56,4 @@ homeboy-agents = { version = "0.1.0", path = ".", features = ["test-support"] }
 # extension catalog, so it must never be compiled into a production binary.
 # Enabled as a dev-dependency feature by homeboy-cli, homeboy-lab-runner, the
 # `homeboy` binary crate, and this crate itself.
-test-support = []
+test-support = ["homeboy-core/test-support"]

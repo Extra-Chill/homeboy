@@ -119,12 +119,6 @@ impl Default for ValidationCollector {
 mod tests {
     use super::*;
 
-    // Audit's `MissingTestMethod` rule uses an exact-name match: stripping
-    // the `test_` prefix from a test must produce the source method name
-    // verbatim. So there is one `test_<method>` per public method, and
-    // additional scenario tests use a `_` suffix so they read naturally
-    // without the auditor treating them as coverage.
-
     #[test]
     fn test_push() {
         let mut v = ValidationCollector::new();

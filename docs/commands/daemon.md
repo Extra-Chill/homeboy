@@ -234,14 +234,13 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /rigs`
 - `GET /rigs/:id`
 - `POST /rigs/:id/check`
-- `GET /runs?kind=bench|audit&component=<id>&rig=<id>&status=<status>&limit=<n>`
+- `GET /runs?kind=bench&component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /runs/:id`
 - `GET /runs/:id/artifacts`
 - `GET /runs/:id/artifacts/sync`
 - `GET /runs/:id/artifacts/:artifact_id`
 - `GET /runs/:id/artifacts/:artifact_id/content`
 - `GET /runs/:id/findings?tool=<tool>&file=<path>&fingerprint=<id>&limit=<n>`
-- `GET /audit/runs?component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /bench/runs?component=<id>&rig=<id>&status=<status>&limit=<n>`
 - `GET /jobs`
 - `GET /jobs/:id`
@@ -257,7 +256,7 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `POST /runner/jobs/:id/finish`
 
 The run readers expose persisted observation-store evidence from previous
-analysis runs. They do not start audit, lint, test, bench, or rig work.
+analysis runs. They do not start lint, test, bench, or rig work.
 Run summaries include `status_note` when a running record appears stale or
 cannot be verified with owner metadata, matching the CLI run-history output.
 
@@ -274,7 +273,7 @@ the transport-free API handler reports inline byte payloads as
 endpoint should reuse that implementation rather than duplicating comparison
 logic in the HTTP API contract.
 
-The analysis entry points `POST /audit`, `POST /lint`, `POST /test`, and
+The analysis entry points `POST /lint`, `POST /test`, and
 `POST /bench` enqueue daemon jobs. Clients inspect those jobs through
 `GET /jobs/:id` and `GET /jobs/:id/events` instead of parsing terminal output.
 
@@ -283,9 +282,8 @@ Sandbox agents should prefer the typed tool surface over command-shaped routes:
 - `GET /tools` returns the bounded Homeboy tool allowlist.
 - Each tool declares its required capability, risk category, job behavior, and
   accepted JSON request fields.
-- `POST /tools/homeboy.audit/run`, `POST /tools/homeboy.lint/run`,
-  `POST /tools/homeboy.test/run`, `POST /tools/homeboy.bench/run`,
-  `POST /tools/homeboy.build/run`, and `POST /tools/homeboy.review/run` enqueue
+- `POST /tools/homeboy.lint/run`, `POST /tools/homeboy.test/run`,
+  `POST /tools/homeboy.bench/run`, `POST /tools/homeboy.build/run`, and `POST /tools/homeboy.review/run` enqueue
   jobs through the same job/event/result contract.
 - Tool IDs that are not in the allowlist, including deploy, release, SSH, auth,
   keychain, and DB operations, are rejected before execution.

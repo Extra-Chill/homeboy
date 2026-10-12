@@ -27,15 +27,6 @@ The profile timeouts are guardrails for hangs, not performance targets. When doi
 test-suite speed work, capture before/after wall time and the slowest tests from
 the nextest summary so lock contention and fixture setup costs stay visible.
 
-Full-pipeline audit/refactor regressions that intentionally run broad audit machinery live in the explicit slow tier:
-
-```sh
-cargo test --lib --features slow-tests code_audit
-cargo test --lib --features slow-tests collect_refactor_sources_audit_write_uses_audit_refactor_engine
-```
-
-Use the slow tier when changing audit detector orchestration, audit fixability planning, or audit-driven refactor planning. These tests remain runnable, but they are not part of the default unit gate because they scan real fixture/checkouts and dominated local suite wall-clock time.
-
 ## Process-Global Environment and Test Threads
 
 `homeboy.json` selects nextest with `rust_test_runner = "nextest"`, so local and
@@ -106,8 +97,7 @@ runs tests in isolated processes, and publishes structured counts before the sin
 
 The reusable workflow installs prebuilt nextest, sets `NEXTEST_PROFILE=ci`, and
 disables fallback for shard planning and replay. The CI profile disables
-fail-fast and terminates a test after two 60-second slow periods. The
-deliberately slow tier remains excluded unless `slow-tests` is enabled. General
+fail-fast and terminates a test after two 60-second slow periods. General
 unsharded nextest output is not yet a measured Homeboy result, so local and
 release gates remain on serialized Cargo.
 

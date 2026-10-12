@@ -12,7 +12,6 @@ extern crate self as homeboy;
 pub use homeboy_agents as agents;
 pub use homeboy_core as core;
 pub use homeboy_core::extension;
-pub use homeboy_refactor as refactor;
 pub use homeboy_release as release;
 pub use homeboy_review as review;
 pub use homeboy_rig as rig;
@@ -21,7 +20,6 @@ pub use homeboy_rig as rig;
 // Re-exported as `runner` so CLI call sites reach it via `crate::runner::*` /
 // `homeboy::runner::*` and register its behavior with core at startup.
 pub use homeboy_fuzz as fuzz;
-pub use homeboy_issues as issues;
 pub use homeboy_lab_runner as runner;
 
 // Re-export the `log_status!` macro and is_zero serde helpers from homeboy-core

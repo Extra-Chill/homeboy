@@ -15,23 +15,6 @@ pub struct SandboxToolDescriptor {
 
 const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
     SandboxToolDescriptor {
-        id: "homeboy.audit",
-        command: "homeboy review audit",
-        required_capability: "run:audit",
-        risk: "bounded_local_run",
-        runs_as_job: true,
-        allowed_arguments: &[
-            "component",
-            "path",
-            "json_summary",
-            "conventions",
-            "only",
-            "exclude",
-            "changed_since",
-            "fixability",
-        ],
-    },
-    SandboxToolDescriptor {
         id: "homeboy.lint",
         command: "homeboy review lint",
         required_capability: "run:lint",
@@ -66,8 +49,6 @@ const SANDBOX_TOOLS: &[SandboxToolDescriptor] = &[
             "coverage",
             "coverage_min",
             "analyze",
-            "drift",
-            "since",
             "changed_since",
             "args",
         ],
@@ -173,7 +154,6 @@ pub fn get(id: &str) -> Result<&'static SandboxToolDescriptor> {
 
 pub fn kind(id: &str) -> Result<JobReadyRunKind> {
     match id {
-        "homeboy.audit" => Ok(JobReadyRunKind::Audit),
         "homeboy.lint" => Ok(JobReadyRunKind::Lint),
         "homeboy.test" => Ok(JobReadyRunKind::Test),
         "homeboy.bench" => Ok(JobReadyRunKind::Bench),
@@ -195,7 +175,6 @@ mod tests {
     #[test]
     fn quality_tool_descriptors_use_nested_review_commands() {
         for (id, command) in [
-            ("homeboy.audit", "homeboy review audit"),
             ("homeboy.lint", "homeboy review lint"),
             ("homeboy.test", "homeboy review test"),
         ] {

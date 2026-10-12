@@ -4,7 +4,6 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::Value;
 
-use homeboy_code_audit::AuditCommandOutput;
 use homeboy_core::ci_profile::CiRunOutput;
 use homeboy_core::execution::{self, PlanExecutionRun};
 use homeboy_core::plan::{HomeboyPlan, PlanStep};
@@ -22,7 +21,7 @@ pub use artifact_findings::ReviewArtifactFindings;
 /// Per-stage section of the consolidated review output.
 #[derive(Serialize)]
 pub struct ReviewStage<T: Serialize> {
-    /// Stage name (`"audit"`, `"lint"`, `"test"`, or `"ci"`).
+    /// Stage name (`"lint"`, `"test"`, or `"ci"`).
     pub stage: String,
     /// Whether the stage ran or was skipped.
     pub ran: bool,
@@ -75,7 +74,6 @@ pub struct ReviewCommandOutput {
     pub observation: Option<ObservationOutputMetadata>,
     pub artifact: ReviewArtifact,
     pub summary: ReviewSummary,
-    pub audit: ReviewStage<AuditCommandOutput>,
     pub lint: ReviewStage<LintCommandOutput>,
     pub test: ReviewStage<TestCommandOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +123,6 @@ pub struct ReviewOutputInput {
 }
 
 pub struct ReviewStages {
-    pub audit: ReviewStage<AuditCommandOutput>,
     pub lint: ReviewStage<LintCommandOutput>,
     pub test: ReviewStage<TestCommandOutput>,
     pub ci_profile: Option<ReviewStage<CiRunOutput>>,
@@ -138,8 +135,7 @@ impl ReviewService {
         input: ReviewOutputInput,
         stages: ReviewStages,
     ) -> (ReviewCommandOutput, i32) {
-        let overall_passed = stages.audit.passed
-            && stages.lint.passed
+        let overall_passed = stages.lint.passed
             && stages.test.passed
             && stages
                 .ci_profile
@@ -149,7 +145,6 @@ impl ReviewService {
         let overall_exit = review_exit_code(
             overall_passed,
             [
-                stages.audit.exit_code,
                 stages.lint.exit_code,
                 stages.test.exit_code,
                 stages
@@ -159,8 +154,7 @@ impl ReviewService {
                     .unwrap_or(0),
             ],
         );
-        let total_findings = stages.audit.finding_count
-            + stages.lint.finding_count
+        let total_findings = stages.lint.finding_count
             + stages.test.finding_count
             + stages
                 .ci_profile
@@ -190,7 +184,6 @@ impl ReviewService {
                 changed_file_count: input.changed_file_count,
                 hints: input.hints,
             },
-            audit: stages.audit,
             lint: stages.lint,
             test: stages.test,
             ci_profile: stages.ci_profile,
@@ -207,7 +200,6 @@ impl ReviewService {
         include_ci_profile: bool,
     ) -> ReviewCommandOutput {
         let stages = ReviewStages {
-            audit: stage_skipped("audit", reason),
             lint: stage_skipped("lint", reason),
             test: stage_skipped("test", reason),
             ci_profile: include_ci_profile.then(|| stage_skipped("ci", reason)),
@@ -217,7 +209,7 @@ impl ReviewService {
     }
 }
 
-fn review_exit_code(passed: bool, codes: [i32; 4]) -> i32 {
+fn review_exit_code(passed: bool, codes: [i32; 3]) -> i32 {
     if passed {
         0
     } else if codes.iter().any(|&code| code >= 2) {
@@ -229,7 +221,6 @@ fn review_exit_code(passed: bool, codes: [i32; 4]) -> i32 {
 
 fn artifact_commands(stages: &ReviewStages) -> Vec<ReviewArtifactCommand> {
     let mut commands = vec![
-        artifact_command(&stages.audit),
         artifact_command(&stages.lint),
         artifact_command(&stages.test),
     ];
@@ -348,12 +339,12 @@ fn generated_at_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_audit_contract::ExtensionPhaseTiming;
+    use homeboy_extension_contract::ExtensionPhaseTiming;
     use homeboy_extension_contract::TestCommandOutput;
 
     #[test]
     fn stage_skipped_helper_marks_not_ran() {
-        let stage: ReviewStage<serde_json::Value> = stage_skipped("audit", "no files changed");
+        let stage: ReviewStage<serde_json::Value> = stage_skipped("lint", "no files changed");
         assert!(!stage.ran);
         assert!(stage.passed);
         assert_eq!(stage.exit_code, 0);
@@ -362,9 +353,9 @@ mod tests {
 
     #[test]
     fn artifact_command_maps_stage_statuses() {
-        let skipped: ReviewStage<serde_json::Value> = stage_skipped("audit", "no files changed");
+        let skipped: ReviewStage<serde_json::Value> = stage_skipped("test", "no files changed");
         let skipped_command = artifact_command(&skipped);
-        assert_eq!(skipped_command.name, "audit");
+        assert_eq!(skipped_command.name, "test");
         assert_eq!(skipped_command.status, "skipped");
         assert_eq!(skipped_command.exit_code, 0);
         assert_eq!(skipped_command.summary, "no files changed");
@@ -406,10 +397,7 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
-            drift: None,
-            auto_fix_drift: None,
             test_scope: None,
             summary: None,
             raw_output: None,
@@ -473,7 +461,7 @@ mod tests {
             artifacts: Vec::new(),
         };
         let failed = ReviewArtifactCommand {
-            name: "audit".to_string(),
+            name: "ci".to_string(),
             status: "failed".to_string(),
             exit_code: 1,
             summary: "1 finding(s); failed".to_string(),
@@ -490,9 +478,9 @@ mod tests {
     #[test]
     fn execute_review_plan_steps_preserves_quality_order() {
         let steps = vec![
-            PlanStep::ready("review.audit", "review.audit").build(),
             PlanStep::ready("review.lint", "review.lint").build(),
             PlanStep::ready("review.test", "review.test").build(),
+            PlanStep::ready("review.build", "review.build").build(),
         ];
         let mut observed = Vec::new();
 
@@ -502,7 +490,7 @@ mod tests {
         })
         .expect("review execution should run ready steps");
 
-        assert_eq!(observed, vec!["review.audit", "review.lint", "review.test"]);
+        assert_eq!(observed, vec!["review.lint", "review.test", "review.build"]);
         assert_eq!(run.results, observed);
         assert!(!run.stopped);
     }
@@ -510,7 +498,7 @@ mod tests {
     #[test]
     fn execute_review_plan_steps_skips_disabled_and_skipped_steps() {
         let steps = vec![
-            PlanStep::ready("review.audit", "review.audit").build(),
+            PlanStep::ready("review.build", "review.build").build(),
             PlanStep::disabled_with_reason("review.lint", "review.lint", "disabled").build(),
             PlanStep::builder(
                 "review.test",
@@ -523,20 +511,20 @@ mod tests {
         let run = execute_review_plan_steps(&steps, |step| Ok(Some(step.id.clone())))
             .expect("review execution should ignore non-executable steps");
 
-        assert_eq!(run.results, vec!["review.audit"]);
+        assert_eq!(run.results, vec!["review.build"]);
         assert!(!run.stopped);
     }
 
     #[test]
     fn execute_review_plan_steps_does_not_treat_failures_as_show_stoppers() {
         let steps = vec![
-            PlanStep::ready("review.audit", "review.audit").build(),
             PlanStep::ready("review.lint", "review.lint").build(),
             PlanStep::ready("review.test", "review.test").build(),
+            PlanStep::ready("review.build", "review.build").build(),
         ];
 
         let run = execute_review_plan_steps(&steps, |step| {
-            let exit_code = if step.id == "review.audit" { 2 } else { 0 };
+            let exit_code = if step.id == "review.lint" { 2 } else { 0 };
             Ok(Some((step.id.clone(), exit_code)))
         })
         .expect("review execution should continue after stage failures");
@@ -544,9 +532,9 @@ mod tests {
         assert_eq!(
             run.results,
             vec![
-                ("review.audit".to_string(), 2),
-                ("review.lint".to_string(), 0),
+                ("review.lint".to_string(), 2),
                 ("review.test".to_string(), 0),
+                ("review.build".to_string(), 0),
             ]
         );
         assert!(!run.stopped);

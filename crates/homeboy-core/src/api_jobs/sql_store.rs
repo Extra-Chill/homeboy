@@ -114,14 +114,69 @@ pub(super) fn open_sql_store_readonly(path: &Path) -> Result<Option<Connection>>
     if !journal.exists() {
         return Ok(None);
     }
-    let connection = Connection::open_with_flags(&journal, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| store_error(path, "open daemon job store read-only", error))?;
+    let rollback_journal = journal.with_file_name(format!(
+        "{}-journal",
+        journal
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    ));
+    if rollback_journal.exists() {
+        let connection = open_sql_store_query_only(path, &journal)?;
+        let initialized = store_state_exists(&connection)
+            .map_err(|error| store_error(path, "inspect daemon job store", error))?;
+        return Ok(initialized.then_some(connection));
+    }
+    let mut connection =
+        match Connection::open_with_flags(&journal, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(connection) => Some(connection),
+            Err(error) if is_sqlite_readonly_error(&error) => {
+                Some(open_sql_store_query_only(path, &journal)?)
+            }
+            Err(error) => return Err(store_error(path, "open daemon job store read-only", error)),
+        };
     connection
+        .as_ref()
+        .expect("opened SQL store")
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|error| store_error(path, "bound daemon job store read", error))?;
-    let initialized = store_state_exists(&connection)
-        .map_err(|error| store_error(path, "inspect daemon job store", error))?;
-    Ok(initialized.then_some(connection))
+    let initialized = match store_state_exists(connection.as_ref().expect("opened SQL store")) {
+        Ok(initialized) => initialized,
+        Err(error) if is_sqlite_readonly_error(&error) => {
+            connection = Some(open_sql_store_query_only(path, &journal)?);
+            store_state_exists(connection.as_ref().expect("recovered SQL store"))
+                .map_err(|error| store_error(path, "inspect daemon job store", error))?
+        }
+        Err(error) => return Err(store_error(path, "inspect daemon job store", error)),
+    };
+    Ok(if initialized { connection } else { None })
+}
+
+fn is_sqlite_readonly_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ReadOnly
+    )
+}
+
+fn open_sql_store_query_only(path: &Path, journal: &Path) -> Result<Connection> {
+    let connection = Connection::open_with_flags(
+        journal,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| store_error(path, "recover daemon job store", error))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .and_then(|_| connection.execute_batch("PRAGMA query_only=ON"))
+        .map_err(|error| {
+            store_error(
+                path,
+                "configure recovered daemon job store read-only",
+                error,
+            )
+        })?;
+    Ok(connection)
 }
 
 pub(super) fn sql_store_initialized(path: &Path) -> Result<bool> {
@@ -766,5 +821,86 @@ pub(super) fn export_legacy_snapshot(path: &Path) -> Result<Vec<u8>> {
                 .map_err(|error| serialize_error(error, "daemon job store snapshot"))
         }
         None => Ok(b"{\"jobs\":[]}".to_vec()),
+    }
+}
+
+#[cfg(test)]
+mod crash_recovery_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    const CHILD_DATABASE: &str = "HOMEBOY_SQLITE_CRASH_TEST_DATABASE";
+    const CHILD_READY: &str = "HOMEBOY_SQLITE_CRASH_TEST_READY";
+
+    #[test]
+    fn child_leaves_hot_rollback_journal() {
+        let Ok(database) = std::env::var(CHILD_DATABASE) else {
+            return;
+        };
+        let ready = std::env::var(CHILD_READY).unwrap();
+        let connection = Connection::open(database).unwrap();
+        connection.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE recovery_probe SET value = printf('%01000d', id) WHERE id > 0;").unwrap();
+        std::fs::write(ready, b"ready").unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    fn crashed_transaction_is_recovered_for_readonly_inspection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json");
+        let database = tombstone_path(&path);
+        let writer = Connection::open(&database).unwrap();
+        writer.execute_batch("CREATE TABLE daemon_store_state (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO daemon_store_state VALUES (1, 0); CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY, value TEXT); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO recovery_probe SELECT x, 'committed' FROM n; PRAGMA journal_mode=DELETE;").unwrap();
+        drop(writer);
+
+        let ready = directory.path().join("child-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "api_jobs::sql_store::crash_recovery_tests::child_leaves_hot_rollback_journal",
+                "--nocapture",
+            ])
+            .env(CHILD_DATABASE, &database)
+            .env(CHILD_READY, &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child began its uncommitted write");
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let readonly =
+            Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let error = readonly
+            .query_row("SELECT value FROM recovery_probe WHERE id = 1", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap_err();
+        assert!(
+            is_sqlite_readonly_error(&error),
+            "expected READONLY_* failure: {error}"
+        );
+        drop(readonly);
+
+        let connection = open_sql_store_readonly(&path).unwrap().unwrap();
+        let value: String = connection
+            .query_row("SELECT value FROM recovery_probe WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(value, "committed");
+        let query_only: i64 = connection
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
     }
 }

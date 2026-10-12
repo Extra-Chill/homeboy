@@ -73,7 +73,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["runs", id, "findings"]) => Ok(HttpEndpoint::RunFindings {
             id: (*id).to_string(),
         }),
-        (HttpMethod::Get, ["audit", "runs"]) => Ok(HttpEndpoint::AuditRuns),
         (HttpMethod::Get, ["bench", "runs"]) => Ok(HttpEndpoint::BenchRuns),
         (HttpMethod::Get, ["activity"]) => Ok(HttpEndpoint::Activity),
         (HttpMethod::Get, ["activity", id]) => Ok(HttpEndpoint::ActivityItem {
@@ -272,9 +271,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 id: (*id).to_string(),
             })
         }
-        (HttpMethod::Post, ["audit"]) => Ok(HttpEndpoint::JobReadyRun {
-            kind: JobReadyRunKind::Audit,
-        }),
         (HttpMethod::Post, ["lint"]) => Ok(HttpEndpoint::JobReadyRun {
             kind: JobReadyRunKind::Lint,
         }),
@@ -310,7 +306,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /runs/:id/artifacts/:artifact_id".to_string(),
                 "GET /runs/:id/artifacts/:artifact_id/content".to_string(),
                 "GET /runs/:id/findings".to_string(),
-                "GET /audit/runs".to_string(),
                 "GET /bench/runs".to_string(),
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
@@ -610,10 +605,6 @@ where
                 })?,
             })
         }
-        HttpEndpoint::AuditRuns => json!({
-            "command": "api.audit.runs",
-            "runs": list_runs(&store, &request.path, Some("audit"), job_store)?,
-        }),
         HttpEndpoint::BenchRuns => json!({
             "command": "api.bench.runs",
             "runs": list_runs(&store, &request.path, Some("bench"), job_store)?,
@@ -2052,16 +2043,6 @@ impl AnalysisJobRequest {
         let mut args = vec![job_ready_slug(kind).to_string()];
 
         match kind {
-            JobReadyRunKind::Audit => {
-                parser.push_optional_string("component", &mut args)?;
-                parser.push_optional_flag_value("path", "--path", &mut args)?;
-                parser.push_bool_flag("json_summary", "--json-summary", &mut args)?;
-                parser.push_bool_flag("conventions", "--conventions", &mut args)?;
-                parser.push_string_array("only", "--only", &mut args)?;
-                parser.push_string_array("exclude", "--exclude", &mut args)?;
-                parser.push_optional_flag_value("changed_since", "--changed-since", &mut args)?;
-                parser.push_bool_flag("fixability", "--fixability", &mut args)?;
-            }
             JobReadyRunKind::Lint => {
                 parser.push_optional_string("component", &mut args)?;
                 parser.push_optional_flag_value("path", "--path", &mut args)?;
@@ -2085,11 +2066,8 @@ impl AnalysisJobRequest {
                 parser.push_bool_flag("coverage", "--coverage", &mut args)?;
                 parser.push_optional_number("coverage_min", "--coverage-min", &mut args)?;
                 parser.push_bool_flag("analyze", "--analyze", &mut args)?;
-                parser.push_bool_flag("drift", "--drift", &mut args)?;
-                parser.push_optional_flag_value("since", "--since", &mut args)?;
                 parser.push_optional_flag_value("changed_since", "--changed-since", &mut args)?;
                 parser.push_passthrough_args(&mut args)?;
-                parser.reject_present("write", "POST /test jobs do not expose mutating --write")?;
             }
             JobReadyRunKind::Bench => {
                 parser.push_optional_string("component", &mut args)?;
@@ -2490,7 +2468,6 @@ fn method_label(method: HttpMethod) -> &'static str {
 
 fn job_ready_slug(kind: JobReadyRunKind) -> &'static str {
     match kind {
-        JobReadyRunKind::Audit => "audit",
         JobReadyRunKind::Lint => "lint",
         JobReadyRunKind::Test => "test",
         JobReadyRunKind::Bench => "bench",

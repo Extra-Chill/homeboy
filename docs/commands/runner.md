@@ -55,7 +55,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Commands that are both resource-policy hot and portable for Lab offload (`agent-task controller from-spec --resume`, `agent-task controller run-from-spec`, `agent-task controller materialize`, `audit`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (`agent-task controller from-spec --resume`, `agent-task controller run-from-spec`, `agent-task controller materialize`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--placement local` keeps a portable hot command local even when a default Lab runner is available, unless a command-specific host policy denies local execution. For benchmarks, `homeboy config set /bench/local_execution '"denied"'` makes local `homeboy bench` execution fail closed until the global config is changed back.
@@ -92,15 +92,12 @@ Lab offload support is intentionally command-specific:
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
 | `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |
-| `audit` full workspace | Yes | Yes | Safe single-workspace replay after snapshot sync. |
-| `audit --changed-since` | No | No | Runs locally for now because changed-since audit depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
 | `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
 | `build` | No | No | Local quality gate; extension-owned build commands are not represented in the portable Lab contract yet. |
 | `fuzz run` / default fuzz run | Yes | Yes | Safe single-workspace replay with fuzz-specific case/result artifacts. |
 | `lint` full workspace | Yes | Yes | Safe single-workspace replay; `--fix` is treated as a mutation flag. |
 | `lint --changed-since` / `lint --changed-only` | No | No | Runs locally for now because changed-file scopes are not represented in the Lab portability contract yet. The Lab plan records the skipped local-only decision. |
-| `refactor --from audit` / `refactor --all` | No | Yes | Source refactor runs with command-owned mutation flags and runner-side workspace controls. |
-| `review` | Yes | Yes | Scoped audit/lint/test umbrella using the same portable quality gates. |
+| `review` | Yes | Yes | Scoped lint/test umbrella using the same portable quality gates. |
 | `rig check` | No | Yes | Runner-side rig validation without starting local services. |
 | `test` full workspace | Yes | Yes | Safe single-workspace replay with runner extension parity preflight. |
 | `test --changed-since` | No | No | Runs locally for now because changed-since test selection depends on git base refs that Lab sync may not have fetched. The Lab plan records the skipped local-only decision. |
@@ -372,7 +369,7 @@ checkout. Missing extensions are reported as `extension.parity` errors with an
 install command such as `homeboy extension install <source> --id rust`.
 
 Lab offload for portable resource-pressure commands uses the same capability vocabulary before running on
-an explicit `--runner`. Homeboy currently gates `lint`, `test`, `audit`,
+an explicit `--runner`. Homeboy currently gates `lint`, `test`,
 `bench`, and `trace` against the source worktree's lightweight tool signals:
 
 - `package.json` requires `node` and `npm`.
@@ -917,7 +914,7 @@ Persists controller-side trust policy for a runner. Policy is stored in the runn
 Policy fields:
 
 - `--project <id>` allows a project to use the runner.
-- `--command <family>` allows a command family such as `test`, `bench`, `lint`, `audit`, `trace`, `cargo`, or `runner.exec`.
+- `--command <family>` allows a command family such as `test`, `bench`, `lint`, `trace`, `cargo`, or `runner.exec`.
 - `--allow-raw-exec <true|false>` controls arbitrary `runner exec` shell access. SSH runner raw exec is denied by default until this is explicitly true.
 - `--workspace-root <path>` limits execution to one or more approved runner workspace roots.
 - `--artifact-policy <label>` records artifact behavior; `none` and `deny` block patch capture.

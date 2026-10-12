@@ -219,10 +219,10 @@ fn cargo_gate_shape(command: &str) -> Result<Option<CargoSelection>> {
 /// read (`parsed_command_preflight::captured_result`), so it costs no
 /// additional live I/O and cannot disagree with what execution actually does.
 ///
-/// A bare `homeboy review lint|audit|test ...` gate (no explicit
+/// A bare `homeboy review lint|test ...` gate (no explicit
 /// `--placement`/`--runner`, or an explicit `--placement local` /
 /// `lab-or-local`) is never rejected here, even under local placement with no
-/// ready Lab runner: lint and audit are not Lab-routed at all, and `review
+/// ready Lab runner: lint is not Lab-routed at all, and `review
 /// test` either runs locally (the common case — resource admission only
 /// engages under measured pressure) or gracefully **defers**. A deferred gate
 /// is its own outcome, distinct from failed (#14731): the candidate stays
@@ -298,8 +298,8 @@ enum PinnedLabRouteRequirement {
 }
 
 /// Only a `homeboy review test` gate that additionally pins an unavailable
-/// Lab route is unrecoverable under local placement. `review lint`/`review
-/// audit` have no Lab-routed defer path at all, and a bare/`auto`/`local`/
+/// Lab route is unrecoverable under local placement. `review lint` has
+/// no Lab-routed defer path at all, and a bare/`auto`/`local`/
 /// `lab-or-local` `review test` either runs locally or defers gracefully —
 /// see `reject_gates_unexecutable_under_resolved_placement` for the full
 /// reasoning.
@@ -711,16 +711,14 @@ mod tests {
         .expect("a Lab-selected placement admits the gate regardless of this local-only check");
     }
 
-    /// #14963: `review lint` and `review audit` are not Lab-routed gates at
-    /// all under this admission check — they must be admitted under local
-    /// placement with no ready Lab runner just like a bare `review test`.
+    /// #14963: `review lint` is not a Lab-routed gate under this admission
+    /// check — it must be admitted under local placement with no ready Lab
+    /// runner just like a bare `review test`.
     #[test]
-    fn admits_review_lint_and_review_audit_gates_under_local_placement() {
+    fn admits_review_lint_gates_under_local_placement() {
         for gate in [
             "homeboy review lint --path .",
             "homeboy review lint data-machine --changed-since origin/main",
-            "homeboy review audit --path .",
-            "homeboy review audit data-machine --changed-since origin/main",
         ] {
             reject_gates_unexecutable_under_placement([gate.to_string()], true, false)
                 .unwrap_or_else(|_| panic!("`{gate}` has no Lab-routed defer path to reject"));

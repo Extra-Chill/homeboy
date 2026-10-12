@@ -5856,9 +5856,11 @@ mod tests {
             record.metadata["cook_continuation_scheduler"]["phase"],
             "artifact_projection"
         );
+        // Status is a read and repairs nothing (#15718); the explicit owner of
+        // the artifact projection and continuation admission is reconcile.
         assert_eq!(
             record.metadata["cook_continuation_scheduler"]["repair_command"],
-            "homeboy agent-task status run"
+            "homeboy agent-task reconcile run --apply"
         );
         assert!(claim_next_from(&store).unwrap().is_none());
     }

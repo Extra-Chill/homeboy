@@ -147,16 +147,13 @@ impl Default for HomeboyPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanKind {
-    Audit,
     Quality,
     Build,
     Release,
     Deploy,
     DependencyStack,
-    IssueReconcile,
     PullRequest,
     Ci,
-    Refactor,
     LabOffload,
     Trace,
     Review,
@@ -170,16 +167,13 @@ pub enum PlanKind {
 impl PlanKind {
     fn slug(&self) -> &'static str {
         match self {
-            Self::Audit => "audit",
             Self::Quality => "quality",
             Self::Build => "build",
             Self::Release => "release",
             Self::Deploy => "deploy",
             Self::DependencyStack => "dependency_stack",
-            Self::IssueReconcile => "issue_reconcile",
             Self::PullRequest => "pull_request",
             Self::Ci => "ci",
-            Self::Refactor => "refactor",
             Self::LabOffload => "lab_offload",
             Self::Trace => "trace",
             Self::Review => "review",
@@ -837,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_warnings() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Refactor, "fixture")
+        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
             .warnings(vec!["review grouping".to_string()])
             .build();
 
@@ -865,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_summarize_disabled_as_skipped() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Audit, "fixture")
+        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
             .steps(vec![PlanStep::disabled(
                 "audit.docs",
                 "audit.detector.docs",

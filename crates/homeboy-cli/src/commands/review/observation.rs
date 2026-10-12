@@ -237,7 +237,7 @@ pub(super) fn finish_success(
         return;
     };
 
-    let status = if !output.audit.ran && !output.lint.ran && !output.test.ran {
+    let status = if !output.lint.ran && !output.test.ran {
         RunStatus::Skipped
     } else if output.summary.passed {
         RunStatus::Pass
@@ -379,7 +379,6 @@ pub(super) fn review_observation_finish_metadata(
     error: Option<&str>,
 ) -> serde_json::Value {
     let mut stages = vec![
-        stage_observation(&output.audit),
         stage_observation(&output.lint),
         stage_observation(&output.test),
     ];
@@ -466,7 +465,6 @@ mod tests {
             ci_profile: None,
             ai: false,
             ai_timeout_seconds: 600,
-            audit_profile: None,
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -613,7 +611,6 @@ mod tests {
 
     #[test]
     fn finish_metadata_captures_aggregate_and_linkable_stages() {
-        use homeboy::core::code_audit::AuditCommandOutput;
         use homeboy_core::extension::lint::LintCommandOutput;
         use homeboy_core::extension::test::TestCommandOutput;
 
@@ -623,16 +620,6 @@ mod tests {
             "scope": "changed-since",
             "observation_status": "running",
         });
-        let audit = ReviewStage {
-            stage: "audit".to_string(),
-            ran: true,
-            passed: true,
-            exit_code: 0,
-            finding_count: 0,
-            hint: "Deep dive: homeboy review audit homeboy --changed-since=origin/main".to_string(),
-            skipped_reason: None,
-            output: None::<AuditCommandOutput>,
-        };
         let lint = ReviewStage {
             stage: "lint".to_string(),
             ran: true,
@@ -657,11 +644,7 @@ mod tests {
             "homeboy",
             "origin/main",
             "abc123",
-            vec![
-                artifact_command(&audit),
-                artifact_command(&lint),
-                artifact_command(&test),
-            ],
+            vec![artifact_command(&lint), artifact_command(&test)],
         );
         let output = ReviewCommandOutput {
             command: "review".to_string(),
@@ -680,7 +663,6 @@ mod tests {
                 changed_file_count: Some(3),
                 hints: vec!["hint".to_string()],
             },
-            audit,
             lint,
             test,
             ci_profile: None,
@@ -694,10 +676,10 @@ mod tests {
         assert_eq!(metadata["exit_code"], 1);
         assert_eq!(metadata["total_findings"], 0);
         assert_eq!(metadata["artifact"]["schema"], "homeboy/review/v1");
-        assert_eq!(metadata["stages"].as_array().expect("stages").len(), 3);
-        assert_eq!(metadata["stages"][2]["name"], "test");
-        assert_eq!(metadata["stages"][2]["status"], "failed");
-        assert_eq!(metadata["stages"][2]["finding_count"], 0);
-        assert!(metadata["stages"][2].get("run_id").is_some());
+        assert_eq!(metadata["stages"].as_array().expect("stages").len(), 2);
+        assert_eq!(metadata["stages"][1]["name"], "test");
+        assert_eq!(metadata["stages"][1]["status"], "failed");
+        assert_eq!(metadata["stages"][1]["finding_count"], 0);
+        assert!(metadata["stages"][1].get("run_id").is_some());
     }
 }

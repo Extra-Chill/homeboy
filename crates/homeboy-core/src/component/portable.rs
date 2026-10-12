@@ -200,7 +200,7 @@ fn validate_github_remote_url_field(component: &Value, field: &str) -> Result<()
     ))
 }
 
-const PORTABLE_SUBSYSTEM_KEYS: &[&str] = &["baselines", "audit_rules"];
+const PORTABLE_SUBSYSTEM_KEYS: &[&str] = &["baselines"];
 
 /// Merge component fields with the explicit non-component portable owners.
 fn merge_portable_config(existing: Value, component: Value) -> Value {
@@ -379,8 +379,7 @@ mod tests {
         let initial = serde_json::json!({
             "id": "test-comp",
             "remote_path": "wp-content/plugins/test",
-            "baselines": { "audit": { "item_count": 42 } },
-            "audit_rules": { "layer_rules": [] },
+            "baselines": { "lint": { "item_count": 42 } },
             "custom_field": "preserve-me"
         });
         fs::write(
@@ -403,20 +402,11 @@ mod tests {
         assert_eq!(
             result
                 .get("baselines")
-                .and_then(|v| v.get("audit"))
+                .and_then(|v| v.get("lint"))
                 .and_then(|v| v.get("item_count"))
                 .and_then(|v| v.as_i64()),
             Some(42),
             "baselines should be preserved"
-        );
-        assert_eq!(
-            result
-                .get("audit_rules")
-                .and_then(|v| v.get("layer_rules"))
-                .and_then(|v| v.as_array())
-                .map(Vec::len),
-            Some(0),
-            "audit_rules should be preserved as subsystem-owned config"
         );
         assert!(
             result.get("custom_field").is_none(),
@@ -598,8 +588,7 @@ mod tests {
     fn merge_portable_config_keeps_only_explicit_subsystem_keys() {
         let existing = serde_json::json!({
             "id": "old",
-            "baselines": { "audit": {} },
-            "audit_rules": { "layer_rules": [] },
+            "baselines": { "lint": {} },
             "remote_path": "real/path",
             "custom_field": "stale"
         });
@@ -613,7 +602,6 @@ mod tests {
 
         assert_eq!(merged.get("id").and_then(|v| v.as_str()), Some("new"));
         assert!(merged.get("baselines").is_some(), "baselines preserved");
-        assert!(merged.get("audit_rules").is_some(), "audit_rules preserved");
         assert!(
             merged.get("custom_field").is_none(),
             "arbitrary unknowns are dropped"

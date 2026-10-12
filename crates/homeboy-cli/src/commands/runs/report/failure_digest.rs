@@ -4,12 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-mod audit;
 mod bench;
 pub(super) mod budget_values;
 mod trace;
 
-use audit::render_audit_section;
 use bench::render_bench_section;
 use trace::render_trace_section;
 
@@ -17,11 +15,11 @@ const LINT_FINDING_DIGEST_LIMIT: usize = 10;
 
 #[derive(Args, Debug, Clone)]
 pub struct FailureDigestArgs {
-    /// Directory containing audit.json, lint.json, test.json, etc.
+    /// Directory containing lint.json, test.json, etc.
     #[arg(long, value_name = "DIR")]
     pub output_dir: String,
 
-    /// Results JSON, e.g. '{"audit":"fail","lint":"pass"}' (supports @file)
+    /// Results JSON, e.g. '{"lint":"fail","test":"pass"}' (supports @file)
     #[arg(long, value_name = "JSON")]
     pub results: String,
 
@@ -37,7 +35,7 @@ pub struct FailureDigestArgs {
     #[arg(long, value_name = "CSV")]
     pub commands: Option<String>,
 
-    /// Commands with autofix support. Defaults to failed audit/lint/test commands.
+    /// Commands with autofix support. Defaults to failed lint/test commands.
     #[arg(long, value_name = "CSV")]
     pub autofix_commands: Option<String>,
 
@@ -95,9 +93,6 @@ fn render_failure_digest(context: &FailureDigestContext) -> String {
     }
     if command_failed(&context.results, "test") {
         render_test_section(&mut out, &context.output_dir, &context.run_url);
-    }
-    if command_failed(&context.results, "audit") {
-        render_audit_section(&mut out, &context.output_dir, &context.run_url);
     }
     if command_reported(&context.results, "trace") {
         render_trace_section(&mut out, &context.output_dir, &context.run_url);
@@ -368,7 +363,7 @@ mod detail {
         let potential = if context.autofix_commands_csv.trim().is_empty() {
             command_names_from_csv(&context.commands_csv)
                 .into_iter()
-                .filter(|cmd| matches!(cmd.as_str(), "audit" | "lint" | "test"))
+                .filter(|cmd| matches!(cmd.as_str(), "lint" | "test"))
                 .collect::<BTreeSet<_>>()
         } else {
             command_names_from_csv(&context.autofix_commands_csv)
@@ -884,13 +879,6 @@ mod detail {
             .unwrap_or_default()
     }
 
-    pub(crate) fn array_from_object(map: &Map<String, Value>, key: &str) -> Vec<Value> {
-        map.get(key)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     pub fn string_array(map: &Map<String, Value>, key: &str) -> Vec<String> {
         map.get(key)
             .and_then(Value::as_array)
@@ -1006,7 +994,7 @@ mod tests {
     #[test]
     fn command_result_stem_matches_the_written_artifact_name() {
         assert_eq!(command_result_stem("review test"), "review-test");
-        assert_eq!(command_result_stem("review audit"), "review-audit");
+        assert_eq!(command_result_stem("review test"), "review-test");
         assert_eq!(command_result_stem("review lint"), "review-lint");
         // Single-word commands were already correct and must stay byte-identical.
         assert_eq!(command_result_stem("test"), "test");

@@ -1,10 +1,4 @@
 pub mod artifacts;
-pub mod audit_provider;
-// The audit config schema was extracted to the homeboy-audit-contract crate
-// (#8425) so it no longer couples component <-> code_audit through the core
-// module tree. Re-exported as `component::audit` so existing
-// `crate::component::audit::*` paths keep resolving.
-pub use homeboy_audit_contract as audit;
 // The pure component model + config data types were extracted to the
 // homeboy-component-contract leaf crate. Re-exported as `component::config` and
 // `component::model` so existing `crate::component::{config,model}::*` paths
@@ -26,16 +20,6 @@ pub mod versioning;
 pub use artifacts::{
     cleanup_artifact_report, declared_cleanup_artifact_paths, CleanupArtifactCandidate,
     CleanupArtifactReport,
-};
-pub use audit::{
-    ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
-    CommandStatusContractScenario, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,
-    ConventionTagGlob, CoreBoundaryLeakConfig, DetectorProfileConfig, DuplicationDetectorConfig,
-    KnownSymbolEntry, KnownSymbolHeaderVersionProvider, KnownSymbolKind, KnownSymbolVersionedEntry,
-    MutatingResourceAccessConfig, PublicRegistryExposureConfig, RedirectValidationConfig,
-    RequestedDetectorRule, RequestedDetectorRuleBody, RequiredRegexScope, SourcePolicyMatchMode,
-    SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm, TestWiringConfig, TestWiringPolicy,
-    ThinCommandAdapterConfig, ThinCommandAdapterMarkerGroup, VersionSource,
 };
 pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,

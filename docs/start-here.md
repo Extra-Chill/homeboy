@@ -12,10 +12,9 @@ From a repository with Homeboy configuration, run:
 homeboy review --changed-since origin/main
 ```
 
-`review` is the PR-shaped umbrella for scoped `audit`, `lint`, and `test` checks. Use individual commands when you need to focus on one stage:
+`review` is the PR-shaped umbrella for scoped `lint` and `test` checks. Use individual commands when you need to focus on one stage:
 
 ```bash
-homeboy review audit
 homeboy review lint
 homeboy review test
 homeboy review build

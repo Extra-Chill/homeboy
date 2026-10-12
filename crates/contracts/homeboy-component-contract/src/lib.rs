@@ -4,7 +4,7 @@
 //! `GithubConfig`, `ComponentScriptsConfig`, `ScopeConfig`, …) describe the
 //! shape of a homeboy component as declared in `homeboy.json`. They are
 //! behavior-free data (serde + `homeboy-error` for validation + the
-//! `homeboy-audit-contract` / `homeboy-extension-contract` leaf types), so this
+//! `homeboy-extension-contract` leaf types), so this
 //! is a leaf crate other crates can depend on without pulling in core.
 //!
 //! The extension-driven, filesystem-touching behavior on `Component`

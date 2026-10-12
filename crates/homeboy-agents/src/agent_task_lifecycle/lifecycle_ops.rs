@@ -5681,7 +5681,8 @@ pub fn is_controller_local(record: &AgentTaskRunRecord) -> bool {
     record.runner_id().is_none() && record.runner_job_id().is_none() && record.lab_handoff.is_none()
 }
 
-/// Whether explicit status reconciliation may reach the runner.
+/// Whether explicit convergence ([`reconcile_status_with_options`]) may reach the
+/// runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentTaskRunnerProbe {
     /// Reach the runner only when the record is genuinely runner-backed and
@@ -5824,14 +5825,24 @@ pub struct AgentTaskStatusOutcome {
     pub runner_probe: AgentTaskRunnerProbePlan,
 }
 
-/// Read the bounded controller-owned lifecycle record without reconciliation.
+/// Read the bounded controller-owned lifecycle record. Reads never mutate
+/// (#13697); the transitions a record's durable evidence implies are owned by
+/// [`reconcile_status`] (#15718).
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     status_in_store(&lifecycle_store, run_id)
 }
 
-/// Apply deferred-candidate, runtime-admission, and runner/daemon projections,
-/// persisting the resulting current, joinable controller record.
+/// Explicitly converge one run: apply the deferred-candidate, runner/daemon,
+/// liveness, candidate-adoption, artifact-projection, and Cook-continuation
+/// transitions its durable evidence already implies, and return the converged
+/// record.
+///
+/// This is an action, not a read. Its owners are `agent-task reconcile <run>
+/// --apply`, the daemon's stale-run sweep (through the same reconcile path), the
+/// runner terminal observer, and the mutating commands that must decide from a
+/// converged record (promotion, finalization, retry, cancellation, Cook
+/// supervision). Status reads use [`status`] and never call this (#15718).
 pub fn reconcile_status(run_id: &str) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     Ok(reconcile_status_in_store(
@@ -5843,8 +5854,8 @@ pub fn reconcile_status(run_id: &str) -> Result<AgentTaskRunRecord> {
     .record)
 }
 
-/// [`reconcile_status`] with explicit control over whether reconciliation may
-/// reach the runner.
+/// [`reconcile_status`] with explicit control over whether convergence may reach
+/// the runner.
 ///
 /// A controller-local record is always answered locally, regardless of options.
 pub fn reconcile_status_with_options(
@@ -5855,71 +5866,6 @@ pub fn reconcile_status_with_options(
     reconcile_status_in_store(&lifecycle_store, run_id, options, false)
 }
 
-// The ambient `exact_status()` shim that used to sit here is
-// gone; the reconciler was its only caller and now reads exactly through the store it resolved once (#7505).
-
-/// The shared, store-rooted body of [`reconcile_status`],
-/// [`reconcile_status_with_options`], and [`exact_status`].
-///
-/// Status reconciliation takes two advisory locks and has roughly twenty
-/// durable write sites, so every step below has to name the installation the
-/// caller injected — a status that decided from one home and committed into
-/// another would be silently wrong in exactly the way #7505 exists to stop.
-/// The three entry points above are now thin ambient wrappers that resolve
-/// `AgentTaskLifecycleStore::from_current_environment()` and delegate here,
-/// which is the same store every `store::` shim used to resolve for itself, so
-/// their behaviour is unchanged.
-///
-/// Both advisory locks follow the injected store.
-/// `reconcile_deferred_candidate_in_store` and the expiry path's
-/// `LabHandoffLock::lock_in_store` (via `expire_unaccepted_lab_handoff_in_store`
-/// and `record_detached_lab_run_in_store`) both take their lock on this store's
-/// own `run_dir`. A lock resolved from `paths::homeboy_data()` while the
-/// mutation it guards followed an injected store would be held where nobody
-/// contends for it.
-///
-/// Two roots that are *not* lifecycle state stay process-global on purpose, and
-/// neither is an oversight:
-///
-/// * `with_runner_continuation` — the runner/broker provider registry, reached
-///   through `reconcile_runner_job_state_in_store`. It is configured trust
-///   material and a subprocess contract, not durable lifecycle state (#12618).
-/// * `homeboy_core::build_identity::current()` — the identity of *this*
-///   coordinator process, which is the fact the continuation scheduler is
-///   recording.
-///
-/// # The Cook recipe store is derived, not injected
-///
-/// The Cook continuation family (`load_recipe`, `load_recipe_for_attempt`,
-/// `enqueue_terminal_continuation`) needs a `CookRecipeStore`, which is a
-/// different store kind from the lifecycle store this function accepts. That is
-/// the cross-kind shape `KNOWN_MIXED_STORE_FUNCTIONS` exists to make someone
-/// argue for, so here is the argument.
-///
-/// This function derives it: `CookRecipeStore::from_data_root(lifecycle_store
-/// .data_root())`. It does not take a second store parameter, because a second
-/// parameter would be a *hazard*, not a safeguard. `CookRecipeStore` carries
-/// exactly one field — a data root — and every path it resolves hangs off it
-/// (`<data>/agent-task-cooks`, `<data>/agent-task-cook-continuations`). There is
-/// no information in a `CookRecipeStore` that is not already in the lifecycle
-/// store's data root, so pairing them can only ever add a way for the two to
-/// disagree. A caller that passed a mismatched pair would enqueue a Cook
-/// continuation for a run whose lifecycle record lives in another home, and
-/// nothing would fail while it happened. Derivation makes that unrepresentable
-/// instead of merely discouraged.
-///
-/// The derivation is exact, not approximate: `CookRecipeStore::from_current_data_root()`
-/// resolves `paths::homeboy_data()`, and `AgentTaskLifecycleStore::from_environment()`
-/// resolves `PathRoots::from_environment()`, whose `data` is that same
-/// `paths::homeboy_data()`. For the ambient wrappers above the derived store is
-/// byte-for-byte the store the old code resolved.
-///
-/// `validate_recipe_attempt_record` is the one member of that family that is
-/// *not* recipe-store work: it reads the controller plan, which is lifecycle
-/// state. This function calls
-/// `validate_recipe_attempt_record_with_controller_plan` with a plan read from
-/// the injected lifecycle store, so the recipe half and the plan half cannot
-/// come from different homes.
 /// Resolve a `CandidateRecoverable` latch left behind by a completed
 /// candidate adoption on a record whose own execution never reached a
 /// provider (a genuine pre-execution failure, durably preserved as
@@ -5942,31 +5888,29 @@ pub fn reconcile_status_with_options(
 /// until any dispatched remediation is itself terminal — meaning there is
 /// nothing left to resume — before restoring this record's true terminal
 /// fact.
-fn reconcile_candidate_adoption_terminal_state_in_store(
+fn candidate_adoption_terminal_state_is_known(
     lifecycle_store: &AgentTaskLifecycleStore,
-    record: &mut AgentTaskRunRecord,
-) -> Result<bool> {
+    record: &AgentTaskRunRecord,
+) -> bool {
     if record.state != AgentTaskRunState::CandidateRecoverable
         || record.metadata.get("pre_execution_failure").is_none()
     {
-        return Ok(false);
+        return false;
     }
     let Some(adoption) = record.candidate_adoption.as_ref() else {
-        return Ok(false);
+        return false;
     };
     if !matches!(adoption.state.as_str(), "completed" | "failed") {
-        return Ok(false);
+        return false;
     }
-    if let Some(remediation_run_id) = adoption.remediation_run_id.clone() {
-        let remediation_terminal = lifecycle_store
-            .read_record(&remediation_run_id)
-            .is_ok_and(|remediation| remediation.state.is_terminal());
-        if !remediation_terminal {
-            return Ok(false);
-        }
-    }
-    set_run_state(record, AgentTaskRunState::Failed);
-    Ok(true)
+    adoption
+        .remediation_run_id
+        .as_deref()
+        .is_none_or(|remediation_run_id| {
+            lifecycle_store
+                .read_record_bounded(remediation_run_id)
+                .is_ok_and(|remediation| remediation.state.is_terminal())
+        })
 }
 
 /// Admit terminal provider results to the durable Cook continuation queue.
@@ -6044,49 +5988,89 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
     lifecycle_store.read_record(run_id)
 }
 
+/// The shared, store-rooted body of [`reconcile_status`] and
+/// [`reconcile_status_with_options`].
+///
+/// Every durable write below names the installation the caller injected; both
+/// advisory locks (`reconcile_deferred_candidate_in_store` and the expiry
+/// path's `LabHandoffLock::lock_in_store`) are taken on this store's own
+/// `run_dir` (#7505). The Cook recipe store is *derived* from
+/// `lifecycle_store.data_root()` rather than injected: it carries nothing but
+/// that root, so a second parameter could only add a way for the two to
+/// disagree.
+///
+/// Terminal transitions go through the compare-and-swap API
+/// (`commit_terminal_record`, `project_terminal_aggregate`,
+/// `transition_when`), so a converge that decided from a stale snapshot cannot
+/// replace a concurrent terminal decision (#15718). A Cook alias's adoption
+/// view is a projection, not a transition: it is applied to the returned record
+/// only and never persisted ([`project_cook_alias_view_in_store`]).
 pub fn reconcile_status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     options: AgentTaskStatusOptions,
     exact: bool,
 ) -> Result<AgentTaskStatusOutcome> {
-    let recipe_store =
-        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = if exact {
         requested_run_id.clone()
     } else {
         resolve_run_id_in_store(lifecycle_store, run_id)?
     };
-    let _ = reconcile_deferred_candidate_in_store(lifecycle_store, &resolved_run_id)?;
-    let mut record = lifecycle_store.read_record(&resolved_run_id)?;
-    // The admission queue is durable lifecycle-adjacent state, so it is read
-    // from this store's own controller-runtime root and not from
-    // `paths::controller_runtimes_store()`. Reporting this installation's queue
-    // position against another installation's owner is the same class of split
-    // as writing the record itself into the wrong home. This mirrors the rooted
-    // `cancel_admission_at` call in the cancellation spine.
-    if let Ok(admission) = homeboy_core::controller_runtime::admission_status_at(
-        &lifecycle_store
-            .data_root()
-            .join(homeboy_core::paths::CONTROLLER_RUNTIMES_STORE),
-        &record.run_id,
-    ) {
-        record.metadata["controller_admission"] = admission;
-        lifecycle_store.write_record_in_place(&mut record)?;
+    let (mut record, runner_probe) =
+        converge_resolved_run_in_store(lifecycle_store, &resolved_run_id, options)?;
+    project_cook_alias_view_in_store(lifecycle_store, &mut record, &requested_run_id, exact);
+    Ok(AgentTaskStatusOutcome {
+        record,
+        runner_probe,
+    })
+}
+
+/// A Cook alias's adoption view of its latest attempt. It is a projection of
+/// the indexed attempts, not a transition, so it is applied to the returned
+/// record and never persisted (#15718).
+fn project_cook_alias_view_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    requested_run_id: &str,
+    exact: bool,
+) {
+    if exact || requested_run_id == record.run_id {
+        return;
     }
-    if reconcile_candidate_adoption(&mut record) {
-        lifecycle_store.write_record_in_place(&mut record)?;
+    let Ok(index) = lifecycle_store.read_cook_index(requested_run_id) else {
+        return;
+    };
+    project_cook_alias_adoption_in_store(lifecycle_store, record, &index);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("cook_alias".to_string(), json!(requested_run_id));
+    metadata.insert(
+        "cook_index".to_string(),
+        serde_json::to_value(index).unwrap_or(Value::Null),
+    );
+}
+
+fn converge_resolved_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    resolved_run_id: &str,
+    options: AgentTaskStatusOptions,
+) -> Result<(AgentTaskRunRecord, AgentTaskRunnerProbePlan)> {
+    let recipe_store =
+        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let _ = reconcile_deferred_candidate_in_store(lifecycle_store, resolved_run_id)?;
+    // A candidate adoption whose owner process died is interrupted. Decided
+    // from a fresh read under the store lock, not from a caller copy.
+    lifecycle_store.mutate_record(resolved_run_id, reconcile_candidate_adoption)?;
+    let mut record = lifecycle_store.read_record(resolved_run_id)?;
+    if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, resolved_run_id)? {
+        record = lifecycle_store.read_record(resolved_run_id)?;
     }
-    if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &resolved_run_id)? {
-        record = lifecycle_store.read_record(&resolved_run_id)?;
-    }
-    if recover_reserved_lab_runner_job_in_store(lifecycle_store, &resolved_run_id)? {
-        record = lifecycle_store.read_record(&resolved_run_id)?;
+    if recover_reserved_lab_runner_job_in_store(lifecycle_store, resolved_run_id)? {
+        record = lifecycle_store.read_record(resolved_run_id)?;
     }
     if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
-        let _ = expire_unaccepted_lab_handoff_in_store(lifecycle_store, &resolved_run_id)?;
-        record = lifecycle_store.read_record(&resolved_run_id)?;
+        let _ = expire_unaccepted_lab_handoff_in_store(lifecycle_store, resolved_run_id)?;
+        record = lifecycle_store.read_record(resolved_run_id)?;
     }
     // A daemon can evict a completed job from its active store before a restarted
     // controller observes it. The terminal event log already mirrored into this
@@ -6094,24 +6078,25 @@ pub fn reconcile_status_in_store(
     // Consume it before querying the live runner, which is no longer authority
     // once its active entry has been evicted.
     if project_persisted_terminal_runner_events_in_store(lifecycle_store, &mut record)? {
-        record = lifecycle_store.read_record(&resolved_run_id)?;
+        record = lifecycle_store.read_record(resolved_run_id)?;
     }
     if super::cancellation::reconcile_controller_job_cancellation_in_store(
         lifecycle_store,
         &mut record,
     )? {
-        lifecycle_store.write_record_in_place(&mut record)?;
+        if record.state.is_terminal() {
+            record = match lifecycle_store.commit_terminal_record(&record)? {
+                super::terminal_transition::TerminalRecordCommit::Committed(committed)
+                | super::terminal_transition::TerminalRecordCommit::Superseded(committed) => {
+                    committed
+                }
+            };
+        } else {
+            lifecycle_store.write_record_in_place(&mut record)?;
+        }
     }
     if !record.state.is_terminal() {
         let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
-        let controller_plan_path = lifecycle_store
-            .controller_plan_path(&record.run_id)
-            .display()
-            .to_string();
-        if record.plan_path != controller_plan_path {
-            record.plan_path = controller_plan_path;
-            lifecycle_store.write_record_in_place(&mut record)?;
-        }
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
             let aggregate_path = lifecycle_store
                 .aggregate_path(&record.run_id)
@@ -6127,7 +6112,14 @@ pub fn reconcile_status_in_store(
             );
 
             if reconciled != record {
-                if let Err(error) = lifecycle_store.write_record_in_place(&mut reconciled) {
+                let committed = if reconciled.state.is_terminal() {
+                    lifecycle_store
+                        .project_terminal_aggregate(&reconciled, record.state, &aggregate)
+                        .map(|committed| reconciled = committed)
+                } else {
+                    lifecycle_store.write_record_in_place(&mut reconciled)
+                };
+                if let Err(error) = committed {
                     reconciled
                         .ensure_metadata_object()
                         .insert("finalization_error".to_string(), json!(error.message));
@@ -6140,9 +6132,8 @@ pub fn reconcile_status_in_store(
     if reconcile_local_provider_ownership(lifecycle_store, &mut record)? {
         lifecycle_store.write_record_in_place(&mut record)?;
     }
-    // The only genuinely-remote step in this read. Skipping it for a
-    // controller-local record is what makes `agent-task status` answerable while
-    // the Lab is wedged (#10418).
+    // The only genuinely-remote step. Skipping it for a controller-local
+    // record is what keeps this answerable while the Lab is wedged (#10418).
     let runner_probe = runner_probe_plan(&record, options);
     let before_liveness_reconciliation = record.clone();
     if runner_probe.performed {
@@ -6152,14 +6143,23 @@ pub fn reconcile_status_in_store(
     if record != before_liveness_reconciliation {
         lifecycle_store.write_record_in_place(&mut record)?;
     }
-    if reconcile_candidate_adoption_terminal_state_in_store(lifecycle_store, &mut record)? {
-        lifecycle_store.write_record_in_place(&mut record)?;
+    // A `CandidateRecoverable` latch whose adoption (and any dispatched
+    // remediation) concluded resolves to the record's true terminal fact,
+    // re-decided from the stored record under compare-and-swap.
+    if candidate_adoption_terminal_state_is_known(lifecycle_store, &record) {
+        if let Some(committed) = lifecycle_store.transition_when(&record.run_id, |stored| {
+            candidate_adoption_terminal_state_is_known(lifecycle_store, stored).then(|| {
+                AgentTaskTransition::Terminate {
+                    outcome: AgentTaskTerminalOutcome::Failed,
+                    metadata: serde_json::Map::new(),
+                }
+            })
+        })? {
+            record = committed;
+        }
     }
     if record.state.is_terminal() {
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&record.run_id) {
-            if reconcile_terminal_provider_models(&mut record, &aggregate) {
-                lifecycle_store.write_record_in_place(&mut record)?;
-            }
             if !crate::agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
                 lifecycle_store,
                 &record,
@@ -6171,27 +6171,10 @@ pub fn reconcile_status_in_store(
                     &aggregate,
                 )?;
             }
-            // Reproject authoritative aggregate model evidence onto a terminal
-            // record whose durable lifecycle model is stale-null (#9411). A run
-            // that went terminal before the #9404/#9405 model repair keeps
-            // `provider_runtime[].metadata.model = null`, which blocks
-            // `finalize-pr` even though the aggregate recorded a concrete model.
-            if crate::agent_task_lifecycle::terminal_provider_model_reconciliation_needed(
-                &record, &aggregate,
-            ) {
-                let controller_plan = lifecycle_store.read_controller_plan(&record.run_id)?;
-                let projection_plan = aggregate_projection_plan(&controller_plan, &aggregate);
-                crate::agent_task_lifecycle::reconcile_terminal_provider_model_in_store(
-                    lifecycle_store,
-                    &mut record,
-                    &projection_plan,
-                    &aggregate,
-                )?;
-            }
         }
     }
-    // Read-side reconciliation only writes the durable continuation signal.
-    // The separate consumer owns execution and cannot inherit a local closure.
+    // Convergence only writes the durable continuation signal. The separate
+    // consumer owns execution and cannot inherit a local closure.
     if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -6244,7 +6227,8 @@ pub fn reconcile_status_in_store(
                                 .unwrap_or("pending")
                                 .to_string();
                             let run_id = record.run_id.clone();
-                            let repair_command = format!("homeboy agent-task status {run_id}");
+                            let repair_command =
+                                format!("homeboy agent-task reconcile {run_id} --apply");
                             record.ensure_metadata_object().insert(
                                 "cook_continuation_scheduler".to_string(),
                                 json!({
@@ -6257,10 +6241,7 @@ pub fn reconcile_status_in_store(
                                 }),
                             );
                             lifecycle_store.write_record_in_place(&mut record)?;
-                            return Ok(AgentTaskStatusOutcome {
-                                record,
-                                runner_probe,
-                            });
+                            return Ok((record, runner_probe));
                         }
                         let existing_scheduler_status = record
                             .metadata
@@ -6350,21 +6331,7 @@ pub fn reconcile_status_in_store(
             }
         }
     }
-    if !exact && requested_run_id != record.run_id {
-        if let Ok(index) = lifecycle_store.read_cook_index(&requested_run_id) {
-            project_cook_alias_adoption_in_store(lifecycle_store, &mut record, &index)?;
-            let metadata = record.ensure_metadata_object();
-            metadata.insert("cook_alias".to_string(), json!(requested_run_id));
-            metadata.insert(
-                "cook_index".to_string(),
-                serde_json::to_value(index).unwrap_or(Value::Null),
-            );
-        }
-    }
-    Ok(AgentTaskStatusOutcome {
-        record,
-        runner_probe,
-    })
+    Ok((record, runner_probe))
 }
 
 /// [`status`] against explicitly injected durable lifecycle roots.

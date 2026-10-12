@@ -170,79 +170,85 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
     paths::runner_session_file(runner_id)
 }
 
-pub(super) fn controller_id() -> String {
-    // The identity is resolved once per process: it names this controller's
-    // service unit, daemon state and sessions, so it must not change mid-run
-    // even if the config root's environment does.
-    static PERSISTED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let persisted = PERSISTED.get_or_init(|| {
-        let root = paths::homeboy().expect("resolve Homeboy config root");
-        persisted_controller_id(&root, system_hostname().as_deref())
-            .expect("persist controller identity")
-    });
+pub(crate) fn controller_id() -> String {
+    // Resolved once per process: the id names this controller's Lab service
+    // unit, daemon state and sessions, so it must not change mid-run.
+    static DERIVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     controller_id_from_scope(
         std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
-        persisted.clone(),
+        DERIVED
+            .get_or_init(|| {
+                derive_controller_id(machine_identity().as_deref(), effective_uid(), || {
+                    hostname_fallback()
+                })
+            })
+            .clone(),
     )
 }
 
-fn controller_id_from_scope(explicit: Option<&str>, persisted: String) -> String {
+fn controller_id_from_scope(explicit: Option<&str>, derived: String) -> String {
     explicit
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or(persisted)
+        .unwrap_or(derived)
 }
 
-fn persisted_controller_id(config_root: &Path, hostname: Option<&str>) -> std::io::Result<String> {
-    let path = config_root.join("controller-id");
-    if let Ok(value) = std::fs::read_to_string(&path) {
-        return Ok(value.trim().to_string());
+/// Derive the controller id from the OS machine identity and the effective
+/// uid. Both survive hostname changes and reboots, and deriving (rather than
+/// persisting) keeps read-only commands free of config writes. Only a platform
+/// without a machine identity falls back to the hostname.
+fn derive_controller_id(
+    machine: Option<&str>,
+    uid: u32,
+    hostname: impl FnOnce() -> String,
+) -> String {
+    match machine.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(machine) => {
+            let digest = homeboy_engine_primitives::content_hash::sha256_hex(
+                format!("homeboy-controller:{machine}:{uid}").as_bytes(),
+            );
+            format!("controller-{}", &digest[..16])
+        }
+        None => format!("{}-uid-{uid}", hostname()),
     }
-    std::fs::create_dir_all(config_root)?;
-    let host = hostname
-        .map(str::trim)
-        .filter(|hostname| !hostname.is_empty())
-        .unwrap_or("local");
-    let slug = host
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let slug = slug.trim_matches('-');
-    let id = format!(
-        "{}-{}",
-        if slug.is_empty() { "local" } else { slug },
-        &uuid::Uuid::new_v4().simple().to_string()[..12]
-    );
-    let temporary = config_root.join(format!(".controller-id.{}.tmp", uuid::Uuid::new_v4()));
+}
+
+fn machine_identity() -> Option<String> {
+    #[cfg(target_os = "macos")]
     {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(id.as_bytes())?;
-        file.sync_all()?;
+        let mut uuid = [0_u8; 16];
+        let wait = libc::timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &wait) } != 0 {
+            return None;
+        }
+        Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
     }
-    match std::fs::hard_link(&temporary, &path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(temporary);
-            Ok(id)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(temporary);
-            std::fs::read_to_string(path).map(|value| value.trim().to_string())
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(temporary);
-            Err(error)
-        }
+    #[cfg(target_os = "linux")]
+    {
+        ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+fn effective_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
     }
 }
 
@@ -828,7 +834,6 @@ pub(super) fn read_session_for_controller_in_root(
     runner_id: &str,
     controller_id: &str,
 ) -> Result<Option<RunnerSession>> {
-    retire_superseded_controller_sessions(config_root, runner_id, controller_id)?;
     read_session_at(&paths::runner_controller_session_file_in_root(
         config_root,
         runner_id,
@@ -1649,34 +1654,25 @@ mod tests {
     }
 
     #[test]
-    fn controller_id_is_persisted_independent_of_hostname_and_concurrent_first_use() {
-        let root = TempDir::new().expect("config root");
-        let threads = (0..8)
-            .map(|index| {
-                let root = root.path().to_path_buf();
-                std::thread::spawn(move || {
-                    persisted_controller_id(
-                        &root,
-                        Some(if index % 2 == 0 {
-                            "mac.lan"
-                        } else {
-                            "MacBook.local"
-                        }),
-                    )
-                    .expect("controller id")
-                })
-            })
-            .collect::<Vec<_>>();
-        let ids = threads
-            .into_iter()
-            .map(|thread| thread.join().expect("thread"))
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(ids.len(), 1);
-        let id = ids.into_iter().next().expect("id");
-        assert!(id.starts_with("mac-lan-") || id.starts_with("macbook-local-"));
+    fn controller_id_derives_from_machine_identity_independent_of_hostname() {
+        let first = derive_controller_id(Some("machine-a"), 501, || "mac.lan".to_string());
+        let renamed = derive_controller_id(Some("machine-a"), 501, || "Mac".to_string());
+        assert_eq!(first, renamed, "a hostname change must not change the id");
+        assert!(first.starts_with("controller-") && first.len() == "controller-".len() + 16);
+        assert_ne!(
+            first,
+            derive_controller_id(Some("machine-a"), 502, || "mac.lan".to_string()),
+            "users on one machine keep separate identities"
+        );
+        assert_ne!(
+            first,
+            derive_controller_id(Some("machine-b"), 501, || "mac.lan".to_string()),
+            "machines keep separate identities"
+        );
         assert_eq!(
-            persisted_controller_id(root.path(), Some("changed-host")).expect("persisted id"),
-            id
+            derive_controller_id(None, 501, || "host".to_string()),
+            "host-uid-501",
+            "only a platform without a machine identity uses the hostname"
         );
     }
 
@@ -1693,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn old_hostname_uid_sessions_are_retired_before_session_lookup() {
+    fn old_hostname_uid_sessions_are_retired_when_the_current_session_is_written() {
         let root = TempDir::new().expect("config root");
         let runner = paths::runner_sessions_dir_in_root(root.path()).join("lab");
         std::fs::create_dir_all(&runner).expect("runner session dir");

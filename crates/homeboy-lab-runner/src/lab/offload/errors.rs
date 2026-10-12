@@ -400,7 +400,7 @@ pub(crate) fn missing_mutation_patch_error(
         error = error
             .with_hint(format!("Inspect the Lab run with `homeboy runs show {run_id}`."))
             .with_hint(format!(
-                "List mirrored Lab artifacts with `homeboy runs artifacts {run_id}` and verify the runner produced a lint/refactor patch artifact."
+                "List mirrored Lab artifacts with `homeboy runs artifacts {run_id}` and verify the runner produced a lint fix patch artifact."
             ));
     } else if let Some(job_id) = exec_output.job_id.as_deref() {
         error = error.with_hint(format!(

@@ -1,4 +1,6 @@
 pub mod baseline;
+pub mod fix;
+mod fix_scope;
 pub mod report;
 pub mod run;
 
@@ -8,6 +10,7 @@ use homeboy_core::component::Component;
 use homeboy_extension_contract::ExtensionCapability;
 
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
+pub use fix::{run_lint_fix, LintFixRequest, LintFixRun};
 pub use report::LintCommandOutput;
 pub use run::{
     resolve_lint_fix_routes, run_main_lint_workflow, run_self_check_lint_workflow,

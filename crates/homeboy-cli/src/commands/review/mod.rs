@@ -1,8 +1,8 @@
-//! Review command — scoped audit + lint + test umbrella.
+//! Review command — scoped lint + test umbrella.
 //!
 //! `homeboy review --changed-since=<ref>` runs the same scoped checks a CI
 //! reviewer would run on a PR diff, fanning out to the existing
-//! `audit`, `lint`, and `test` commands and collapsing their structured
+//! `lint` and `test` commands and collapsing their structured
 //! results into a single consolidated report.
 //!
 //! The umbrella is deliberately thin: scoping logic lives in the underlying
@@ -14,7 +14,6 @@
 
 use clap::{Args, Subcommand};
 use homeboy::core::ci_profile::{self, CiRunSelection};
-use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::git;
 use homeboy::core::observation::ObservationStore;
@@ -44,7 +43,7 @@ use super::utils::args::{
     PositionalComponentArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{audit, audit_baseline, build, ci, lint, test, CmdResult};
+use super::{build, ci, lint, test, CmdResult};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
@@ -96,7 +95,7 @@ pub struct ReviewArgs {
     pub command: Option<ReviewCommand>,
 
     /// Attach to an already-persisted review run instead of starting another
-    /// audit/lint/test execution.
+    /// lint/test execution.
     #[arg(long, value_name = "RUN_ID")]
     pub run_id: Option<String>,
 
@@ -111,8 +110,8 @@ pub struct ReviewArgs {
     // flattens, so `review --changed-since` and `review lint --changed-since`
     // can no longer drift apart.
     //
-    // Lint and audit reuse the precomputed working-tree file set for
-    // `--changed-only`; test still runs against the full component.
+    // Lint reuses the precomputed working-tree file set for `--changed-only`;
+    // test still runs against the full component.
     #[command(flatten)]
     pub changed: ChangedScopeArgs,
 
@@ -131,15 +130,6 @@ pub struct ReviewArgs {
     /// Maximum independent reviewer runtime in seconds.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub ai_timeout_seconds: u64,
-
-    /// Audit detector profile for the audit stage. Defaults to `pr` for
-    /// changed-file review and `full` for full review.
-    #[arg(
-        long,
-        value_name = "PROFILE",
-        value_parser = ["full", "pr", "architecture"]
-    )]
-    pub audit_profile: Option<String>,
 
     /// Output format. Default JSON envelope; `--report=pr-comment` emits a
     /// markdown PR-comment section instead, suitable for piping to
@@ -168,11 +158,6 @@ pub struct ReviewArgs {
 pub enum ReviewCommand {
     /// Review a committed candidate with an operator-installed AI reviewer
     Ai(ReviewAiArgs),
-    /// Audit code conventions and detect architectural drift
-    Audit(ReviewAuditArgs),
-    /// Internal target for normalized `review audit baseline ...` invocations
-    #[command(name = "audit-baseline", hide = true)]
-    AuditBaseline(audit_baseline::AuditBaselineArgs),
     /// Lint a component
     Lint(lint::LintArgs),
     /// Run tests for a component
@@ -198,8 +183,6 @@ impl ReviewCommand {
     fn lab_label(&self) -> &'static str {
         match self {
             Self::Ai(_) => "review ai",
-            Self::Audit(_) => "review audit",
-            Self::AuditBaseline(_) => "review audit-baseline",
             Self::Lint(_) => "review lint",
             Self::Test(_) => "review test",
             Self::Build(_) => "review build",
@@ -222,26 +205,7 @@ pub struct ReviewAiArgs {
     pub ai_timeout_seconds: u64,
 }
 
-#[derive(Args)]
-pub struct ReviewAuditArgs {
-    #[command(flatten)]
-    pub audit: audit::AuditArgs,
-
-    /// Operate only on files modified in the working tree. Review translates
-    /// this to audit's precomputed HEAD-based changed-file scope.
-    #[arg(long, conflicts_with = "changed_since")]
-    pub changed_only: bool,
-
-    /// Audit detector profile for this review action.
-    #[arg(
-        long,
-        value_name = "PROFILE",
-        value_parser = ["full", "pr", "architecture"]
-    )]
-    pub audit_profile: Option<String>,
-}
-
-const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their audit, lint, and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
+const REVIEW_SCOPED_LAB_UNSUPPORTED_REASON: &str = "Scoped review runs stay local because their lint and test substeps use changed-file scopes that are not represented consistently in the current Lab portability contract yet.";
 
 impl ReviewArgs {
     /// Project parent-first and action-first options into one action-aware
@@ -278,34 +242,6 @@ impl ReviewArgs {
                 }
                 ReviewCommand::Ai(child)
             }
-            ReviewCommand::Audit(mut args) => {
-                let changed_only = merge_flag(self.changed.changed_only, args.changed_only);
-                merge_changed_since(&mut self.changed, &mut args.audit.changed)?;
-                merge_component_args(&mut self.comp, &mut args.audit.comp)?;
-                merge_extension_ids(
-                    &mut self.extension_override,
-                    &mut args.audit.extension_override,
-                );
-                merge_baseline_args(&mut self.baseline_args, &mut args.audit.baseline_args);
-                self.summary = merge_flag(self.summary, args.audit.json_summary);
-                args.audit.json_summary = self.summary;
-                let action_profile = merge_option(
-                    "--audit-profile",
-                    args.audit_profile.take(),
-                    args.audit.profile.take(),
-                )?;
-                let profile =
-                    merge_option("--audit-profile", self.audit_profile.take(), action_profile)?;
-                self.audit_profile = profile.clone();
-                args.audit.profile = profile;
-                self.changed.changed_only = changed_only;
-                args.changed_only = changed_only;
-                reject_conflicting_changed_scopes(&self.changed)?;
-                // A changed-only review audit becomes a HEAD-based audit after
-                // its source checkout is resolved, so its Lab contract must be
-                // local before routing reaches that resolution.
-                ReviewCommand::Audit(args)
-            }
             ReviewCommand::Lint(mut args) => {
                 merge_changed_scope(&mut self.changed, &mut args.changed)?;
                 reject_conflicting_changed_scopes(&self.changed)?;
@@ -335,10 +271,9 @@ impl ReviewArgs {
                     || self.baseline_args.ignore_baseline
                     || self.baseline_args.ratchet
                     || !self.extension_override.extensions.is_empty()
-                    || self.audit_profile.is_some()
                 {
                     return Err(unsupported_nested_option(
-                        "--changed-only, --summary, baseline options, --extension, or --audit-profile",
+                        "--changed-only, --summary, baseline options, or --extension",
                     ));
                 }
                 args.target_id = merge_option(
@@ -353,7 +288,6 @@ impl ReviewArgs {
                 merge_changed_since(&mut self.changed, &mut args.changed)?;
                 ReviewCommand::Build(args)
             }
-            ReviewCommand::AuditBaseline(args) => ReviewCommand::AuditBaseline(args),
             ReviewCommand::Ci(args) => {
                 if self.comp.component.is_some()
                     || self.comp.path.is_some()
@@ -363,7 +297,6 @@ impl ReviewArgs {
                     || self.baseline_args.baseline
                     || self.baseline_args.ignore_baseline
                     || self.baseline_args.ratchet
-                    || self.audit_profile.is_some()
                 {
                     return Err(unsupported_nested_option("review scope or quality options"));
                 }
@@ -376,19 +309,15 @@ impl ReviewArgs {
     pub(crate) fn nested_component_args(&self) -> Option<&PositionalComponentArgs> {
         match self.command.as_ref()? {
             ReviewCommand::Ai(args) => Some(&args.comp),
-            ReviewCommand::Audit(args) => Some(&args.audit.comp),
             ReviewCommand::Lint(args) => Some(&args.comp),
             ReviewCommand::Test(args) => Some(&args.comp),
-            ReviewCommand::AuditBaseline(_) | ReviewCommand::Build(_) | ReviewCommand::Ci(_) => {
-                None
-            }
+            ReviewCommand::Build(_) | ReviewCommand::Ci(_) => None,
         }
     }
 
     pub(crate) fn effective_extension_override_ids(&self) -> &[String] {
         match self.command.as_ref() {
             Some(ReviewCommand::Ai(args)) => &args.extension_override.extensions,
-            Some(ReviewCommand::Audit(args)) => &args.audit.extension_override.extensions,
             Some(ReviewCommand::Lint(args)) => &args.extension_override.extensions,
             Some(ReviewCommand::Test(args)) => &args.extension_override.extensions,
             _ => &self.extension_override.extensions,
@@ -428,19 +357,13 @@ impl ReviewArgs {
             return match command {
                 ReviewCommand::Ai(_) => Some(LabCommandContract::local_only(
                     "review ai", "AI reviewers use operator-installed packages and authentication on this host; invoke on the runner after installing its private provider")),
-                ReviewCommand::Audit(args) => args
-                    .audit
-                    .lab_contract()
-                    .map(|contract| contract.with_hot_label("review audit")),
                 ReviewCommand::Lint(args) => args
                     .lab_contract()
                     .map(|contract| contract.with_hot_label("review lint")),
                 ReviewCommand::Test(args) => {
                     Some(args.lab_contract().with_hot_label("review test"))
                 }
-                ReviewCommand::AuditBaseline(_)
-                | ReviewCommand::Build(_)
-                | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
+                ReviewCommand::Build(_) | ReviewCommand::Ci(_) => Some(LabCommandContract::local_only(
                     command.lab_label(),
                     "this nested review subcommand has no portable Lab contract",
                 )),
@@ -487,7 +410,6 @@ struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
 }
 
 enum ReviewStageRun {
-    Audit(Box<ReviewStage<AuditCommandOutput>>),
     Lint(Box<ReviewStage<LintCommandOutput>>),
     Test(Box<ReviewStage<TestCommandOutput>>),
 }
@@ -514,16 +436,12 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
         let (output, exit_code) = (self.run)((self.build_args)(review_args, review_context))?;
         let finding_count = (self.finding_count)(&output);
 
-        let mut hint = format!(
+        let hint = format!(
             "Deep dive: homeboy review {} {}{}",
             self.name,
             component_label,
             scope_flag_suffix(review_args, self.include_changed_only_scope),
         );
-        if self.name == "audit" {
-            hint.push_str(" --profile=");
-            hint.push_str(&selected_audit_profile(review_args, review_context));
-        }
 
         Ok((
             ReviewStage {
@@ -542,24 +460,12 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
 }
 
 fn dispatch_review_plan_step(
-    // homeboy-audit: allow-thin-command-adapter
     step: &PlanStep,
     args: &ReviewArgs,
     component_label: &str,
     review_context: &ReviewExecutionContext,
 ) -> homeboy::core::Result<Option<ReviewStageRun>> {
     match step.kind.as_str() {
-        "review.audit" => {
-            let descriptor = ReviewStageDescriptor {
-                name: "audit",
-                include_changed_only_scope: true,
-                build_args: build_audit_args,
-                run: audit::run,
-                finding_count: audit_finding_count,
-            };
-            let (stage, _) = descriptor.execute(args, component_label, review_context)?;
-            Ok(Some(ReviewStageRun::Audit(Box::new(stage))))
-        }
         "review.lint" => {
             let descriptor = ReviewStageDescriptor {
                 name: "lint",
@@ -648,21 +554,6 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
                 ))
             }
         }
-        Some(ReviewCommand::Audit(review_audit)) => {
-            let deadline = ReviewPreflightDeadline::start();
-            let requested_source = review_audit.audit.release_readiness_source.clone();
-            let component = load_component_with_deadline(&review_audit.audit.comp, deadline)?;
-            prepare_local_review_dependencies(&component, &None, deadline)?;
-            let audit_args =
-                review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
-            to_value_with_readiness_provenance(
-                audit::run(audit_args),
-                &component,
-                requested_source.as_deref(),
-                "audit",
-            )
-        }
-        Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
         Some(ReviewCommand::Lint(lint_args)) => {
             let deadline = ReviewPreflightDeadline::start();
             let requested_source = lint_args.release_readiness_source.clone();
@@ -785,26 +676,6 @@ fn merge_baseline_args(parent: &mut BaselineArgs, child: &mut BaselineArgs) {
 
 fn merge_flag(parent: bool, child: bool) -> bool {
     parent || child
-}
-
-/// Translate review's working-tree scope to audit's existing HEAD-based scoped
-/// workflow. The injected list avoids a second git walk and keeps untracked
-/// files in scope.
-fn review_audit_args(
-    mut audit_args: audit::AuditArgs,
-    changed: &ChangedScopeArgs,
-    source_path: &str,
-) -> homeboy::core::Result<audit::AuditArgs> {
-    if changed.changed_only && audit_args.changed.changed_since.is_none() {
-        audit_args.changed.changed_since = Some("HEAD".to_string());
-        audit_args.changed.precomputed_changed_files = Some(git::get_dirty_files(source_path)?);
-        // `AuditArgs::profile` defaults to full for direct audit. A working-tree
-        // review instead uses the bounded profile promised by review's scope.
-        if audit_args.profile.is_none() {
-            audit_args.profile = Some("pr".to_string());
-        }
-    }
-    Ok(audit_args)
 }
 
 /// Portable release preflight consumes this child-produced provenance from the
@@ -1039,7 +910,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         top_hints.push(violation.message.clone());
     }
 
-    let mut audit_stage = None;
     let mut lint_stage = None;
     let mut test_stage = None;
     let review_run_id = review_observation
@@ -1058,12 +928,10 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
                 None,
             ));
         }
-        // homeboy-audit: allow-thin-command-adapter
         progress(&review_observation, "test_execution", &step.kind, "running");
         let _heartbeat =
             StageHeartbeat::start(review_run_id.as_deref(), "test_execution", &step.kind);
         dispatch_review_plan_step(step, &args, &component_label, &review_context)
-        // homeboy-audit: allow-thin-command-adapter
     }) {
         Ok(run) => run,
         Err(error) => {
@@ -1074,9 +942,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     for stage_run in stage_run.results {
         match stage_run {
-            ReviewStageRun::Audit(stage) => {
-                audit_stage = Some(*stage);
-            }
             ReviewStageRun::Lint(stage) => {
                 lint_stage = Some(*stage);
             }
@@ -1086,7 +951,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         }
     }
 
-    let audit_stage = audit_stage.expect("review quality plan must include audit stage");
     let lint_stage = lint_stage.expect("review quality plan must include lint stage");
     let test_stage = test_stage.expect("review quality plan must include test stage");
     let ci_profile_stage = match (|| -> homeboy::core::Result<Option<ReviewStage<_>>> {
@@ -1154,9 +1018,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     };
 
     if args.changed.changed_only {
-        top_hints.push(
-            "--changed-only scopes lint and audit; audit uses the bounded pr detector profile while test runs on the full component".to_string(),
-        );
+        top_hints.push("--changed-only scopes lint; test runs on the full component".to_string());
     }
 
     let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
@@ -1172,7 +1034,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             hints: top_hints,
         },
         ReviewStages {
-            audit: audit_stage,
             lint: lint_stage,
             test: test_stage,
             ci_profile: ci_profile_stage,
@@ -1839,50 +1700,6 @@ fn scope_flag_suffix(args: &ReviewArgs, include_changed_only: bool) -> String {
     }
 }
 
-fn build_audit_args(
-    args: &ReviewArgs,
-    review_context: &ReviewExecutionContext,
-) -> audit::AuditArgs {
-    audit::AuditArgs {
-        comp: args.effective_component_args().clone(),
-        release_readiness_source: None,
-        extension_override: args.extension_override.clone(),
-        conventions: false,
-        only: Vec::new(),
-        exclude: Vec::new(),
-        profile: Some(selected_audit_profile(args, review_context)),
-        baseline_args: args.baseline_args.clone(),
-        changed: ChangedSinceArgs {
-            // Audit has no separate --changed-only flag. Reusing HEAD with the
-            // already-resolved dirty file list preserves working-tree semantics
-            // while activating its scoped execution path and bounded output.
-            changed_since: args
-                .changed
-                .changed_since()
-                .map(str::to_string)
-                .or(args.changed.changed_only.then_some("HEAD".to_string())),
-            precomputed_changed_files: review_context
-                .precomputed_changed_files()
-                .map(<[String]>::to_vec),
-        },
-        json_summary: args.summary,
-        fixability: false,
-        full: false,
-    }
-}
-
-fn selected_audit_profile(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> String {
-    args.audit_profile.clone().unwrap_or_else(|| {
-        if args.changed.changed_since().is_some()
-            || review_context.precomputed_changed_files().is_some()
-        {
-            "pr".to_string()
-        } else {
-            "full".to_string()
-        }
-    })
-}
-
 fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -> lint::LintArgs {
     lint::LintArgs {
         comp: args.effective_component_args().clone(),
@@ -1925,9 +1742,6 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         coverage_min: None,
         baseline_args: args.baseline_args.clone(),
         analyze: false,
-        drift: false,
-        write: false,
-        since: "HEAD~10".to_string(),
         changed: LabChangedScopeArgs {
             since: ChangedSinceArgs {
                 changed_since: args.changed.changed_since().map(str::to_string),
@@ -1945,16 +1759,6 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         args: Vec::new(),
         json_summary: args.summary,
         restore_checkout: true,
-    }
-}
-
-fn audit_finding_count(output: &AuditCommandOutput) -> usize {
-    match output {
-        AuditCommandOutput::Full { result, .. } => result.findings.len(),
-        AuditCommandOutput::Compared { result, .. } => result.findings.len(),
-        AuditCommandOutput::Summary(summary) => summary.total_findings,
-        AuditCommandOutput::BaselineSaved { findings_count, .. } => *findings_count,
-        AuditCommandOutput::Conventions { .. } => 0,
     }
 }
 
@@ -1996,7 +1800,6 @@ fn print_human_summary(output: &ReviewCommandOutput) {
         output.summary.component,
         output.summary.scope,
     );
-    print_stage_line(&output.audit);
     print_stage_line(&output.lint);
     print_stage_line(&output.test);
     if let Some(ref stage) = output.ci_profile {
@@ -2050,7 +1853,7 @@ mod tests {
 
     #[test]
     fn review_action_projection_makes_parent_and_action_options_identical() {
-        let audit_before = projected_review(&[
+        let lint_scoped_before = projected_review(&[
             "homeboy",
             "review",
             "--path",
@@ -2061,15 +1864,13 @@ mod tests {
             "main",
             "--summary",
             "--baseline",
-            "--audit-profile",
-            "architecture",
-            "audit",
+            "lint",
             "fixture",
         ]);
-        let audit_after = projected_review(&[
+        let lint_scoped_after = projected_review(&[
             "homeboy",
             "review",
-            "audit",
+            "lint",
             "fixture",
             "--path",
             "fixture-path",
@@ -2079,21 +1880,15 @@ mod tests {
             "main",
             "--summary",
             "--baseline",
-            "--audit-profile",
-            "architecture",
         ]);
-        for review in [&audit_before, &audit_after] {
-            let Some(ReviewCommand::Audit(args)) = review.command.as_ref() else {
-                panic!("expected audit action");
+        for review in [&lint_scoped_before, &lint_scoped_after] {
+            let Some(ReviewCommand::Lint(args)) = review.command.as_ref() else {
+                panic!("expected lint action");
             };
-            assert_eq!(args.audit.comp.path.as_deref(), Some("fixture-path"));
-            assert_eq!(
-                args.audit.extension_override.extensions,
-                ["fixture-extension"]
-            );
-            assert_eq!(args.audit.changed.changed_since.as_deref(), Some("main"));
-            assert!(args.audit.json_summary && args.audit.baseline_args.baseline);
-            assert_eq!(args.audit.profile.as_deref(), Some("architecture"));
+            assert_eq!(args.comp.path.as_deref(), Some("fixture-path"));
+            assert_eq!(args.extension_override.extensions, ["fixture-extension"]);
+            assert_eq!(args.changed.changed_since(), Some("main"));
+            assert!(args.summary && args.baseline_args.baseline);
         }
 
         let lint_before = projected_review(&[
@@ -2211,9 +2006,7 @@ mod tests {
             "-base",
             "--extension",
             "fixture-extension",
-            "--audit-profile",
-            "pr",
-            "audit",
+            "lint",
             "fixture",
             "--path",
             "-fixture-path",
@@ -2221,19 +2014,13 @@ mod tests {
             "-base",
             "--extension",
             "fixture-extension",
-            "--audit-profile",
-            "pr",
         ]);
-        let Some(ReviewCommand::Audit(args)) = review.command else {
-            panic!("expected audit action");
+        let Some(ReviewCommand::Lint(args)) = review.command else {
+            panic!("expected lint action");
         };
         assert_eq!(review.comp.path.as_deref(), Some("-fixture-path"));
-        assert_eq!(args.audit.changed.changed_since(), Some("-base"));
-        assert_eq!(args.audit.profile.as_deref(), Some("pr"));
-        assert_eq!(
-            args.audit.extension_override.extensions,
-            ["fixture-extension"]
-        );
+        assert_eq!(args.changed.changed_since(), Some("-base"));
+        assert_eq!(args.extension_override.extensions, ["fixture-extension"]);
 
         for argv in [
             [
@@ -2241,7 +2028,7 @@ mod tests {
                 "review",
                 "--path",
                 "parent-path",
-                "audit",
+                "lint",
                 "fixture",
                 "--path",
                 "child-path",
@@ -2256,17 +2043,6 @@ mod tests {
                 "fixture",
                 "--changed-since",
                 "child-base",
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "review",
-                "--audit-profile",
-                "full",
-                "audit",
-                "fixture",
-                "--audit-profile",
-                "pr",
             ]
             .as_slice(),
         ] {
@@ -2287,7 +2063,7 @@ mod tests {
 
     #[test]
     fn review_action_projection_rejects_cross_position_changed_scopes() {
-        for action in ["audit", "lint"] {
+        for action in ["lint"] {
             for argv in [
                 [
                     "homeboy",
@@ -2327,7 +2103,7 @@ mod tests {
 
     #[test]
     fn review_action_scope_conflicts_are_rejected_in_action_first_order() {
-        for action in ["audit", "lint", "test", "build"] {
+        for action in ["lint", "test", "build"] {
             let error = match Cli::try_parse_from([
                 "homeboy",
                 "review",
@@ -2406,7 +2182,7 @@ mod tests {
 
     #[test]
     fn release_readiness_evidence_preserves_each_portable_gate_discriminator() {
-        for gate in ["audit", "lint", "test"] {
+        for gate in ["lint", "test"] {
             let evidence = serde_json::to_value(ReviewChildReadinessEvidence {
                 gate: gate.to_string(),
                 requested_source_commit: "frozen-source".to_string(),
@@ -2446,15 +2222,6 @@ mod tests {
         let cli = TestCli::try_parse_from(["test", "--changed-only"]).expect("should parse");
         assert!(cli.review.changed.changed_only);
         assert!(cli.review.changed.changed_since().is_none());
-    }
-
-    #[test]
-    fn parses_changed_only_before_direct_audit() {
-        let cli = TestCli::try_parse_from(["test", "--changed-only", "audit"])
-            .expect("direct audit should retain the parent changed-only scope");
-
-        assert!(cli.review.changed.changed_only);
-        assert!(matches!(cli.review.command, Some(ReviewCommand::Audit(_))));
     }
 
     #[test]
@@ -2637,7 +2404,6 @@ mod tests {
             ci_profile: None,
             ai: false,
             ai_timeout_seconds: 600,
-            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
@@ -2670,36 +2436,13 @@ mod tests {
             ci_profile: None,
             ai: false,
             ai_timeout_seconds: 600,
-            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), " --changed-only");
-        // Test still runs full-component, but audit now translates this into its
-        // scoped HEAD workflow.
+        // Test still runs full-component.
         assert_eq!(scope_flag_suffix(&args, false), "");
-    }
-
-    #[test]
-    fn changed_only_review_builds_bounded_head_scoped_audit() {
-        let mut args = review_args_fixture();
-        args.changed.changed_only = true;
-        let review_context = ReviewExecutionContext {
-            scope: "changed-only".to_string(),
-            changed_file_count: Some(1),
-            precomputed_changed_files: Some(vec!["src/changed.rs".to_string()]),
-        };
-
-        let audit_args = build_audit_args(&args, &review_context);
-
-        assert_eq!(audit_args.profile.as_deref(), Some("pr"));
-        assert_eq!(audit_args.changed.changed_since.as_deref(), Some("HEAD"));
-        assert_eq!(
-            audit_args.changed.precomputed_changed_files.as_deref(),
-            Some(&["src/changed.rs".to_string()][..]),
-            "working-tree files must be injected instead of recomputing a HEAD diff"
-        );
     }
 
     #[test]
@@ -2726,44 +2469,12 @@ mod tests {
             ci_profile: None,
             ai: false,
             ai_timeout_seconds: 600,
-            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),
         };
         assert_eq!(scope_flag_suffix(&args, true), "");
         assert_eq!(scope_flag_suffix(&args, false), "");
-    }
-
-    #[test]
-    fn changed_since_review_uses_pr_audit_profile() {
-        let mut args = review_args_fixture();
-        args.changed.lab.since.changed_since = Some("origin/main".to_string());
-        let review_context = ReviewExecutionContext {
-            scope: "changed since origin/main".to_string(),
-            changed_file_count: Some(1),
-            precomputed_changed_files: None,
-        };
-
-        assert_eq!(
-            build_audit_args(&args, &review_context).profile.as_deref(),
-            Some("pr")
-        );
-    }
-
-    #[test]
-    fn full_review_uses_full_audit_profile() {
-        let args = review_args_fixture();
-        let review_context = ReviewExecutionContext {
-            scope: "full".to_string(),
-            changed_file_count: None,
-            precomputed_changed_files: None,
-        };
-
-        assert_eq!(
-            build_audit_args(&args, &review_context).profile.as_deref(),
-            Some("full")
-        );
     }
 
     #[test]
@@ -2865,23 +2576,6 @@ mod tests {
     }
 
     #[test]
-    fn review_audit_profile_override_takes_precedence() {
-        let mut args = review_args_fixture();
-        args.changed.lab.since.changed_since = Some("origin/main".to_string());
-        args.audit_profile = Some("architecture".to_string());
-        let review_context = ReviewExecutionContext {
-            scope: "changed since origin/main".to_string(),
-            changed_file_count: Some(1),
-            precomputed_changed_files: None,
-        };
-
-        assert_eq!(
-            build_audit_args(&args, &review_context).profile.as_deref(),
-            Some("architecture")
-        );
-    }
-
-    #[test]
     fn review_rejects_manual_configured_changelog_edits_only() {
         let review_context = ReviewExecutionContext {
             scope: "changed-since".to_string(),
@@ -2951,7 +2645,6 @@ mod tests {
             ci_profile: None,
             ai: false,
             ai_timeout_seconds: 600,
-            audit_profile: None,
             report: None,
             banner: Vec::new(),
             baseline_args: BaselineArgs::default(),

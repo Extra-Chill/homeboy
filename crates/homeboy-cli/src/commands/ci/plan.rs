@@ -1,7 +1,7 @@
 //! CI command-plan orchestration.
 //!
 //! `homeboy-action` historically owned command inference, the quality-vs-ops
-//! split, canonical ordering, refactor-only detection, the `HOMEBOY_SKIP_LINT`
+//! split, canonical ordering, the `HOMEBOY_SKIP_LINT`
 //! decision, and per-command output filenames — all assembled by shell string
 //! builders (`scripts/core/resolve-commands.sh`, `scripts/core/lib.sh`). Those
 //! behaviors are reusable outside the GitHub Action, so this module hoists
@@ -29,7 +29,7 @@ pub enum CiEventContext {
 
 impl CiEventContext {
     /// Parse a context label, defaulting unknown values to `Manual` to match
-    /// the action's permissive `*) audit,lint,test` fallthrough.
+    /// the action's permissive `*) lint,test` fallthrough.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "pr" => CiEventContext::Pr,
@@ -45,7 +45,7 @@ impl CiEventContext {
         match self {
             CiEventContext::Cron => &["release"],
             // pr / push / manual all default to the quality gates.
-            _ => &["audit", "lint", "test"],
+            _ => &["lint", "test"],
         }
     }
 }
@@ -63,19 +63,17 @@ pub enum CommandCategory {
     Operations,
 }
 
-/// Canonical rank for the quality gates. Lower runs first: audit → lint → test
-/// → refactor. Anything unranked keeps request order after the ranked gates.
+/// Canonical rank for the quality gates. Lower runs first: lint → test.
+/// Anything unranked keeps request order after the ranked gates.
 fn canonical_rank(base: &str) -> Option<u8> {
     match base {
-        "audit" => Some(0),
-        "lint" => Some(1),
-        "test" => Some(2),
-        "refactor" => Some(3),
+        "lint" => Some(0),
+        "test" => Some(1),
         _ => None,
     }
 }
 
-/// The leading token of a command request (`refactor --from all` -> `refactor`).
+/// The leading token of a command request (`bench --rig pr` -> `bench`).
 fn base_command(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or("")
 }
@@ -91,13 +89,13 @@ fn categorize(base: &str) -> CommandCategory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedCommand {
     /// The full command request as the runner should invoke it
-    /// (e.g. `audit`, `refactor --from all`).
+    /// (e.g. `lint`, `bench --rig pr`).
     pub command: String,
-    /// Leading token used for routing decisions (e.g. `refactor`).
+    /// Leading token used for routing decisions (e.g. `bench`).
     pub base: String,
     pub category: CommandCategory,
     /// Stable, filesystem-safe stem for this command's structured output and
-    /// log files (e.g. `refactor---from-all`). Owned by core so the action
+    /// log files (e.g. `bench---rig-pr`). Owned by core so the action
     /// stops deriving filenames with `sed`.
     pub output_stem: String,
     /// When true, the runner should export `HOMEBOY_SKIP_LINT=1` for this
@@ -107,21 +105,17 @@ pub struct PlannedCommand {
 }
 
 /// The full structured plan a CI runner executes. Replaces the action's
-/// `RESOLVED_COMMANDS` / `OPERATIONS_COMMANDS` / `refactor-only` env exports.
+/// `RESOLVED_COMMANDS` / `OPERATIONS_COMMANDS` env exports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CiPlan {
     /// Whether the commands were inferred from context or taken from an
     /// explicit request.
     pub inferred: bool,
     pub context: CiEventContext,
-    /// Quality gates in canonical order (audit → lint → test → refactor → …).
+    /// Quality gates in canonical order (lint → test → …).
     pub quality: Vec<PlannedCommand>,
     /// Operations commands (deploy) in request order.
     pub operations: Vec<PlannedCommand>,
-    /// True when every quality command is a `refactor` variant. The action uses
-    /// this to skip the circular post-autofix rerun (the autofix IS the
-    /// refactor, so rerunning it is pointless).
-    pub refactor_only: bool,
     /// True when a standalone `lint` quality command is present.
     pub has_lint: bool,
 }
@@ -151,7 +145,7 @@ fn split_request(request: &str) -> Vec<String> {
 ///
 /// When `request` is empty (or whitespace), commands are inferred from
 /// `context`. Quality gates are sorted into canonical order; operations
-/// commands keep request order. `skip_lint`, `refactor_only`, `has_lint`, and
+/// commands keep request order. `skip_lint`, `has_lint`, and
 /// per-command output stems are all derived here so the runner never re-derives
 /// them.
 pub fn plan(request: &str, context: CiEventContext) -> CiPlan {
@@ -188,7 +182,7 @@ pub fn plan(request: &str, context: CiEventContext) -> CiPlan {
         }
     }
 
-    // Canonical order: audit → lint → test → refactor → (others, stable).
+    // Canonical order: lint → test → (others, stable).
     // `sort_by_key` is stable, so unranked commands keep their request order.
     quality.sort_by_key(|c| canonical_rank(&c.base).unwrap_or(u8::MAX));
 
@@ -200,14 +194,11 @@ pub fn plan(request: &str, context: CiEventContext) -> CiPlan {
         command.skip_lint = has_lint && command.base == "test" && command.command == "test";
     }
 
-    let refactor_only = !quality.is_empty() && quality.iter().all(|c| c.base == "refactor");
-
     CiPlan {
         inferred,
         context,
         quality,
         operations,
-        refactor_only,
         has_lint,
     }
 }
@@ -218,43 +209,27 @@ mod tests {
 
     #[test]
     fn skip_lint_only_set_on_test_when_lint_present() {
-        let p = plan("audit, lint, test", CiEventContext::Manual);
+        let p = plan("test, lint, build", CiEventContext::Manual);
         let test = p.quality.iter().find(|c| c.command == "test").unwrap();
         assert!(test.skip_lint);
-        let audit = p.quality.iter().find(|c| c.command == "audit").unwrap();
-        assert!(!audit.skip_lint);
+        let build = p.quality.iter().find(|c| c.command == "build").unwrap();
+        assert!(!build.skip_lint);
+        let order: Vec<&str> = p.quality.iter().map(|c| c.command.as_str()).collect();
+        assert_eq!(order, vec!["lint", "test", "build"]);
     }
 
     #[test]
     fn no_skip_lint_when_lint_absent() {
-        let p = plan("audit, test", CiEventContext::Manual);
+        let p = plan("build, test", CiEventContext::Manual);
         let test = p.quality.iter().find(|c| c.command == "test").unwrap();
         assert!(!test.skip_lint);
         assert!(!p.has_lint);
     }
 
     #[test]
-    fn refactor_only_detects_pure_refactor_sets() {
-        let p = plan("refactor --from all", CiEventContext::Manual);
-        assert!(p.refactor_only);
-        assert_eq!(p.quality[0].base, "refactor");
-        assert_eq!(p.quality[0].command, "refactor --from all");
-
-        let mixed = plan("audit, refactor", CiEventContext::Manual);
-        assert!(!mixed.refactor_only);
-    }
-
-    #[test]
-    fn refactor_only_false_when_no_quality_commands() {
-        let p = plan("deploy", CiEventContext::Manual);
-        assert!(!p.refactor_only);
-        assert!(p.quality.is_empty());
-    }
-
-    #[test]
     fn output_stem_sanitizes_and_falls_back() {
-        assert_eq!(output_stem("audit"), "audit");
-        assert_eq!(output_stem("refactor --from all"), "refactor---from-all");
+        assert_eq!(output_stem("lint"), "lint");
+        assert_eq!(output_stem("bench --rig pr"), "bench---rig-pr");
         assert_eq!(output_stem("   "), "homeboy-output");
         assert_eq!(output_stem("///"), "homeboy-output");
         assert_eq!(output_stem("-lint-"), "lint");
@@ -262,10 +237,10 @@ mod tests {
 
     #[test]
     fn planned_command_carries_base_and_stem() {
-        let p = plan("refactor --from all", CiEventContext::Manual);
+        let p = plan("bench --rig pr", CiEventContext::Manual);
         let cmd = &p.quality[0];
-        assert_eq!(cmd.base, "refactor");
-        assert_eq!(cmd.output_stem, "refactor---from-all");
+        assert_eq!(cmd.base, "bench");
+        assert_eq!(cmd.output_stem, "bench---rig-pr");
         assert_eq!(cmd.category, CommandCategory::Quality);
     }
 

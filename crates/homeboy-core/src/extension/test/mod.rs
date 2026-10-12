@@ -8,7 +8,6 @@ pub mod durations;
 pub mod parsing;
 pub mod report;
 pub mod run;
-pub mod workflow;
 
 use crate::extension::invoke::ExtensionRunner;
 use crate::extension::resolve::ExtensionExecutionContext;
@@ -43,6 +42,7 @@ pub use durations::{
     build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
     SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
 };
+pub use homeboy_extension_contract::test_results::MainTestWorkflowResult;
 pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_failures_from_text,
     parse_test_results_failures_file, parse_test_results_file, parse_test_results_file_with_spec,
@@ -55,10 +55,6 @@ pub use run::{
     run_main_test_workflow, run_self_check_test_workflow,
     run_self_check_test_workflow_with_progress, RawTestOutput, TestRunWorkflowArgs,
     TestRunWorkflowResult,
-};
-pub use workflow::{
-    auto_fix_test_drift, detect_test_drift, AutoFixDriftOutput, AutoFixDriftWorkflowResult,
-    DriftWorkflowResult, MainTestWorkflowResult,
 };
 
 pub fn resolve_test_command(

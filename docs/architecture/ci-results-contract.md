@@ -91,15 +91,6 @@ only fetch logs when they need extra debugging context.
       "changed_file_count": 7,
       "hints": []
     },
-    "audit": {
-      "stage": "audit",
-      "ran": true,
-      "passed": false,
-      "exit_code": 1,
-      "finding_count": 2,
-      "hint": "Deep dive: homeboy review audit sample-plugin --changed-since=origin/main",
-      "output": { "...": "AuditCommandOutput" }
-    },
     "lint": { "...": "ReviewStage<LintCommandOutput>" },
     "test": { "...": "ReviewStage<TestCommandOutput>" }
   }
@@ -117,7 +108,7 @@ Stable fields for PR review agents:
 - `data.summary.total_findings`: aggregate findings across ran stages.
 - `data.summary.changed_file_count`: scoped changed-file count, when known.
 - `data.summary.hints`: machine-preserved human guidance.
-- `data.<stage>.ran`: whether `audit`, `lint`, or `test` ran.
+- `data.<stage>.ran`: whether `lint` or `test` ran.
 - `data.<stage>.passed`: stage pass/fail when it ran.
 - `data.<stage>.exit_code`: stage exit code.
 - `data.<stage>.finding_count`: normalized count for quick triage.
@@ -127,8 +118,6 @@ Stable fields for PR review agents:
 
 Stage payloads preserve the same structured data as invoking the stage directly:
 
-- `data.audit.output`: `AuditCommandOutput`, including baseline comparison and
-  changed-since scoped audit findings when those modes are active.
 - `data.lint.output`: `LintCommandOutput`, including lint findings and baseline
   comparison when available.
 - `data.test.output`: `TestCommandOutput`, including test counts, failures, drift,
@@ -170,7 +159,6 @@ Existing CI wrappers may still run individual commands and upload one JSON file 
 command. That shape remains valid, but it is a lower-level contract:
 
 ```sh
-homeboy --output "$RUNNER_TEMP/homeboy-results/audit.json" audit "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --json-summary
 homeboy --output "$RUNNER_TEMP/homeboy-results/lint.json"  lint  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --summary
 homeboy --output "$RUNNER_TEMP/homeboy-results/test.json"  test  "$COMPONENT_ID" --path "$GITHUB_WORKSPACE" --changed-since "$BASE_REF" --json-summary
 ```
@@ -179,8 +167,6 @@ Recommended artifact layout for per-command mode:
 
 ```text
 homeboy-ci-results/
-  audit.json
-  audit.log
   lint.json
   lint.log
   test.json
@@ -211,7 +197,7 @@ Recommended manifest:
 }
 ```
 
-The manifest is action-owned metadata. `review.json`, `audit.json`, `lint.json`,
+The manifest is action-owned metadata. `review.json`, `lint.json`,
 and `test.json` stay Homeboy-owned payloads.
 
 ## Observation bundle artifacts
@@ -271,7 +257,7 @@ and leave the bundle schema to Homeboy core.
 PR review agents should:
 
 - Wait while the GitHub check is pending instead of reviewing stale results.
-- Fall back to `audit.json`, `lint.json`, and `test.json` when `review.json` is absent.
+- Fall back to `lint.json` and `test.json` when `review.json` is absent.
 - Use `success`, `data.summary.passed`, and per-stage `passed` fields for status.
 - Use `finding_count` for quick triage and the nested stage `output` for details.
 - Use `changed-since` scoped payloads to avoid repeating unrelated baseline findings.
@@ -286,7 +272,6 @@ PR review agents should:
 
 - [JSON output contract](output-system.md)
 - [review](../commands/review.md)
-- [audit](../commands/audit.md)
 - [lint](../commands/lint.md)
 - [test](../commands/test.md)
 - Issue [#1825](https://github.com/Extra-Chill/homeboy/issues/1825)

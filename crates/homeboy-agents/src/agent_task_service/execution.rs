@@ -2828,17 +2828,6 @@ pub struct AgentTaskRetryServiceResult {
     pub created: bool,
 }
 
-/// Reconcile status with explicit control over whether the operation may reach
-/// the runner.
-///
-/// Read-only inspection must stay answerable while the Lab is wedged (#10418).
-pub fn reconcile_status_with_options(
-    run_id: &str,
-    options: agent_task_lifecycle::AgentTaskStatusOptions,
-) -> Result<agent_task_lifecycle::AgentTaskStatusOutcome> {
-    agent_task_lifecycle::reconcile_status_with_options(run_id, options)
-}
-
 /// Return the canonical non-reconciling control-plane run resource.
 pub fn control_plane_run(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneRun> {
     crate::orchestration::run_from_current_environment(run_id)

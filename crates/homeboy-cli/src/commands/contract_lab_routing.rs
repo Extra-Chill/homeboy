@@ -315,18 +315,6 @@ impl Commands {
             Commands::Review(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract())
             }
-            Commands::Refactor(args) if args.is_hot_resource_command() => {
-                LabCommandContract::portable(
-                    "refactor",
-                    args.lab_offload_writes_local_state()
-                        .then_some("--write/--commit"),
-                    false,
-                    LAB_NO_EXTRA_CAPABILITIES,
-                )
-                // Mechanical rename/refactor is cheap relative to a Lab
-                // round-trip; only offload it on a genuinely hot machine.
-                .cheap()
-            }
             Commands::Rig(args) => return args.portability_contract(),
             Commands::Trace(args) => return args.portability_contract(),
             Commands::Tunnel(args) => return args.portability_contract(),

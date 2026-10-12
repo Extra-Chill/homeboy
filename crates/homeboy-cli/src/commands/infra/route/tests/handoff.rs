@@ -799,22 +799,22 @@ fn tunnel_preview_consumer_run_keeps_explicit_runner_contract() {
 
 #[test]
 fn lab_command_with_mutation_flag_stays_portable_for_patch_capture() {
-    let cli = Cli::parse_from(["homeboy", "review", "audit", "--baseline"]);
+    let cli = Cli::parse_from(["homeboy", "review", "lint", "--fix"]);
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-    assert_eq!(command.hot_label, "review audit");
+    assert_eq!(command.hot_label, "review lint");
     assert!(command.is_portable());
     assert!(command.routing_policy.requires_extension_parity);
 }
 
 #[test]
 fn lab_command_with_ratchet_stays_portable_for_patch_capture() {
-    let cli = Cli::parse_from(["homeboy", "review", "audit", "--ratchet"]);
+    let cli = Cli::parse_from(["homeboy", "review", "lint", "--ratchet"]);
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
 
-    assert_eq!(command.hot_label, "review audit");
+    assert_eq!(command.hot_label, "review lint");
     assert!(command.is_portable());
     assert!(command.routing_policy.requires_extension_parity);
 }
@@ -848,10 +848,9 @@ fn strip_component_target_replaces_positional_with_path() {
 fn strip_component_target_replaces_component_flag_with_path() {
     let args = vec![
         "homeboy".to_string(),
-        "refactor".to_string(),
-        "--from".to_string(),
+        "review".to_string(),
         "lint".to_string(),
-        "--write".to_string(),
+        "--fix".to_string(),
         "--component".to_string(),
         "sample-component".to_string(),
     ];
@@ -862,10 +861,9 @@ fn strip_component_target_replaces_component_flag_with_path() {
         rewritten,
         vec![
             "homeboy".to_string(),
-            "refactor".to_string(),
-            "--from".to_string(),
+            "review".to_string(),
             "lint".to_string(),
-            "--write".to_string(),
+            "--fix".to_string(),
             "--path".to_string(),
             "/src/sample".to_string(),
         ]
@@ -874,14 +872,12 @@ fn strip_component_target_replaces_component_flag_with_path() {
 
 #[test]
 fn strip_component_target_only_strips_first_positional_match() {
-    // A `--from` value equal to the component id must survive; only the bare
-    // positional component token is dropped.
+    // Only the bare positional component token is dropped.
     let args = vec![
         "homeboy".to_string(),
-        "refactor".to_string(),
-        "--from".to_string(),
+        "review".to_string(),
         "lint".to_string(),
-        "--write".to_string(),
+        "--fix".to_string(),
         "dmc".to_string(),
     ];
 
@@ -891,10 +887,9 @@ fn strip_component_target_only_strips_first_positional_match() {
         rewritten,
         vec![
             "homeboy".to_string(),
-            "refactor".to_string(),
-            "--from".to_string(),
+            "review".to_string(),
             "lint".to_string(),
-            "--write".to_string(),
+            "--fix".to_string(),
             "--path".to_string(),
             "/src/dmc".to_string(),
         ]

@@ -10,10 +10,9 @@ core generic while letting extensions provide platform-specific behavior.
 
 Homeboy core owns the reusable automation substrate: command routing,
 configuration, scope resolution, structured output, persisted runs, baselines,
-release/evidence workflows, runner offload, daemon/API surfaces, and generic
-audit primitives. It should not encode ecosystem-specific assumptions such as
+release/evidence workflows, runner offload, and daemon/API surfaces. It should not encode ecosystem-specific assumptions such as
 Cargo behavior, WP-CLI flows, package-manager semantics, or framework-specific
-audit rules.
+lint rules.
 
 Those semantics belong in extensions. The shared implementation lives in
 [Extra-Chill/homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions),
@@ -40,7 +39,7 @@ Extensibility through an extension system that allows:
 - Platform-specific behaviors such as Rust, WordPress, Node.js, GitHub,
   Homebrew, and Swift
 - Custom CLI commands exposed as top-level verbs such as `homeboy wp` and `homeboy cargo`
-- Release pipeline actions, deploy hooks, audit rules, lint/test/build runners,
+- Release pipeline actions, deploy hooks, lint/test/build runners,
   benchmark runners, and trace support
 - Documentation topics embedded alongside extension behavior
 
@@ -218,37 +217,6 @@ Local orchestration system:
 Step types:
 - Core: preflight, changelog, version, git, deploy, cleanup, and artifact steps
 - Extension-backed: prepare, package, and publish actions declared by extensions
-
-### Code Audit
-
-**Location:** `crates/homeboy-code-audit/src/`
-
-Convention detection and drift analysis:
-- Fingerprints source files (methods, registrations, types) via extensions
-- Groups files by directory and language
-- Discovers conventions (patterns most files follow)
-- Detects outliers, structural complexity, duplication, dead code, test coverage gaps
-- Baseline comparison for drift tracking
-- Fix stub generation for outlier files
-
-Audit pipeline phases:
-1. Discovery (auto-discover file groups)
-2. Convention detection
-3. Convention checking
-4. Findings (outliers, structural, duplication, dead code, test coverage)
-5. Report (alignment score)
-6. Cross-directory convention discovery
-
-### Docs Audit
-
-**Location:** `crates/homeboy-code-audit/src/docs_audit/`
-
-Documentation verification:
-- Extracts claims (file paths, directory paths) from markdown docs
-- Verifies claims against the filesystem
-- Detects features in source code and checks documentation coverage
-- Identifies priority docs (source files changed since baseline tag)
-- Supports `--features` for machine-readable feature inventory
 
 ### CLI Layer
 

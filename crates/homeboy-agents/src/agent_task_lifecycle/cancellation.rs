@@ -1292,9 +1292,10 @@ fn retain_pending_runner_cancellation(
     record.updated_at = Some(now);
 }
 
-/// Reconcile an asynchronously cancelled controller-owned staging job. This is
-/// read-side so a CLI that observed only the acknowledgement still converges the
-/// durable cook record after the provider exits.
+/// Reconcile an asynchronously cancelled controller-owned staging job. Part of
+/// [`super::reconcile_status_in_store`], so the cancel action's bounded convergence
+/// window and `agent-task reconcile <run> --apply` converge the durable Cook
+/// record after the provider exits; status reads never do (#15718).
 ///
 /// The two side effects at the end — controller-scratch finalization and
 /// admission cancellation — are the reason this takes a store. Both are durable
@@ -1306,8 +1307,9 @@ fn retain_pending_runner_cancellation(
 /// admission (#7505). This mirrors `cancel_exact_run_in_store`, which already
 /// uses exactly these two rooted forms.
 ///
-/// The caller mutates `record` in place and persists it itself, so no record
-/// write happens here. There is no ambient wrapper: `reconcile_status_in_store` is the
+/// The caller mutates `record` in place and persists it itself (through the
+/// compare-and-swap terminal commit when this cancels), so no record write
+/// happens here. There is no ambient wrapper: `reconcile_status_in_store` is the
 /// only caller, and the store it hands down is the one its own caller
 /// injected.
 pub(super) fn reconcile_controller_job_cancellation_in_store(

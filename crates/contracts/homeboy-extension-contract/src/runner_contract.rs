@@ -19,7 +19,7 @@ pub const GENERIC_INFRASTRUCTURE_FAILURE_MARKERS: &[&str] = &[
 
 /// Shared verification phase vocabulary for isolated commands and composed runners.
 ///
-/// `homeboy review lint`, `homeboy review audit`, and `homeboy review test` stay independent. A
+/// `homeboy review lint` and `homeboy review test` stay independent. A
 /// future composed command can run these phases in canonical order while reusing
 /// the same phase reports and exit-code semantics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -29,7 +29,6 @@ pub enum VerificationPhase {
     Syntax,
     Lint,
     Typecheck,
-    Audit,
     Test,
 }
 
@@ -65,12 +64,27 @@ pub struct PhaseFailure {
     pub summary: String,
 }
 
-// `ExtensionPhaseTiming` is a pure serde value type that both the extension
-// runners (which produce it) and `code_audit` (which reports it) consume. It
-// lives in `homeboy-audit-contract` so `code_audit` never reaches up into the
-// extension layer for it; this re-export keeps the existing
-// `extension::runner_contract::ExtensionPhaseTiming` path working.
-pub use homeboy_audit_contract::ExtensionPhaseTiming;
+/// One phase of an extension runner's work (build/lint/test), with duration,
+/// an opaque provider-declared status, a human-readable message, artifacts,
+/// and free-form metadata. Core treats every field as opaque data — it never
+/// infers tool-specific behavior from `status` or `message`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ExtensionPhaseTiming {
+    pub name: String,
+    pub duration_ms: u64,
+    /// Provider-declared generic state for this phase, for example `running`,
+    /// `waiting`, `blocked`, `queued`, `passed`, or `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Human-readable provider summary for the phase. Core treats this as
+    /// opaque text and does not infer tool-specific behavior from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+}
 
 pub fn phase_status_from_exit_code(exit_code: i32) -> PhaseStatus {
     if exit_code == 0 {

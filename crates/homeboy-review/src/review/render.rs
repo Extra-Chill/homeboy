@@ -9,7 +9,7 @@
 //! 1. Optional caller-supplied banners for action-level signals.
 //! 2. Scope banner: `:zap:` for changed-since/changed-only, `:information_source:` for full.
 //! 3. Total findings line.
-//! 4. Stage blocks in fixed order — audit, lint, test, optional ci. Each stage:
+//! 4. Stage blocks in fixed order — lint, test, optional ci. Each stage:
 //!    - icon + name header (`:white_check_mark:`, `:x:`, `:fast_forward:`)
 //!    - up to 10 finding bullets (top categories / sniff codes / failure summary)
 //!    - blockquote with the deep-dive hint
@@ -18,19 +18,14 @@
 use std::fmt::Write as _;
 
 use super::top_n::top_n_by;
-use homeboy_audit_contract::ExtensionPhaseTiming;
-use homeboy_code_audit::AuditCommandOutput;
 use homeboy_core::ci_profile::CiRunOutput;
 use homeboy_core::extension::test::SLOWEST_UNITS_REPORTED;
 use homeboy_extension_contract::{
-    LintCommandOutput, TestCommandOutput, TestDurations, TestUnitDuration,
+    ExtensionPhaseTiming, LintCommandOutput, TestCommandOutput, TestDurations, TestUnitDuration,
 };
 use homeboy_finding::HomeboyFinding;
 
 use super::{ReviewCommandOutput, ReviewStage};
-
-#[path = "render_audit.rs"]
-mod audit;
 
 /// Maximum bullets shown per stage. Anything beyond is collapsed into a
 /// `(... N more)` hint so PR comments stay skim-friendly.
@@ -53,8 +48,6 @@ pub fn render_pr_comment_with_banners(
     render_total_findings(&mut out, output);
     render_top_hints(&mut out, output);
 
-    render_audit_stage(&mut out, &output.audit);
-    out.push('\n');
     render_lint_stage(&mut out, &output.lint);
     out.push('\n');
     render_test_stage(&mut out, &output.test);
@@ -109,7 +102,7 @@ fn render_scope_banner(out: &mut String, output: &ReviewCommandOutput) {
 }
 
 fn render_total_findings(out: &mut String, output: &ReviewCommandOutput) {
-    let ran = [output.audit.ran, output.lint.ran, output.test.ran]
+    let ran = [output.lint.ran, output.test.ran]
         .into_iter()
         .filter(|ran| *ran)
         .count()
@@ -182,15 +175,6 @@ fn render_stage_hint<T: serde::Serialize>(out: &mut String, stage: &ReviewStage<
     if stage.ran {
         let _ = writeln!(out, "> {}", stage.hint);
     }
-}
-
-fn render_audit_stage(out: &mut String, stage: &ReviewStage<AuditCommandOutput>) {
-    render_stage_header(out, stage);
-    if let Some(ref output) = stage.output {
-        audit::render_audit_body(out, output);
-        render_extension_phase_timings(out, audit_extension_phase_timings(output));
-    }
-    render_stage_hint(out, stage);
 }
 
 fn render_lint_stage(out: &mut String, stage: &ReviewStage<LintCommandOutput>) {
@@ -410,21 +394,6 @@ fn format_test_unit_duration(unit: &TestUnitDuration) -> String {
     line
 }
 
-fn audit_extension_phase_timings(output: &AuditCommandOutput) -> &[ExtensionPhaseTiming] {
-    match output {
-        AuditCommandOutput::Full {
-            extension_phase_timings,
-            ..
-        }
-        | AuditCommandOutput::Compared {
-            extension_phase_timings,
-            ..
-        } => extension_phase_timings,
-        AuditCommandOutput::Summary(summary) => &summary.extension_phase_timings,
-        AuditCommandOutput::BaselineSaved { .. } | AuditCommandOutput::Conventions { .. } => &[],
-    }
-}
-
 fn render_extension_phase_timings(out: &mut String, timings: &[ExtensionPhaseTiming]) {
     if timings.is_empty() {
         return;
@@ -499,9 +468,6 @@ fn render_ci_body(out: &mut String, output: &CiRunOutput) {
 mod tests {
     use super::*;
 
-    use homeboy_code_audit::{
-        AuditCommandOutput, AuditFinding, CodeAuditResult, Finding, Severity,
-    };
     use homeboy_core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
     use homeboy_core::quality::{build_quality_plan, QualityPlanOptions};
     use homeboy_extension_contract::{
@@ -528,25 +494,11 @@ mod tests {
                 changed_file_count: None,
                 hints: Vec::new(),
             },
-            audit: stage_audit_passing(),
             lint: stage_lint_passing(),
             test: stage_test_passing(0),
             ci_profile: None,
             ai: None,
             actionable: None,
-        }
-    }
-
-    fn stage_audit_passing() -> ReviewStage<AuditCommandOutput> {
-        ReviewStage {
-            stage: "audit".to_string(),
-            ran: true,
-            passed: true,
-            exit_code: 0,
-            finding_count: 0,
-            hint: "Deep dive: homeboy review audit my-comp".to_string(),
-            skipped_reason: None,
-            output: Some(audit_full_with_findings(Vec::new())),
         }
     }
 
@@ -627,56 +579,6 @@ mod tests {
         }
     }
 
-    fn audit_full_with_findings(conventions: Vec<&str>) -> AuditCommandOutput {
-        let findings: Vec<Finding> = conventions
-            .into_iter()
-            .map(|c| Finding {
-                convention: c.to_string(),
-                severity: Severity::Warning,
-                file: "src/foo.rs".to_string(),
-                description: "deviates from convention".to_string(),
-                suggestion: "align with siblings".to_string(),
-                kind: AuditFinding::MissingMethod,
-                line: None,
-            })
-            .collect();
-
-        let result = CodeAuditResult {
-            component_id: "my-comp".to_string(),
-            source_path: "/tmp/my-comp".to_string(),
-            summary: homeboy_code_audit::AuditSummary {
-                files_scanned: 0,
-                conventions_detected: 0,
-                outliers_found: 0,
-                alignment_score: Some(1.0),
-                files_skipped: 0,
-                warnings: Vec::new(),
-            },
-            conventions: Vec::new(),
-            directory_conventions: Vec::new(),
-            findings,
-            duplicate_groups: Vec::new(),
-        };
-
-        AuditCommandOutput::Full {
-            passed: result.findings.is_empty(),
-            result,
-            timing: homeboy_code_audit::AuditTiming::default(),
-            measurement: homeboy_code_audit::AuditMeasurement::new(
-                homeboy_code_audit::AuditProfile::Full,
-                false,
-                false,
-                false,
-                false,
-                false,
-            ),
-            fixability: None,
-            extension_phase_timings: Vec::new(),
-            actionable: None,
-            full_report: None,
-        }
-    }
-
     fn lint_with_findings(items: Vec<(&str, &str)>) -> LintCommandOutput {
         let findings: Vec<HomeboyFinding> = items
             .into_iter()
@@ -748,10 +650,7 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
-            drift: None,
-            auto_fix_drift: None,
             test_scope: None,
             summary: None,
             raw_output: None,
@@ -830,13 +729,8 @@ mod tests {
             md
         );
         assert!(
-            md.contains("**0** finding(s) across 3 stage(s)"),
+            md.contains("**0** finding(s) across 2 stage(s)"),
             "missing total-findings line:\n{}",
-            md
-        );
-        assert!(
-            md.contains(":white_check_mark: **audit**"),
-            "audit header: {}",
             md
         );
         assert!(
@@ -940,16 +834,6 @@ mod tests {
         env.summary.status = "failed".to_string();
         env.summary.total_findings = 5;
 
-        // Audit fails with three actionable findings.
-        env.audit.passed = false;
-        env.audit.exit_code = 1;
-        env.audit.finding_count = 3;
-        env.audit.output = Some(audit_full_with_findings(vec![
-            "ability-shape",
-            "ability-shape",
-            "naming-convention",
-        ]));
-
         // Lint fails with two sniffs.
         env.lint.passed = false;
         env.lint.exit_code = 1;
@@ -960,13 +844,7 @@ mod tests {
         ]));
 
         let md = render_pr_comment(&env);
-        assert!(md.contains(":x: **audit**"), "audit failed icon:\n{}", md);
         assert!(md.contains(":x: **lint**"), "lint failed icon:\n{}", md);
-        assert!(
-            md.contains("- `src/foo.rs` — **missing_method**: deviates from convention; align with siblings"),
-            "audit finding detail:\n{}",
-            md
-        );
         assert!(
             md.contains("- `Squiz.Commenting.FunctionComment.Missing` — 2 finding(s)"),
             "lint sniff bucket count:\n{}",
@@ -985,7 +863,7 @@ mod tests {
 
         let md = render_pr_comment(&env);
 
-        assert!(md.contains("**1** finding(s) across 4 stage(s)"));
+        assert!(md.contains("**1** finding(s) across 3 stage(s)"));
         assert!(md.contains(":x: **ci**"));
         assert!(md.contains("- `lint` — passed (exit 0)"));
         assert!(md.contains("- `unit` — failed (exit 1)"));
@@ -1011,7 +889,6 @@ mod tests {
                 changed_file_count: Some(0),
                 hints: vec!["No files changed since main — skipping review".to_string()],
             },
-            audit: stage_skipped("audit", "no files changed"),
             lint: stage_skipped("lint", "no files changed"),
             test: stage_skipped("test", "no files changed"),
             ci_profile: None,
@@ -1020,12 +897,7 @@ mod tests {
         };
         let md = render_pr_comment(&env);
         assert!(
-            md.contains(":fast_forward: **audit** — skipped (no files changed)"),
-            "audit skipped header:\n{}",
-            md
-        );
-        assert!(
-            md.contains(":fast_forward: **lint**"),
+            md.contains(":fast_forward: **lint** — skipped (no files changed)"),
             "lint skipped: {}",
             md
         );
@@ -1204,35 +1076,9 @@ mod tests {
     }
 
     #[test]
-    fn caps_audit_findings_at_top_10() {
-        let conventions: Vec<String> = (0..15).map(|i| format!("convention-{:02}", i)).collect();
-        let conv_refs: Vec<&str> = conventions.iter().map(|s| s.as_str()).collect();
-
-        let mut env = passing_envelope();
-        env.audit.passed = false;
-        env.audit.exit_code = 1;
-        env.audit.finding_count = 15;
-        env.audit.output = Some(audit_full_with_findings(conv_refs));
-
-        let md = render_pr_comment(&env);
-        let bullet_count = md.matches("- `src/foo.rs` — **missing_method**").count();
-        assert_eq!(
-            bullet_count, TOP_N,
-            "should render exactly 10 audit finding bullets:\n{}",
-            md
-        );
-        assert!(
-            md.contains("_… 5 more audit finding(s)_"),
-            "missing overflow hint:\n{}",
-            md
-        );
-    }
-
-    #[test]
     fn renders_deep_dive_hints_for_ran_stages() {
         let env = passing_envelope();
         let md = render_pr_comment(&env);
-        assert!(md.contains("> Deep dive: homeboy review audit my-comp"));
         assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
         assert!(md.contains("> Deep dive: homeboy review test my-comp"));
     }
