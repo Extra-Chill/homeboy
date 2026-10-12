@@ -319,9 +319,6 @@ glob.
 - `id`
 - `label`
 - `action_type`
-- `endpoint`
-- `method`
-- `requires_auth`
 - `payload`
 - `command`
 - `builtin` — Legacy UI action type. CLI parses but does not execute.

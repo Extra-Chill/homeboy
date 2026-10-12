@@ -904,11 +904,9 @@ They are an array of typed action objects.
 
 - **`id`** (string): Stable action identifier
 - **`label`** (string): Human-readable action label
-- **`type`** (string): `"command"`, `"api"`, or `"builtin"`
+- **`type`** (string): `"command"` or `"builtin"`
 - **`command`** (string): Command to execute for `command` actions
-- **`endpoint`** (string): Endpoint for `api` actions
-- **`method`** (string): HTTP method for `api` actions
-- **`payload`** (object): Optional payload template for `api` actions
+- **`payload`** (object): Optional payload template interpolated into the action environment
 - **`builtin`** (string): Legacy UI action type for `builtin` actions
 
 #### Command Action
@@ -921,27 +919,6 @@ They are an array of typed action objects.
       "label": "Sync data",
       "type": "command",
       "command": "scripts/sync.sh"
-    }
-  ]
-}
-```
-
-#### API Action
-
-```json
-{
-  "actions": [
-    {
-      "id": "create_release",
-      "label": "Create GitHub release",
-      "type": "api",
-      "method": "POST",
-      "endpoint": "/repos/{owner}/{repo}/releases",
-      "payload": {
-        "tag_name": "{{release.tag}}",
-        "name": "{{release.name}}",
-        "body": "{{release.notes}}"
-      }
     }
   ]
 }
@@ -969,7 +946,6 @@ actions and routes prepare/package/publish behavior through those actions.
 ### Release Action Types
 
 - **`command`**: Execute an extension-owned command.
-- **`api`**: Execute an API request configured by the extension action.
 - **`builtin`**: Legacy UI action type parsed by the CLI but not executed.
 
 ### Release Action Output Contract
