@@ -248,7 +248,6 @@ fn finalized_receipt_fixture(
         finalization: CookFinalization {
             no_finalize: false,
             draft_pr: false,
-            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Finalized fixture".to_string(),
