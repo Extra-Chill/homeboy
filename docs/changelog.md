@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.8] - 2026-10-12
+
+### Changed
+- delete the code audit, refactor, and issue reconciler stacks
+
 ## [0.418.7] - 2026-10-12
 
 ### Fixed
