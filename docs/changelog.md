@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.11] - 2026-10-12
+
+### Fixed
+- omit package-manager trees when copying a cached validation dependency out
+
 ## [0.418.10] - 2026-10-12
 
 ### Fixed
