@@ -46,3 +46,5 @@ mod rig_local_artifact_registration;
 mod runner_job_list;
 #[path = "cli_binary/runner_refresh_progress.rs"]
 mod runner_refresh_progress;
+#[path = "cli_binary/unknown_command.rs"]
+mod unknown_command;

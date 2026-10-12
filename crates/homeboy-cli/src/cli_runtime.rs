@@ -1307,6 +1307,22 @@ impl CliRuntime {
             eprintln!("error: {error}");
             return std::process::ExitCode::from(2);
         }
+
+        if is_top_level_version_request(&normalized) {
+            println!("{}", upgrade::current_build_version());
+            return std::process::ExitCode::SUCCESS;
+        }
+
+        // Parse before any background side effect: argv clap rejects is not a
+        // command, so it must exit without spawning reconcilers or workers.
+        let matches = self.parse_matches(normalized.clone());
+        // Global-arg conflicts are only enforced by clap when the flags follow
+        // the subcommand, so this must be checked explicitly (#11826).
+        if let Err(error) = crate::cli_surface::reject_conflicting_placement_selection(&matches) {
+            eprintln!("{error}");
+            return std::process::ExitCode::from(2);
+        }
+
         // Runner-owned fallback staging may outlive the controller process. A
         // detached bounded pass keeps command startup independent of remote I/O.
         // The pass persists projection state (and its lock), so read-only
@@ -1333,18 +1349,6 @@ impl CliRuntime {
             }
         }
 
-        if is_top_level_version_request(&normalized) {
-            println!("{}", upgrade::current_build_version());
-            return std::process::ExitCode::SUCCESS;
-        }
-
-        let matches = self.parse_matches(normalized.clone());
-        // Global-arg conflicts are only enforced by clap when the flags follow
-        // the subcommand, so this must be checked explicitly (#11826).
-        if let Err(error) = crate::cli_surface::reject_conflicting_placement_selection(&matches) {
-            eprintln!("{error}");
-            return std::process::ExitCode::from(2);
-        }
         if crate::commands::route::is_agent_task_providers_query(&normalized) {
             if let Some(runner_id) = matches.get_one::<String>("runner") {
                 let error = crate::commands::route::runner_provider_query_requires_runner_exec(

@@ -68,11 +68,22 @@ fn entity_suggestion_cache() -> &'static RwLock<Option<Vec<EntityIdList>>> {
     })
 }
 
+/// Every source here is a registry read: no checkout, Git remote, or network.
+///
+/// Suggestions run on the clap error path, so they must cost what the parse
+/// error costs. Component IDs come from [`component::registered_base`], not the
+/// resolved inventory: resolving each attachment's portable config spawns Git
+/// and fetches release metadata per component, which turned a mistyped
+/// top-level command into a minutes-long hang on a populated config.
 fn load_entity_suggestion_snapshot() -> Vec<EntityIdList> {
     vec![
         EntityIdList {
             entity_type: EntityType::Component,
-            ids: component::list_ids().unwrap_or_default(),
+            ids: component::registered_base()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|component| component.id)
+                .collect(),
         },
         EntityIdList {
             entity_type: EntityType::Project,
