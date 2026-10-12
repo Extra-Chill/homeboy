@@ -808,6 +808,9 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
+        // Hold the process-wide env lock: other tests read HOMEBOY_OUTPUT_DIR
+        // while walking sources (module-surface indexing, cached audits).
+        let _env_guard = homeboy_core::test_support::env_lock();
         let prior_output_dir = std::env::var("HOMEBOY_OUTPUT_DIR").ok();
         std::env::set_var("HOMEBOY_OUTPUT_DIR", &output_dir);
 

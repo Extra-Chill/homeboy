@@ -351,6 +351,7 @@ mod tests {
 
     #[test]
     fn skip_when_no_applied_chunks() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let cfg = AutofixVerifyConfig {
             command: "true".to_string(),
@@ -369,6 +370,7 @@ mod tests {
 
     #[test]
     fn skip_when_no_config() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let rollback = InMemoryRollback::new();
         let mut chunks = vec![chunk("c1", &["a.rs"], ChunkStatus::Applied)];
@@ -383,6 +385,7 @@ mod tests {
 
     #[test]
     fn skip_when_env_disabled() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let cfg = AutofixVerifyConfig {
             command: "true".to_string(),
@@ -392,8 +395,8 @@ mod tests {
         let rollback = InMemoryRollback::new();
         let mut chunks = vec![chunk("c1", &["a.rs"], ChunkStatus::Applied)];
 
-        // SAFETY: tests in this module run serially because they share the
-        // same env var. If we ever parallelize, use a per-test mutex.
+        // Every test here reads HOMEBOY_AUTOFIX_VERIFY through
+        // run_verify_gate, so each holds the process-wide env lock.
         std::env::set_var(VERIFY_ENV_VAR, "0");
         let outcome = run_verify_gate(Some(&cfg), &rollback, root.path(), &mut chunks);
         std::env::remove_var(VERIFY_ENV_VAR);
@@ -406,6 +409,7 @@ mod tests {
 
     #[test]
     fn passing_verify_leaves_files_and_chunks_alone() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("a.rs");
         fs::write(&file, "// modified\n").unwrap();
@@ -431,6 +435,7 @@ mod tests {
 
     #[test]
     fn failing_verify_reverts_files_and_downgrades_chunks() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("a.rs");
         fs::write(&file, "original\n").unwrap();
@@ -469,6 +474,7 @@ mod tests {
 
     #[test]
     fn failing_verify_removes_newly_created_files() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("new.rs");
 
@@ -495,6 +501,7 @@ mod tests {
 
     #[test]
     fn unknown_command_counts_as_failure_and_reverts() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("a.rs");
         fs::write(&file, "original\n").unwrap();
@@ -522,6 +529,7 @@ mod tests {
 
     #[test]
     fn timeout_triggers_revert() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("a.rs");
         fs::write(&file, "original\n").unwrap();
@@ -547,6 +555,7 @@ mod tests {
 
     #[test]
     fn applied_files_from_chunks_dedups_and_skips_reverted() {
+        let _env = homeboy_core::test_support::env_lock();
         let chunks = vec![
             chunk("c1", &["a.rs", "b.rs"], ChunkStatus::Applied),
             chunk("c2", &["b.rs", "c.rs"], ChunkStatus::Applied),
@@ -564,6 +573,7 @@ mod tests {
 
     #[test]
     fn capture_pre_apply_snapshot_records_all_paths() {
+        let _env = homeboy_core::test_support::env_lock();
         let root = tempfile::tempdir().unwrap();
         let a = root.path().join("a.rs");
         let b = root.path().join("b.rs");
