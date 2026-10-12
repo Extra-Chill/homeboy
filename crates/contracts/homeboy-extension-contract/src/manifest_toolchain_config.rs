@@ -1,5 +1,5 @@
 //! Extension manifest capability/config types (deploy, build, test, lint, cli,
-//! database, discovery, requirements, source-snapshot).
+//! discovery, requirements, source-snapshot).
 
 use crate::{TestDriftConfig, TestInventoryConfig, TestPassthroughFilter};
 use homeboy_engine_primitives::output_parse::ParseSpec;
