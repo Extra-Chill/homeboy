@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.12] - 2026-10-12
+
+### Fixed
+- copy validation dependencies with their own gitignore excludes
+- treat a daemon running a replaced executable as stale; retry stale-lease staging rejections
+
 ## [0.418.11] - 2026-10-12
 
 ### Fixed
