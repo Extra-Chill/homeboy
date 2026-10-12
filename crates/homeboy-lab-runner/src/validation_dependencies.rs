@@ -170,10 +170,14 @@ fn prepare_validation_dependency_workspace(
     // transport retries, transitive syncs, and concurrent Cooks (#15253).
     // Every consumer still gets a private copy, because the source evidence
     // below is written into it.
-    let prepared = crate::validation_dependency_cache::prepare_with_cache(
+    let declared_outputs = homeboy_core::hygiene::validation_dependency_output_paths(&component);
+    // Never ships, so never copied out of the cache either (#15797).
+    let consumer_excludes = prepared_dependency_snapshot_excludes(&[], &declared_outputs);
+    let prepared = crate::validation_dependency_cache::prepare_with_cache_excluding(
         &component,
         &path,
         excludes,
+        &consumer_excludes,
         |prepared_component, prepared_path| {
             run_dependency_lifecycle(prepared_component, prepared_path)
         },
@@ -185,10 +189,7 @@ fn prepare_validation_dependency_workspace(
     )?;
 
     let prepared_path = canonicalize_dependency_path(&prepared.path, dependency_id)?;
-    let snapshot_excludes = prepared_dependency_snapshot_excludes(
-        excludes,
-        &homeboy_core::hygiene::validation_dependency_output_paths(&component),
-    );
+    let snapshot_excludes = prepared_dependency_snapshot_excludes(excludes, &declared_outputs);
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
