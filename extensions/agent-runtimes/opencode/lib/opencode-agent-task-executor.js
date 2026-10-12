@@ -32,6 +32,7 @@ const { finalizeOwnershipMarker, writeOwnershipMarker } = require('./opencode-ex
 const {
 	CODEX_SECRET_ENV,
 	CODEX_SECRET_ENV_SOURCES,
+	ANTHROPIC_OAUTH_ACCOUNT,
 	OPENAI_OAUTH_ACCOUNT,
 	OPENCODE_STORE_SECRET_ENV_NAME_PATTERN,
 	effectiveOpenCodeModel,
@@ -53,6 +54,8 @@ const OPENCODE_SECRET_ENV = [...CODEX_SECRET_ENV];
 const OPENCODE_ALL_SECRET_ENV = [...OPENCODE_SECRET_ENV, 'OPENAI_API_KEY'];
 const OPENCODE_OPENAI_STORE_SECRET_ENV = openCodeStoreSecretEnv('openai');
 const OPENCODE_OPENAI_STORE_SECRET_ENV_SOURCES = openCodeStoreSecretEnvSources('openai');
+const OPENCODE_ANTHROPIC_STORE_SECRET_ENV = openCodeStoreSecretEnv('anthropic');
+const OPENCODE_ANTHROPIC_STORE_SECRET_ENV_SOURCES = openCodeStoreSecretEnvSources('anthropic');
 const OPENCODE_FATAL_LOG_PATTERNS = [
 	{
 		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:weekly(?:\/monthly)?|monthly)\s+limit\s+exhausted\b/i,
@@ -135,6 +138,7 @@ const OPENCODE_READINESS_INVOCATION = {
 		'HOMEBOY_OPENCODE_COMMAND_ARGS', 'OPENCODE_CONFIG_CONTENT',
 		...OPENCODE_ALL_SECRET_ENV,
 		...OPENCODE_OPENAI_STORE_SECRET_ENV,
+		...OPENCODE_ANTHROPIC_STORE_SECRET_ENV,
 	],
 	display: 'node {{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs',
 };
@@ -233,6 +237,18 @@ const OPENCODE_PROVIDER_DEFAULTS = {
 		secret_env: [...OPENCODE_SECRET_ENV],
 		secret_env_sources: CODEX_SECRET_ENV_SOURCES,
 	},
+	// Controller-refreshed Anthropic OAuth (homeboy#15783). Core runs
+	// controller_refresh on the controller before Lab delivery, then delivers
+	// only access + expiry: the runner can use the login but never rotate it.
+	[ANTHROPIC_OAUTH_ACCOUNT]: {
+		secret_env: [...OPENCODE_ANTHROPIC_STORE_SECRET_ENV],
+		secret_env_sources: { ...OPENCODE_ANTHROPIC_STORE_SECRET_ENV_SOURCES },
+		controller_refresh: {
+			argv: ['node', '{{runtime_path}}/scripts/agent/homeboy-opencode-anthropic-refresh.cjs'],
+			timeout_ms: 45000,
+			display: 'node {{runtime_path}}/scripts/agent/homeboy-opencode-anthropic-refresh.cjs',
+		},
+	},
 };
 
 const OPENCODE_SESSION_METADATA_ABSENT = {
@@ -282,6 +298,7 @@ function providerContract(options = {}) {
 		...contractFields,
 		secret_env_requirements: [
 			providerSecretEnvRequirement(OPENAI_OAUTH_ACCOUNT, OPENCODE_OPENAI_STORE_SECRET_ENV),
+			providerSecretEnvRequirement(ANTHROPIC_OAUTH_ACCOUNT, OPENCODE_ANTHROPIC_STORE_SECRET_ENV),
 			providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV),
 		],
 		capabilities: OPENCODE_CAPABILITIES,
@@ -1977,6 +1994,7 @@ module.exports = {
 	OPENCODE_PROVIDER_LABEL,
 	OPENCODE_SECRET_ENV,
 	OPENCODE_OPENAI_STORE_SECRET_ENV,
+	OPENCODE_ANTHROPIC_STORE_SECRET_ENV,
 	OPENAI_OAUTH_ACCOUNT,
 	OPENCODE_COMMAND,
 	OPENCODE_INVOCATION,

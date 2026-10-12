@@ -14,6 +14,19 @@ const OPENCODE_STORE_SECRET_ENV_NAME_PATTERN = /^AI_PROVIDER_OPENCODE_[A-Z0-9]+_
 // Explicit legacy file-handoff selector. Native provider names do not select an
 // auth kind: the runtime resolves that from the selected account and environment.
 const OPENAI_OAUTH_ACCOUNT = 'openai-oauth';
+// Explicit controller-refreshed Anthropic OAuth account (homeboy#15783). A route
+// opts in with provider_config {"provider":"anthropic-oauth"}; a plain
+// `anthropic` route (API key or runner-owned login) is unaffected.
+const ANTHROPIC_OAUTH_ACCOUNT = 'anthropic-oauth';
+// Credential-selector accounts and the OpenCode provider each one routes to.
+const STORE_OAUTH_ACCOUNT_PROVIDERS = {
+	[OPENAI_OAUTH_ACCOUNT]: 'openai',
+	[ANTHROPIC_OAUTH_ACCOUNT]: 'anthropic',
+};
+// Providers whose OAuth refresh chain the controller owns. Their store handoff
+// declares access + expiry only, so a Lab runner never receives the single-use
+// refresh token: two hosts holding one invalidate each other (homeboy#15783).
+const CONTROLLER_REFRESHED_STORE_PROVIDERS = new Set(['anthropic']);
 
 const CODEX_SECRET_ENV = [
 	'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
@@ -87,9 +100,9 @@ function selectedOpenCodeRoute(config = {}) {
 	const separator = configuredModel.indexOf('/');
 	const modelProvider = separator > 0 ? configuredModel.slice(0, separator) : '';
 	const configuredProvider = stringValue(config.provider);
-	// The store account is a credential selector for the OpenAI route, not a
+	// A store account is a credential selector for its provider's route, not a
 	// separate OpenCode provider.
-	const normalizedProvider = configuredProvider === OPENAI_OAUTH_ACCOUNT ? 'openai' : configuredProvider;
+	const normalizedProvider = STORE_OAUTH_ACCOUNT_PROVIDERS[configuredProvider] || configuredProvider;
 	return {
 		provider: normalizedProvider || modelProvider,
 		model: separator > 0 ? configuredModel.slice(separator + 1) : configuredModel,
@@ -160,14 +173,20 @@ function openCodeStoreSecretEnvKey(provider) {
 	return String(provider || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
 }
 
+function openCodeStoreSecretEnvFields(provider) {
+	return CONTROLLER_REFRESHED_STORE_PROVIDERS.has(provider)
+		? OPENCODE_STORE_SECRET_ENV_FIELDS.filter(([suffix]) => suffix !== 'REFRESH')
+		: OPENCODE_STORE_SECRET_ENV_FIELDS;
+}
+
 function openCodeStoreSecretEnv(provider) {
 	const key = openCodeStoreSecretEnvKey(provider);
-	return OPENCODE_STORE_SECRET_ENV_FIELDS.map(([suffix]) => `${OPENCODE_STORE_SECRET_ENV_PREFIX}${key}_${suffix}`);
+	return openCodeStoreSecretEnvFields(provider).map(([suffix]) => `${OPENCODE_STORE_SECRET_ENV_PREFIX}${key}_${suffix}`);
 }
 
 function openCodeStoreSecretEnvSources(provider) {
 	const key = openCodeStoreSecretEnvKey(provider);
-	return Object.fromEntries(OPENCODE_STORE_SECRET_ENV_FIELDS.map(([suffix, field]) => [
+	return Object.fromEntries(openCodeStoreSecretEnvFields(provider).map(([suffix, field]) => [
 		`${OPENCODE_STORE_SECRET_ENV_PREFIX}${key}_${suffix}`,
 		{ source: 'json-file', path: OPENCODE_AUTH_STORE_PATH, field: `${provider}.${field}` },
 	]));
@@ -204,6 +223,8 @@ function clone(value) {
 }
 
 module.exports = {
+	ANTHROPIC_OAUTH_ACCOUNT,
+	CONTROLLER_REFRESHED_STORE_PROVIDERS,
 	CODEX_SECRET_ENV,
 	CODEX_SECRET_ENV_SOURCES,
 	OPENAI_OAUTH_ACCOUNT,

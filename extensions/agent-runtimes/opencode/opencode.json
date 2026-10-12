@@ -79,7 +79,9 @@
           "OPENAI_API_KEY",
           "AI_PROVIDER_OPENCODE_OPENAI_ACCESS",
           "AI_PROVIDER_OPENCODE_OPENAI_REFRESH",
-          "AI_PROVIDER_OPENCODE_OPENAI_EXPIRES"
+          "AI_PROVIDER_OPENCODE_OPENAI_EXPIRES",
+          "AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS",
+          "AI_PROVIDER_OPENCODE_ANTHROPIC_EXPIRES"
         ],
         "display": "node {{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs"
       },
@@ -147,6 +149,30 @@
               {
                 "path": "provider",
                 "equals": "openai-oauth"
+              }
+            ]
+          }
+        },
+        {
+          "schema": "homeboy/secret-env-requirement/v1",
+          "source": "provider_default",
+          "env": [
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS",
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_EXPIRES"
+          ],
+          "when": {
+            "any": [
+              {
+                "path": "executor.config.provider",
+                "equals": "anthropic-oauth"
+              },
+              {
+                "path": "executor.provider",
+                "equals": "anthropic-oauth"
+              },
+              {
+                "path": "provider",
+                "equals": "anthropic-oauth"
               }
             ]
           }
@@ -299,6 +325,32 @@
               "field": "tokens.fedramp",
               "value": "false"
             }
+          }
+        },
+        "anthropic-oauth": {
+          "secret_env": [
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS",
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_EXPIRES"
+          ],
+          "secret_env_sources": {
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS": {
+              "source": "json-file",
+              "path": "~/.local/share/opencode/auth.json",
+              "field": "anthropic.access"
+            },
+            "AI_PROVIDER_OPENCODE_ANTHROPIC_EXPIRES": {
+              "source": "json-file",
+              "path": "~/.local/share/opencode/auth.json",
+              "field": "anthropic.expires"
+            }
+          },
+          "controller_refresh": {
+            "argv": [
+              "node",
+              "{{runtime_path}}/scripts/agent/homeboy-opencode-anthropic-refresh.cjs"
+            ],
+            "timeout_ms": 45000,
+            "display": "node {{runtime_path}}/scripts/agent/homeboy-opencode-anthropic-refresh.cjs"
           }
         }
       },
