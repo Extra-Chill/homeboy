@@ -3,9 +3,6 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct RigSourceListResult {
     pub sources: Vec<RigSourceGroup>,
-    /// Installed stack specs with no source metadata. These are intentionally
-    /// separate from managed sources because their provenance is unknown.
-    pub orphaned_stacks: Vec<OrphanedRigSourceStack>,
     pub invalid: Vec<InvalidRigSourceMetadata>,
 }
 
@@ -26,7 +23,6 @@ pub struct RigSourceGroup {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     pub rigs: Vec<RigSourceRig>,
-    pub stacks: Vec<RigSourceStack>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,43 +38,6 @@ pub struct RigSourceRig {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RigSourceStack {
-    pub id: String,
-    pub stack_path: String,
-    pub stack_present: bool,
-    pub config_path: String,
-    pub config_present: bool,
-    pub config_owned: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_path_present: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stale_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OrphanedRigSourceStack {
-    pub id: String,
-    pub config_path: String,
-    pub content_identity: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_path_present: Option<bool>,
-    pub source_status: &'static str,
-    pub recovery_actions: Vec<RigSourceRecoveryAction>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RigSourceRecoveryAction {
-    pub kind: &'static str,
-    pub description: &'static str,
-    pub command: &'static str,
-    pub required_parameters: Vec<&'static str>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct InvalidRigSourceMetadata {
     pub id: String,
     pub metadata_path: String,
@@ -90,22 +49,13 @@ pub struct RigSourceRemoveResult {
     pub selector: String,
     pub source: RigSourceGroup,
     pub removed: Vec<RemovedRigSourceRig>,
-    pub removed_stacks: Vec<RemovedRigSourceStack>,
     pub skipped: Vec<SkippedRigSourceRig>,
-    pub skipped_stacks: Vec<SkippedRigSourceStack>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_package_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RemovedRigSourceRig {
-    pub id: String,
-    pub config_path: String,
-    pub metadata_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RemovedRigSourceStack {
     pub id: String,
     pub config_path: String,
     pub metadata_path: String,
@@ -119,16 +69,8 @@ pub struct SkippedRigSourceRig {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SkippedRigSourceStack {
-    pub id: String,
-    pub config_path: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct RigSourceUpdateResult {
     pub updated: Vec<RigSourceUpdatedRig>,
-    pub updated_stacks: Vec<RigSourceUpdatedStack>,
     pub skipped: Vec<SkippedRigSourceUpdate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<FailedRigSourceUpdate>,
@@ -145,15 +87,6 @@ pub struct RigSourceUpdatedRig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
 }
-
-/// A stack updated by a rig source sync.
-///
-/// Identical in shape to [`RigSourceUpdatedRig`] -- same six fields, same order,
-/// same serde -- because a rig and a stack record the same thing about an
-/// update. The rig-versus-stack distinction is already carried by which field of
-/// `RigSourceUpdateResult` the value lands in (`updated` versus
-/// `updated_stacks`), so it was never in the shape.
-pub type RigSourceUpdatedStack = RigSourceUpdatedRig;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SkippedRigSourceUpdate {

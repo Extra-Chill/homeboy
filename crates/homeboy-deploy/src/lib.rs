@@ -530,8 +530,8 @@ pub fn fetch_project_remote_versions_with_deadline(
 /// Reuses a validated prepared artifact or verified release asset across targets
 /// while keeping per-target lifecycle state isolated for resumable deployments.
 ///
-/// Unknown project IDs are skipped (not fatal) — fleet configs can
-/// accumulate stale references that shouldn't block the rest.
+/// Unknown project IDs are skipped (not fatal) so stale target references
+/// don't block the rest.
 pub fn run_multi(
     project_ids: &[String],
     component_ids: &[String],
@@ -561,12 +561,7 @@ pub fn run_multi(
         .collect();
 
     for pid in &unknown_projects {
-        homeboy_core::log_status!(
-            "deploy",
-            "Skipping unknown project '{}' — remove from fleet with: homeboy fleet remove-project <fleet> {}",
-            pid,
-            pid
-        );
+        homeboy_core::log_status!("deploy", "Skipping unknown project '{}'", pid);
     }
 
     if valid_project_ids.is_empty() {
@@ -980,12 +975,12 @@ fn lifecycle_identity(
 
 /// Find all projects that use any of the specified components.
 ///
-/// Used by `--shared` flag to deploy a component to every project that has it.
+/// Used by release deployment to reach every project that uses the component.
 pub fn resolve_shared_targets(component_ids: &[String]) -> Result<Vec<String>> {
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "component",
-            "At least one component ID is required when using --shared",
+            "At least one component ID is required to resolve shared deploy targets",
             None,
             None,
         ));

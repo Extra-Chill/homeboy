@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, bench, cleanup, component, config, contract, control_plane, daemon,
-    db, deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, project,
-    refactor, release, review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh,
-    stack, status, topology, trace, tunnel, upgrade, worktree,
+    activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
+    deferred_workload, deploy, extension, file, fuzz, git, harvest, project, refactor, release,
+    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace,
+    tunnel, upgrade, worktree,
 };
 
 mod argument_provenance;
@@ -190,16 +190,10 @@ pub enum Commands {
         after_help = "Command-shaped trace modes:\n  homeboy trace list --profiles\n  homeboy trace <component> list\n  homeboy trace compare before.json after.json\n  homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>\n  homeboy trace matrix <component> <scenario> --axis name=value1,value2\n  homeboy trace compare-variant --rig <rig-id> --scenario <scenario>\n  homeboy trace compare-bundle --component <component> --scenario <scenario>\n  homeboy trace overlay-locks --stale"
     )]
     Trace(trace::TraceArgs),
-    /// Database operations
-    Db(db::DbArgs),
     /// Manage component dependencies
     Deps(DepsArgs),
     /// Remote file operations
     File(file::FileArgs),
-    /// Manage fleets (groups of projects)
-    Fleet(fleet::FleetArgs),
-    /// Remote log viewing
-    Logs(logs::LogsArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
     /// Recover remote component content into local Git history
@@ -243,17 +237,11 @@ pub enum Commands {
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations
     Tunnel(tunnel::TunnelArgs),
-    /// Inspect declared resource relationships without resolving effective configuration
-    Topology(topology::TopologyArgs),
     /// Inspect persisted observation runs, artifacts, and typed evidence projections
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity
     #[command(name = "self")]
     SelfCmd(self_cmd::SelfArgs),
-    /// Manage stacks (combined-fixes branches built from base + cherry-picked PRs)
-    Stack(stack::StackArgs),
-    /// Make API requests to a project
-    Api(api::ApiArgs),
     /// Upgrade Homeboy to the latest version
     Upgrade(upgrade::UpgradeArgs),
 }
@@ -493,7 +481,6 @@ pub struct CommandSurfaceDoctorReport {
 #[serde(rename_all = "snake_case")]
 pub enum CommandSurfaceRegistry {
     Core,
-    Descriptor,
     Extension,
     DocsIndex,
     Help,
@@ -971,7 +958,7 @@ mod tests {
     #[test]
     fn doctor_reports_actual_missing_docs_with_registry_provenance() {
         let report = command_surface_doctor_report(
-            vec![provenance("composed", CommandSurfaceRegistry::Descriptor)],
+            vec![provenance("composed", CommandSurfaceRegistry::Core)],
             BTreeSet::new(),
             BTreeSet::from(["composed".to_string()]),
             BTreeSet::new(),
@@ -984,7 +971,7 @@ mod tests {
             [CommandSurfaceDriftEvidence {
                 command: "composed".to_string(),
                 drift: "missing_from_docs_index".to_string(),
-                registry: CommandSurfaceRegistry::Descriptor,
+                registry: CommandSurfaceRegistry::Core,
             }]
         );
     }
@@ -1547,39 +1534,8 @@ mod tests {
                 "--dry-run",
             ]
             .as_slice(),
-            [
-                "homeboy",
-                "db",
-                "delete-row",
-                "mysite",
-                "--apply",
-                "wp_posts",
-                "1",
-            ]
-            .as_slice(),
-            ["homeboy", "db", "drop-table", "mysite", "--apply", "wp_tmp"].as_slice(),
             ["homeboy", "file", "delete", "mysite", "tmp.txt", "--apply"].as_slice(),
             ["homeboy", "file", "write", "mysite", "tmp.txt", "--apply"].as_slice(),
-            [
-                "homeboy",
-                "api",
-                "request",
-                "POST",
-                "mysite",
-                "/wp/v2/posts",
-                "--apply",
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "api",
-                "http",
-                "request",
-                "POST",
-                "--apply",
-                "https://example.test/api",
-            ]
-            .as_slice(),
         ] {
             Cli::try_parse_from(args).unwrap_or_else(|error| {
                 panic!("documented command form failed to parse: {args:?}\n{error}")

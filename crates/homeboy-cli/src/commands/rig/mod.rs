@@ -13,9 +13,9 @@ use homeboy::runner::runners;
 
 use self::output::{
     RigAppOutput, RigArtifactRegisterOutput, RigCheckOutput, RigDownOutput, RigInstallOutput,
-    RigInstalledStackSummary, RigInstalledSummary, RigListOutput, RigReleaseLockOutput,
-    RigRepairOutput, RigRunOutput, RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary,
-    RigSyncOutput, RigUpOutput, RigUpPlanOutput, RigUpPlanStep, RigUpdateOutput,
+    RigInstalledSummary, RigListOutput, RigReleaseLockOutput, RigRepairOutput, RigRunOutput,
+    RigShowOutput, RigSourceSummary, RigStatusOutput, RigSummary, RigUpOutput, RigUpPlanOutput,
+    RigUpPlanStep, RigUpdateOutput,
 };
 use super::bench::RigRunBenchOptions;
 use super::utils::args::SettingArgs;
@@ -44,10 +44,7 @@ impl RigArgs {
     pub(crate) fn is_runner_source_management_command(&self) -> bool {
         matches!(
             self.command,
-            RigCommand::Install { .. }
-                | RigCommand::Update { .. }
-                | RigCommand::Sync { .. }
-                | RigCommand::Sources { .. }
+            RigCommand::Install { .. } | RigCommand::Update { .. } | RigCommand::Sources { .. }
         )
     }
 
@@ -193,15 +190,7 @@ enum RigCommand {
         /// Rig ID
         rig_id: String,
     },
-    /// Sync every stack declared by this rig's components
-    Sync {
-        /// Rig ID
-        rig_id: String,
-        /// Print what WOULD happen without mutating stack specs or target branches.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Refresh, sync, check, and benchmark a rig profile end-to-end
+    /// Refresh, check, and benchmark a rig profile end-to-end
     Run(RigRunArgs),
     /// Show current state of a rig: running services, last up/check
     Status {
@@ -400,7 +389,6 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
             setting_args,
         } => down(config_root, &rig_id, &setting_args),
         RigCommand::Repair { rig_id } => repair(config_root, &rig_id),
-        RigCommand::Sync { rig_id, dry_run } => sync(config_root, &rig_id, dry_run),
         RigCommand::Run(args) => run_profile(config_root, args),
         RigCommand::Status { rig_id } => status(config_root, &rig_id),
         RigCommand::ReleaseLock { rig_id, force } => release_lock(&rig_id, force),
@@ -565,17 +553,6 @@ fn install(
                     path: rig.path.to_string_lossy().to_string(),
                     spec_path: rig.spec_path.to_string_lossy().to_string(),
                     source_revision: rig.source_revision,
-                })
-                .collect(),
-            installed_stacks: result
-                .installed_stacks
-                .into_iter()
-                .map(|stack| RigInstalledStackSummary {
-                    id: stack.id,
-                    description: stack.description,
-                    path: stack.path.to_string_lossy().to_string(),
-                    spec_path: stack.spec_path.to_string_lossy().to_string(),
-                    source_revision: stack.source_revision,
                 })
                 .collect(),
         }),
@@ -976,43 +953,14 @@ fn repair(config_root: &Path, rig_id: &str) -> CmdResult<RigCommandOutput> {
     ))
 }
 
-fn sync(config_root: &Path, rig_id: &str, dry_run: bool) -> CmdResult<RigCommandOutput> {
-    let rig = rig::load(config_root, rig_id)?;
-    let report = rig::run_sync(&rig, dry_run)?;
-    let exit_code = if report.success { 0 } else { 1 };
-    Ok((
-        RigCommandOutput::Sync(RigSyncOutput {
-            command: "rig.sync",
-            report,
-        }),
-        exit_code,
-    ))
-}
-
 fn run_profile(config_root: &Path, args: RigRunArgs) -> CmdResult<RigCommandOutput> {
     // Boundary: one rig run is one unit of work (#7505).
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
     let source_update = refresh_rig_source_if_materialized(roots.config(), &args.rig_id)?;
     let rig = rig::load(config_root, &args.rig_id)?;
-    let sync_report = rig::run_sync(&rig, false)?;
     let bench_options = rig_run_bench_options(args);
     let profile = bench_options.profile.clone();
     let bench_invocation = bench_options.bench_plan();
-
-    if !sync_report.success {
-        return Ok((
-            RigCommandOutput::Run(Box::new(RigRunOutput {
-                command: "rig.run",
-                rig_id: rig.id,
-                profile,
-                source_update,
-                sync: sync_report,
-                bench_invocation,
-                bench: None,
-            })),
-            1,
-        ));
-    }
 
     let (bench, bench_exit_code) = super::bench::run_rig_profile(bench_options)?;
     Ok((
@@ -1021,7 +969,6 @@ fn run_profile(config_root: &Path, args: RigRunArgs) -> CmdResult<RigCommandOutp
             rig_id: rig.id,
             profile,
             source_update,
-            sync: sync_report,
             bench_invocation,
             bench: Some(bench),
         })),
@@ -1170,15 +1117,6 @@ mod tests {
         };
         assert_eq!(kind, "wp_codebox_bundle");
         assert_eq!(path, std::path::Path::new("/tmp/wp-codebox-bundle"));
-    }
-
-    #[test]
-    fn sync_is_runner_source_management() {
-        let cli =
-            TestCli::try_parse_from(["homeboy", "sync", "static-site-importer-fixture-matrix"])
-                .expect("rig sync should parse");
-
-        assert!(cli.rig.is_runner_source_management_command());
     }
 
     #[test]

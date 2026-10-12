@@ -252,7 +252,6 @@ fn rig_component_for_fuzz_with_path(
             .to_string(),
         local_path: path.to_string(),
         remote_url: rig_component.remote_url.clone(),
-        triage_remote_url: rig_component.triage_remote_url.clone(),
         extensions: Some(extensions),
         ..Component::default()
     };

@@ -94,38 +94,10 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         golden_fixture: None,
     },
     PublicOutputVariantContract {
-        command: "db",
-        variant: "status",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("status"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "db",
-        variant: "query",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("query"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "db",
-        variant: "tunnel",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("tunnel"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
         command: "deploy",
         variant: "single",
         discriminator_field: Some("variant"),
         discriminator_value: Some("single"),
-        golden_fixture: Some("deploy_contract.json"),
-    },
-    PublicOutputVariantContract {
-        command: "deploy",
-        variant: "multi_project",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("multi_project"),
         golden_fixture: Some("deploy_contract.json"),
     },
     PublicOutputVariantContract {
@@ -175,13 +147,6 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         variant: "patch",
         discriminator_field: Some("variant"),
         discriminator_value: Some("patch"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "api",
-        variant: "response",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("response"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {
@@ -273,13 +238,6 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
         variant: "repair",
         discriminator_field: Some("variant"),
         discriminator_value: Some("repair"),
-        golden_fixture: None,
-    },
-    PublicOutputVariantContract {
-        command: "rig",
-        variant: "sync",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("sync"),
         golden_fixture: None,
     },
     PublicOutputVariantContract {

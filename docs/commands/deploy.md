@@ -5,16 +5,9 @@
 ```sh
 homeboy deploy [<project_id>|<component_id>] [<component_ids...>] [-p|--project <id>] [-c|--component <id>]... [--all] [--outdated|--behind-upstream] [--head|--ref <git-ref-or-sha>] [--release-set <path>] [--check] [--dry-run] [--confirm-dangerous] [--json '<spec>']
 # If no component IDs are provided, you must use --all, --outdated, --behind-upstream, or --check.
-
-# Multi-project deployment
-homeboy deploy --projects <project1>,<project2> <component_ids...>
-
-# Fleet deployment
-homeboy deploy <component_id> --fleet <fleet_id>
-
-# Shared component deployment (auto-detect projects)
-homeboy deploy <component_id> --shared
 ```
+
+Deploy targets one project per invocation. Run separate invocations for separate projects.
 
 ## Arguments and flags
 
@@ -36,9 +29,6 @@ Options:
 - `--confirm-dangerous`: confirm real deploys that use dangerous modes such as `--head`, `--ref`, or `--force`
 - `--force`: deploy even with uncommitted changes
 - `--json`: JSON input spec for bulk operations (`{"component_ids": ["component-id", ...]}`)
-- `--projects`: deploy to multiple projects (comma-separated). When using this flag, all positional arguments are treated as component IDs. Each project deployment builds independently.
-- `-f`, `--fleet`: deploy to all projects in a fleet. Resolves fleet to project IDs, then runs multi-project deployment.
-- `-s`, `--shared`: deploy to all projects using the specified component(s). Auto-detects which projects have the component configured and deploys to all of them.
 - `--keep-deps`: keep build dependencies and skip post-deploy cleanup.
 - `--version <version>`: assert the expected local component version before deploying; aborts on mismatch.
 - `--no-pull`: skip the automatic pull before deploy.
@@ -174,101 +164,6 @@ Exit code is `0` when `summary.failed == 0`, otherwise `1`.
 
 - `0` when all selected component deploys succeed.
 - `1` when any component deploy fails.
-
-## Multi-Project Deployment
-
-When a component belongs to multiple projects, use `--projects` to deploy to all of them in a single command:
-
-```sh
-# Deploy sample-plugin to both extra-chill and sarai-chinwag projects
-homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin
-
-# Deploy multiple components to multiple projects
-homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin extrachill-api
-
-# Preview multi-project deployment
-homeboy deploy --projects extra-chill,sarai-chinwag sample-plugin --dry-run
-```
-
-Each project deployment builds independently; build artifacts are scoped to the individual project run.
-
-### Multi-project JSON output
-
-When using `--projects`, the output structure differs:
-
-```json
-{
-  "command": "deploy.run_multi",
-  "component_ids": ["sample-plugin"],
-  "dry_run": false,
-  "check": false,
-  "force": false,
-  "projects": [
-    {
-      "project_id": "extra-chill",
-      "status": "deployed|applied_unverified|failed|planned|checked",
-      "error": "<string>|null",
-      "results": [...],
-      "summary": { "total": 1, "succeeded": 1, "skipped": 0, "failed": 0 }
-    },
-    {
-      "project_id": "sarai-chinwag",
-      "status": "deployed|failed|planned|checked",
-      "error": "<string>|null",
-      "results": [...],
-      "summary": { "total": 1, "succeeded": 1, "skipped": 0, "failed": 0 }
-    }
-  ],
-  "summary": { "total_projects": 2, "succeeded": 2, "failed": 0, "skipped": 0, "planned": 0 }
-}
-```
-
-Exit code is `1` if any project deployment fails.
-
-## Fleet Deployment
-
-Deploy to all projects in a named fleet:
-
-```sh
-# Deploy my-plugin to all projects in the production fleet
-homeboy deploy my-plugin --fleet production
-
-# Preview fleet deployment
-homeboy deploy my-plugin --fleet production --dry-run
-
-# Check status across fleet before deploying
-homeboy fleet check production
-```
-
-See [fleet](fleet.md) for fleet management commands.
-
-### Fleet vs Shared: When to Use Which
-
-`--fleet` and `--shared` often produce the same result, especially in smaller setups where a fleet's projects are exactly the set of projects that use a given component. The difference is in **how they resolve targets**:
-
-- **`--fleet <name>`** targets a **named group of projects**. The fleet is an explicit list you maintain. Use this when you want organizational control — e.g., deploying only to "production" projects, or deploying a component to a fleet even if not every project in it uses that component yet.
-- **`--shared`** targets **every project that has the component configured**. It auto-detects from project configs. Use this when you want to update a component everywhere it's used, regardless of fleet membership.
-
-**Rule of thumb:** Use `--shared` for "update this component everywhere." Use `--fleet` for "update this fleet specifically."
-
-In practice, if your fleet membership mirrors your component usage, they're interchangeable — but as your fleet grows (staging vs production, multi-site networks), the distinction becomes meaningful.
-
-## Shared Component Deployment
-
-Deploy to all projects using a component, auto-detected:
-
-```sh
-# Deploy my-plugin to every project that uses it
-homeboy deploy my-plugin --shared
-
-# See which projects would be affected
-homeboy component shared my-plugin
-
-# Preview shared deployment
-homeboy deploy my-plugin --shared --dry-run
-```
-
-This is useful when you don't have a named fleet but want to update a component everywhere it's used.
 
 ## Preview Before Deploying
 
@@ -431,7 +326,6 @@ This runs once, after the last component in the deploy, only when at least one c
 - [build](build.md)
 - [release](release.md)
 - [component](component.md)
-- [fleet](fleet.md)
 - [hooks](../architecture/hooks.md)
 ## Release Sets
 

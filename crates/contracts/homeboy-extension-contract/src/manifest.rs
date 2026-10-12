@@ -468,11 +468,6 @@ impl ExtensionManifest {
             .unwrap_or(&[])
     }
 
-    /// Convenience: get database config from platform capability.
-    pub fn database(&self) -> Option<&DatabaseConfig> {
-        self.platform.as_ref().and_then(|p| p.database.as_ref())
-    }
-
     /// Parse the version string as semver.
     pub fn semver(&self) -> homeboy_error::Result<semver::Version> {
         crate::version::parse_extension_version(&self.version, &self.id)

@@ -16,9 +16,6 @@ use crate::observation::{
     RunRecord, RunStatus, MAX_RUN_PAGE_LIMIT,
 };
 use crate::{activity, component, git};
-use homeboy_resource_topology_contract::{
-    ResourceTopologyResourceKind, ResourceTopologyResourceRef,
-};
 
 mod analysis_job_runner;
 mod sandbox_tools;
@@ -47,21 +44,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["components", id, "changes"]) => Ok(HttpEndpoint::ComponentChanges {
             id: (*id).to_string(),
         }),
-        (HttpMethod::Get, ["topology", kind, id]) => Ok(HttpEndpoint::ResourceTopology {
-            root: topology_root(kind, id)?,
-        }),
         (HttpMethod::Get, ["rigs"]) => Ok(HttpEndpoint::Rigs),
         (HttpMethod::Get, ["rigs", id]) => Ok(HttpEndpoint::Rig {
             id: (*id).to_string(),
         }),
         (HttpMethod::Post, ["rigs", id, "check"]) => Ok(HttpEndpoint::RigCheck {
-            id: (*id).to_string(),
-        }),
-        (HttpMethod::Get, ["stacks"]) => Ok(HttpEndpoint::Stacks),
-        (HttpMethod::Get, ["stacks", id]) => Ok(HttpEndpoint::Stack {
-            id: (*id).to_string(),
-        }),
-        (HttpMethod::Post, ["stacks", id, "status"]) => Ok(HttpEndpoint::StackStatus {
             id: (*id).to_string(),
         }),
         (HttpMethod::Get, ["runs"]) => Ok(HttpEndpoint::Runs),
@@ -313,8 +300,6 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /components/:id/status".to_string(),
                 "GET /rigs".to_string(),
                 "POST /rigs/:id/check".to_string(),
-                "GET /stacks".to_string(),
-                "POST /stacks/:id/status".to_string(),
                 "GET /runs".to_string(),
                 "GET /runs/:id".to_string(),
                 "GET /runs/:id/artifacts".to_string(),
@@ -514,9 +499,6 @@ where
                 context,
             );
         }
-        HttpEndpoint::ResourceTopology { root } => {
-            return topology_response(endpoint.clone(), root.clone());
-        }
         _ => {}
     }
     // Boundary: one observation-backed HTTP request is one unit of work, so
@@ -540,7 +522,6 @@ where
             "command": "api.components.changes",
             "changes": git::changes(Some(id), None, false)?,
         }),
-        HttpEndpoint::ResourceTopology { .. } => unreachable!("returned before store open"),
         HttpEndpoint::Rigs => json!({
             "command": "api.rigs.list",
             "rigs": crate::rig_provider::rig_list_json()?,
@@ -553,20 +534,6 @@ where
             json!({
                 "command": "api.rigs.check",
                 "report": crate::rig_provider::rig_check_json(id)?,
-            })
-        }
-        HttpEndpoint::Stacks => json!({
-            "command": "api.stacks.list",
-            "stacks": crate::stack_provider::stack_list_json()?,
-        }),
-        HttpEndpoint::Stack { id } => json!({
-            "command": "api.stacks.show",
-            "stack": crate::stack_provider::stack_show_json(id)?,
-        }),
-        HttpEndpoint::StackStatus { id } => {
-            json!({
-                "command": "api.stacks.status",
-                "report": crate::stack_provider::stack_status_json(id)?,
             })
         }
         HttpEndpoint::Runs => json!({
@@ -2490,57 +2457,6 @@ fn raw_query_values(path: &str, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn topology_root(kind: &str, id: &str) -> Result<ResourceTopologyResourceRef> {
-    let kind = match kind {
-        "component" => ResourceTopologyResourceKind::Component,
-        "project" => ResourceTopologyResourceKind::Project,
-        "server" => ResourceTopologyResourceKind::Server,
-        "fleet" => ResourceTopologyResourceKind::Fleet,
-        "runner" => ResourceTopologyResourceKind::Runner,
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                "kind",
-                format!("Unknown topology resource kind '{kind}'"),
-                Some(kind.to_string()),
-                Some(vec![
-                    "component".to_string(),
-                    "project".to_string(),
-                    "server".to_string(),
-                    "fleet".to_string(),
-                    "runner".to_string(),
-                ]),
-            ));
-        }
-    };
-    Ok(ResourceTopologyResourceRef {
-        kind,
-        id: id.to_string(),
-    })
-}
-
-fn topology_response(
-    endpoint: HttpEndpoint,
-    root: ResourceTopologyResourceRef,
-) -> Result<HttpApiResponse> {
-    let runners = crate::server::list()?
-        .into_iter()
-        .filter(|server| server.runner.is_some())
-        .map(|server| crate::resource_topology::ResourceTopologyRunner {
-            id: server.id.clone(),
-            server_id: Some(server.id),
-        })
-        .collect::<Vec<_>>();
-    let snapshot = crate::resource_topology::resolve(&[root], &runners)?;
-    Ok(HttpApiResponse {
-        status: 200,
-        endpoint: endpoint.name().to_string(),
-        body: json!({
-            "command": "api.resource_topology.show",
-            "snapshot": snapshot,
-        }),
-    })
 }
 
 fn method_label(method: HttpMethod) -> &'static str {

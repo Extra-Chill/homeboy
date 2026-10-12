@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::action_types::{ActionType, BuiltinAction, HttpMethod};
+use crate::action_types::{ActionType, BuiltinAction};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
@@ -66,12 +66,6 @@ pub struct ActionConfig {
     pub label: String,
     #[serde(rename = "type")]
     pub action_type: ActionType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<HttpMethod>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_auth: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]

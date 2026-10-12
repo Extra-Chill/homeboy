@@ -7,10 +7,9 @@ Homeboy commands operate on different kinds of things. The shared scope model ma
 | Scope | Meaning | Typical commands |
 | --- | --- | --- |
 | `component` | A source checkout or registered codebase. | `build`, `test`, `lint`, `release`, `changes`, `version`, `bench` |
-| `project` | A runtime target: site, server, domain, base path, database/API context, and deploy destination. | `wp`, `db`, `logs`, `api`, `auth`, `deploy` |
+| `project` | A runtime target: site, server, domain, base path, and deploy destination. | `wp`, `ssh`, `file`, `deploy` |
 | `rig` | A reproducible local environment composed from component paths, services, symlinks, and pipelines. | `rig up`, `rig check`, `rig down`, rig-pinned `bench`/`trace` |
-| `fleet` | A group of projects/targets. | fleet status/check/exec, multi-target deploy |
-| `workspace` | Everything Homeboy can discover locally across projects, rigs, standalone components, and the current checkout. | `triage workspace`, `runs`, global reports |
+| `workspace` | Everything Homeboy can discover locally across projects, rigs, standalone components, and the current checkout. | `status`, `runs`, global reports |
 | `path` | An unregistered checkout operated on directly. | ad-hoc component/source workflows |
 
 ## Command Classes
@@ -18,8 +17,8 @@ Homeboy commands operate on different kinds of things. The shared scope model ma
 Commands should describe which scope class they accept:
 
 - **Component commands** operate on source code and should work with component IDs, paths, and CWD discovery without project registration.
-- **Target commands** operate on a runtime/deploy destination and should require a project or fleet when the command writes to a site/server.
-- **Environment commands** operate on rigs or stacks and should not require project ownership.
+- **Target commands** operate on a runtime/deploy destination and should require a project when the command writes to a site/server.
+- **Environment commands** operate on rigs and should not require project ownership.
 - **Workspace commands** aggregate evidence across scopes and should expose filters instead of silently inheriting active project state.
 
 ## Design Rules
@@ -38,11 +37,10 @@ The shared Rust model lives in `homeboy::scope`:
 enum Scope {
     Component(String),
     Project(String),
-    Fleet(String),
     Rig(String),
     Workspace,
     Path { path: String, component_id: Option<String> },
 }
 ```
 
-Use `resolve_scope_components()` when a feature needs to turn any supported scope into component references. Triage is the first consumer; additional commands can adopt the same resolver as they clarify their accepted scopes.
+Use `resolve_scope_component_records()` when a feature needs to turn any supported scope into full component records.

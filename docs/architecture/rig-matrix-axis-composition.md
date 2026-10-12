@@ -165,7 +165,7 @@ Rules:
   product.
 - Missing axes use their declared `default` value.
 - Unknown axes or values are validation errors.
-- `rig up`, `rig check`, `rig down`, `rig status`, and `rig sync` accept only
+- `rig up`, `rig check`, `rig down`, and `rig status` accept only
   `--variant`, not multi-value `--matrix`, because they operate on one
   environment at a time.
 - `homeboy bench --rig <id> --matrix ...` expands derived rig entries and feeds
@@ -524,8 +524,8 @@ against real Studio package specs before runtime commands depend on it.
 
 ### Phase 2: Single-Variant Rig Commands
 
-- Add `--variant axis=value` to `rig up`, `rig check`, `rig down`, `rig status`,
-  and `rig sync`.
+- Add `--variant axis=value` to `rig up`, `rig check`, `rig down`, and
+  `rig status`.
 - Use the derived id for state and leases.
 - Add matrix metadata to `RigStateSnapshot`.
 

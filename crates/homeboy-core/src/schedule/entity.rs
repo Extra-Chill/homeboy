@@ -119,7 +119,7 @@ fn validate_step(step: &super::types::ScheduleStep) -> Result<()> {
             "A step needs something to run",
             None,
             Some(vec![
-                "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
+                "Pass --command 'status --refresh', or --exec with a program.".to_string(),
             ]),
         )),
     }
@@ -213,7 +213,7 @@ mod tests {
     fn schedule() -> Schedule {
         Schedule {
             id: "nightly-harvest".to_string(),
-            command: Some(vec!["harvest".to_string(), "prod".to_string()]),
+            command: Some(vec!["status".to_string(), "prod".to_string()]),
             exec: None,
             steps: Vec::new(),
             every: Cadence::from_seconds(86_400).expect("cadence"),
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn declaring_both_a_command_and_a_program_is_rejected() {
         let invalid = Schedule {
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             ..exec_schedule()
         };
         assert!(invalid.validate_in_root(unused_root()).is_err());
@@ -391,10 +391,10 @@ mod tests {
     #[test]
     fn declaring_both_a_single_command_and_steps_is_rejected() {
         let invalid = Schedule {
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: vec![super::super::types::ScheduleStep {
-                command: Some(vec!["fleet".to_string(), "check".to_string()]),
+                command: Some(vec!["runs".to_string(), "list".to_string()]),
                 exec: None,
             }],
             ..schedule()
@@ -414,7 +414,7 @@ mod tests {
             exec: None,
             steps: vec![
                 super::super::types::ScheduleStep {
-                    command: Some(vec!["triage".to_string()]),
+                    command: Some(vec!["status".to_string()]),
                     exec: None,
                 },
                 super::super::types::ScheduleStep {
@@ -453,7 +453,7 @@ mod tests {
             let loaded = crate::config::load::<Schedule>("nightly-harvest").expect("load");
             assert_eq!(
                 loaded.command,
-                Some(vec!["harvest".to_string(), "prod".to_string()])
+                Some(vec!["status".to_string(), "prod".to_string()])
             );
             assert_eq!(loaded.every.seconds(), 86_400);
             assert!(loaded.enabled);

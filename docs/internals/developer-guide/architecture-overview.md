@@ -68,9 +68,7 @@ Config entities:
   in repo-level `homeboy.json`
 - **Projects**: Deployable environments and server bindings
 - **Servers**: SSH connection settings
-- **Fleets**: Named groups of projects for batch inspection and operations
 - **Rigs**: Reproducible local multi-component environments
-- **Stacks**: Combined-fixes branch specifications
 - **Extensions**: Domain-specific behaviors and tools
 
 ### Rig Boundaries
@@ -128,7 +126,7 @@ Core exposes generic local path helpers for process and runtime adapters:
 
 Supports:
 - Local commands such as builds, tests, benchmarks, and review gates
-- Remote commands via SSH for configured projects and fleets
+- Remote commands via SSH for configured projects
 - Extension runtime execution
 - Extension actions, release hooks, and CLI routing
 - Lab offload for commands with portable runner contracts
@@ -219,19 +217,6 @@ Local orchestration system:
 Step types:
 - Core: preflight, changelog, version, git, deploy, cleanup, and artifact steps
 - Extension-backed: prepare, package, and publish actions declared by extensions
-
-### Fleet Management
-
-**Location:** `crates/homeboy-core/src/fleet/`
-
-Fleet management for grouped environments:
-- Named groups of projects
-- Shared component detection
-- Fleet-wide status, triage, and deploy operations
-- Coordinated operations across multiple servers or local environments
-
-Config entities:
-- **Fleets**: Named groups of projects for batch operations
 
 ### CLI Layer
 
@@ -384,7 +369,6 @@ OS-specific credential storage:
 
 ## Related
 
-- [API client system](../../architecture/api-client.md) - HTTP client details
 - [Keychain/secrets management](../../architecture/keychain-secrets.md) - Credential storage
 - [SSH key management](../../architecture/ssh-key-management.md) - SSH operations
 - [Release pipeline system](../../architecture/release-pipeline.md) - Release orchestration

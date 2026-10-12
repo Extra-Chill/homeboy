@@ -30,7 +30,6 @@ the higher-level system model and core/extension boundary, see
 - `defaults` — Built-in install, version-discovery, deploy, and permission defaults.
 - `bench` — Benchmark execution policy.
 - `lab` — Preferred runner and runner workspace retention policy.
-- `triage` — Triage priority-label configuration.
 - `agent_task` — Default backend, secret sources, provider rotation policy, and optional independently signed acceptance verification for agent-task dispatch. `acceptance_verifier` uses controller-owned `trust: { kind: hmac_sha256, key_id, key_env }`; Homeboy removes `key_env` from the verifier subprocess, verifies its base64 HMAC-SHA-256 over the canonical verdict binding, and stores the signature plus key ID with the durable run record.
 - `notifications` — Notification delivery policy for route-less completed operations.
 - `github_hosts` — Host-scoped environment for `gh` and remote-capable Git subprocesses, keyed by hostname. Component-level `github.hosts` entries override these global defaults. Git applies matching host proxy/env only to the child process so stored remotes and persistent Git config stay unchanged.
@@ -133,10 +132,6 @@ clock and in-flight uploads the controller cannot fully observe, so lowering
 them stays an explicit per-invocation `--min-age-hours` argument instead of a
 persisted default that would silently apply to every future sweep.
 
-### `TriageConfig`
-
-- `priority_labels` — Optional labels treated as priority during triage.
-
 ### `AgentTaskConfig`
 
 - `default_backend` — Optional default agent-task backend.
@@ -210,16 +205,6 @@ persisted default that would silently apply to every future sweep.
 
 - `extensions`
 - `components`
-
-### `DatabaseConfig`
-
-- `cli`
-
-### `DatabaseCliConfig`
-
-- `tables_command`
-- `describe_command`
-- `query_command`
 
 ### `CliHelpConfig`
 
@@ -334,9 +319,6 @@ glob.
 - `id`
 - `label`
 - `action_type`
-- `endpoint`
-- `method`
-- `requires_auth`
 - `payload`
 - `command`
 - `builtin` — Legacy UI action type. CLI parses but does not execute.
@@ -353,30 +335,6 @@ glob.
 ### `RemoteFileConfig`
 
 - `pinned_files`
-
-### `RemoteLogConfig`
-
-- `pinned_logs`
-
-### `ApiConfig`
-
-- `enabled`
-- `base_url`
-- `auth`
-
-### `AuthConfig`
-
-- `header`
-- `variables`
-- `login`
-- `refresh`
-
-### `AuthFlowConfig`
-
-- `endpoint`
-- `method`
-- `body`
-- `store`
 
 ## Manifests
 

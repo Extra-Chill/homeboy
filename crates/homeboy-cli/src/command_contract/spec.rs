@@ -387,10 +387,6 @@ const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const API_REQUEST_DANGEROUS_FLAGS: &[&str] = &["--apply", "METHOD!=GET"];
-const API_HTTP_REQUEST_DANGEROUS_FLAGS: &[&str] =
-    &["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
 
 const fn mutating_safety() -> CommandSafetySpec {
     CommandSafetySpec {
@@ -489,16 +485,6 @@ const fn paths_safety_without_notes(
 const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
 const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
 const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
-const FLEET_CONFIG_PATHS: &[&str] = &["create", "set", "delete", "add", "remove"];
-const API_AUTH_PATHS: &[&str] = &[
-    "auth login",
-    "auth set",
-    "auth remove",
-    "auth logout",
-    "auth profile set-basic",
-    "auth profile set-bearer",
-    "auth profile remove",
-];
 const SERVER_OPERATOR_PATHS: &[&str] = &[
     "create",
     "set",
@@ -532,7 +518,7 @@ const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename",
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
 const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
 const RIG_RUNTIME_MUTATING_PATHS: &[&str] = &["down", "repair", "install", "update"];
-const RIG_MANAGED_FILE_PATHS: &[&str] = &["sync", "app install", "app update", "app uninstall"];
+const RIG_MANAGED_FILE_PATHS: &[&str] = &["app install", "app update", "app uninstall"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -552,38 +538,6 @@ const FILE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "mutates file content unless --dry-run is passed",
     ),
     paths_safety_without_notes(FILE_TRANSFER_PATHS, mutating_safety()),
-];
-
-const FLEET_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    CommandPathSafetySpec {
-        paths: &["exec"],
-        safety: operator_safety(Some("--check"), FLEET_EXEC_DANGEROUS_FLAGS),
-        output_notes: Some(
-            "default output is blocked for remote execution; pass --check to plan or --apply to execute",
-        ),
-        lab_notes: Some(
-            "local-only: depends on local fleet/project/server configuration before SSH fan-out",
-        ),
-    },
-    paths_safety(FLEET_CONFIG_PATHS, mutating_safety(), "mutates local fleet configuration"),
-];
-
-const API_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["request"],
-        operator_safety(None, API_REQUEST_DANGEROUS_FLAGS),
-        "mutating API methods require --apply; GET is allowed without it",
-    ),
-    paths_safety(
-        &["http request"],
-        operator_safety(None, API_HTTP_REQUEST_DANGEROUS_FLAGS),
-        "mutating HTTP methods require --apply; GET, HEAD, and OPTIONS are allowed without it",
-    ),
-    paths_safety(
-        API_AUTH_PATHS,
-        operator_safety(None, &[]),
-        "mutates keychain-backed authentication state",
-    ),
 ];
 
 const SERVER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety_without_notes(
@@ -730,35 +684,6 @@ const TUNNEL_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
 ];
 
-const STACK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["create", "add-pr", "remove-pr"],
-        mutating_safety(),
-        "mutates persisted stack specification metadata",
-    ),
-    paths_safety(
-        &["apply", "rebase"],
-        with_risk_exemption(
-            operator_safety(None, &[]),
-            "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
-        ),
-        "mutates the configured stack target branch",
-    ),
-    paths_safety(
-        &["sync"],
-        operator_safety(Some("--dry-run"), &[]),
-        "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed",
-    ),
-    paths_safety(
-        &["push"],
-        with_risk_exemption(
-            operator_safety(None, &[]),
-            "push is the explicit remote publication action; no dry-run contract exists yet",
-        ),
-        "pushes the configured stack target branch to its remote",
-    ),
-];
-
 const RUNNER_CONFIG_PATHS: &[&str] = &[
     "add",
     "enable",
@@ -869,12 +794,6 @@ const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     &["rename"],
     guarded_mutating_safety(REFACTOR_DANGEROUS_FLAGS),
     "reports a plan by default; pass --write to rewrite source files",
-)];
-
-const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
-    &["delete-row", "drop-table"],
-    operator_safety(None, &[]),
-    "default output is a non-mutating plan; pass --apply to mutate",
 )];
 
 const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
@@ -1048,10 +967,6 @@ crate::builtin_json_command_descriptors!(declare_command_specs);
 pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
     CommandDocSpec {
         slug: "cargo",
-        kind: CommandDocKind::RuntimeExtensionCommand,
-    },
-    CommandDocSpec {
-        slug: "triage",
         kind: CommandDocKind::RuntimeExtensionCommand,
     },
     CommandDocSpec {

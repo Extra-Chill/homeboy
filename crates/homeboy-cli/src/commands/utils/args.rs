@@ -789,7 +789,7 @@ mod normalize_tests {
 }
 
 // ============================================================================
-// ScopeArgs: --project + --fleet + --component + --rig + --path + --workspace
+// ScopeArgs: --project + --component + --rig + --path + --workspace
 // ============================================================================
 
 /// The shared six-way entity selector.
@@ -812,27 +812,23 @@ mod normalize_tests {
 #[derive(Args, Debug, Clone, Default)]
 pub struct ScopeArgs {
     /// Scope: project id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["fleet", "component", "rig", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["component", "rig", "path", "workspace"])]
     pub project: Option<String>,
 
-    /// Scope: fleet id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "component", "rig", "path", "workspace"])]
-    pub fleet: Option<String>,
-
     /// Scope: registered component id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "rig", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "rig", "path", "workspace"])]
     pub component: Option<String>,
 
     /// Scope: local rig id.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "component", "path", "workspace"])]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "component", "path", "workspace"])]
     pub rig: Option<String>,
 
     /// Scope: checkout path, bypassing the registry.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "fleet", "component", "rig", "workspace"])]
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "component", "rig", "workspace"])]
     pub path: Option<String>,
 
     /// Scope: every configured workspace repo.
-    #[arg(long, conflicts_with_all = ["project", "fleet", "component", "rig", "path"])]
+    #[arg(long, conflicts_with_all = ["project", "component", "rig", "path"])]
     pub workspace: bool,
 }
 
@@ -843,9 +839,6 @@ impl ScopeArgs {
     pub fn selection(&self) -> Option<Scope> {
         if let Some(project) = &self.project {
             return Some(Scope::Project(project.clone()));
-        }
-        if let Some(fleet) = &self.fleet {
-            return Some(Scope::Fleet(fleet.clone()));
         }
         if let Some(component) = &self.component {
             return Some(Scope::Component(component.clone()));
@@ -905,10 +898,6 @@ mod scope_args_tests {
             Scope::Project("growth".to_string())
         );
         assert_eq!(
-            parse(&["scoped", "--fleet", "growth"]).resolve(),
-            Scope::Fleet("growth".to_string())
-        );
-        assert_eq!(
             parse(&["scoped", "--component", "homeboy"]).resolve(),
             Scope::Component("homeboy".to_string())
         );
@@ -951,10 +940,6 @@ mod scope_args_tests {
             Some(ScopeKind::Project)
         );
         assert_eq!(
-            parse(&["scoped", "--fleet", "growth"]).kind(),
-            Some(ScopeKind::Fleet)
-        );
-        assert_eq!(
             parse(&["scoped", "--component", "homeboy"]).kind(),
             Some(ScopeKind::Component)
         );
@@ -970,7 +955,7 @@ mod scope_args_tests {
 
     #[test]
     fn selectors_are_mutually_exclusive() {
-        let valued = ["--project", "--fleet", "--component", "--rig", "--path"];
+        let valued = ["--project", "--component", "--rig", "--path"];
         for (index, first) in valued.iter().copied().enumerate() {
             for second in valued.iter().copied().skip(index + 1) {
                 let argv = vec!["scoped", first, "a", second, "b"];
@@ -1311,18 +1296,17 @@ impl LintSniffArgs {
 
 /// How a command should render its result.
 ///
-/// `--json` means three unrelated things across the CLI today (#11138) and
+/// `--json` means two unrelated things across the CLI today (#11138) and
 /// this enum owns only the first of them — the *output format* sense:
 ///
 /// 1. **Output format** (a bool): `bench --json`, `runs show --json`,
 ///    `runs proof --json`, `runs dossier --json`.
-/// 2. **A JSON request body** (a string): `api http --json '<body>'`.
-/// 3. **A bulk input spec** (a string): `git --json`, `deploy --json`,
+/// 2. **A bulk input spec** (a string): `git --json`, `deploy --json`,
 ///    `build --json`, and `DynamicSetArgs --json` — *"JSON input spec for
 ///    bulk operations. Use `-` for stdin"*.
 ///
-/// Senses 2 and 3 are inputs, not presentation, so they are deliberately
-/// out of this group's scope. Renaming the input-spec flag to `--spec`
+/// Sense 2 is an input, not presentation, so it is deliberately out of this
+/// group's scope. Renaming the input-spec flag to `--spec`
 /// with `--json` kept as an alias is the natural follow-up, but it is a
 /// separate change: `--json` there takes a value, so it cannot be folded
 /// into a presentation flag without removing a spelling.

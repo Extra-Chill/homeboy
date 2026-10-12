@@ -15,7 +15,6 @@ pub use homeboy_core::extension;
 pub use homeboy_release as release;
 pub use homeboy_review as review;
 pub use homeboy_rig as rig;
-pub use homeboy_stack as stack;
 
 // The optional Lab-offload runner subsystem lives in the homeboy-runner crate.
 // Re-exported as `runner` so CLI call sites reach it via `crate::runner::*` /
@@ -28,7 +27,6 @@ pub use homeboy_lab_runner as runner;
 // across this layer resolve at the crate root.
 pub use homeboy_core::{is_zero, is_zero_u32, log_status};
 
-pub mod capability_registry;
 pub mod cli_runtime;
 pub mod cli_surface;
 pub mod command_capability;

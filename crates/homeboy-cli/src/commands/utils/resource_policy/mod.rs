@@ -3,7 +3,6 @@ mod messages;
 
 use crate::cli_surface::{Cli, Commands, Placement};
 use crate::command_contract::LabCommandPortability;
-use crate::command_contract::LabCommandRoute;
 use crate::commands::agent_task;
 use crate::runner::runners::LabRunnerReadiness;
 
@@ -560,24 +559,6 @@ pub(crate) fn hot_command_for_cli(cli: &Cli) -> Option<HotCommand> {
         return None;
     }
     hot_command(&cli.command)
-}
-
-/// Classify a descriptor-composed route with the exact portable/local-only and
-/// pressure-threshold rules used after built-in command classification.
-pub(crate) fn hot_command_for_lab_route(route: &LabCommandRoute) -> Option<HotCommand> {
-    if !route.portability_contract().is_resource_intensive() {
-        return None;
-    }
-    let contract = route.lab_contract()?;
-    match contract.portability {
-        LabCommandPortability::Portable => Some(HotCommand {
-            offload_only_when_hot: contract.routing_policy.offload_only_when_hot,
-            ..HotCommand::lab_supported(contract.hot_label)
-        }),
-        LabCommandPortability::LocalOnly(reason) => {
-            Some(HotCommand::local_only(contract.hot_label, Some(reason)))
-        }
-    }
 }
 
 pub(crate) fn is_cook_preview(command: &Commands) -> bool {
@@ -1485,7 +1466,6 @@ mod tests {
         for args in [
             ["homeboy", "rig", "install", "./rig-package"].as_slice(),
             ["homeboy", "rig", "update", "demo-rig"].as_slice(),
-            ["homeboy", "rig", "sync", "demo-rig"].as_slice(),
             ["homeboy", "rig", "sources"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
@@ -1749,7 +1729,6 @@ mod tests {
             .as_slice(),
             ["homeboy", "rig", "update"].as_slice(),
             ["homeboy", "rig", "update", "--all"].as_slice(),
-            ["homeboy", "rig", "sync", "example-rig"].as_slice(),
             ["homeboy", "rig", "sources"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);

@@ -336,12 +336,6 @@ fn run_step(
             args,
             ..
         } => git_step::run_git_step(rig, component, *op, args),
-        PipelineStep::Stack {
-            component,
-            op,
-            dry_run,
-            ..
-        } => component::run_stack_step(rig, component, *op, *dry_run),
         PipelineStep::Command { .. } | PipelineStep::CommandIfMissing { .. } => {
             command_step::run_command_pipeline_step(rig, step, settings)
         }

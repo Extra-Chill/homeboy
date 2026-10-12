@@ -726,7 +726,6 @@ dependencies = [
  "homeboy-lab-contract",
  "homeboy-product-identity",
  "homeboy-runner-contract",
- "homeboy-triage",
  "libc",
  "reqwest",
  "rusqlite",
@@ -815,11 +814,9 @@ dependencies = [
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
  "homeboy-release",
- "homeboy-resource-topology-contract",
  "homeboy-review",
  "homeboy-rig",
  "homeboy-runner-contract",
- "homeboy-stack",
  "homeboy-tunnel",
  "homeboy-upgrade",
  "homeboy-version",
@@ -910,7 +907,6 @@ dependencies = [
  "homeboy-product-identity",
  "homeboy-redaction",
  "homeboy-release-contract",
- "homeboy-resource-topology-contract",
  "homeboy-runner-contract",
  "homeboy-source-snapshot-contract",
  "keyring",
@@ -1160,14 +1156,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-resource-topology-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "homeboy-review"
 version = "0.1.0"
 dependencies = [
@@ -1192,7 +1180,6 @@ dependencies = [
  "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-rig-contract",
- "homeboy-stack",
  "libc",
  "serde",
  "serde_json",
@@ -1224,28 +1211,6 @@ dependencies = [
 name = "homeboy-source-snapshot-contract"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "homeboy-stack"
-version = "0.1.0"
-dependencies = [
- "homeboy-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "homeboy-triage"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "homeboy-core",
- "homeboy-rig",
  "serde",
  "serde_json",
 ]

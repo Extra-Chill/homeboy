@@ -1,16 +1,13 @@
 use serde_json::Value;
 
-use crate::command_contract::{
-    CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, LabCommandContract,
-};
+use crate::command_contract::{CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode};
 
 use crate::cli_surface::Commands;
 
-use crate::commands::{contract, fleet};
+use crate::commands::contract;
 
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
 pub(crate) type JsonCommandExecutor<Args> = fn(Args) -> JsonHandlerResult;
-pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
 type CommandAdapterResult = Result<BoundCommandAdapter, Box<Commands>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +50,6 @@ impl CommandAdapterContract {
 pub(crate) struct TypedCommandAdapter<Args> {
     pub contract: CommandAdapterContract,
     pub execute_json: Option<JsonCommandExecutor<Args>>,
-    pub lab_contract: Option<LabContractResolver<Args>>,
 }
 
 pub(crate) struct BoundCommandAdapter {
@@ -92,17 +88,7 @@ impl<Args> TypedCommandAdapter<Args> {
                 lab_runner: CommandLabRunnerPolicy::LOCAL,
             },
             execute_json: Some(execute_json),
-            lab_contract: None,
         }
-    }
-
-    pub(crate) fn with_lab_contract(mut self, lab_contract: LabContractResolver<Args>) -> Self {
-        self.lab_contract = Some(lab_contract);
-        self
-    }
-
-    pub fn lab_contract(&self, args: &Args) -> Option<LabCommandContract> {
-        self.lab_contract.and_then(|resolver| resolver(args))
     }
 }
 
@@ -111,12 +97,6 @@ pub(crate) fn command_adapter(
     output_file_mode: CommandOutputFileMode,
 ) -> CommandAdapterResult {
     match command {
-        Commands::Fleet(args) => {
-            let executor = fleet::adapter(output_file_mode)
-                .execute_json
-                .expect("fleet adapter supports JSON execution");
-            Ok(BoundCommandAdapter::bind(args, executor))
-        }
         Commands::Contract(args) => {
             let executor = contract::adapter(output_file_mode)
                 .execute_json
@@ -132,15 +112,7 @@ pub(crate) fn output_descriptor(
     output_file_mode: CommandOutputFileMode,
 ) -> Option<CommandOutputDescriptor> {
     match command {
-        Commands::Fleet(_) => Some(fleet::adapter(output_file_mode).output_descriptor()),
         Commands::Contract(_) => Some(contract::adapter(output_file_mode).output_descriptor()),
-        _ => None,
-    }
-}
-
-pub(crate) fn lab_contract(command: &Commands) -> Option<LabCommandContract> {
-    match command {
-        Commands::Fleet(args) => fleet::adapter(CommandOutputFileMode::None).lab_contract(args),
         _ => None,
     }
 }
@@ -148,9 +120,7 @@ pub(crate) fn lab_contract(command: &Commands) -> Option<LabCommandContract> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_contract::{
-        CommandOutputContractKind, CommandResponseMode, LabCommandPortability,
-    };
+    use crate::command_contract::{CommandOutputContractKind, CommandResponseMode};
     use clap::Parser;
 
     fn parsed_command(args: &[&str]) -> Commands {
@@ -183,12 +153,6 @@ mod tests {
     }
     #[test]
     fn command_adapter_recognizes_migrated_json_commands() {
-        assert!(command_adapter(
-            parsed_command(&["homeboy", "fleet", "list"]),
-            CommandOutputFileMode::None,
-        )
-        .is_ok());
-
         assert!(command_adapter(
             parsed_command(&["homeboy", "contract", "manifest"]),
             CommandOutputFileMode::None,
@@ -247,13 +211,10 @@ mod tests {
 
     #[test]
     fn migrated_adapter_output_descriptors_match_command_contracts() {
-        let commands = [
-            ("fleet", parsed_command(&["homeboy", "fleet", "list"])),
-            (
-                "contract",
-                parsed_command(&["homeboy", "contract", "manifest"]),
-            ),
-        ];
+        let commands = [(
+            "contract",
+            parsed_command(&["homeboy", "contract", "manifest"]),
+        )];
         let output_file_modes = [
             CommandOutputFileMode::None,
             CommandOutputFileMode::GenericEnvelope,
@@ -288,45 +249,5 @@ mod tests {
             command.output_descriptor(spec, false),
             spec.output_descriptor(CommandOutputFileMode::None)
         );
-    }
-
-    #[test]
-    fn fleet_adapter_owns_hot_exec_lab_contract() {
-        let Commands::Fleet(args) = parsed_command(&[
-            "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
-        ]) else {
-            panic!("expected parsed fleet command");
-        };
-
-        let contract = fleet::adapter(CommandOutputFileMode::None)
-            .lab_contract(&args)
-            .expect("hot fleet exec should declare a Lab contract");
-
-        assert_eq!(contract.hot_label, "fleet exec");
-        assert!(matches!(
-            contract.portability,
-            LabCommandPortability::LocalOnly(reason)
-                if reason.contains("runner-side config parity")
-        ));
-    }
-
-    #[test]
-    fn fleet_adapter_leaves_cold_commands_without_lab_contract() {
-        let Commands::Fleet(args) = parsed_command(&["homeboy", "fleet", "list"]) else {
-            panic!("expected parsed fleet command");
-        };
-
-        assert!(fleet::adapter(CommandOutputFileMode::None)
-            .lab_contract(&args)
-            .is_none());
-    }
-
-    #[test]
-    fn migrated_adapter_lab_contract_matches_command_contract() {
-        let command = parsed_command(&[
-            "homeboy", "fleet", "exec", "--apply", "growth", "wp", "plugin", "list",
-        ]);
-
-        assert_eq!(lab_contract(&command), command.lab_contract());
     }
 }

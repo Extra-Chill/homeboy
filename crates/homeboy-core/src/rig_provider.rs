@@ -1,8 +1,8 @@
 //! Rig provider hook.
 //!
 //! A few core surfaces read the rig subsystem: the HTTP API lists/shows/checks
-//! rigs, and scope resolution expands a rig's component paths into scope refs
-//! and component records. Loading + expanding rig specs is rig behavior, so it
+//! rigs, and scope resolution expands a rig's component paths into component
+//! records. Loading + expanding rig specs is rig behavior, so it
 //! is inverted behind this provider: core owns the HTTP API and scope model,
 //! the rig layer supplies the rig data.
 //!
@@ -13,7 +13,6 @@
 use serde_json::Value;
 
 use crate::component::Component;
-use crate::scope::ScopeComponentRef;
 use crate::Result;
 
 /// Supplies rig data to core's HTTP API and scope resolution.
@@ -29,9 +28,6 @@ pub trait RigProvider: Send + Sync {
 
     /// Every rig id (for enumerating rig scopes).
     fn rig_ids(&self) -> Result<Vec<String>>;
-
-    /// Resolve a rig's components into scope refs (expanded paths + remotes).
-    fn resolve_rig_scope(&self, rig_id: &str) -> Result<Vec<ScopeComponentRef>>;
 
     /// Resolve a rig's components into discovered component records.
     fn resolve_rig_component_records(&self, rig_id: &str) -> Result<Vec<Component>>;
@@ -50,9 +46,6 @@ impl RigProvider for NoopProvider {
         Ok(Value::Null)
     }
     fn rig_ids(&self) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-    fn resolve_rig_scope(&self, _rig_id: &str) -> Result<Vec<ScopeComponentRef>> {
         Ok(Vec::new())
     }
     fn resolve_rig_component_records(&self, _rig_id: &str) -> Result<Vec<Component>> {
@@ -84,10 +77,6 @@ pub(crate) fn rig_check_json(id: &str) -> Result<Value> {
 
 pub(crate) fn rig_ids() -> Result<Vec<String>> {
     with_provider(|p| p.rig_ids())
-}
-
-pub(crate) fn resolve_rig_scope(rig_id: &str) -> Result<Vec<ScopeComponentRef>> {
-    with_provider(|p| p.resolve_rig_scope(rig_id))
 }
 
 pub(crate) fn resolve_rig_component_records(rig_id: &str) -> Result<Vec<Component>> {

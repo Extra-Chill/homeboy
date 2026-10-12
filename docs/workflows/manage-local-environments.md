@@ -1,6 +1,6 @@
 # Manage Local Environments
 
-Use rigs, stacks, and task worktrees when local work spans more than one checkout, branch, component, or agent task. These commands keep local environments reproducible instead of relying on hand-maintained shell notes.
+Use rigs and task worktrees when local work spans more than one checkout, branch, component, or agent task. These commands keep local environments reproducible instead of relying on hand-maintained shell notes.
 
 ## Use This When
 
@@ -56,24 +56,7 @@ homeboy rig repair <rig-id>
 
 Repair should fix declared rig drift. It is not a substitute for understanding failed checks or uncommitted component changes.
 
-## 4. Sync Combined-Fixes Stacks
-
-Rigs can reference stacks for components that need a combined branch. Preview first:
-
-```bash
-homeboy rig sync <rig-id> --dry-run
-homeboy stack status <stack-id>
-```
-
-When the plan is correct, sync the stack:
-
-```bash
-homeboy rig sync <rig-id>
-```
-
-`stack sync` and `stack apply` mutate local branches. Use dry-run/status paths before branch mutation, and authenticate `gh` when stack reports need private PR state.
-
-## 5. Create Task Worktrees
+## 4. Create Task Worktrees
 
 Use task worktrees when a human or agent needs an isolated branch tied to a component:
 
@@ -102,7 +85,7 @@ homeboy cleanup artifacts
 homeboy cleanup artifacts --apply
 ```
 
-## 6. Connect To Agent Workflows
+## 5. Connect To Agent Workflows
 
 Agent-task cooks can target a managed worktree:
 
@@ -119,7 +102,6 @@ Use [Run agent task loops](run-agent-task-loops.md) when those one-shot cooks be
 ## Reference
 
 - [rig command](../commands/rig.md)
-- [stack command](../commands/stack.md)
 - [worktree command](../commands/worktree.md)
 - [agent-task command](../commands/agent-task.md)
 - [Use runners](use-runners.md)

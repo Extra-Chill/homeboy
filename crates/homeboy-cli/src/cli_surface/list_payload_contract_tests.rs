@@ -19,12 +19,10 @@ use clap::CommandFactory;
 const ENTITY_LIST_COMMANDS: &[&str] = &[
     "component list",
     "extension list",
-    "fleet list",
     "project list",
     "rig list",
     "runner list",
     "server list",
-    "stack list",
     "tunnel service list",
 ];
 
@@ -66,7 +64,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "fuzz list",
         "per-component workload discovery report with diagnostics",
     ),
-    ("logs list", "LogsOutput shared with show/clear/search"),
     (
         "project components list",
         "nested sub-resource under data.components, shared with set/attach",
@@ -83,10 +80,7 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "review ci list",
         "CI inventory with three row sets (profiles, jobs, discovered_jobs)",
     ),
-    (
-        "rig sources list",
-        "three row sets (sources, orphaned_stacks, invalid)",
-    ),
+    ("rig sources list", "two row sets (sources, invalid)"),
     (
         "runner broker list",
         "RunnerBrokerOutput shared with pair/revoke",

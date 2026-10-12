@@ -336,7 +336,7 @@ mod tests {
         );
 
         // Non-scoped commands get no flags.
-        for cmd in ["release", "deploy", "fleet"] {
+        for cmd in ["release", "deploy"] {
             assert!(
                 resolved.command_flags(cmd).is_empty(),
                 "command {cmd} must not be scoped"

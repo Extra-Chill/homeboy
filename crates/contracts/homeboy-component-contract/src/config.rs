@@ -106,8 +106,6 @@ pub struct ScopeConfig {
     /// output can be excluded here without hiding its changes from releases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<CommandScopeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fleet: Option<CommandScopeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

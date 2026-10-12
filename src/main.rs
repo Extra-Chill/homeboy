@@ -1,26 +1,4 @@
-use clap::{ArgMatches, Command};
-use homeboy::cli_runtime::{CliCapability, CliRuntime};
-
-static PRODUCT_CAPABILITIES: [&'static dyn homeboy::cli_runtime::CliCapability; 1] =
-    [&TRIAGE_CAPABILITY];
-
-struct TriageCapability;
-
-static TRIAGE_CAPABILITY: TriageCapability = TriageCapability;
-
-impl CliCapability for TriageCapability {
-    fn name(&self) -> &'static str {
-        homeboy_triage::COMMAND_NAME
-    }
-
-    fn command(&self) -> Command {
-        homeboy_triage::command()
-    }
-
-    fn run(&self, matches: &ArgMatches) -> homeboy::core::Result<(serde_json::Value, i32)> {
-        homeboy_triage::run_command(matches)
-    }
-}
+use homeboy::cli_runtime::CliRuntime;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -30,11 +8,7 @@ fn main() -> std::process::ExitCode {
     if let Some(exit_code) = homeboy::cli_runtime::run_update_help_fast_path(&args) {
         return exit_code;
     }
-    let runtime = CliRuntime::try_with_required_capabilities(
-        &PRODUCT_CAPABILITIES,
-        &[homeboy_triage::COMMAND_NAME],
-    )
-    .expect("standard product capability composition must be complete");
+    let runtime = CliRuntime::new();
     if let Some(exit_code) = runtime.run_startup_fast_path(&args) {
         return exit_code;
     }

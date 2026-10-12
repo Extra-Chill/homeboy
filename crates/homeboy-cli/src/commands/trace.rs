@@ -1568,10 +1568,6 @@ fn rig_component_for_trace(spec: &RigSpec, component_id: &str) -> Option<Compone
     }
     let mut resolved = homeboy::rig::resolve_component(spec, component_id).ok()?;
     resolved.remote_url = component.remote_url.clone().or(resolved.remote_url);
-    resolved.triage_remote_url = component
-        .triage_remote_url
-        .clone()
-        .or(resolved.triage_remote_url);
     resolved.extensions = if extensions.is_empty() {
         None
     } else {

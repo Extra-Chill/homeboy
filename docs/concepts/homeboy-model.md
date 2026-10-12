@@ -37,7 +37,7 @@ Agent tasks, loops, controllers, runs, and artifacts make Homeboy useful without
 
 ## Operations
 
-Projects, servers, and fleets add remote operations for deployments, SSH, logs, files, databases, and fleet fan-out. These are useful for configured environments but are not required for the local quality loop.
+Projects and servers add remote operations for deployments, SSH, and files. These are useful for configured environments but are not required for the local quality loop.
 
 ## Related
 

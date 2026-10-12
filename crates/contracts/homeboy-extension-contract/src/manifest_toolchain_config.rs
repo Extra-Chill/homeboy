@@ -1,5 +1,5 @@
 //! Extension manifest capability/config types (deploy, build, test, lint, cli,
-//! database, discovery, requirements, source-snapshot).
+//! discovery, requirements, source-snapshot).
 
 use crate::{TestDriftConfig, TestInventoryConfig, TestPassthroughFilter};
 use homeboy_engine_primitives::output_parse::ParseSpec;
@@ -78,19 +78,6 @@ pub struct EnvProviderConfig {
 pub struct SourceSnapshotConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sync_excludes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cli: Option<DatabaseCliConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseCliConfig {
-    pub tables_command: String,
-    pub describe_command: String,
-    pub query_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

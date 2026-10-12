@@ -5,7 +5,7 @@
 
 use crate::error::{Error, ErrorCode, Result};
 use keyring::Entry;
-use serde_json::{json, Value};
+use serde_json::json;
 
 const SERVICE_NAME: &str = "homeboy";
 
@@ -101,22 +101,6 @@ pub fn is_secure_storage_unavailable(error: &Error) -> bool {
         "interaction not allowed",
     ];
     NEEDLES.iter().any(|needle| haystack.contains(needle))
-}
-
-pub fn missing_error(project_id: &str, variable_name: &str) -> Error {
-    Error::new(
-        ErrorCode::ExtensionNotFound,
-        format!(
-            "Keychain variable '{}' is not set for project '{}'",
-            variable_name, project_id
-        ),
-        Value::Null,
-    )
-    .with_hint(format!(
-        "Run 'homeboy api auth set --project {} {}' to store it locally",
-        project_id, variable_name
-    ))
-    .with_hint("Use source: \"env\" instead for CI/headless environments")
 }
 
 #[cfg(target_os = "macos")]
@@ -346,17 +330,8 @@ mod tests {
 
     #[test]
     fn does_not_flag_ordinary_keychain_errors() {
-        let error = missing_error("wpcloud-api", "token");
+        let error = Error::validation_invalid_argument("token", "not set", None, None);
         assert!(!is_secure_storage_unavailable(&error));
-    }
-
-    #[test]
-    fn test_missing_error() {
-        let err = missing_error("wpcloud-api", "token");
-
-        assert!(err.message.contains("token"));
-        assert!(err.message.contains("wpcloud-api"));
-        assert_eq!(err.hints.len(), 2);
     }
 
     #[test]

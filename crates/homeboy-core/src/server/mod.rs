@@ -1,10 +1,6 @@
-pub mod api;
-pub mod auth;
-pub mod auth_profiles;
 pub mod client;
 mod connection;
 pub mod health;
-pub mod http;
 mod keys;
 mod process_cleanup;
 mod session;

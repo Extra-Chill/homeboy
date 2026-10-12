@@ -334,7 +334,6 @@ fn rig_source_management_explains_lab_setup_boundary() {
     for args in [
         ["homeboy", "rig", "install", "./rig-package"].as_slice(),
         ["homeboy", "rig", "update", "demo-rig"].as_slice(),
-        ["homeboy", "rig", "sync", "demo-rig"].as_slice(),
         ["homeboy", "rig", "sources"].as_slice(),
     ] {
         let command = parsed_command(args);

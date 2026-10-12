@@ -613,7 +613,6 @@ struct RetainedStorageSqlite {
     path: String,
     exists: bool,
     size_bytes: u64,
-    status_command: &'static str,
     compaction: &'static str,
 }
 
@@ -918,8 +917,8 @@ fn retained_storage_report(
         path: database_path.display().to_string(),
         exists: metadata.is_some(),
         size_bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
-        status_command: "homeboy db status",
-        compaction: "SQLite compaction is explicitly delegated; inspect status before selecting an operator-managed VACUUM workflow.",
+        compaction:
+            "SQLite compaction is explicitly delegated to an operator-managed VACUUM workflow.",
     };
     if sqlite.exists {
         records.push(RetainedStorageRecord {
@@ -1187,7 +1186,11 @@ fn filesystem_entry_with_budget(
             "managed",
             "homeboy cleanup --include controller-scratch",
         ),
-        "homeboy.sqlite" => ("sqlite_observation_store", "managed", "homeboy db status"),
+        "homeboy.sqlite" => (
+            "sqlite_observation_store",
+            "managed",
+            "operator-managed SQLite VACUUM",
+        ),
         _ => (
             "unknown_storage",
             "unknown/unmanaged",
@@ -1570,7 +1573,6 @@ fn build_retained_storage_report(
             "homeboy cleanup --include persisted-run-artifacts".to_string(),
             "homeboy cleanup --include runner-downloads".to_string(),
             "homeboy cleanup --include orphaned-artifact-bytes".to_string(),
-            "homeboy db status".to_string(),
         ],
         sqlite,
         filesystem,
@@ -4973,7 +4975,6 @@ mod tests {
                 path: "homeboy.sqlite".to_string(),
                 exists: true,
                 size_bytes: 10,
-                status_command: "homeboy db status",
                 compaction: "delegated",
             },
             test_filesystem(),
@@ -5013,7 +5014,6 @@ mod tests {
                 path: "homeboy.sqlite".to_string(),
                 exists: true,
                 size_bytes: 10,
-                status_command: "homeboy db status",
                 compaction: "delegated",
             },
             test_filesystem(),
@@ -5045,7 +5045,6 @@ mod tests {
             path: "homeboy.sqlite".to_string(),
             exists: true,
             size_bytes: 10,
-            status_command: "homeboy db status",
             compaction: "delegated",
         }
     }

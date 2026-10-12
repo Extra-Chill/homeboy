@@ -2563,14 +2563,9 @@ fn unpushed_commit_count_until(
 /// A branch that is genuinely unmerged fails both probes: its commits (and
 /// their aggregate) have no patch-id equivalent anywhere in `target_ref`.
 ///
-/// `homeboy stack` already has a `git cherry`-based `patch_in_base` probe for
-/// the same squash-merge symptom in its own PR-tracking domain, but it
-/// compares a single PR head SHA and cannot see this crate's registry (nor
-/// should it — `homeboy-stack` depends on `homeboy-core`, not the other way
-/// around). The synthetic-commit fallback here generalizes that idea to
-/// multi-commit worktree branches, which a single-SHA patch-id compare
-/// cannot: a squash of N commits has no individual commit whose patch-id
-/// matches the combined squash commit.
+/// The synthetic-commit fallback covers multi-commit worktree branches, which
+/// a single-SHA patch-id compare cannot: a squash of N commits has no
+/// individual commit whose patch-id matches the combined squash commit.
 fn branch_content_merged_until(
     path: &Path,
     branch_ref: &str,

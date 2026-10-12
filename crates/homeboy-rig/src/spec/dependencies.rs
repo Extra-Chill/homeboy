@@ -366,8 +366,6 @@ mod tests {
                     path_setting: None,
                     checkout_root: None,
                     remote_url: None,
-                    triage_remote_url: None,
-                    stack: None,
                     lab_stack: None,
                     branch: None,
                     r#ref: None,

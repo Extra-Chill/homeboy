@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn api_action_validation_failure_is_typed() {
+    fn action_validation_failure_is_typed() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
                 "name": "Registry",
@@ -198,8 +198,7 @@ mod tests {
                 "actions": [{
                     "id": "registry.publish",
                     "label": "Publish",
-                    "type": "api",
-                    "endpoint": "/publish"
+                    "type": "command"
                 }]
             }))
             .expect("manifest");
@@ -221,7 +220,7 @@ mod tests {
                 failure.code,
                 ExtensionApiOperationFailureCode::CapabilityExecutionFailed
             );
-            assert!(failure.message.contains("--project is required"));
+            assert!(failure.message.contains("Command action missing 'command'"));
         });
     }
 }

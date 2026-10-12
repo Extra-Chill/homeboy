@@ -253,7 +253,7 @@ pub struct Schedule {
     pub id: String,
 
     /// Homeboy arguments to run, without the leading binary name.
-    /// For example `["fleet", "check", "prod"]`.
+    /// For example `["status", "--refresh"]`.
     ///
     /// Mutually exclusive with `exec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,7 +398,7 @@ mod tests {
     fn jitter_is_stable_per_id_and_bounded_by_the_window() {
         let schedule = |id: &str| Schedule {
             id: id.to_string(),
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
@@ -431,7 +431,7 @@ mod tests {
     fn a_pre_exec_declaration_still_deserializes() {
         let stored = r#"{
             "id": "nightly",
-            "command": ["harvest", "production", "--check"],
+            "command": ["status", "production", "--refresh"],
             "every": 86400,
             "notify_on": "change",
             "on_overlap": "skip",
@@ -442,9 +442,9 @@ mod tests {
         assert_eq!(
             schedule.command,
             Some(vec![
-                "harvest".to_string(),
+                "status".to_string(),
                 "production".to_string(),
-                "--check".to_string()
+                "--refresh".to_string()
             ])
         );
         assert!(schedule.exec.is_none());
@@ -456,7 +456,7 @@ mod tests {
         ));
         assert_eq!(
             schedule.command_display(),
-            "homeboy harvest production --check"
+            "homeboy status production --refresh"
         );
     }
 
@@ -485,7 +485,7 @@ mod tests {
         let stored = r#"{
             "id": "managed",
             "steps": [
-                { "command": ["harvest", "production", "--check"] },
+                { "command": ["status", "production", "--refresh"] },
                 { "exec": { "program": "npm", "args": ["test"], "working_dir": "/srv/p" } }
             ],
             "every": 86400

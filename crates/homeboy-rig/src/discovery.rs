@@ -1,13 +1,12 @@
-//! Rig and stack discovery within a rig package.
+//! Rig discovery within a rig package.
 //!
 //! Cohesive group extracted from the install lifecycle: walking a rig package
-//! to enumerate its rig and stack specs, and selecting the requested rig. Kept
+//! to enumerate its rig specs, and selecting the requested rig. Kept
 //! in a sibling module so the install root stays under the structural
 //! item-count threshold (#5241).
 
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::extension::lifecycle;
-use homeboy_stack::stack;
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,13 +16,6 @@ pub struct DiscoveredRig {
     pub id: String,
     pub description: String,
     pub rig_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DiscoveredStack {
-    pub id: String,
-    pub description: String,
-    pub stack_path: PathBuf,
 }
 
 pub fn discover_rigs(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
@@ -190,61 +182,6 @@ fn no_rigs_found(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
                 "For command-local package discovery, run Homeboy from inside a checkout that contains rigs/<id>/rig.json.".to_string(),
             ]),
         ))
-}
-
-pub fn discover_stacks(package_path: &Path) -> Result<Vec<DiscoveredStack>> {
-    let stacks_dir = package_path.join("stacks");
-    if !stacks_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let mut stacks = Vec::new();
-    for entry in fs::read_dir(&stacks_dir)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read stacks dir".into())))?
-    {
-        let entry = entry
-            .map_err(|e| Error::internal_io(e.to_string(), Some("read stack entry".into())))?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        stacks.push(discovered_stack_from_path(&path)?);
-    }
-
-    stacks.sort_by(|a, b| a.id.cmp(&b.id));
-    stacks.dedup_by(|a, b| a.id == b.id);
-    Ok(stacks)
-}
-
-fn discovered_stack_from_path(path: &Path) -> Result<DiscoveredStack> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some("read stack spec".into())))?;
-    let mut spec: stack::StackSpec = serde_json::from_str(&content).map_err(|e| {
-        Error::validation_invalid_json(
-            e,
-            Some(format!("parse stack spec {}", path.display())),
-            Some(content.chars().take(200).collect()),
-        )
-    })?;
-    if spec.id.is_empty() {
-        spec.id = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "stack_id",
-                    "Stack spec has no id and no filename fallback",
-                    None,
-                    None,
-                )
-            })?
-            .to_string();
-    }
-    Ok(DiscoveredStack {
-        id: spec.id,
-        description: spec.description,
-        stack_path: path.to_path_buf(),
-    })
 }
 
 fn discovered_from_path(

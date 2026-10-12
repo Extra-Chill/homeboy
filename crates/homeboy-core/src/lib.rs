@@ -103,7 +103,6 @@ pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
-pub mod fleet;
 pub use homeboy_gate_contract::gate;
 pub mod control_plane;
 pub mod git;
@@ -111,7 +110,6 @@ pub mod harvest;
 pub mod host_mutation_lifecycle;
 pub mod http_api;
 pub mod http_probe;
-pub mod http_request;
 pub mod hygiene;
 pub mod io;
 pub mod keychain;
@@ -158,7 +156,6 @@ pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
-pub mod resource_topology;
 pub mod resources;
 pub mod rig_provider;
 pub use homeboy_lifecycle_contract::run_lifecycle_record;
@@ -171,7 +168,6 @@ pub mod runtime_package;
 pub mod runtime_promotion;
 pub mod schedule;
 pub mod scope;
-pub mod stack_provider;
 pub use homeboy_lab_contract::secret_env_plan;
 pub mod secret_env;
 
@@ -224,8 +220,6 @@ pub mod defaults;
 // preserve the public API for external users of the library.
 pub use engine::cli_tool;
 pub use engine::hooks;
-pub use server::api;
-pub use server::auth;
 
 // Re-export common types for convenience
 pub use error::{Error, ErrorCode, Result};

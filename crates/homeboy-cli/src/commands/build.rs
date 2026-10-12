@@ -29,7 +29,7 @@ pub struct BuildArgs {
     // Entity selection. `--path` keeps its historical build meaning — override
     // local_path for this build (a workspace clone or temp checkout) — so it
     // still composes with the positional target and CWD discovery below. The
-    // registry selectors (--component/--project/--fleet/--rig/--workspace) are
+    // registry selectors (--component/--project/--rig/--workspace) are
     // resolved through the shared scope resolver instead.
     #[command(flatten)]
     pub scope: ScopeArgs,
@@ -232,10 +232,6 @@ mod tests {
             Some(Scope::Project("my-project".to_string()))
         );
         assert_eq!(
-            parse(&["build", "--fleet", "growth"]).scope.selection(),
-            Some(Scope::Fleet("growth".to_string()))
-        );
-        assert_eq!(
             parse(&["build", "--rig", "studio"]).scope.selection(),
             Some(Scope::Rig("studio".to_string()))
         );
@@ -251,7 +247,7 @@ mod tests {
             vec!["build", "--component", "a", "--project", "b"],
             vec!["build", "--component", "a", "--path", "/tmp/a"],
             vec!["build", "--project", "a", "--workspace"],
-            vec!["build", "--fleet", "a", "--rig", "b"],
+            vec!["build", "--project", "a", "--rig", "b"],
         ] {
             assert!(
                 TestCli::try_parse_from(&argv).is_err(),

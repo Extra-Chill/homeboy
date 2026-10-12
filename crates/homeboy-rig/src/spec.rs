@@ -32,7 +32,7 @@ pub use dependencies::{
 };
 pub use pipeline::{
     GitOp, HostMutationOp, LifecycleWorkloadKind, LifecycleWorkloadRef, PatchOp, PipelineStep,
-    ServiceOp, SharedPathOp, StackOp, SymlinkOp,
+    ServiceOp, SharedPathOp, SymlinkOp,
 };
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
@@ -1245,24 +1245,11 @@ pub struct ComponentSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkout_root: Option<String>,
 
-    /// Optional source repository URL. When omitted, `homeboy triage rig`
-    /// falls back to `git -C <path> remote get-url origin`.
+    /// Optional source repository URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
 
-    /// Reporting-only GitHub remote override for `homeboy triage rig`.
-    /// Does not affect git, deploy, release, or rig pipeline operations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage_remote_url: Option<String>,
-
-    /// Stack ID this component should track. `homeboy rig sync` and explicit
-    /// `stack` pipeline steps use this to delegate combined-fixes upkeep to
-    /// the stack primitive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stack: Option<String>,
-
-    /// Immutable Git stack source materialized directly by a Lab runner. This
-    /// is distinct from `stack`, which names a local stack-sync configuration.
+    /// Immutable Git stack source materialized directly by a Lab runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab_stack: Option<LabStackSpec>,
 

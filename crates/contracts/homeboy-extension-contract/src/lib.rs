@@ -57,7 +57,6 @@
 //! Keep behavior here limited to interpreting the contract itself, so that
 //! deciding what a declaration means stays with the declaration.
 
-pub use action_types::HttpMethod;
 pub mod api;
 pub use ci_config::{
     CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
@@ -68,9 +67,8 @@ pub use manifest_capability_config::{
     DiscoveryMarkerConfig, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor, ScriptsConfig,
 };
 pub use manifest_toolchain_config::{
-    CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DatabaseCliConfig, DeployVerification,
-    LintChangedFileRoute, RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection,
-    TestSettingStringPredicate,
+    CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DeployVerification, LintChangedFileRoute,
+    RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection, TestSettingStringPredicate,
 };
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;

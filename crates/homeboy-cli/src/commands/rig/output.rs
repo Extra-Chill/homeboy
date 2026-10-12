@@ -22,7 +22,6 @@ pub enum RigCommandOutput {
     Check(RigCheckOutput),
     Down(RigDownOutput),
     Repair(RigRepairOutput),
-    Sync(RigSyncOutput),
     Status(RigStatusOutput),
     Install(RigInstallOutput),
     Update(RigUpdateOutput),
@@ -47,7 +46,6 @@ pub struct RigRunOutput {
     pub profile: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_update: Option<rig::RigSourceUpdateResult>,
-    pub sync: rig::RigStackSyncReport,
     pub bench_invocation: RigRunBenchPlan,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bench: Option<BenchOutput>,
@@ -130,7 +128,6 @@ pub struct RigUpPlanStep {
 pub type RigCheckOutput = CommandReport<rig::CheckReport>;
 pub type RigDownOutput = CommandReport<rig::DownReport>;
 pub type RigRepairOutput = CommandReport<rig::RepairReport>;
-pub type RigSyncOutput = CommandReport<rig::RigStackSyncReport>;
 pub type RigStatusOutput = CommandReport<rig::RigStatusReport>;
 
 #[derive(Serialize)]
@@ -144,7 +141,6 @@ pub struct RigInstallOutput {
     pub source_dirty: bool,
     pub source_content_hash: String,
     pub installed: Vec<RigInstalledSummary>,
-    pub installed_stacks: Vec<RigInstalledStackSummary>,
 }
 
 #[derive(Serialize)]
@@ -156,14 +152,6 @@ pub struct RigInstalledSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
 }
-
-/// An installed stack, as `rig` renders it.
-///
-/// Identical in shape to [`RigInstalledSummary`] -- same five fields, same
-/// order, same serde -- because an installed rig and an installed stack report
-/// the same thing. Which of the two a value describes is already carried by the
-/// field it lands in, not by its shape.
-pub type RigInstalledStackSummary = RigInstalledSummary;
 
 pub type RigUpdateOutput = CommandReport<rig::RigSourceUpdateResult>;
 pub type RigSourcesOutput = CommandReport<RigSourcesReport>;

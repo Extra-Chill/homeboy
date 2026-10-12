@@ -3,7 +3,7 @@
 use super::super::expand::expand_vars;
 use super::super::spec::{
     GitOp, HostMutationOp, LifecyclePhaseKind, PatchOp, PipelineStep, RigSpec, ServiceOp,
-    SharedPathOp, StackOp, SymlinkOp,
+    SharedPathOp, SymlinkOp,
 };
 
 pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
@@ -12,7 +12,6 @@ pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::Build { .. } => "build",
         PipelineStep::Extension { .. } => "extension",
         PipelineStep::Git { .. } => "git",
-        PipelineStep::Stack { .. } => "stack",
         PipelineStep::Command { .. } => "command",
         PipelineStep::CommandIfMissing { .. } => "command-if-missing",
         PipelineStep::Requirement { .. } => "requirement",
@@ -54,20 +53,6 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
                 format!(" {}", args.join(" "))
             };
             format!("git {} {}{}", serialize_git_op(*op), component, joined)
-        }),
-        PipelineStep::Stack {
-            component,
-            op,
-            dry_run,
-            label,
-            ..
-        } => label.clone().unwrap_or_else(|| {
-            format!(
-                "stack {} {}{}",
-                serialize_stack_op(*op),
-                component,
-                if *dry_run { " --dry-run" } else { "" }
-            )
         }),
         PipelineStep::Command { cmd, label, .. } => label
             .clone()
@@ -156,12 +141,6 @@ fn serialize_git_op(op: GitOp) -> &'static str {
         GitOp::CurrentBranch => "current-branch",
         GitOp::Rebase => "rebase",
         GitOp::CherryPick => "cherry-pick",
-    }
-}
-
-fn serialize_stack_op(op: StackOp) -> &'static str {
-    match op {
-        StackOp::Sync => "sync",
     }
 }
 

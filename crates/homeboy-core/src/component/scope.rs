@@ -6,7 +6,6 @@ pub enum ScopeCommand {
     Test,
     Deploy,
     Release,
-    Fleet,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -33,7 +32,6 @@ pub fn resolve_component_scope(component: &Component, command: ScopeCommand) -> 
         ScopeCommand::Test => scopes.test.as_ref(),
         ScopeCommand::Deploy => scopes.deploy.as_ref(),
         ScopeCommand::Release => scopes.release.as_ref(),
-        ScopeCommand::Fleet => scopes.fleet.as_ref(),
     };
 
     if let Some(scope) = command_scope {

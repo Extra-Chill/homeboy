@@ -158,57 +158,39 @@ enum ProjectComponentsCommand {
 
 #[derive(Subcommand)]
 enum ProjectPinCommand {
-    /// List pinned items
+    /// List pinned files
     List {
         /// Project ID
         project_id: String,
-        /// Item type: file or log
-        #[arg(long, value_enum)]
-        r#type: ProjectPinType,
     },
-    /// Pin a file or log
+    /// Pin a file
     Add {
         /// Project ID
         project_id: String,
         /// Path to pin (relative to basePath or absolute)
         path: String,
-        /// Item type: file or log
-        #[arg(long, value_enum)]
-        r#type: ProjectPinType,
         /// Optional display label
         #[arg(long)]
         label: Option<String>,
-        /// Number of lines to tail (logs only)
-        #[arg(long, default_value = "100")]
-        tail: u32,
     },
-    /// Unpin a file or log
+    /// Unpin a file
     Remove {
         /// Project ID
         project_id: String,
         /// Path to unpin
         path: String,
-        /// Item type: file or log
-        #[arg(long, value_enum)]
-        r#type: ProjectPinType,
     },
-    /// Update an existing pinned file or log
+    /// Update an existing pinned file
     Update {
         /// Project ID
         project_id: String,
         /// Path to update
         path: String,
-        /// Item type: file or log
-        #[arg(long, value_enum)]
-        r#type: ProjectPinType,
-        /// Optional display label
+        /// Display label
         #[arg(long)]
         label: Option<String>,
-        /// Number of lines to tail (logs only)
-        #[arg(long)]
-        tail: Option<u32>,
     },
-    /// Rename the path for an existing pinned file or log
+    /// Rename the path for an existing pinned file
     Rename {
         /// Project ID
         project_id: String,
@@ -216,16 +198,7 @@ enum ProjectPinCommand {
         old_path: String,
         /// New pinned path
         new_path: String,
-        /// Item type: file or log
-        #[arg(long, value_enum)]
-        r#type: ProjectPinType,
     },
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-enum ProjectPinType {
-    File,
-    Log,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -513,121 +486,42 @@ fn write_project_components_response(
 }
 
 fn pin(command: ProjectPinCommand) -> CmdResult<ProjectOutput> {
-    match command {
-        ProjectPinCommand::List { project_id, r#type } => pin_list(&project_id, r#type),
+    let (action, project_id, pin) = match command {
+        ProjectPinCommand::List { project_id } => {
+            let pin = project::list_pins(&project_id)?;
+            ("project.pin.list", project_id, pin)
+        }
         ProjectPinCommand::Add {
             project_id,
             path,
-            r#type,
             label,
-            tail,
-        } => pin_add(&project_id, &path, r#type, label, tail),
-        ProjectPinCommand::Remove {
-            project_id,
-            path,
-            r#type,
-        } => pin_remove(&project_id, &path, r#type),
+        } => {
+            let pin = project::add_pin(&project_id, &path, project::PinOptions { label })?;
+            ("project.pin.add", project_id, pin)
+        }
+        ProjectPinCommand::Remove { project_id, path } => {
+            let pin = project::remove_pin(&project_id, &path)?;
+            ("project.pin.remove", project_id, pin)
+        }
         ProjectPinCommand::Update {
             project_id,
             path,
-            r#type: update_type,
             label,
-            tail,
-        } => pin_update(&project_id, &path, update_type, label, tail),
+        } => {
+            let pin = project::update_pin(&project_id, &path, project::PinUpdateOptions { label })?;
+            ("project.pin.update", project_id, pin)
+        }
         ProjectPinCommand::Rename {
             project_id,
             old_path,
             new_path,
-            r#type,
-        } => pin_rename(&project_id, &old_path, &new_path, r#type),
-    }
-}
+        } => {
+            let pin = project::rename_pin(&project_id, &old_path, &new_path)?;
+            ("project.pin.rename", project_id, pin)
+        }
+    };
 
-fn pin_list(project_id: &str, pin_type: ProjectPinType) -> CmdResult<ProjectOutput> {
-    Ok((
-        project::build_pin_output(
-            "project.pin.list",
-            project_id,
-            project::list_pins(project_id, map_pin_type(pin_type))?,
-        ),
-        0,
-    ))
-}
-
-fn pin_add(
-    project_id: &str,
-    path: &str,
-    pin_type: ProjectPinType,
-    label: Option<String>,
-    tail: u32,
-) -> CmdResult<ProjectOutput> {
-    let pin = project::add_pin(
-        project_id,
-        map_pin_type(pin_type),
-        path,
-        project::PinOptions {
-            label,
-            tail_lines: tail,
-        },
-    )?;
-
-    Ok((
-        project::build_pin_output("project.pin.add", project_id, pin),
-        0,
-    ))
-}
-
-fn pin_remove(project_id: &str, path: &str, pin_type: ProjectPinType) -> CmdResult<ProjectOutput> {
-    let pin = project::remove_pin(project_id, map_pin_type(pin_type), path)?;
-
-    Ok((
-        project::build_pin_output("project.pin.remove", project_id, pin),
-        0,
-    ))
-}
-
-fn pin_update(
-    project_id: &str,
-    path: &str,
-    pin_type: ProjectPinType,
-    label: Option<String>,
-    tail: Option<u32>,
-) -> CmdResult<ProjectOutput> {
-    let pin = project::update_pin(
-        project_id,
-        map_pin_type(pin_type),
-        path,
-        project::PinUpdateOptions {
-            label,
-            tail_lines: tail,
-        },
-    )?;
-
-    Ok((
-        project::build_pin_output("project.pin.update", project_id, pin),
-        0,
-    ))
-}
-
-fn pin_rename(
-    project_id: &str,
-    old_path: &str,
-    new_path: &str,
-    pin_type: ProjectPinType,
-) -> CmdResult<ProjectOutput> {
-    let pin = project::rename_pin(project_id, map_pin_type(pin_type), old_path, new_path)?;
-
-    Ok((
-        project::build_pin_output("project.pin.rename", project_id, pin),
-        0,
-    ))
-}
-
-fn map_pin_type(pin_type: ProjectPinType) -> project::PinType {
-    match pin_type {
-        ProjectPinType::File => project::PinType::File,
-        ProjectPinType::Log => project::PinType::Log,
-    }
+    Ok((project::build_pin_output(action, &project_id, pin), 0))
 }
 
 fn status(project_id: &str, health_only: bool) -> CmdResult<ProjectOutput> {

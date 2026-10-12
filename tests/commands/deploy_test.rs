@@ -1,7 +1,4 @@
-use super::{
-    has_retryable_multi_target_failures, resolve_multi_args, resume_deploy_command, run,
-    DeployArgs, DeployTargetArg,
-};
+use super::{build_config, run, DeployArgs, DeployTargetArg};
 use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use std::collections::BTreeMap;
@@ -135,28 +132,6 @@ fn release_set_rejects_conflicting_source_selectors() {
 }
 
 #[test]
-fn release_set_rejects_multi_target_modes() {
-    for target in [
-        vec!["--projects", "project-a,project-b"],
-        vec!["--fleet", "fleet-a"],
-        vec!["--shared"],
-    ] {
-        let mut argv = vec!["homeboy", "deploy", "--release-set", "release-set.json"];
-        argv.extend(target.iter().copied());
-        let cli =
-            Cli::try_parse_from(argv).expect("multi-target selector should parse for diagnostic");
-        let Commands::Deploy(args) = cli.command else {
-            panic!("expected deploy command");
-        };
-        let error = match run(args) {
-            Ok(_) => panic!("release-set multi-target deploy must be rejected"),
-            Err(error) => error,
-        };
-        assert!(error.message.contains("one --project deployment at a time"));
-    }
-}
-
-#[test]
 fn release_set_requires_dangerous_confirmation_before_preflight() {
     let manifest = tempfile::NamedTempFile::new().expect("manifest file");
     std::fs::write(
@@ -196,88 +171,6 @@ fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
 }
 
 #[test]
-fn deploy_resume_run_id_propagates_to_multi_target_config() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "component-a",
-        "--projects",
-        "project-a,project-b",
-        "--resume",
-        "run-123",
-    ])
-    .expect("--resume should parse");
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    let (_, config) = resolve_multi_args(&args).expect("deploy config should resolve");
-
-    assert_eq!(config.resume_run_id.as_deref(), Some("run-123"));
-}
-
-#[test]
-fn generated_resume_action_round_trips_all_multi_target_identity_inputs() {
-    let mut config = resolve_multi_args(&deploy_args(|args| {
-        args.component = Some(vec![
-            "component one".to_string(),
-            "component-two".to_string(),
-        ]);
-        args.all = true;
-        args.force = true;
-        args.keep_deps = true;
-        args.no_pull = true;
-        args.allow_stale_source = true;
-        args.allow_downgrade = true;
-        args.head = true;
-    }))
-    .expect("config")
-    .1;
-    config.component_ids = vec!["component one".to_string(), "component-two".to_string()];
-    let projects = vec!["project one".to_string(), "project-two".to_string()];
-    let command = resume_deploy_command(
-        &projects,
-        &config.component_ids,
-        &config,
-        "checkpoint with spaces",
-    );
-    let argv = shlex::split(&command).expect("shell-safe resume command");
-    let cli = Cli::try_parse_from(argv).expect("resume action should parse");
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-    let parsed_projects = args.projects.clone().expect("multi-project targets");
-    let (components, parsed_config) = resolve_multi_args(&args).expect("multi-target config");
-
-    assert_eq!(parsed_projects, projects);
-    assert_eq!(components, config.component_ids);
-    assert_eq!(
-        parsed_config.resume_run_id.as_deref(),
-        Some("checkpoint with spaces")
-    );
-    assert!(parsed_config.all);
-    assert!(parsed_config.force);
-    assert!(parsed_config.keep_deps);
-    assert!(parsed_config.no_pull);
-    assert!(parsed_config.allow_stale_source);
-    assert!(parsed_config.allow_downgrade);
-    assert!(parsed_config.head);
-}
-
-#[test]
-fn applied_unverified_projects_do_not_count_as_retryable_multi_target_failures() {
-    assert!(!has_retryable_multi_target_failures([
-        "applied_unverified",
-        "deployed",
-        "skipped",
-    ]));
-    assert!(has_retryable_multi_target_failures([
-        "applied_unverified",
-        "failed",
-    ]));
-}
-
-#[test]
 fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     let cli = Cli::try_parse_from([
         "homeboy",
@@ -292,7 +185,7 @@ fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
     let Commands::Deploy(args) = cli.command else {
         panic!("expected deploy command");
     };
-    let (_, config) = resolve_multi_args(&args).expect("deploy config should resolve");
+    let config = build_config(&args, false);
     crate::commands::set_skip_deps_hydration(false);
 
     assert!(config.skip_deps_hydration);
@@ -326,20 +219,6 @@ fn deploy_rejects_old_apply_spelling() {
     };
     assert!(error.to_string().contains("unexpected argument"));
     assert!(error.to_string().contains("--apply"));
-}
-
-#[test]
-fn deploy_rejects_zero_max_concurrency() {
-    let result = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "project-a",
-        "component-a",
-        "--max-concurrency",
-        "0",
-    ]);
-
-    assert!(result.is_err(), "zero concurrency must be rejected");
 }
 
 #[test]
@@ -398,89 +277,6 @@ fn deploy_ref_rejects_every_other_source_selector() {
     }
 }
 
-#[test]
-fn multi_project_resolves_positional_components() {
-    let (components, config) = resolve_multi_args(&deploy_args(|args| {
-        args.projects = Some(vec!["project-a".to_string(), "project-b".to_string()]);
-        args.target_id = Some("component-a".to_string());
-        args.component_ids = vec!["component-b".to_string()];
-    }))
-    .expect("positional components should resolve");
-
-    assert_eq!(components, ["component-a", "component-b"]);
-    assert_eq!(config.component_ids, components);
-}
-
-#[test]
-fn multi_project_resolves_component_flag_components() {
-    let (components, config) = resolve_multi_args(&deploy_args(|args| {
-        args.projects = Some(vec!["project-a".to_string(), "project-b".to_string()]);
-        args.component = Some(vec!["component-a".to_string(), "component-b".to_string()]);
-    }))
-    .expect("component flag components should resolve");
-
-    assert_eq!(components, ["component-a", "component-b"]);
-    assert_eq!(config.component_ids, components);
-}
-
-#[test]
-fn multi_project_resolves_json_components() {
-    let (components, config) = resolve_multi_args(&deploy_args(|args| {
-        args.projects = Some(vec!["project-a".to_string(), "project-b".to_string()]);
-        args.json = Some(r#"{"component_ids":["component-a","component-b"]}"#.to_string());
-    }))
-    .expect("json components should resolve");
-
-    assert_eq!(components, ["component-a", "component-b"]);
-    assert_eq!(config.component_ids, components);
-}
-
-#[test]
-fn multi_project_zero_components_remains_validation_failure() {
-    let (components, config) = resolve_multi_args(&deploy_args(|args| {
-        args.projects = Some(vec!["project-a".to_string(), "project-b".to_string()]);
-    }))
-    .expect("empty component input is resolved for core validation");
-
-    assert!(components.is_empty());
-    assert!(config.component_ids.is_empty());
-
-    let err = homeboy_deploy::run_multi(
-        &["project-a".to_string(), "project-b".to_string()],
-        &components,
-        &config,
-    )
-    .expect_err("zero components should fail multi-project validation");
-
-    assert_eq!(err.details["field"], "component_ids");
-    assert!(err
-        .message
-        .contains("At least one component ID is required for multi-project deployment"));
-}
-
-#[test]
-fn deploy_parser_keeps_positionals_as_components_with_explicit_projects() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "deploy",
-        "--projects",
-        "project-a,project-b",
-        "component-a",
-        "component-b",
-    ]);
-
-    let Commands::Deploy(args) = cli.command else {
-        panic!("expected deploy command");
-    };
-
-    assert_eq!(
-        args.projects,
-        Some(vec!["project-a".to_string(), "project-b".to_string()])
-    );
-    assert_eq!(args.target_id, Some("component-a".to_string()));
-    assert_eq!(args.component_ids, ["component-b"]);
-}
-
 fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
     let mut args = DeployArgs {
         target_id: None,
@@ -495,9 +291,6 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         confirm_dangerous: false,
         check: false,
         force: false,
-        projects: None,
-        fleet: None,
-        shared: false,
         keep_deps: false,
         version: None,
         no_pull: false,
@@ -508,8 +301,6 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         requested_ref: None,
         tagged: false,
         target: None,
-        resume: None,
-        max_concurrency: 4,
         exact_refs: BTreeMap::new(),
         resolved_refs: BTreeMap::new(),
         preflighted_source_paths: BTreeMap::new(),

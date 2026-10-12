@@ -105,7 +105,6 @@ Lab offload support is intentionally command-specific:
 | `tunnel preview-consumer run` | No | Yes | Runner-hosted preview consumer execution. |
 | `tunnel service expose` / `tunnel service start` | No | Yes | Runner-hosted private service tunnel lifecycle. |
 | `rig up` | No | No | Stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace snapshot cannot safely mirror. |
-| `fleet exec` | No | No | Stays local because fleet execution depends on local fleet/project/server config before opening SSH sessions to each project; runner-side config parity is not guaranteed. |
 
 Local-only resource-pressure commands still get resource-policy warnings, but those warnings explain why Lab offload is unavailable instead of suggesting `--runner`.
 

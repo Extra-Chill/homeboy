@@ -40,7 +40,7 @@ impl CiEventContext {
     }
 
     /// Commands inferred for this context when no explicit request is given.
-    /// Operations commands (fleet/deploy) are never auto-inferred.
+    /// Operations commands (deploy) are never auto-inferred.
     fn default_commands(self) -> &'static [&'static str] {
         match self {
             CiEventContext::Cron => &["release"],
@@ -52,7 +52,7 @@ impl CiEventContext {
 
 /// Whether a command is a reusable quality gate or a remote operations command.
 ///
-/// Operations commands (fleet/deploy) are passthrough — they target remote
+/// Operations commands (deploy) are passthrough — they target remote
 /// servers via SSH, use their own argument structure, and never take the
 /// component/workspace/scope flags the quality loop applies. They are also
 /// never auto-inferred.
@@ -80,7 +80,7 @@ fn base_command(command: &str) -> &str {
 
 fn categorize(base: &str) -> CommandCategory {
     match base {
-        "fleet" | "deploy" => CommandCategory::Operations,
+        "deploy" => CommandCategory::Operations,
         _ => CommandCategory::Quality,
     }
 }
@@ -114,7 +114,7 @@ pub struct CiPlan {
     pub context: CiEventContext,
     /// Quality gates in canonical order (lint → test → …).
     pub quality: Vec<PlannedCommand>,
-    /// Operations commands (fleet/deploy) in request order.
+    /// Operations commands (deploy) in request order.
     pub operations: Vec<PlannedCommand>,
     /// True when a standalone `lint` quality command is present.
     pub has_lint: bool,

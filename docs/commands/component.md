@@ -81,7 +81,7 @@ homeboy component set my-plugin --json '{"type":"plugin","docs_dir":"docs"}'
 Notes:
 
 - If the JSON contains an `id` field that differs from `<id>`, the component is automatically renamed first (equivalent to calling `rename`), then the remaining fields are merged. Project references are updated automatically.
-- `remote_url` and `triage_remote_url` must be GitHub remotes (`https://github.com/<owner>/<repo>.git` or `git@github.com:<owner>/<repo>.git`). Local filesystem paths and unsupported providers are rejected when writing component config.
+- `remote_url` must be a GitHub remote (`https://github.com/<owner>/<repo>.git` or `git@github.com:<owner>/<repo>.git`). Local filesystem paths and unsupported providers are rejected when writing component config.
 - Use `null` in JSON to clear a field (for example, `{"changelog_target": null}`).
 
 #### Release configuration
@@ -196,8 +196,7 @@ homeboy component shared my-plugin
 
 This is useful for:
 - Understanding component distribution across your projects
-- Planning coordinated deployments with `deploy --shared`
-- Identifying candidates for fleet grouping
+- Planning coordinated deployments
 
 ## JSON output
 
@@ -231,6 +230,5 @@ Notes:
 
 - [build](build.md)
 - [deploy](deploy.md)
-- [fleet](fleet.md)
 - [project](project.md)
 - [JSON output contract](../architecture/output-system.md)

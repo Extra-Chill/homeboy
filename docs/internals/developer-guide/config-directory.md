@@ -2,7 +2,7 @@
 
 > **Important:** Portable component configuration can live in a repo-level
 > `homeboy.json`. Reusable machine-local configuration, state, installed
-> extensions, projects, servers, fleets, rigs, and stacks live in
+> extensions, projects, servers, and rigs live in
 > `~/.config/homeboy/`. There is no repo-local dotfile or hidden Homeboy config
 > directory.
 
@@ -45,9 +45,6 @@ Typically: `C:\Users\<username>\AppData\Roaming\homeboy\`
 │   └── ...
 ├── components/
 │   ├── <component_id>.json    # Component configurations
-│   └── ...
-├── fleets/
-│   ├── <fleet_id>.json        # Fleet configurations
 │   └── ...
 ├── extensions/
 │   ├── <extension_id>/
@@ -134,22 +131,6 @@ standalone config directory is for reusable registrations outside the checkout.
 }
 ```
 
-### Fleet Configurations
-
-**Directory:** `~/.config/homeboy/fleets/`
-
-Each fleet is a separate JSON file named after the fleet ID. Fleets group projects for coordinated operations.
-
-**Example:** `~/.config/homeboy/fleets/production.json`
-
-```json
-{
-  "id": "production",
-  "project_ids": ["site-a", "site-b", "site-c"],
-  "description": "Production sites sharing common plugins"
-}
-```
-
 ### Extension Directory
 
 **Directory:** `~/.config/homeboy/extensions/`
@@ -213,7 +194,6 @@ While Homeboy provides CLI commands for most operations, configurations can be e
 - [Component schema](../../reference/schemas/component-schema.md)
 - [Project schema](../../reference/schemas/project-schema.md)
 - [Server schema](../../reference/schemas/server-schema.md)
-- [Fleet schema](../../reference/schemas/fleet-schema.md)
 - [Extension manifest schema](../../reference/schemas/extension-manifest-schema.md)
 
 ## Migration and Backups
@@ -308,5 +288,4 @@ If configuration file is invalid:
 - [Project command](../../commands/project.md) - Manage project configurations
 - [Server command](../../commands/server.md) - Manage server configurations
 - [Component command](../../commands/component.md) - Manage component configurations
-- [Fleet command](../../commands/fleet.md) - Manage fleet configurations
 - [Extension command](../../commands/extension.md) - Manage extension installations

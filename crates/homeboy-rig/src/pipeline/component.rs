@@ -1,7 +1,6 @@
-//! Component resolution plus build, extension, and stack pipeline steps.
+//! Component resolution plus build and extension pipeline steps.
 
-use super::super::spec::{ComponentSpec, RigSpec, StackOp};
-use super::super::stack as rig_stack;
+use super::super::spec::{ComponentSpec, RigSpec};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 
@@ -73,19 +72,5 @@ pub(super) fn run_extension_step(rig: &RigSpec, component_id: &str, op: &str) ->
                 other, component_id
             ),
         )),
-    }
-}
-
-pub(super) fn run_stack_step(
-    rig: &RigSpec,
-    component_id: &str,
-    op: StackOp,
-    dry_run: bool,
-) -> Result<()> {
-    match op {
-        StackOp::Sync => {
-            rig_stack::run_component_sync(rig, component_id, dry_run)?;
-            Ok(())
-        }
     }
 }

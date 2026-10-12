@@ -2,14 +2,13 @@ use std::collections::HashMap;
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project;
-use homeboy_core::server::http::ApiClient;
 use homeboy_engine_primitives::validation;
 use homeboy_extension_contract::api::v1::ExtensionApiInvocationProcessEvidence;
 
 use super::scope::ExtensionScope;
 use super::{build_action_env, execute_extension_command, ExtensionExecutionMode};
 use crate::extension::catalog::load_extension;
-use homeboy_extension_contract::action_types::{ActionType, HttpMethod};
+use homeboy_extension_contract::action_types::ActionType;
 use homeboy_extension_contract::manifest_action_config::ActionConfig;
 
 pub(super) struct ActionExecution {
@@ -61,48 +60,6 @@ pub(super) fn execute_action_implementation(
         })?;
 
     match action.action_type {
-        ActionType::Api => {
-            let pid = validation::require(
-                project_id,
-                "project",
-                "--project is required for API actions",
-            )?;
-
-            let project = project::load(pid)?;
-            let client = ApiClient::new(pid, &project.api)?;
-
-            if action.requires_auth.unwrap_or(false) && !client.is_authenticated() {
-                return Err(Error::validation_invalid_argument(
-                    "auth",
-                    "Not authenticated",
-                    None,
-                    Some(vec!["Run 'homeboy api auth login --project <id>' first.".to_string()]),
-                ));
-            }
-
-            let endpoint = validation::require(
-                action.endpoint.as_ref(),
-                "endpoint",
-                "API action missing 'endpoint'",
-            )?;
-
-            let method = action.method.as_ref().unwrap_or(&HttpMethod::Post);
-            let project = project::load(pid)?;
-            let settings = ExtensionScope::effective_settings(extension_id, Some(&project), None)?;
-            let payload = interpolate_action_payload(action, selected, &settings, payload)?;
-
-            let output = match method {
-                HttpMethod::Get => client.get(endpoint),
-                HttpMethod::Post => client.post(endpoint, &payload),
-                HttpMethod::Put => client.put(endpoint, &payload),
-                HttpMethod::Patch => client.patch(endpoint, &payload),
-                HttpMethod::Delete => client.delete(endpoint),
-            }?;
-            Ok(ActionExecution {
-                output: Some(output),
-                process: None,
-            })
-        }
         ActionType::Builtin => Err(Error::validation_invalid_argument(
             "action_id",
             format!("Action '{}' is a builtin action. Builtin actions run in the Desktop app, not the CLI.", action_id),

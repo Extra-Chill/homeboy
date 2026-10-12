@@ -571,7 +571,7 @@ mod tests {
     fn schedule(policy: NotifyPolicy) -> Schedule {
         Schedule {
             id: "digest-fixture".to_string(),
-            command: Some(vec!["triage".to_string()]),
+            command: Some(vec!["status".to_string()]),
             exec: None,
             steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
@@ -807,7 +807,7 @@ mod tests {
             id: id.to_string(),
             command: None,
             exec: None,
-            steps: vec![step(&["harvest", "--check"]), step(&["fleet", "check"])],
+            steps: vec![step(&["status", "--refresh"]), step(&["runs", "list"])],
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::Change,
             on_overlap: OverlapPolicy::default(),
@@ -833,7 +833,7 @@ mod tests {
             assert_eq!(outcome.status, "succeeded");
             assert_eq!(
                 *calls.lock().expect("calls"),
-                vec!["harvest --check".to_string(), "fleet check".to_string()]
+                vec!["status --refresh".to_string(), "runs list".to_string()]
             );
             assert_eq!(outcome.steps.len(), 2);
             assert_eq!(outcome.steps[0].index, 1);
