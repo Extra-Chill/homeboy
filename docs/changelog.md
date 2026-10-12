@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.10] - 2026-10-12
+
+### Fixed
+- report the tail of dependency command output, not its first line
+- fail fast on unknown top-level commands
+
 ## [0.418.9] - 2026-10-12
 
 ### Changed
