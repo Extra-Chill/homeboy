@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.5] - 2026-10-12
+
+### Changed
+- make agent-task status a pure projection
+- delete legacy artifact provenance repair
+- delete unused runs subcommands
+
+### Fixed
+- derive the controller identity from the machine id so read-only commands write nothing
+- release job owners pinning a proven-stopped draining generation on attestation
+- persist a stable controller identity instead of deriving it from the hostname
+
 ## [0.418.4] - 2026-10-12
 
 ### Fixed

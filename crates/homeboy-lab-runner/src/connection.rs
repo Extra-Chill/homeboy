@@ -2533,6 +2533,8 @@ fn reconcile_status_with_outcome_in_roots_with_policy(
         retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
         evidence_blocked_generation_ids: generation_reconcile.evidence_blocked_generation_ids,
         released_unverified_evidence: generation_reconcile.released_unverified_evidence,
+        stopped_generation_job_owner_ids: generation_reconcile.stopped_generation_job_owner_ids,
+        released_stopped_generation_jobs: generation_reconcile.released_stopped_generation_jobs,
     })
 }
 
@@ -2546,6 +2548,11 @@ pub struct RunnerReconcileStatusOutcome {
     pub evidence_blocked_generation_ids: std::collections::BTreeSet<String>,
     /// Generations retired under `--release-unverified-evidence`, with reasons.
     pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
+    /// Proven-stopped draining generations still pinned by job owners that
+    /// only a workload-absence attestation can release (#15779).
+    pub stopped_generation_job_owner_ids: std::collections::BTreeMap<String, Vec<String>>,
+    /// Job owners released under that attestation, by retired generation.
+    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The result of a reconcile that was allowed to apply the operator-attested

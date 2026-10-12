@@ -1449,16 +1449,7 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             )
         };
 
-        let hostname = String::from_utf8(
-            Command::new("hostname")
-                .output()
-                .expect("read hostname")
-                .stdout,
-        )
-        .expect("hostname is UTF-8")
-        .trim()
-        .to_string();
-        let controller_id = format!("{hostname}-uid-{}", unsafe { libc::geteuid() });
+        let controller_id = crate::connection::controller_id();
         let session = RunnerSession {
             runner_id: "lab-local".to_string(),
             mode: RunnerTunnelMode::DirectSsh,
