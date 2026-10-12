@@ -3,7 +3,6 @@ import SwiftUI
 
 @main
 struct HomeboyApp: App {
-    @StateObject private var authManager = AuthManager()
     @State private var showCLISetup = false
     @State private var showCLIUpdate = false
     @State private var cliVersionInfo: CLIVersionChecker.VersionInfo?
@@ -11,7 +10,6 @@ struct HomeboyApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(authManager)
                 .task {
                     if !CLIVersionChecker.shared.isInstalled {
                         showCLISetup = true
@@ -38,7 +36,6 @@ struct HomeboyApp: App {
 
         Settings {
             SettingsView()
-                .environmentObject(authManager)
         }
     }
 }

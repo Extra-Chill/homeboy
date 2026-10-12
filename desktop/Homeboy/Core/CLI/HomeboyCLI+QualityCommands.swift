@@ -79,15 +79,6 @@ extension HomeboyCLI {
         return try await executeCommandWithOutputFile(args, dataType: QualityReviewOutput.self, source: "Quality Review", timeout: 180)
     }
 
-    func qualityTriage(componentId: String) async throws -> QualityTriageOutput {
-        try await executeCommandWithOutputFile(
-            ["triage", "component", componentId],
-            dataType: QualityTriageOutput.self,
-            source: "Quality Triage",
-            timeout: 60
-        )
-    }
-
     func qualityStage(
         _ stage: QualityStage,
         componentId: String,

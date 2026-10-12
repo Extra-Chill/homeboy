@@ -67,7 +67,7 @@ struct ServersSettingsTab: View {
                             showServerSheet = true
                         }
                         
-                        Text("A server connection is required for remote deployments, database access, and production CLI commands.")
+                        Text("A server connection is required for remote deployments, remote files, and production CLI commands.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }

@@ -46,8 +46,8 @@ if let error = viewModel.error {
 Prefer providing a stable `source` string (extension/tool name) and include file context when available.
 
 ```swift
-AppError("Database credentials not configured", source: "Database Browser")
-AppError("Failed to parse log file", source: "Log Viewer", path: "/var/log/debug.log")
+AppError("Server not configured", source: "Deployer")
+AppError("Failed to read file", source: "File Editor", path: "wp-config.php")
 AppError("Connection timeout", source: "SSH", additionalInfo: ["Host": "example.com"])
 ```
 

@@ -12,55 +12,12 @@ struct KeychainService {
     private static let service = "com.extrachill.homeboy"
     
     private enum Keys {
-        static let accessToken = "accessToken"
-        static let refreshToken = "refreshToken"
         static let sshPrivateKey = "sshPrivateKey"
-        static let liveMySQLPassword = "liveMySQLPassword"
     }
     
     // Non-sensitive data stored in UserDefaults to avoid Keychain prompts
     private enum UserDefaultsKeys {
-        static let accessExpiresAt = "accessExpiresAt"
-        static let deviceId = "deviceId"
         static let sshPublicKey = "sshPublicKey"
-        // MySQL credentials (non-sensitive parts)
-        static let liveMySQLUsername = "liveMySQLUsername"
-        static let liveMySQLDatabase = "liveMySQLDatabase"
-    }
-    
-    // MARK: - Token Storage (Site-Namespaced)
-    
-    static func storeTokens(for siteId: String, accessToken: String, refreshToken: String, expiresAt: Date) throws {
-        try store(key: "\(Keys.accessToken)_\(siteId)", value: accessToken)
-        try store(key: "\(Keys.refreshToken)_\(siteId)", value: refreshToken)
-        UserDefaults.standard.set(expiresAt.timeIntervalSince1970, forKey: "\(UserDefaultsKeys.accessExpiresAt)_\(siteId)")
-    }
-    
-    static func getTokens(for siteId: String) -> (accessToken: String?, refreshToken: String?, expiresAt: Date?) {
-        let accessToken = try? retrieve(key: "\(Keys.accessToken)_\(siteId)")
-        let refreshToken = try? retrieve(key: "\(Keys.refreshToken)_\(siteId)")
-        let expiresAtInterval = UserDefaults.standard.double(forKey: "\(UserDefaultsKeys.accessExpiresAt)_\(siteId)")
-        let expiresAt = expiresAtInterval > 0 ? Date(timeIntervalSince1970: expiresAtInterval) : nil
-        
-        return (accessToken, refreshToken, expiresAt)
-    }
-    
-    static func clearTokens(for siteId: String) {
-        try? delete(key: "\(Keys.accessToken)_\(siteId)")
-        try? delete(key: "\(Keys.refreshToken)_\(siteId)")
-        UserDefaults.standard.removeObject(forKey: "\(UserDefaultsKeys.accessExpiresAt)_\(siteId)")
-    }
-
-    // MARK: - Device ID (UserDefaults - not sensitive)
-    
-    static func getOrCreateDeviceId() -> String {
-        if let existing = UserDefaults.standard.string(forKey: UserDefaultsKeys.deviceId) {
-            return existing
-        }
-        
-        let newId = UUID().uuidString
-        UserDefaults.standard.set(newId, forKey: UserDefaultsKeys.deviceId)
-        return newId
     }
     
     // MARK: - Private Helpers
@@ -143,40 +100,5 @@ struct KeychainService {
         try? delete(key: "\(Keys.sshPrivateKey)_\(serverId)")
         UserDefaults.standard.removeObject(forKey: "\(UserDefaultsKeys.sshPublicKey)_\(serverId)")
         SSHKeyManager.deleteKeyFiles(forServer: serverId)
-    }
-    
-    // MARK: - Live MySQL Credentials
-    
-    static func storeLiveMySQLCredentials(username: String, password: String, database: String) throws {
-        try store(key: Keys.liveMySQLPassword, value: password)
-        UserDefaults.standard.set(username, forKey: UserDefaultsKeys.liveMySQLUsername)
-        UserDefaults.standard.set(database, forKey: UserDefaultsKeys.liveMySQLDatabase)
-    }
-    
-    static func getLiveMySQLCredentials() -> (username: String?, password: String?, database: String?) {
-        let username = UserDefaults.standard.string(forKey: UserDefaultsKeys.liveMySQLUsername)
-        let password = try? retrieve(key: Keys.liveMySQLPassword)
-        let database = UserDefaults.standard.string(forKey: UserDefaultsKeys.liveMySQLDatabase)
-        return (username, password, database)
-    }
-    
-    static func hasLiveMySQLCredentials() -> Bool {
-        let creds = getLiveMySQLCredentials()
-        return creds.username != nil && !creds.username!.isEmpty &&
-               creds.database != nil && !creds.database!.isEmpty
-    }
-    
-    static func clearLiveMySQLCredentials() {
-        try? delete(key: Keys.liveMySQLPassword)
-        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.liveMySQLUsername)
-        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.liveMySQLDatabase)
-    }
-    
-    // MARK: - Reset All
-    
-    static func clearAll(for siteId: String) {
-        clearTokens(for: siteId)
-        clearLiveMySQLCredentials()
-        UserDefaults.standard.removeObject(forKey: UserDefaultsKeys.deviceId)
     }
 }

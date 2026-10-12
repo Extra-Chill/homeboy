@@ -4,7 +4,6 @@ import SwiftUI
 struct ExtensionActionsBar: View {
     let currentExtension: LoadedExtension
     @ObservedObject var viewModel: ExtensionViewModel
-    @EnvironmentObject var authManager: AuthManager
     
     var body: some View {
         HStack {
@@ -46,7 +45,7 @@ struct ExtensionActionsBar: View {
         .help(state.tooltip)
     }
     
-    /// Determines button state based on auth, settings, and selection requirements
+    /// Determines button state based on selection requirements
     private func buttonState(for action: ActionConfig) -> (isEnabled: Bool, tooltip: String) {
         // Always disabled while performing action
         if viewModel.isPerformingAction {
@@ -58,26 +57,7 @@ struct ExtensionActionsBar: View {
             return (false, "Select rows first")
         }
         
-        // For API actions, check additional requirements
-        if action.type == .api {
-            // Check auth requirement
-            if action.requiresAuth == true && !authManager.isAuthenticated {
-                return (false, "Login required - configure in Settings > API")
-            }
-            
-            // Check if required settings are configured
-            if let missingSettings = missingRequiredSettings(for: action) {
-                return (false, "Configure \(missingSettings) in Settings > Extensions")
-            }
-        }
-        
         return (true, "")
-    }
-    
-    /// Returns comma-separated list of missing settings used in action payload, or nil if all present
-    private func missingRequiredSettings(for action: ActionConfig) -> String? {
-        // Settings storage not implemented - skip validation
-        return nil
     }
     
     private func iconForAction(_ action: ActionConfig) -> String {
@@ -89,10 +69,6 @@ struct ExtensionActionsBar: View {
         case .copyJson:
             return "doc.on.doc"
         case .none:
-            // API actions
-            if action.id.contains("newsletter") || action.id.contains("subscribe") {
-                return "envelope"
-            }
             return "arrow.right.circle"
         }
     }

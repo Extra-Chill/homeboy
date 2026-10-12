@@ -11,10 +11,8 @@ final class QualityViewModel: ObservableObject, ConfigurationObserving {
     @Published var scope: QualityScope = .full
     @Published var changedSince = "origin/main"
     @Published var review: QualityReviewOutput?
-    @Published var triage: QualityTriageOutput?
     @Published var consoleOutput = ""
     @Published var isRunningReview = false
-    @Published var isRunningTriage = false
     @Published var runningStage: QualityStage?
     @Published var error: (any DisplayableError)?
 
@@ -35,7 +33,7 @@ final class QualityViewModel: ObservableObject, ConfigurationObserving {
     }
 
     var isBusy: Bool {
-        isRunningReview || isRunningTriage || runningStage != nil
+        isRunningReview || runningStage != nil
     }
 
     func handleConfigChange(_ change: ConfigurationChangeType) {
@@ -79,24 +77,6 @@ final class QualityViewModel: ObservableObject, ConfigurationObserving {
                 consoleOutput = error.localizedDescription
             }
             isRunningReview = false
-        }
-    }
-
-    func runTriage() {
-        guard let component = selectedComponent else { return }
-        isRunningTriage = true
-        error = nil
-        consoleOutput = "Running homeboy triage component..."
-
-        Task {
-            do {
-                triage = try await HomeboyCLI.shared.qualityTriage(componentId: component.id)
-                consoleOutput = "Triage report loaded for \(component.id)."
-            } catch {
-                self.error = error.toDisplayableError(source: "Quality Triage")
-                consoleOutput = error.localizedDescription
-            }
-            isRunningTriage = false
         }
     }
 

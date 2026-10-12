@@ -46,12 +46,6 @@ struct ExtensionManifest: Codable, Identifiable {
     /// Default pinned files (from platform group)
     var defaultPinnedFiles: [String]? { platform?.defaultPinnedFiles }
 
-    /// Default pinned logs (from platform group)
-    var defaultPinnedLogs: [String]? { platform?.defaultPinnedLogs }
-
-    /// Database config (from platform group)
-    var database: ExtensionDatabaseConfig? { platform?.database }
-
     /// Discovery config (from platform group)
     var discovery: DiscoveryConfig? { platform?.discovery }
 
@@ -208,15 +202,8 @@ struct ActionConfig: Codable, Identifiable {
     // Command action properties
     let command: String?
     
-    // API action properties
-    let endpoint: String?
-    let method: String?
-    let requiresAuth: Bool?
-    let payload: [String: PayloadValue]?
-    
     enum ActionType: String, Codable {
         case builtin
-        case api
         case command
     }
     
@@ -224,34 +211,6 @@ struct ActionConfig: Codable, Identifiable {
         case copyColumn = "copy-column"
         case exportCsv = "export-csv"
         case copyJson = "copy-json"
-    }
-}
-
-/// Handles payload values which can be strings or interpolation templates
-enum PayloadValue: Codable, Equatable {
-    case string(String)
-    case array([[String: String]])
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let stringValue = try? container.decode(String.self) {
-            self = .string(stringValue)
-        } else if let arrayValue = try? container.decode([[String: String]].self) {
-            self = .array(arrayValue)
-        } else {
-            throw DecodingError.typeMismatch(
-                PayloadValue.self,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Expected String or Array")
-            )
-        }
-    }
-    
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value): try container.encode(value)
-        case .array(let value): try container.encode(value)
-        }
     }
 }
 
@@ -345,8 +304,6 @@ struct ExecutableConfig: Codable {
 struct PlatformConfig: Codable {
     let configSchema: [String: ConfigSchemaItem]?
     let defaultPinnedFiles: [String]?
-    let defaultPinnedLogs: [String]?
-    let database: ExtensionDatabaseConfig?
     let discovery: DiscoveryConfig?
     let commands: [PlatformCommand]?
 }
@@ -357,29 +314,6 @@ struct ConfigSchemaItem: Codable {
     let description: String?
     let `default`: String?
     let required: Bool?
-}
-
-/// Database configuration for platform extensions
-struct ExtensionDatabaseConfig: Codable {
-    let tables: [DatabaseTableConfig]?
-    let views: [DatabaseViewConfig]?
-}
-
-struct DatabaseTableConfig: Codable {
-    let name: String
-    let description: String?
-    let columns: [DatabaseColumnConfig]?
-}
-
-struct DatabaseViewConfig: Codable {
-    let name: String
-    let query: String
-}
-
-struct DatabaseColumnConfig: Codable {
-    let name: String
-    let type: String
-    let description: String?
 }
 
 /// Discovery configuration for finding projects

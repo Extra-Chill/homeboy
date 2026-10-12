@@ -124,10 +124,7 @@ private struct CLIBridgeProjectEntity: Decodable {
     let basePath: String?
     let tablePrefix: String?
     let remoteFiles: RemoteFileConfigCLI?
-    let remoteLogs: RemoteLogConfigCLI?
-    let database: DatabaseConfigCLI?
     let tools: ToolsConfigCLI?
-    let api: ApiConfigCLI?
     let subTargets: [SubTargetCLI]?
     let sharedTables: [String]?
     let components: [CLIBridgeProjectComponent]?
@@ -149,24 +146,6 @@ private struct CLIBridgeProjectEntity: Decodable {
             )
         }
 
-        if let remoteLogs {
-            config.remoteLogs = RemoteLogConfig(
-                pinnedLogs: remoteLogs.pinnedLogs.map { log in
-                    PinnedRemoteLog(id: UUID(), path: log.path, label: nil, tailLines: log.tailLines)
-                }
-            )
-        }
-
-        if let database {
-            config.database = DatabaseConfig(
-                host: database.host,
-                port: database.port,
-                name: database.name,
-                user: database.user,
-                useSSHTunnel: database.useSshTunnel
-            )
-        }
-
         if let tools {
             config.tools = ToolsConfig(
                 bandcampScraper: BandcampScraperConfig(
@@ -176,10 +155,6 @@ private struct CLIBridgeProjectEntity: Decodable {
                     sendyListId: tools.newsletter?.sendyListId ?? ""
                 )
             )
-        }
-
-        if let api {
-            config.api = APIConfig(enabled: api.enabled, baseURL: api.baseUrl)
         }
 
         config.subTargets = subTargets?.map { target in
@@ -534,7 +509,7 @@ actor CLIBridge {
     /// - Parameters:
     ///   - args: Arguments to pass to the CLI
     ///   - dataType: Expected data type for successful response
-    ///   - source: Source identifier for error context (e.g., "Deployer", "Database Browser")
+    ///   - source: Source identifier for error context (e.g., "Deployer", "File Editor")
     ///   - timeout: Maximum time to wait for the command to complete
     func executeCommand<T: Decodable>(
         _ args: [String],

@@ -223,8 +223,6 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
         switch action.type {
         case .builtin:
             performBuiltinAction(action, extension: currentExtension)
-        case .api:
-            await performAPIAction(action, extension: currentExtension)
         case .command:
             actionResult = "Command actions are not implemented in the desktop runner yet."
         }
@@ -290,117 +288,6 @@ class ExtensionViewModel: ObservableObject, ConfigurationObserving {
                 self.error = AppError("Failed to save CSV: \(error.localizedDescription)", source: "Extension: \(extensionId)")
             }
         }
-    }
-    
-    private func performAPIAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) async {
-        guard let endpoint = action.endpoint,
-              let method = action.method else {
-            error = AppError("Invalid API action configuration", source: "Extension: \(extensionId)")
-            return
-        }
-        
-        // Get current site's API config
-        let siteConfig = configManager.safeActiveProject
-        guard siteConfig.api.enabled, !siteConfig.api.baseURL.isEmpty else {
-            error = AppError("API not configured for current site. Go to Settings to configure.", source: "Extension: \(extensionId)")
-            return
-        }
-        
-        // Check auth if required
-        if action.requiresAuth == true {
-            guard await APIClient.shared.hasTokens() else {
-                error = AppError("Not logged in. Go to Settings to authenticate.", source: "Extension: \(extensionId)")
-                return
-            }
-        }
-        
-        // Build payload by interpolating templates
-        var payload: [String: Any] = [:]
-        if let payloadTemplate = action.payload {
-            for (key, value) in payloadTemplate {
-                payload[key] = interpolateValue(value, extension: currentExtension)
-            }
-        }
-        
-        // Perform request
-        do {
-            let url = URL(string: siteConfig.api.baseURL + endpoint)!
-            var request = URLRequest(url: url)
-            request.httpMethod = method
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            if action.requiresAuth == true {
-                if let token = await APIClient.shared.getAccessToken() {
-                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                }
-            }
-            
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                error = AppError("Invalid response", source: "Extension: \(extensionId)")
-                return
-            }
-            
-            if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
-                // Try to parse response for display
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    actionResult = formatAPIResponse(json)
-                } else {
-                    actionResult = "Action completed successfully"
-                }
-            } else {
-                let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-                error = AppError("API error (\(httpResponse.statusCode)): \(errorText)", source: "Extension: \(extensionId)")
-            }
-            
-        } catch {
-            self.error = AppError("Request failed: \(error.localizedDescription)", source: "Extension: \(extensionId)")
-        }
-    }
-    
-    /// Interpolates template values like {{selected}} and {{settings.key}}
-    private func interpolateValue(_ value: PayloadValue, extension currentExtension: LoadedExtension) -> Any {
-        switch value {
-        case .string(let template):
-            if template == "{{selected}}" {
-                // Return selected results as array of dicts
-                return selectedResults.map { row in
-                    var dict: [String: String] = [:]
-                    for (key, value) in row {
-                        dict[key] = value.stringValue
-                    }
-                    return dict
-                }
-            } else if template.hasPrefix("{{settings.") && template.hasSuffix("}}") {
-                return ""
-            }
-            return template
-            
-        case .array(let arr):
-            return arr
-        }
-    }
-    
-    private func formatAPIResponse(_ json: [String: Any]) -> String {
-        var parts: [String] = []
-        
-        if let subscribed = json["subscribed"] as? Int {
-            parts.append("Subscribed: \(subscribed)")
-        }
-        if let alreadySubscribed = json["already_subscribed"] as? Int, alreadySubscribed > 0 {
-            parts.append("Already subscribed: \(alreadySubscribed)")
-        }
-        if let failed = json["failed"] as? Int, failed > 0 {
-            parts.append("Failed: \(failed)")
-        }
-        if let message = json["message"] as? String {
-            parts.append(message)
-        }
-        
-        return parts.isEmpty ? "Success" : parts.joined(separator: ", ")
     }
     
     // MARK: - Console

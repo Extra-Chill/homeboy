@@ -5,12 +5,9 @@ import Foundation
 enum ProjectField: String, CaseIterable {
     case server
     case basePath
-    case database
     case components
     case subTargets
     case remoteFiles
-    case remoteLogs
-    case api
     case tools
 }
 

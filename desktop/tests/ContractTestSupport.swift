@@ -83,61 +83,6 @@ struct ExtensionActionCLI: Decodable {
     let type: String
 }
 
-// MARK: - Database Output Types (mirror HomeboyCLI.swift)
-
-struct DbOutput: Decodable {
-    let command: String
-    let projectId: String
-    let exitCode: Int32?
-    let success: Bool?
-    let stdout: String?
-    let stderr: String?
-    let tables: [String]?
-    let table: String?
-    let sql: String?
-}
-
-// MARK: - Stack Output Types (mirror HomeboyCLI.swift)
-
-struct StackListOutput: Decodable {
-    let command: String
-    let stacks: [StackListItem]?
-}
-
-struct StackListItem: Decodable {
-    let id: String
-    let description: String
-    let component: String
-    let componentPath: String
-    let base: String
-    let target: String
-    let prCount: Int
-}
-
-struct StackStatusOutput: Decodable {
-    let command: String
-    let success: Bool?
-    let stackId: String
-    let componentPath: String
-    let base: String
-    let target: String
-    let targetAhead: Int
-    let targetBehind: Int
-    let mergedCount: Int
-    let prs: [StackPullRequestStatus]
-}
-
-struct StackPullRequestStatus: Decodable {
-    let repo: String
-    let number: Int
-    let note: String?
-    let title: String?
-    let url: String?
-    let upstreamState: String
-    let localState: String
-    let reviewDecision: String?
-}
-
 // MARK: - Rig Output Types (mirror HomeboyCLI.swift)
 
 enum JSONValueTest: Decodable {
@@ -229,27 +174,6 @@ struct RigPipelineStepTest: Decodable {
     let error: String?
 }
 
-// MARK: - API/Auth Output Types (mirror HomeboyCLI.swift)
-
-struct HomeboyAuthOutputTest: Decodable {
-    let projectId: String
-    let authenticated: Bool?
-    let success: Bool?
-}
-
-struct HomeboyAPIGetOutputTest: Decodable {
-    let projectId: String
-    let method: String
-    let endpoint: String
-    let response: JSONValueTest
-}
-
-struct WPTable: Decodable {
-    let Name: String
-    let Rows: String?
-    let Engine: String?
-}
-
 // MARK: - Component Configuration Types (mirror ComponentConfiguration.swift)
 
 struct VersionTargetTest: Decodable {
@@ -270,7 +194,6 @@ struct ScopeConfigTest: Decodable {
     let refactor: CommandScopeConfigTest?
     let deploy: CommandScopeConfigTest?
     let release: CommandScopeConfigTest?
-    let fleet: CommandScopeConfigTest?
 }
 
 struct GitDeployConfigTest: Decodable {

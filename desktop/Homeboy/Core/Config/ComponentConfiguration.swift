@@ -34,7 +34,6 @@ struct ScopeConfig: Codable, Equatable {
     var refactor: CommandScopeConfig?
     var deploy: CommandScopeConfig?
     var release: CommandScopeConfig?
-    var fleet: CommandScopeConfig?
 }
 
 /// Server-side git deployment settings matching CLI's GitDeployConfig.

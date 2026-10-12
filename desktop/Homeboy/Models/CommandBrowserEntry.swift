@@ -6,7 +6,6 @@ struct CommandBrowserEntry: Identifiable, Hashable {
         case project = "Project"
         case component = "Component"
         case rig = "Rig"
-        case stack = "Stack"
         case server = "Server"
     }
 

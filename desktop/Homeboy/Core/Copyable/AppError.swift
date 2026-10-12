@@ -34,16 +34,8 @@ extension AppError {
         AppError(message, source: "Deployer", path: path)
     }
 
-    static func logViewer(_ message: String, path: String? = nil) -> AppError {
-        AppError(message, source: "Log Viewer", path: path)
-    }
-
     static func fileEditor(_ message: String, path: String? = nil) -> AppError {
         AppError(message, source: "File Editor", path: path)
-    }
-
-    static func databaseBrowser(_ message: String, path: String? = nil) -> AppError {
-        AppError(message, source: "Database Browser", path: path)
     }
 
     static func extensionError(_ extensionId: String, _ message: String) -> AppError {

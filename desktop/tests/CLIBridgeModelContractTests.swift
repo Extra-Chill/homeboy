@@ -165,14 +165,8 @@ func testHomeboyCLIHelperCommandShapes() throws {
         "refactor rename uses current component flag shape", code: 81)
     try requireContains("[\"--file-type\", type]",
         "file find uses --file-type", code: 82)
-    try requireContains("[\"--limit\", String(limit)]",
-        "db search limit is converted before parser validation", code: 83)
     try requireContains("[\"--max-depth\", String(depth)]",
         "file search depth is converted before parser validation", code: 84)
-    try requireContains("[\"-n\", String(lines)]",
-        "log line counts are converted before parser validation", code: 85)
-    try requireContains("[\"-C\", String(context)]",
-        "log context counts are converted before parser validation", code: 86)
     try requireContains("let args = [\"status\", \"--full\"]",
         "workspace discovery uses homeboy status --full", code: 92)
 
@@ -206,21 +200,11 @@ func testMutationCommandShapes(testDir: String) throws {
     }
 
     let source = try cliSourceContent(at: cliURL)
-    let fleetCreate = try sourceSlice(
-        source,
-        from: "func fleetCreate(",
-        to: "    /// Delete a fleet"
-    )
     let componentCreate = try sourceSlice(
         source,
         from: "func componentCreate(",
         to: "    func componentSet("
     )
-
-    try assertContains(fleetCreate, "\"--projects\"", message: "fleet create must use current --projects flag")
-    try assertDoesNotContain(fleetCreate, "\"--project\"", message: "fleet create must not use legacy repeated --project flag")
-    try assertContains(fleetCreate, "joined(separator: \",\")", message: "fleet create should pass comma-separated project IDs")
-    print("[PASS] fleet create uses --projects")
 
     try assertContains(componentCreate, "\"--local-path\"", message: "component create must pass local path as an explicit flag")
     try assertContains(componentCreate, "\"--remote-path\"", message: "component create must pass remote path as an explicit flag")

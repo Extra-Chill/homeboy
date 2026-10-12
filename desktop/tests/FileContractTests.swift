@@ -1,91 +1,23 @@
 import Foundation
 
-// MARK: - file/log/db
+// MARK: - file
 
-func runFileLogDBContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
-    try testDbDescribe(fixturesDir: fixturesDir, decoder: decoder)
-    try testRemoteLogViewerPinCommandShape(testDir: testDir)
+func runFileContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testRemoteFileEditorPinCommandShape(testDir: testDir)
     try testRemoteFileEditorModelAndPathShape(testDir: testDir)
-    try testRemoteFileAndLogPinnedReloadReconciliation(testDir: testDir)
+    try testRemoteFilePinnedReloadReconciliation(testDir: testDir)
     try testRemoteFileBrowserStaleRequestGuard(testDir: testDir)
     try testPinnedTabClosePreservesVisibleStateUntilUnpinSucceeds(testDir: testDir)
-    try testRemoteLogTailPickerOnlyShowsSupportedCounts(testDir: testDir)
 }
 
-func testDbDescribe(fixturesDir: String, decoder: JSONDecoder) throws {
-    print("Test: db-describe.json")
-    print("----------------------")
-
-    let fixture = URL(fileURLWithPath: "\(fixturesDir)/db-describe.json")
-
-    guard FileManager.default.fileExists(atPath: fixture.path) else {
-        throw NSError(domain: "ContractTest", code: 20,
-            userInfo: [NSLocalizedDescriptionKey: "Fixture not found: db-describe.json"])
-    }
-
-    let data = try Data(contentsOf: fixture)
-
-    // Decode through CLIResponse wrapper (matches HomeboyCLI)
-    let result = try decoder.decode(CLIResponse<DbOutput>.self, from: data)
-
-    guard result.success else {
-        throw NSError(domain: "ContractTest", code: 21,
-            userInfo: [NSLocalizedDescriptionKey: "db-describe.json: success=false"])
-    }
-
-    guard let output = result.data else {
-        throw NSError(domain: "ContractTest", code: 22,
-            userInfo: [NSLocalizedDescriptionKey: "db-describe.json: data field is nil"])
-    }
-
-    print("[PASS] Parsed CLIResponse wrapper")
-    print("[PASS] Parsed DbOutput with projectId: \(output.projectId)")
-
-    // Validate stdout contains parseable table data
-    guard let stdout = output.stdout else {
-        throw NSError(domain: "ContractTest", code: 23,
-            userInfo: [NSLocalizedDescriptionKey: "db-describe.json: stdout is nil"])
-    }
-
-    guard let tableData = stdout.data(using: .utf8) else {
-        throw NSError(domain: "ContractTest", code: 24,
-            userInfo: [NSLocalizedDescriptionKey: "db-describe.json: stdout is not valid UTF-8"])
-    }
-
-    // Parse tables from stdout (matches DatabaseBrowserViewModel.parseTables)
-    let tables = try JSONDecoder().decode([WPTable].self, from: tableData)
-
-    print("[PASS] Parsed \(tables.count) tables from stdout")
-
-    // Validate table fields
-    for table in tables {
-        guard !table.Name.isEmpty else {
-            throw NSError(domain: "ContractTest", code: 25,
-                userInfo: [NSLocalizedDescriptionKey: "Table Name is empty"])
-        }
-    }
-    print("[PASS] All tables have Name field")
-
-    print("")
-    print("Database Summary:")
-    print("  Tables: \(tables.count)")
-    for table in tables {
-        print("    - \(table.Name) (\(table.Rows ?? "?") rows)")
-    }
-    print("")
-}
-
-func testRemoteFileAndLogPinnedReloadReconciliation(testDir: String) throws {
-    print("Test: Remote File/Log pinned reload reconciliation")
-    print("--------------------------------------------------")
+func testRemoteFilePinnedReloadReconciliation(testDir: String) throws {
+    print("Test: Remote File pinned reload reconciliation")
+    print("---------------------------------------------")
 
     let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
     let fileViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
-    let logViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
 
     let fileSource = try String(contentsOf: fileViewModelPath, encoding: .utf8)
-    let logSource = try String(contentsOf: logViewModelPath, encoding: .utf8)
 
     guard fileSource.contains("reconcilePinnedFiles()") else {
         throw NSError(domain: "ContractTest", code: 89,
@@ -93,83 +25,23 @@ func testRemoteFileAndLogPinnedReloadReconciliation(testDir: String) throws {
     }
     print("[PASS] Remote File Editor uses a pinned-file reconcile path")
 
-    guard logSource.contains("reconcilePinnedLogs()") else {
-        throw NSError(domain: "ContractTest", code: 90,
-            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewerViewModel does not reconcile pinned logs on config reload"])
-    }
-    print("[PASS] Remote Log Viewer uses a pinned-log reconcile path")
-
     guard fileSource.contains("openFiles[index].isPinned = pinnedByPath[openFiles[index].path] != nil") else {
         throw NSError(domain: "ContractTest", code: 91,
             userInfo: [NSLocalizedDescriptionKey: "Remote File Editor reconcile path does not update existing file pin state"])
     }
     print("[PASS] Existing file tabs keep their tab identity while pin state changes")
 
-    guard logSource.contains("openLogs[index].isPinned = true")
-        && logSource.contains("openLogs[index].tailLines = max(1, pinned.tailLines)")
-        && logSource.contains("openLogs[index].isPinned = false") else {
-        throw NSError(domain: "ContractTest", code: 92,
-            userInfo: [NSLocalizedDescriptionKey: "Remote Log Viewer reconcile path does not update existing log pin metadata"])
-    }
-    print("[PASS] Existing log tabs keep their tab identity while pin metadata changes")
-
-    guard fileSource.contains("openFiles.append(OpenFile(from: pinned))")
-        && logSource.contains("openLogs.append(OpenLog(from: pinned))") else {
+    guard fileSource.contains("openFiles.append(OpenFile(from: pinned))") else {
         throw NSError(domain: "ContractTest", code: 93,
             userInfo: [NSLocalizedDescriptionKey: "Pinned reload reconciliation does not append newly pinned tabs"])
     }
-    print("[PASS] Newly pinned files and logs are appended without replacing temporary tabs")
+    print("[PASS] Newly pinned files are appended without replacing temporary tabs")
 
-    guard fileSource.contains("openFiles = config.remoteFiles.pinnedFiles.map")
-        && logSource.contains("openLogs = config.remoteLogs.pinnedLogs.map") else {
+    guard fileSource.contains("openFiles = config.remoteFiles.pinnedFiles.map") else {
         throw NSError(domain: "ContractTest", code: 94,
             userInfo: [NSLocalizedDescriptionKey: "Project-switch pinned tab reset loaders are missing"])
     }
     print("[PASS] Project-switch full reset loaders remain available")
-
-    print("")
-}
-
-func testRemoteLogViewerPinCommandShape(testDir: String) throws {
-    print("Test: Remote Log Viewer pin command shape")
-    print("-----------------------------------------")
-
-    let viewModelPath = URL(fileURLWithPath: testDir)
-        .deletingLastPathComponent()
-        .appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
-    let cliPath = URL(fileURLWithPath: testDir)
-        .deletingLastPathComponent()
-        .appendingPathComponent("Homeboy/Core/CLI/HomeboyCLI+ProjectPinCommands.swift")
-
-    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
-    let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
-    let currentPinCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(tailLines), projectId, path]"#
-    let currentTailUpdateCommand = #"["project", "pin", "add", "--type", "log", "--tail", String(tailLines), projectId, path]"#
-    let oldPositionalFirstCommand = #"["project", "pin", "add", projectId, log.path, "--type", "log", "--tail"#
-
-    guard cliSource.contains(currentPinCommand) else {
-        throw NSError(domain: "ContractTest", code: 70,
-            userInfo: [NSLocalizedDescriptionKey: "Log CLI wrapper pin command does not use current homeboy project pin add syntax"])
-    }
-    print("[PASS] Pin command puts --type/--tail before project/path")
-
-    guard cliSource.contains(currentTailUpdateCommand) else {
-        throw NSError(domain: "ContractTest", code: 71,
-            userInfo: [NSLocalizedDescriptionKey: "Log CLI wrapper tail update command does not preserve current pin syntax"])
-    }
-    print("[PASS] Tail-line update command preserves --tail before project/path")
-
-    guard !viewModelSource.contains("[\"project\", \"pin\"") else {
-        throw NSError(domain: "ContractTest", code: 72,
-            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewerViewModel still builds raw project pin commands instead of using HomeboyCLI wrappers"])
-    }
-    print("[PASS] View model uses typed HomeboyCLI log pin wrappers")
-
-    guard !cliSource.contains(oldPositionalFirstCommand) else {
-        throw NSError(domain: "ContractTest", code: 73,
-            userInfo: [NSLocalizedDescriptionKey: "RemoteLogViewer still contains old positional-first project pin add syntax"])
-    }
-    print("[PASS] Old positional-first log pin syntax is absent")
 
     print("")
 }
@@ -187,8 +59,8 @@ func testRemoteFileEditorPinCommandShape(testDir: String) throws {
 
     let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
     let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
-    let currentAddCommand = #"["project", "pin", "add", projectId, path, "--type", "file"]"#
-    let currentRemoveCommand = #"["project", "pin", "remove", projectId, path, "--type", "file"]"#
+    let currentAddCommand = #"["project", "pin", "add", projectId, path]"#
+    let currentRemoveCommand = #"["project", "pin", "remove", projectId, path]"#
 
     guard cliSource.contains(currentAddCommand) else {
         throw NSError(domain: "ContractTest", code: 74,
@@ -354,10 +226,8 @@ func testPinnedTabClosePreservesVisibleStateUntilUnpinSucceeds(testDir: String) 
 
     let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
     let fileViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteFileEditor/RemoteFileEditorViewModel.swift")
-    let logViewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
 
     let fileSource = try String(contentsOf: fileViewModelPath, encoding: .utf8)
-    let logSource = try String(contentsOf: logViewModelPath, encoding: .utf8)
 
     guard fileSource.contains("_ = try await cli.filePinRemove(projectId: projectId, path: file.path)\n                    closeOpenFileTab(id)") else {
         throw NSError(domain: "ContractTest", code: 86,
@@ -370,44 +240,6 @@ func testPinnedTabClosePreservesVisibleStateUntilUnpinSucceeds(testDir: String) 
             userInfo: [NSLocalizedDescriptionKey: "Remote File close does not surface pinned unpin failures"])
     }
     print("[PASS] Pinned file close surfaces unpin failure")
-
-    guard logSource.contains("try await unpinLog(path: log.path)\n                    closeOpenLogTab(id)") else {
-        throw NSError(domain: "ContractTest", code: 88,
-            userInfo: [NSLocalizedDescriptionKey: "Remote Log close does not wait for pinned unpin before removing the tab"])
-    }
-    print("[PASS] Pinned log close removes the tab only after unpin succeeds")
-
-    guard logSource.contains("Failed to unpin log:") else {
-        throw NSError(domain: "ContractTest", code: 89,
-            userInfo: [NSLocalizedDescriptionKey: "Remote Log close does not surface pinned unpin failures"])
-    }
-    print("[PASS] Pinned log close surfaces unpin failure")
-
-    print("")
-}
-
-func testRemoteLogTailPickerOnlyShowsSupportedCounts(testDir: String) throws {
-    print("Test: Remote Log tail picker supported counts")
-    print("------------------------------------------------")
-
-    let root = URL(fileURLWithPath: testDir).deletingLastPathComponent()
-    let viewModelPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/RemoteLogViewerViewModel.swift")
-    let viewPath = root.appendingPathComponent("Homeboy/Extensions/RemoteLogViewer/Views/RemoteLogViewerView.swift")
-
-    let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
-    let viewSource = try String(contentsOf: viewPath, encoding: .utf8)
-
-    guard viewModelSource.contains("static let tailOptions = [50, 100, 500, 1000]") else {
-        throw NSError(domain: "ContractTest", code: 90,
-            userInfo: [NSLocalizedDescriptionKey: "Remote Log tail options changed without updating this contract"])
-    }
-    print("[PASS] Tail options contain only explicit line counts")
-
-    guard !viewSource.contains("count == 0 ? \"All\"") else {
-        throw NSError(domain: "ContractTest", code: 91,
-            userInfo: [NSLocalizedDescriptionKey: "Remote Log tail picker still contains dead All display branch"])
-    }
-    print("[PASS] Tail picker does not render unsupported All option")
 
     print("")
 }

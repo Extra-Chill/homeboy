@@ -51,10 +51,7 @@ struct ProjectConfigCLI: Decodable {
     let componentOverrides: [String: ProjectComponentOverrides]
     let services: [String]
     let remoteFiles: RemoteFileConfigCLI
-    let remoteLogs: RemoteLogConfigCLI
-    let database: DatabaseConfigCLI
     let tools: ToolsConfigCLI
-    let api: ApiConfigCLI
     let subTargets: [SubTargetCLI]
     let sharedTables: [String]
 
@@ -62,7 +59,7 @@ struct ProjectConfigCLI: Decodable {
         case domain, serverId, basePath, tablePrefix, extensions
         case changelogNextSectionLabel, changelogNextSectionAliases
         case componentIds, components, componentOverrides, services
-        case remoteFiles, remoteLogs, database, tools, api, subTargets, sharedTables
+        case remoteFiles, tools, subTargets, sharedTables
     }
 
     init(from decoder: Decoder) throws {
@@ -81,10 +78,7 @@ struct ProjectConfigCLI: Decodable {
         componentOverrides = try container.decodeIfPresent([String: ProjectComponentOverrides].self, forKey: .componentOverrides) ?? [:]
         services = try container.decodeIfPresent([String].self, forKey: .services) ?? []
         remoteFiles = try container.decodeIfPresent(RemoteFileConfigCLI.self, forKey: .remoteFiles) ?? RemoteFileConfigCLI()
-        remoteLogs = try container.decodeIfPresent(RemoteLogConfigCLI.self, forKey: .remoteLogs) ?? RemoteLogConfigCLI()
-        database = try container.decodeIfPresent(DatabaseConfigCLI.self, forKey: .database) ?? DatabaseConfigCLI()
         tools = try container.decodeIfPresent(ToolsConfigCLI.self, forKey: .tools) ?? ToolsConfigCLI()
-        api = try container.decodeIfPresent(ApiConfigCLI.self, forKey: .api) ?? ApiConfigCLI()
         subTargets = try container.decodeIfPresent([SubTargetCLI].self, forKey: .subTargets) ?? []
         sharedTables = try container.decodeIfPresent([String].self, forKey: .sharedTables) ?? []
     }
@@ -119,37 +113,6 @@ struct PinnedRemoteFileCLI: Decodable, Identifiable {
     var id: String { path }
 }
 
-struct RemoteLogConfigCLI: Decodable {
-    let pinnedLogs: [PinnedRemoteLogCLI]
-
-    init(pinnedLogs: [PinnedRemoteLogCLI] = []) {
-        self.pinnedLogs = pinnedLogs
-    }
-}
-
-struct PinnedRemoteLogCLI: Decodable, Identifiable {
-    let path: String
-    let tailLines: Int
-
-    var id: String { path }
-}
-
-struct DatabaseConfigCLI: Decodable {
-    let host: String
-    let port: Int
-    let name: String
-    let user: String
-    let useSshTunnel: Bool
-
-    init(host: String = "localhost", port: Int = 3306, name: String = "", user: String = "", useSshTunnel: Bool = true) {
-        self.host = host
-        self.port = port
-        self.name = name
-        self.user = user
-        self.useSshTunnel = useSshTunnel
-    }
-}
-
 struct ToolsConfigCLI: Decodable {
     let bandcampScraper: BandcampScraperConfig?
     let newsletter: NewsletterToolConfig?
@@ -166,31 +129,6 @@ struct ToolsConfigCLI: Decodable {
     struct NewsletterToolConfig: Decodable {
         let sendyListId: String?
     }
-}
-
-struct ApiConfigCLI: Decodable {
-    let baseUrl: String
-    let enabled: Bool
-
-    init(baseUrl: String = "", enabled: Bool = false) {
-        self.baseUrl = baseUrl
-        self.enabled = enabled
-    }
-}
-
-// MARK: - API/Auth CLI Output Models
-
-struct HomeboyAuthOutput: Decodable {
-    let projectId: String
-    let authenticated: Bool?
-    let success: Bool?
-}
-
-struct HomeboyAPIGetOutput: Decodable {
-    let projectId: String
-    let method: String
-    let endpoint: String
-    let response: JSONValue
 }
 
 struct SubTargetCLI: Decodable, Identifiable {
@@ -228,27 +166,6 @@ struct FileOutput: Decodable {
     let success: Bool?
 }
 
-struct LogsListEntry: Decodable {
-    let path: String
-    let label: String?
-    let tailLines: Int?
-}
-
-struct LogsTail: Decodable {
-    let path: String
-    let lines: Int?
-    let content: String
-}
-
-struct LogsOutput: Decodable {
-    let command: String
-    let projectId: String
-    let entries: [LogsListEntry]?
-    let log: LogsTail?
-    let clearedPath: String?
-    let searchResult: LogSearchResult?
-}
-
 struct ProjectPinReportOutput: Decodable {
     let command: String
     let id: String?
@@ -258,7 +175,6 @@ struct ProjectPinReportOutput: Decodable {
 struct ProjectPinOutput: Decodable {
     let action: String
     let projectId: String
-    let type: String
     let items: [ProjectPinListItem]?
     let added: ProjectPinChange?
     let removed: ProjectPinChange?
@@ -268,12 +184,10 @@ struct ProjectPinListItem: Decodable {
     let path: String
     let label: String?
     let displayName: String
-    let tailLines: Int?
 }
 
 struct ProjectPinChange: Decodable {
     let path: String
-    let type: String
 }
 
 // MARK: - File Search Types
@@ -302,42 +216,6 @@ struct FileGrepMatch: Decodable {
     let file: String
     let line: Int
     let content: String
-}
-
-// MARK: - Logs Search Types
-
-struct LogSearchResult: Decodable {
-    let path: String
-    let pattern: String
-    let matches: [LogSearchMatch]
-    let matchCount: Int
-}
-
-struct LogSearchMatch: Decodable {
-    let lineNumber: Int
-    let content: String
-}
-
-struct DbTunnelInfo: Decodable {
-    let localPort: Int
-    let remoteHost: String
-    let remotePort: Int
-    let database: String
-    let user: String
-}
-
-struct DbOutput: Decodable {
-    let command: String
-    let projectId: String
-    let exitCode: Int32?
-    let success: Bool?
-    let stdout: String?
-    let stderr: String?
-
-    let tables: [String]?
-    let table: String?
-    let sql: String?
-    let tunnel: DbTunnelInfo?
 }
 
 // MARK: - Server CLI Output Models
@@ -369,197 +247,6 @@ struct ServerRecordCLI: Decodable, Identifiable {
     let identityFile: String?
 
     var id: String { host }
-}
-
-// MARK: - Fleet CLI Output Models
-
-struct Fleet: Decodable, Identifiable, Hashable {
-    let id: String
-    let projectIds: [String]
-    let description: String?
-    let componentOverrides: [String: ProjectComponentOverrides]
-    let priorityLabels: [String]?
-
-    private enum CodingKeys: String, CodingKey {
-        case id, projectIds, description, componentOverrides, priorityLabels
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        projectIds = try container.decodeIfPresent([String].self, forKey: .projectIds) ?? []
-        description = try container.decodeIfPresent(String.self, forKey: .description)
-        componentOverrides = try container.decodeIfPresent([String: ProjectComponentOverrides].self, forKey: .componentOverrides) ?? [:]
-        priorityLabels = try container.decodeIfPresent([String].self, forKey: .priorityLabels)
-    }
-
-    static func == (lhs: Fleet, rhs: Fleet) -> Bool {
-        lhs.id == rhs.id
-    }
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
-}
-
-struct FleetOutput: Decodable {
-    let command: String
-    let id: String?
-    let entity: Fleet?
-    let entities: [Fleet]?
-    let updatedFields: [String]?
-    let deleted: [String]?
-
-    var fleet: Fleet? { entity }
-    var fleets: [Fleet]? { entities }
-}
-
-typealias FleetListOutput = FleetOutput
-
-struct FleetProjectsOutput: Decodable {
-    let command: String
-    let id: String?
-    let projects: [ProjectListItem]?
-}
-
-struct FleetComponentsOutput: Decodable {
-    let command: String
-    let id: String?
-    let components: [String: [String]]?
-}
-
-struct FleetStatusOutput: Decodable {
-    let command: String
-    let id: String?
-    let status: FleetStatusResult?
-}
-
-struct FleetStatusResult: Decodable {
-    let projects: [FleetProjectStatus]
-    let summary: FleetStatusSummary
-}
-
-struct FleetProjectStatus: Decodable, Identifiable {
-    let projectId: String
-    let serverId: String?
-    let components: [FleetComponentStatus]
-    let health: JSONValue?
-
-    var id: String { projectId }
-}
-
-struct FleetComponentStatus: Decodable, Identifiable {
-    let componentId: String
-    let localVersion: String?
-    let remoteVersion: String?
-    let versionSource: String
-    let drift: String
-    let unreleasedCommits: UInt32
-
-    var id: String { componentId }
-}
-
-struct FleetStatusSummary: Decodable {
-    let projects: FleetProjectSummary
-    let components: FleetComponentSummary
-    let servers: FleetServerSummary
-    let warnings: [FleetWarning]?
-}
-
-struct FleetProjectSummary: Decodable {
-    let total: UInt32
-    let healthy: UInt32
-    let warning: UInt32
-    let unreachable: UInt32
-}
-
-struct FleetComponentSummary: Decodable {
-    let total: UInt32
-    let current: UInt32
-    let needsUpdate: UInt32
-    let needsRelease: UInt32
-    let docsOnly: UInt32
-    let unknown: UInt32
-}
-
-struct FleetServerSummary: Decodable {
-    let total: UInt32
-    let healthy: UInt32
-    let warning: UInt32
-    let unreachable: UInt32
-    let servicesUp: UInt32
-    let servicesDown: UInt32
-}
-
-struct FleetWarning: Decodable, Identifiable {
-    let serverId: String
-    let projectId: String
-    let message: String
-
-    var id: String { "\(serverId):\(projectId):\(message)" }
-}
-
-struct FleetCheckOutput: Decodable {
-    let command: String
-    let id: String?
-    let check: [FleetProjectCheck]?
-    let summary: FleetCheckSummary?
-}
-
-struct FleetProjectCheck: Decodable, Identifiable {
-    let projectId: String
-    let serverId: String?
-    let status: String
-    let error: String?
-    let components: [FleetComponentCheck]
-
-    var id: String { projectId }
-}
-
-struct FleetComponentCheck: Decodable, Identifiable {
-    let componentId: String
-    let localVersion: String?
-    let remoteVersion: String?
-    let status: String
-
-    var id: String { componentId }
-}
-
-struct FleetCheckSummary: Decodable {
-    let totalProjects: UInt32
-    let projectsChecked: UInt32
-    let projectsFailed: UInt32
-    let componentsUpToDate: UInt32
-    let componentsNeedsUpdate: UInt32
-    let componentsUnknown: UInt32
-}
-
-struct FleetExecOutput: Decodable {
-    let command: String
-    let id: String?
-    let exec: [FleetExecProjectResult]?
-    let execSummary: FleetExecSummary?
-}
-
-struct FleetExecProjectResult: Decodable, Identifiable {
-    let projectId: String
-    let serverId: String?
-    let basePath: String?
-    let command: String
-    let status: String
-    let stdout: String?
-    let stderr: String?
-    let exitCode: Int32?
-    let error: String?
-
-    var id: String { projectId }
-}
-
-struct FleetExecSummary: Decodable {
-    let total: UInt32
-    let succeeded: UInt32
-    let failed: UInt32
-    let skipped: UInt32
 }
 
 // MARK: - Component CLI Output Models
@@ -875,148 +562,6 @@ struct BuildOutput: Decodable {
     let stdout: String?
     let stderr: String?
     let success: Bool
-}
-
-// MARK: - Stack CLI Output Models
-
-struct StackListOutput: Decodable {
-    let command: String
-    let stacks: [StackListItem]?
-}
-
-struct StackListItem: Decodable, Identifiable, Hashable {
-    let id: String
-    let description: String
-    let component: String
-    let componentPath: String
-    let base: String
-    let target: String
-    let prCount: Int
-}
-
-struct StackShowOutput: Decodable {
-    let command: String
-    let stack: StackSpec?
-}
-
-struct StackSpec: Decodable, Identifiable {
-    let id: String
-    let description: String
-    let component: String
-    let componentPath: String
-    let base: StackGitRef
-    let target: StackGitRef
-    let prs: [StackPrEntry]
-}
-
-struct StackGitRef: Decodable {
-    let remote: String
-    let branch: String
-}
-
-struct StackPrEntry: Decodable, Identifiable {
-    let repo: String
-    let number: Int
-    let note: String?
-
-    var id: String { "\(repo)#\(number)" }
-}
-
-struct StackStatusOutput: Decodable {
-    let command: String
-    let success: Bool?
-    let stackId: String
-    let componentPath: String
-    let base: String
-    let target: String
-    let targetAhead: Int
-    let targetBehind: Int
-    let mergedCount: Int
-    let prs: [StackPullRequestStatus]
-
-    private enum CodingKeys: String, CodingKey {
-        case command, success, stackId, componentPath, base, target, targetAhead, targetBehind, mergedCount, prs
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        command = try container.decode(String.self, forKey: .command)
-        success = try container.decodeIfPresent(Bool.self, forKey: .success)
-        stackId = try container.decode(String.self, forKey: .stackId)
-        componentPath = try container.decode(String.self, forKey: .componentPath)
-        base = try container.decode(String.self, forKey: .base)
-        target = try container.decode(String.self, forKey: .target)
-        targetAhead = try container.decodeIfPresent(Int.self, forKey: .targetAhead) ?? 0
-        targetBehind = try container.decodeIfPresent(Int.self, forKey: .targetBehind) ?? 0
-        mergedCount = try container.decode(Int.self, forKey: .mergedCount)
-        prs = try container.decode([StackPullRequestStatus].self, forKey: .prs)
-    }
-}
-
-struct StackPullRequestStatus: Decodable, Identifiable {
-    let repo: String
-    let number: Int
-    let note: String?
-    let title: String?
-    let url: String?
-    let upstreamState: String
-    let localState: String
-    let reviewDecision: String?
-    let mergedAt: String?
-    let candidateForDrop: Bool
-    let error: String?
-
-    var id: String { "\(repo)#\(number)" }
-
-    private enum CodingKeys: String, CodingKey {
-        case repo, number, note, title, url, upstreamState, localState, reviewDecision, mergedAt, candidateForDrop, error
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        repo = try container.decode(String.self, forKey: .repo)
-        number = try container.decode(Int.self, forKey: .number)
-        note = try container.decodeIfPresent(String.self, forKey: .note)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
-        url = try container.decodeIfPresent(String.self, forKey: .url)
-        upstreamState = try container.decodeIfPresent(String.self, forKey: .upstreamState) ?? "UNKNOWN"
-        localState = try container.decodeIfPresent(String.self, forKey: .localState) ?? "unknown"
-        reviewDecision = try container.decodeIfPresent(String.self, forKey: .reviewDecision)
-        mergedAt = try container.decodeIfPresent(String.self, forKey: .mergedAt)
-        candidateForDrop = try container.decodeIfPresent(Bool.self, forKey: .candidateForDrop) ?? false
-        error = try container.decodeIfPresent(String.self, forKey: .error)
-    }
-}
-
-struct StackInspectOutput: Decodable {
-    let command: String
-    let componentId: String
-    let path: String
-    let branch: String
-    let base: String
-    let baseAutoDetected: Bool
-    let commits: [StackInspectCommit]
-    let mergedCount: Int
-    let success: Bool
-}
-
-struct StackInspectCommit: Decodable, Identifiable {
-    let sha: String
-    let shortSha: String
-    let subject: String
-    let author: String
-    let date: String
-    let pr: StackInspectPullRequest?
-    let prLookupNote: String?
-
-    var id: String { sha }
-}
-
-struct StackInspectPullRequest: Decodable {
-    let number: Int
-    let state: String
-    let title: String
-    let url: String
 }
 
 // MARK: - Undo CLI Output Models

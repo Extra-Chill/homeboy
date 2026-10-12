@@ -76,69 +76,6 @@ extension HomeboyCLI {
         try await cli.execute(["server", "key", "use", serverId, privateKeyPath], timeout: 30)
     }
 
-    func dbTables(projectId: String) async throws -> DbOutput {
-        try await cli.executeCommand(
-            ["db", "tables", projectId],
-            dataType: DbOutput.self,
-            source: "Database Tables"
-        )
-    }
-
-    func dbDescribe(projectId: String, table: String?) async throws -> DbOutput {
-        var args = ["db", "describe", projectId]
-        if let table {
-            args.append(table)
-        }
-        return try await cli.executeCommand(args, dataType: DbOutput.self, source: "Database Describe", timeout: 60)
-    }
-
-    func dbQuery(projectId: String, sql: String) async throws -> DbOutput {
-        try await cli.executeCommand(
-            ["db", "query", projectId, sql],
-            dataType: DbOutput.self,
-            source: "Database Query",
-            timeout: 60
-        )
-    }
-
-    func dbDeleteRow(projectId: String, table: String, rowId: String) async throws -> DbOutput {
-        try await cli.executeCommand(
-            ["db", "delete-row", projectId, table, rowId, "--confirm"],
-            dataType: DbOutput.self,
-            source: "Database Delete Row"
-        )
-    }
-
-    func dbDropTable(projectId: String, table: String) async throws -> DbOutput {
-        try await cli.executeCommand(
-            ["db", "drop-table", projectId, table, "--confirm"],
-            dataType: DbOutput.self,
-            source: "Database Drop Table"
-        )
-    }
-
-    func dbSearch(
-        projectId: String,
-        table: String,
-        column: String,
-        pattern: String,
-        exact: Bool = false,
-        limit: Int? = nil,
-        subtarget: String? = nil
-    ) async throws -> DbOutput {
-        var args = ["db", "search", projectId, table, "--column", column, "--pattern", pattern]
-        if exact {
-            args.append("--exact")
-        }
-        if let limit {
-            args.append(contentsOf: ["--limit", String(limit)])
-        }
-        if let subtarget {
-            args.append(contentsOf: ["--subtarget", subtarget])
-        }
-        return try await cli.executeCommand(args, dataType: DbOutput.self, source: "Database Search", timeout: 60)
-    }
-
     // MARK: - File Search
 
     func fileFind(

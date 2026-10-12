@@ -14,11 +14,11 @@ func runTests(testDir: String) throws {
 
     try runCLIBridgeModelDecodingContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runWorkspaceStatusConfigContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
-    try runFileLogDBContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
+    try runFileContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runRigBenchReleaseUndoContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runHistoryContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
-    try runStackGitAPIAuthContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
-    try runQualityAuditReviewTriageContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
+    try runGitContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
+    try runQualityAuditReviewContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runControlPlaneContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runCookComposerContractTests(fixturesDir: fixturesDir)
 

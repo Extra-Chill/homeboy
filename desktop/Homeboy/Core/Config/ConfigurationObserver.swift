@@ -303,9 +303,6 @@ final class ConfigurationObserver: ObservableObject {
         if oldConfig.basePath != newConfig.basePath {
             fields.insert(.basePath)
         }
-        if !isEqual(oldConfig.database, newConfig.database) {
-            fields.insert(.database)
-        }
         if oldConfig.componentIds != newConfig.componentIds {
             fields.insert(.components)
         }
@@ -314,12 +311,6 @@ final class ConfigurationObserver: ObservableObject {
         }
         if oldConfig.remoteFiles != newConfig.remoteFiles {
             fields.insert(.remoteFiles)
-        }
-        if oldConfig.remoteLogs != newConfig.remoteLogs {
-            fields.insert(.remoteLogs)
-        }
-        if !isEqual(oldConfig.api, newConfig.api) {
-            fields.insert(.api)
         }
         if !isEqual(oldConfig.tools, newConfig.tools) {
             fields.insert(.tools)

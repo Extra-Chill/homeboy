@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @EnvironmentObject var authManager: AuthManager
     @ObservedObject var config = ConfigurationManager.shared
     
     var body: some View {
@@ -12,12 +11,8 @@ struct SettingsView: View {
             ServersSettingsTab(config: config)
                 .tabItem { Text("Servers") }
             
-            DatabaseSettingsTab(config: config)
-                .tabItem { Text("Database") }
-            
             if config.safeActiveProject.isWordPress {
                 WordPressSettingsTab(config: config)
-                    .environmentObject(authManager)
                     .tabItem { Text("WordPress") }
             }
             
@@ -34,5 +29,4 @@ struct SettingsView: View {
 
 #Preview {
     SettingsView()
-        .environmentObject(AuthManager())
 }

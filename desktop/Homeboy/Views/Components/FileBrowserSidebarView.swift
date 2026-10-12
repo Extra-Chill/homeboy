@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// Reusable file browser sidebar for Remote File Editor and Log Viewer
+/// Reusable file browser sidebar for Remote File Editor
 ///
 /// Provides a compact file tree view with navigation and optional file operations.
 /// When `fileOperationsEnabled` is true, users can create, rename, and delete files/folders.

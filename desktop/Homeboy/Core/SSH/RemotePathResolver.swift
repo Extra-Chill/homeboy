@@ -95,15 +95,10 @@ struct RemotePathResolver {
         return "tmp/\(artifactName)"
     }
 
-    // MARK: - File/Log Paths
+    // MARK: - File Paths
 
     /// Resolve a relative file path (for remote file editor)
     func filePath(_ relativePath: String) -> String {
-        resolve(relativePath)
-    }
-
-    /// Resolve a relative log path (for remote log viewer)
-    func logPath(_ relativePath: String) -> String {
         resolve(relativePath)
     }
 }

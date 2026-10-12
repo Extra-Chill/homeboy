@@ -8,7 +8,7 @@ protocol PinnableTabItem: Identifiable where ID == UUID {
 }
 
 /// A reusable horizontal tab bar with pinnable tabs
-/// Used by Remote File Editor and Remote Log Viewer
+/// Used by Remote File Editor
 struct PinnableTabBar<Item: PinnableTabItem>: View {
     let items: [Item]
     let selectedId: UUID?

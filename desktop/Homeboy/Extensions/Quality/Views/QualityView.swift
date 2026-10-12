@@ -68,9 +68,6 @@ struct QualityView: View {
 
                 Spacer()
 
-                Button("Run Triage") { viewModel.runTriage() }
-                    .disabled(!viewModel.canRun)
-
                 Button("Run Review") { viewModel.runReview() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!viewModel.canRun)
@@ -91,10 +88,6 @@ struct QualityView: View {
                     stageGrid(review)
                 } else {
                     emptyReview
-                }
-
-                if let triage = viewModel.triage {
-                    triageSummary(triage)
                 }
             }
             .padding()
@@ -186,72 +179,6 @@ struct QualityView: View {
         .padding()
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(10)
-    }
-
-    private func triageSummary(_ triage: QualityTriageOutput) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Triage")
-                .font(.headline)
-
-            HStack(spacing: 16) {
-                metric("Open Issues", triage.summary.openIssues)
-                metric("Open PRs", triage.summary.openPrs)
-                metric("Actions", triage.summary.actions)
-                metric("Failing Checks", triage.summary.failingChecks)
-            }
-
-            ForEach(triage.components) { component in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(component.componentId)
-                        .font(.subheadline.bold())
-
-                    ForEach(component.actions) { action in
-                        Label(action.label, systemImage: action.severity == "high" ? "exclamationmark.triangle.fill" : "info.circle")
-                            .foregroundColor(action.severity == "high" ? .orange : .secondary)
-                    }
-
-                    ForEach(component.pullRequests?.items ?? []) { item in
-                        triageLink(item, prefix: "PR")
-                    }
-                    ForEach(component.issues?.items ?? []) { item in
-                        triageLink(item, prefix: "Issue")
-                    }
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(10)
-    }
-
-    private func metric(_ label: String, _ value: Int) -> some View {
-        VStack(alignment: .leading) {
-            Text(String(value))
-                .font(.title3.bold())
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    private func triageLink(_ item: QualityTriageItem, prefix: String) -> some View {
-        HStack {
-            if let url = item.url, let parsedURL = URL(string: url) {
-                Link("\(prefix) #\(item.number)", destination: parsedURL)
-            } else {
-                Text("\(prefix) #\(item.number)")
-            }
-            Text(item.title)
-                .lineLimit(1)
-            Spacer()
-            if let nextAction = item.nextAction {
-                Text(nextAction)
-                    .font(.caption.monospaced())
-                    .foregroundColor(.secondary)
-            }
-        }
-        .font(.caption)
     }
 
     private var consolePane: some View {

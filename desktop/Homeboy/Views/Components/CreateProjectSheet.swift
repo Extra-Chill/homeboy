@@ -4,7 +4,6 @@ import SwiftUI
 /// Shown when no projects exist or when user explicitly adds a project.
 struct CreateProjectSheet: View {
     @ObservedObject var configManager = ConfigurationManager.shared
-    @EnvironmentObject var authManager: AuthManager
 
     @Environment(\.dismiss) private var dismiss
 
@@ -121,10 +120,8 @@ struct CreateProjectSheet: View {
 
 #Preview("First Project") {
     CreateProjectSheet(isFirstProject: true)
-        .environmentObject(AuthManager())
 }
 
 #Preview("Add Project") {
     CreateProjectSheet(isFirstProject: false)
-        .environmentObject(AuthManager())
 }

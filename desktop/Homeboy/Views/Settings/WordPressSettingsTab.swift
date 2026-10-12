@@ -2,15 +2,6 @@ import SwiftUI
 
 struct WordPressSettingsTab: View {
     @ObservedObject var config: ConfigurationManager
-    @EnvironmentObject var authManager: AuthManager
-
-    // API Auth state
-    @State private var apiEnabled = false
-    @State private var apiBaseURL = ""
-    @State private var loginUsername = ""
-    @State private var loginPassword = ""
-    @State private var isLoggingIn = false
-    @State private var loginError: String?
 
     var body: some View {
         Form {
@@ -59,93 +50,7 @@ struct WordPressSettingsTab: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-
-            Section("REST API Authentication") {
-                Toggle("Enable API Authentication", isOn: $apiEnabled)
-                    .onChange(of: apiEnabled) { _, newValue in
-                        Task {
-                            try? await config.updateActiveProject { $0.api.enabled = newValue }
-                        }
-                    }
-
-                if apiEnabled {
-                    TextField("API Base URL", text: $apiBaseURL)
-                        .textFieldStyle(.roundedBorder)
-                        .onChange(of: apiBaseURL) { _, newValue in
-                            Task {
-                                try? await config.updateActiveProject { $0.api.baseURL = newValue }
-                            }
-                        }
-                    Text("e.g., https://yoursite.com/wp-json/extrachill/v1")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Divider()
-
-                    if authManager.isAuthenticated, let user = authManager.user {
-                        HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Logged in as \(user.displayName)")
-                            Spacer()
-                            Button("Logout", role: .destructive) {
-                                authManager.logout()
-                            }
-                        }
-                    } else {
-                        TextField("Username", text: $loginUsername)
-                            .textFieldStyle(.roundedBorder)
-                        SecureField("Password", text: $loginPassword)
-                            .textFieldStyle(.roundedBorder)
-
-                        HStack {
-                            Button("Login") {
-                                performLogin()
-                            }
-                            .disabled(loginUsername.isEmpty || loginPassword.isEmpty || apiBaseURL.isEmpty || isLoggingIn)
-
-                            if isLoggingIn {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                        }
-
-                        if let error = loginError {
-                            InlineErrorView(error, source: "WordPress Settings")
-                        }
-                    }
-                }
-
-                Text("Requires JWT token authentication. Standard WordPress login is not supported.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
         }
         .formStyle(.grouped)
-        .onAppear {
-            loadAPISettings()
-        }
-    }
-
-    private func loadAPISettings() {
-        apiEnabled = config.safeActiveProject.api.enabled
-        apiBaseURL = config.safeActiveProject.api.baseURL
-    }
-
-    private func performLogin() {
-        isLoggingIn = true
-        loginError = nil
-
-        Task {
-            await authManager.login(identifier: loginUsername, password: loginPassword)
-            isLoggingIn = false
-
-            if authManager.isAuthenticated {
-                loginUsername = ""
-                loginPassword = ""
-            } else {
-                loginError = authManager.error?.body ?? "Login failed"
-            }
-        }
     }
 }

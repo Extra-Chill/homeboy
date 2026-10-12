@@ -1,8 +1,8 @@
 import Foundation
 
-// MARK: - quality/audit/review/triage
+// MARK: - quality/audit/review
 
-func runQualityAuditReviewTriageContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
+func runQualityAuditReviewContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testQualityWorkspaceCommandShapes(testDir: testDir)
     try testCurrentCLICommandSurface(testDir: testDir)
 }
@@ -40,13 +40,11 @@ func testQualityWorkspaceCommandShapes(testDir: String) throws {
     try requireContains(contentView, "case quality = \"Quality\"", "Quality is registered as a core tool", code: 100)
     try requireContains(contentView, "QualityView()", "QualityView is mounted in the core tool stack", code: 101)
     try requireContains(source, #"["review", componentId, "--summary"]"#, "Quality review uses current review --summary command", code: 102)
-    try requireContains(source, #"["triage", "component", componentId]"#, "Quality triage uses current triage component command", code: 103)
     try requireContains(source, #"args.append(contentsOf: ["--changed-since", changedSince])"#, "Quality scope supports changed-since", code: 104)
     try requireContains(source, #"args.append("--changed-only")"#, "Quality scope supports changed-only", code: 105)
     try requireContains(source, #"args.append(contentsOf: ["--path", path])"#, "Quality commands support component path override", code: 106)
     try requireContains(source, "executeCommandWithOutputFile", "Quality decoding reads --output JSON envelopes", code: 107)
     try requireContains(qualityView, "Run Review", "Quality UI exposes review entry point", code: 108)
-    try requireContains(qualityView, "Run Triage", "Quality UI exposes triage entry point", code: 109)
     try requireContains(qualityView, "Findings:", "Quality UI renders stage finding summaries", code: 110)
     try requireContains(qualityViewModel, "HomeboyCLI.shared.qualityStage", "Quality view model exposes stage deep-dives", code: 111)
 
@@ -77,6 +75,13 @@ func testCurrentCLICommandSurface(testDir: String) throws {
         "\"audit\", \"structure\"",
         "\"supports\"",
         "SupportsOutput",
+        "[\"triage\"",
+        "[\"stack\"",
+        "[\"fleet\"",
+        "[\"db\"",
+        "[\"logs\"",
+        "[\"api\"",
+        "[\"auth\"",
     ]
 
     for shape in removedShapes {
@@ -85,7 +90,7 @@ func testCurrentCLICommandSurface(testDir: String) throws {
                 userInfo: [NSLocalizedDescriptionKey: "Removed CLI shape still appears in Homeboy CLI sources: \(shape)"])
         }
     }
-    print("[PASS] Removed audit/supports command shapes are absent")
+    print("[PASS] Removed CLI command shapes are absent")
 
     let requiredShapes = [
         "var args = [\"audit\", componentId]",

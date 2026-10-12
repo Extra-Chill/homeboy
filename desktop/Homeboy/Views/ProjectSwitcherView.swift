@@ -3,7 +3,6 @@ import SwiftUI
 /// Project switcher dropdown for the sidebar header with project management capabilities
 struct ProjectSwitcherView: View {
     @ObservedObject var configManager = ConfigurationManager.shared
-    @EnvironmentObject var authManager: AuthManager
 
     /// Optional closure to check if there's unsaved work before switching projects.
     /// Returns true if there's unsaved work that should prompt a confirmation.
@@ -271,7 +270,6 @@ struct ProjectSwitcherView: View {
     private func performProjectSwitch(_ projectId: String) {
         Task {
             await configManager.switchToProject(id: projectId)
-            await authManager.resetForProjectSwitch()
         }
     }
 

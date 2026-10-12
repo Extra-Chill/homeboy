@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SidebarView: View {
     @Binding var selectedItem: NavigationItem?
-    @EnvironmentObject var authManager: AuthManager
     @ObservedObject private var extensionManager = ExtensionManager.shared
     @ObservedObject private var config = ConfigurationManager.shared
 
@@ -120,21 +119,6 @@ struct SidebarView: View {
             .listStyle(.sidebar)
         }
         .frame(minWidth: 200)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                HStack {
-                    if let user = authManager.user {
-                        Text(user.displayName)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Button(action: { authManager.logout() }) {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                    }
-                    .help("Logout")
-                }
-            }
-        }
         .onChange(of: config.activeProject?.id) { _, _ in
             ensureSelectionIsVisible()
         }
@@ -165,7 +149,7 @@ struct SidebarView: View {
     }
     
     /// Core tools to display in the sidebar.
-    /// All tools are universal - Database Browser shows config prompt if not configured.
+    /// All tools are universal.
     /// Settings is shown in a separate section below.
     private var coreTools: [CoreTool] {
         CoreTool.allCases.filter { $0 != .settings && $0.isAvailable(for: config.activeProject) }
@@ -174,5 +158,4 @@ struct SidebarView: View {
 
 #Preview {
     SidebarView(selectedItem: .constant(.coreTool(.deployer)))
-        .environmentObject(AuthManager())
 }

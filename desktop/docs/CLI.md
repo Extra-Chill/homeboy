@@ -55,11 +55,11 @@ If you do edit config via CLI/scripts, use `homeboy docs projects`, `homeboy doc
 
 ### server
 
-The desktop app expects servers to be editable in Settings, and uses the CLI for operations that require SSH (connection tests, remote file/log access, deployments).
+The desktop app expects servers to be editable in Settings, and uses the CLI for operations that require SSH (connection tests, remote file access, deployments).
 
 For canonical server command docs and JSON output, run `homeboy docs server`.
 
-### wp / pm2 / db / deploy / ssh / logs / file / extension / rig
+### wp / pm2 / deploy / ssh / file / extension / rig
 
 These areas are implemented by the CLI and surfaced by the desktop app via `CLIBridge`.
 

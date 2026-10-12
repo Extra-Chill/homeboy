@@ -15,8 +15,7 @@ enum NavigationItem: Hashable {
 }
 
 /// Built-in project tools (not extensions), reachable under the sidebar's
-/// Projects section. Order: Deployer, File Editor, Log Viewer are universal.
-/// Database Browser is shown if project type supports it.
+/// Projects section.
 /// Settings is shown in a separate section.
 enum CoreTool: String, CaseIterable, Identifiable {
     case commandBrowser = "Commands"
@@ -26,13 +25,9 @@ enum CoreTool: String, CaseIterable, Identifiable {
     case runHistory = "Run History"
     case release = "Release"
     case rigs = "Rigs"
-    case stackManager = "Stacks"
     case git = "Git"
     case quality = "Quality"
     case remoteFileEditor = "File Editor"
-    case remoteLogViewer = "Log Viewer"
-    case databaseBrowser = "Database"
-    case apiAuth = "API/Auth"
     case settings = "Settings"
     
     var id: String { rawValue }
@@ -46,13 +41,9 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .runHistory: return "clock.arrow.circlepath"
         case .release: return "tag"
         case .rigs: return "shippingbox.and.arrow.backward"
-        case .stackManager: return "square.stack.3d.up"
         case .git: return "point.3.connected.trianglepath.dotted"
         case .quality: return "checkmark.seal"
         case .remoteFileEditor: return "doc.badge.gearshape"
-        case .remoteLogViewer: return "doc.text.magnifyingglass"
-        case .databaseBrowser: return "cylinder.split.1x2"
-        case .apiAuth: return "network.badge.shield.half.filled"
         case .settings: return "gear"
         }
     }
@@ -68,20 +59,15 @@ enum CoreTool: String, CaseIterable, Identifiable {
             return true
         case .settings:
             return true
-        case .deployer, .bench, .lab, .runHistory, .release, .rigs, .stackManager, .git, .quality:
+        case .deployer, .bench, .lab, .runHistory, .release, .rigs, .git, .quality:
             return hasComponents
-        case .remoteFileEditor, .remoteLogViewer:
+        case .remoteFileEditor:
             return hasRemoteTarget
-        case .databaseBrowser:
-            return project.isWordPress || !project.database.name.isEmpty
-        case .apiAuth:
-            return project.api.enabled || project.isWordPress
         }
     }
 }
 
 struct ContentView: View {
-    @EnvironmentObject var authManager: AuthManager
     @ObservedObject private var configManager = ConfigurationManager.shared
     @ObservedObject private var extensionManager = ExtensionManager.shared
     @StateObject private var missionStore = MissionStore()
@@ -147,20 +133,12 @@ struct ContentView: View {
                     .opacity(selectedItem == .coreTool(.release) ? 1 : 0)
                 RigsView()
                     .opacity(selectedItem == .coreTool(.rigs) ? 1 : 0)
-                StackManagerView()
-                    .opacity(selectedItem == .coreTool(.stackManager) ? 1 : 0)
                 GitOperationsView()
                     .opacity(selectedItem == .coreTool(.git) ? 1 : 0)
                 QualityView()
                     .opacity(selectedItem == .coreTool(.quality) ? 1 : 0)
-                DatabaseBrowserView()
-                    .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
-                RemoteLogViewerView()
-                    .opacity(selectedItem == .coreTool(.remoteLogViewer) ? 1 : 0)
                 RemoteFileEditorView()
                     .opacity(selectedItem == .coreTool(.remoteFileEditor) ? 1 : 0)
-                APIAuthWorkspaceView()
-                    .opacity(selectedItem == .coreTool(.apiAuth) ? 1 : 0)
 
                 // Dynamic extensions
                 ForEach(extensionManager.extensions) { ext in
@@ -534,368 +512,6 @@ struct ReleaseWorkflowView: View {
     }
 }
 
-// MARK: - Stack Manager
-
-struct StackManagerView: View {
-    @State private var stacks: [StackListItem] = []
-    @State private var selectedStack: StackListItem?
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-
-    var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedStack) {
-                Section("Stacks") {
-                    ForEach(stacks) { stack in
-                        StackRow(stack: stack)
-                            .tag(stack)
-                    }
-                }
-            }
-            .navigationTitle("Stacks")
-            .overlay {
-                if isLoading && stacks.isEmpty {
-                    ProgressView("Loading stacks...")
-                } else if stacks.isEmpty && errorMessage == nil {
-                    ContentUnavailableView(
-                        "No Stack Specs",
-                        systemImage: "square.stack.3d.up.slash",
-                        description: Text("Create stack specs with homeboy stack create, then refresh this view.")
-                    )
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await loadStacks() }
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(isLoading)
-                }
-            }
-        } detail: {
-            if let selectedStack {
-                StackDetailView(stack: selectedStack)
-                    .id(selectedStack.id)
-            } else {
-                ContentUnavailableView(
-                    "Select a Stack",
-                    systemImage: "square.stack.3d.up",
-                    description: Text("Choose a stack spec to inspect PR state and local branch status.")
-                )
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.red.opacity(0.08))
-            }
-        }
-        .task {
-            await loadStacks()
-        }
-    }
-
-    private func loadStacks() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            let loadedStacks = try await HomeboyCLI.shared.stackList()
-            stacks = loadedStacks
-            if selectedStack == nil || !loadedStacks.contains(where: { $0.id == selectedStack?.id }) {
-                selectedStack = loadedStacks.first
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-}
-
-struct StackRow: View {
-    let stack: StackListItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Image(systemName: "square.stack.3d.up.fill")
-                    .foregroundColor(.purple)
-                Text(stack.id)
-                    .font(.headline)
-            }
-
-            Text(stack.description)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(2)
-
-            HStack(spacing: 8) {
-                Text(stack.component)
-                Text("\(stack.prCount) PR\(stack.prCount == 1 ? "" : "s")")
-            }
-            .font(.caption2)
-            .foregroundColor(.secondary)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct StackDetailView: View {
-    let stack: StackListItem
-
-    @State private var spec: StackSpec?
-    @State private var status: StackStatusOutput?
-    @State private var inspection: StackInspectOutput?
-    @State private var isLoading = false
-    @State private var isInspecting = false
-    @State private var errorMessage: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-
-            if isLoading && status == nil {
-                ProgressView("Loading stack status...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        if let errorMessage {
-                            Text(errorMessage)
-                                .foregroundColor(.red)
-                                .padding(10)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.red.opacity(0.08))
-                                .cornerRadius(8)
-                        }
-
-                        summaryCards
-                        pullRequestList
-                        inspectionSection
-                    }
-                    .padding()
-                }
-            }
-        }
-        .task {
-            await loadStack()
-        }
-    }
-
-    private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(stack.id)
-                    .font(.title)
-                Text(stack.description)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                Text("\(stack.base) -> \(stack.target)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            Button {
-                Task { await loadStack() }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .disabled(isLoading)
-        }
-        .padding()
-    }
-
-    private var summaryCards: some View {
-        HStack(spacing: 12) {
-            StackMetricCard(title: "Pull Requests", value: "\(status?.prs.count ?? stack.prCount)")
-            StackMetricCard(title: "Merged", value: "\(status?.mergedCount ?? 0)")
-            StackMetricCard(title: "Target Ahead", value: status.map { "\($0.targetAhead)" } ?? "-")
-            StackMetricCard(title: "Target Behind", value: status.map { "\($0.targetBehind)" } ?? "-")
-        }
-    }
-
-    private var pullRequestList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Pull Requests")
-                .font(.headline)
-
-            if let status {
-                ForEach(status.prs) { pr in
-                    StackPullRequestRow(pr: pr)
-                }
-            } else if let spec {
-                ForEach(spec.prs) { pr in
-                    HStack {
-                        Text("#\(pr.number)")
-                            .font(.headline)
-                        VStack(alignment: .leading) {
-                            Text(pr.repo)
-                            if let note = pr.note {
-                                Text(note)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        Spacer()
-                    }
-                    .padding(10)
-                    .background(Color.secondary.opacity(0.08))
-                    .cornerRadius(8)
-                }
-            }
-        }
-    }
-
-    private var inspectionSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Branch Inspection")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    Task { await inspectStackBranch() }
-                } label: {
-                    Label("Inspect", systemImage: "magnifyingglass")
-                }
-                .disabled(isInspecting || status == nil)
-            }
-
-            if isInspecting {
-                ProgressView("Inspecting branch...")
-            } else if let inspection {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(inspection.branch): \(inspection.commits.count) commit\(inspection.commits.count == 1 ? "" : "s") over \(inspection.base)")
-                    Text("Merged PRs detected: \(inspection.mergedCount)")
-                        .foregroundColor(.secondary)
-                    ForEach(inspection.commits) { commit in
-                        Text("\(commit.shortSha)  \(commit.subject)")
-                            .font(.system(.caption, design: .monospaced))
-                    }
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.secondary.opacity(0.08))
-                .cornerRadius(8)
-            } else {
-                Text("Runs read-only `homeboy stack inspect` against the stack component path and base.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private func loadStack() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            async let specTask = HomeboyCLI.shared.stackShow(id: stack.id)
-            async let statusTask = HomeboyCLI.shared.stackStatus(id: stack.id)
-            spec = try await specTask
-            status = try await statusTask
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-
-    private func inspectStackBranch() async {
-        guard let status else { return }
-        isInspecting = true
-        errorMessage = nil
-        do {
-            inspection = try await HomeboyCLI.shared.stackInspect(path: status.componentPath, base: status.base, includePRs: false)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-        isInspecting = false
-    }
-}
-
-struct StackMetricCard: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Text(value)
-                .font(.title2)
-                .fontWeight(.semibold)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.secondary.opacity(0.08))
-        .cornerRadius(10)
-    }
-}
-
-struct StackPullRequestRow: View {
-    let pr: StackPullRequestStatus
-
-    private var destination: URL? {
-        URL(string: pr.url ?? "https://github.com/\(pr.repo)/pull/\(pr.number)")
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                if let destination {
-                    Link("#\(pr.number) \(pr.title ?? pr.repo)", destination: destination)
-                        .font(.headline)
-                } else {
-                    Text("#\(pr.number) \(pr.title ?? pr.repo)")
-                        .font(.headline)
-                }
-                Text(pr.note ?? pr.repo)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 4) {
-                StackStateBadge(label: pr.upstreamState, color: pr.upstreamState == "MERGED" ? .purple : .blue)
-                StackStateBadge(label: pr.localState, color: pr.localState == "applied" ? .green : .orange)
-                if let reviewDecision = pr.reviewDecision {
-                    Text(reviewDecision)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.08))
-        .cornerRadius(8)
-    }
-}
-
-struct StackStateBadge: View {
-    let label: String
-    let color: Color
-
-    var body: some View {
-        Text(label)
-            .font(.caption2)
-            .fontWeight(.semibold)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(color.opacity(0.16))
-            .foregroundColor(color)
-            .cornerRadius(6)
-    }
-}
-
 #Preview {
     ContentView()
-        .environmentObject(AuthManager())
 }

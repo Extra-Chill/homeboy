@@ -31,7 +31,7 @@ Note: the CLI embeds its core documentation in the binary (see `homeboy docs`).
 
 Homeboy extensions can:
 
-- define **project type behavior** for the platform (discovery, CLI templates, DB templates, deploy verification, version parsing patterns, etc.)
+- define **project type behavior** for the platform (discovery, CLI templates, deploy verification, version parsing patterns, etc.)
 - define **executable tools** (optional `runtime.*` section) runnable via `homeboy extension run`
 
 The manifest is a single unified `homeboy.json` file; extensions include only fields they need.
@@ -54,7 +54,6 @@ For the authoritative runtime behavior, run `homeboy docs extension`.
 | `configSchema` | string | No | Project-type config schema identifier (platform behavior) |
 | `discovery` | object | No | Project discovery commands (platform behavior) |
 | `cli` | object | No | Project-type CLI template (platform behavior) |
-| `database` | object | No | Project-type DB templates (platform behavior) |
 | `deploy` | array | No | Deployment verification rules (platform behavior) |
 | `versionPatterns` | array | No | Version parsing rules by file/extension (platform behavior) |
 | `build` | object | No | Build behavior (platform behavior) |
@@ -79,7 +78,7 @@ Extensions can declare dependencies on project configuration (components, featur
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `components` | array | No | Component IDs that must exist in the active project config |
-| `features` | array | No | Required feature flags (supported: `hasDatabase`, `hasRemoteDeployment`, `hasRemoteLogs`, `hasCLI`) |
+| `features` | array | No | Required feature flags (supported: `hasRemoteDeployment`, `hasCLI`) |
 | `projectType` | string | No | Required project type (e.g. `wordpress`) |
 
 ### Input Object
