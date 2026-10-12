@@ -4668,8 +4668,8 @@ pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,
     service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
 };
-use session_store::*;
 pub(crate) use session_store::controller_id;
+use session_store::*;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 
 #[cfg(test)]

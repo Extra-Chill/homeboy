@@ -151,5 +151,6 @@ fn workspace_materializer_fetches_only_the_exact_sha_for_a_fresh_checkout() {
     assert!(command.contains("mv \"$tmp\" \"$dest\""));
     // The reuse branch still resets an existing valid checkout in place.
     assert!(command.contains("git -C \"$dest\" reset --hard"));
-    assert!(!command.contains("git clone"));
+    // Only the shared mirror is cloned; the workspace itself is never a full clone.
+    assert!(!command.contains("git clone https://"));
 }
