@@ -221,31 +221,10 @@ pub const PUBLIC_OUTPUT_VARIANT_CONTRACTS: &[PublicOutputVariantContract] = &[
     },
     PublicOutputVariantContract {
         command: "runs",
-        variant: "query",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("query"),
-        golden_fixture: Some("runs_contract.json"),
-    },
-    PublicOutputVariantContract {
-        command: "runs",
         variant: "refs",
         discriminator_field: Some("variant"),
         discriminator_value: Some("refs"),
         golden_fixture: Some("runs_contract.json"),
-    },
-    PublicOutputVariantContract {
-        command: "runs",
-        variant: "drift",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("drift"),
-        golden_fixture: Some("runs_contract.json"),
-    },
-    PublicOutputVariantContract {
-        command: "runs",
-        variant: "loop_sync",
-        discriminator_field: Some("variant"),
-        discriminator_value: Some("loop_sync"),
-        golden_fixture: None,
     },
     PublicOutputVariantContract {
         command: "rig",

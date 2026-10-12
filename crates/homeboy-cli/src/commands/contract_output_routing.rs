@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_report_preserves_markdown_and_json_output_routing() {
+    fn runs_report_preserves_markdown_output_routing() {
         let spec = crate::command_contract::COMMAND_SPECS
             .iter()
             .find(|spec| spec.name == "runs")
@@ -212,16 +212,6 @@ mod tests {
                 .output_descriptor(spec, false)
                 .response_mode,
             CommandResponseMode::Raw(CommandRawOutputMode::Markdown)
-        );
-
-        let json = Cli::try_parse_from([
-            "homeboy", "runs", "report", "compare", "--old", "old.json", "--new", "new.json",
-            "--format", "json",
-        ])
-        .expect("JSON report invocation should parse");
-        assert_eq!(
-            json.command.output_descriptor(spec, false).response_mode,
-            CommandResponseMode::Json
         );
     }
 }

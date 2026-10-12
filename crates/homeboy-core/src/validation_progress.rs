@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::run_dir::{self, RunDir};
 use crate::error::{Error, Result};
-use crate::observation::{merge_metadata, ActiveObservation, RunRecord};
+use crate::observation::{merge_metadata, ActiveObservation};
 
 const COMMAND_ARTIFACT_MAX_BYTES: usize = 64 * 1024;
 
@@ -89,33 +89,6 @@ impl ValidationProgressLedger {
     pub fn read_from_run_dir(run_dir: &RunDir) -> Option<Self> {
         let value = run_dir.read_step_output(run_dir::files::VALIDATION_PROGRESS)?;
         serde_json::from_value(value).ok()
-    }
-
-    pub fn from_run(run: &RunRecord) -> Option<Self> {
-        serde_json::from_value(run.metadata_json.get("validation_progress")?.clone()).ok()
-    }
-
-    pub fn resume_hints(&self) -> Vec<String> {
-        let mut hints = Vec::new();
-        if let Some(active) = &self.active_command {
-            hints.push(format!(
-                "Previous run stopped while command {} (`{}`) was active.",
-                active.index + 1,
-                active.label
-            ));
-        }
-        if let Some(next) = &self.next_command {
-            hints.push(format!(
-                "Resume from command {}: {}",
-                next.index + 1,
-                next.command
-            ));
-        } else if self.failed_count == 0 && self.completed_count == self.command_count {
-            hints.push("All recorded validation commands completed successfully.".to_string());
-        } else {
-            hints.push("No pending command is known from this validation manifest.".to_string());
-        }
-        hints
     }
 
     fn mark_started(&mut self, index: usize) {
@@ -394,10 +367,6 @@ mod tests {
             "check one"
         );
         assert_eq!(ledger.next_command.as_ref().unwrap().command, "check two");
-        assert!(ledger
-            .resume_hints()
-            .iter()
-            .any(|hint| hint.contains("Resume from command 2: check two")));
     }
 
     #[test]
@@ -463,7 +432,9 @@ mod tests {
                 .get_run(&run_id)
                 .expect("read run")
                 .expect("run exists");
-            let ledger = ValidationProgressLedger::from_run(&stored).expect("metadata ledger");
+            let ledger: ValidationProgressLedger =
+                serde_json::from_value(stored.metadata_json["validation_progress"].clone())
+                    .expect("metadata ledger");
             assert_eq!(ledger.completed_count, 1);
             assert_eq!(ledger.next_command.as_ref().unwrap().command, "check two");
 

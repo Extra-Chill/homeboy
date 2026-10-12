@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use homeboy::core::observation::evidence_report;
 use homeboy::core::observation::{runs_service, ObservationStore, RunEvidenceCommands, RunRecord};
-use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy_engine_primitives::shell::shell_arg;
 
 use super::common::RunSummary;
@@ -112,7 +111,6 @@ pub(crate) fn runs_dossier_in_store(
     let failure = evidence_report::evidence_failure_summary(&run);
     let stale_reason = runs_service::running_status_note(&run);
     let env = env_summary(&run);
-    let validation_progress = ValidationProgressLedger::from_run(&run);
 
     Ok((
         RunsOutput::Dossier(RunsDossierOutput {
@@ -132,8 +130,8 @@ pub(crate) fn runs_dossier_in_store(
             env,
             artifacts: artifact_summary(artifact_index),
             inspection_commands: inspection_commands(&run),
-            repair_commands: repair_commands(&run, &validation_progress),
-            next_commands: next_commands(&run, validation_progress.as_ref()),
+            repair_commands: repair_commands(&run),
+            next_commands: next_commands(&run),
         }),
         0,
     ))
@@ -329,11 +327,7 @@ fn inspection_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
     commands
 }
 
-fn repair_commands(
-    run: &RunRecord,
-    validation_progress: &Option<ValidationProgressLedger>,
-) -> Vec<RunsDossierCommandHint> {
-    let run_id = shell_arg(&run.id);
+fn repair_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
     let mut commands = Vec::new();
     if run.status == "running" {
         commands.push(command_hint(
@@ -342,37 +336,16 @@ fn repair_commands(
             "Mark orphaned running records stale after owner-process checks.",
         ));
     }
-    if validation_progress.is_some() {
-        commands.push(command_hint(
-            "resume-plan",
-            format!("homeboy runs resume-plan {run_id}"),
-            "Inspect the generic validation-progress ledger before resuming work.",
-        ));
-    }
     commands
 }
 
-fn next_commands(
-    run: &RunRecord,
-    validation_progress: Option<&ValidationProgressLedger>,
-) -> Vec<RunsDossierCommandHint> {
+fn next_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
     let run_id = shell_arg(&run.id);
-    let mut commands = vec![command_hint(
+    vec![command_hint(
         "export",
         format!("homeboy runs export --run {run_id} --output <dir>"),
         "Create a portable metadata bundle for handoff or review.",
-    )];
-    if validation_progress
-        .and_then(|ledger| ledger.next_command.as_ref())
-        .is_some()
-    {
-        commands.push(command_hint(
-            "resume-plan",
-            format!("homeboy runs resume-plan {run_id}"),
-            "A next validation command is recorded in the ledger.",
-        ));
-    }
-    commands
+    )]
 }
 
 fn command_hint(label: &str, command: String, reason: &str) -> RunsDossierCommandHint {
