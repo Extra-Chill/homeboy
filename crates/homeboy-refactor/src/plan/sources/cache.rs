@@ -142,13 +142,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn tmp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -160,7 +154,7 @@ mod tests {
 
     #[test]
     fn try_load_cached_audit_reads_output_dir() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = homeboy_core::test_support::env_lock();
         std::env::remove_var(OUTPUT_DIR_ENV);
         let dir = tmp_dir("cached-audit");
         fs::create_dir_all(&dir).unwrap();
@@ -206,7 +200,7 @@ mod tests {
 
     #[test]
     fn try_load_cached_audit_skips_failed_envelope() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = homeboy_core::test_support::env_lock();
         std::env::remove_var(OUTPUT_DIR_ENV);
         let dir = tmp_dir("cached-audit-fail");
         fs::create_dir_all(&dir).unwrap();
@@ -235,7 +229,7 @@ mod tests {
 
     #[test]
     fn try_load_cached_audit_returns_none_when_unset() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = homeboy_core::test_support::env_lock();
         std::env::remove_var(OUTPUT_DIR_ENV);
         assert!(try_load_cached_audit().is_none());
     }
