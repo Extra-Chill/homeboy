@@ -2787,10 +2787,10 @@ fn routes_read_only_http_api_contract() {
     assert_eq!(components.body["endpoint"], "components.list");
     assert!(components.body["body"]["components"].is_array());
 
-    let job_ready = route("POST", "/audit");
+    let job_ready = route("POST", "/lint");
     assert_eq!(job_ready.status_code, 200);
     assert_eq!(job_ready.body["endpoint"], "jobs.required");
-    assert_eq!(job_ready.body["body"]["command"], "api.audit.enqueue");
+    assert_eq!(job_ready.body["body"]["command"], "api.lint.enqueue");
     assert!(job_ready.body["body"]["poll"]["job"]
         .as_str()
         .unwrap()

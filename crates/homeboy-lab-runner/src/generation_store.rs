@@ -1753,6 +1753,13 @@ pub(crate) struct GenerationReconcileResult {
     /// artifact ownership stays recorded as retired evidence; nothing is
     /// deleted on the controller or the runner.
     pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
+    /// Proven-stopped draining generations whose job owners could only be
+    /// released by operator attestation (#15779), with those job IDs.
+    pub stopped_generation_job_owner_ids: std::collections::BTreeMap<String, Vec<String>>,
+    /// Job owners released under `release_stopped_generation_jobs`, by the
+    /// generation that retired. The generation endpoint is kept as retired
+    /// evidence; nothing is deleted on the controller or the runner.
+    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Operator choices for one generation reconcile.
@@ -1762,6 +1769,13 @@ pub struct GenerationReconcilePolicy {
     /// verified (legacy custody, unreachable source inventory). Explicit only:
     /// the default stays fail-closed (#15653).
     pub release_unverified_evidence: bool,
+    /// The operator attests that no workload process survives a draining
+    /// generation whose daemon is proven stopped. Its remaining job owners
+    /// can never be observed terminal (only the dead daemon could answer),
+    /// so they are released as retired evidence instead of pinning the
+    /// generation forever (#15779). Explicit only; the default stays
+    /// fail-closed.
+    pub release_stopped_generation_jobs: bool,
 }
 
 /// Result references are provenance, not a reason to keep a process alive.
@@ -2008,6 +2022,8 @@ fn reconcile_with_operations(
 ) -> Result<GenerationReconcileResult> {
     let mut evidence_blocked_generation_ids = std::collections::BTreeSet::new();
     let mut released_unverified_evidence = std::collections::BTreeMap::new();
+    let mut stopped_generation_job_owner_ids = std::collections::BTreeMap::new();
+    let mut released_stopped_generation_jobs = std::collections::BTreeMap::new();
     let Some(generations) = read(runner_id)? else {
         return Ok(GenerationReconcileResult::default());
     };
@@ -2179,19 +2195,48 @@ fn reconcile_with_operations(
                 // `observed_active_jobs` stays `None`. With no durable job
                 // owner it has nothing left to drain and retires as already
                 // stopped; the owner set, not a stored counter, is the proof.
+                //
+                // Its remaining job owners can only be settled by the stopped
+                // daemon itself, so they pin it forever (#15779). Report them,
+                // and release them only on the operator's workload-absence
+                // attestation.
+                let mut releasable_owner_ids = Vec::new();
                 if *proven_stopped
                     && !*unclaimed
                     && entry.drain_state == crate::RollingDrainState::Draining
-                    && prior_job_owner_ids.is_empty()
+                    && !prior_job_owner_ids.is_empty()
+                {
+                    stopped_generation_job_owner_ids
+                        .insert(generation.clone(), prior_job_owner_ids.clone());
+                    if policy.release_stopped_generation_jobs && evidence_error.is_none() {
+                        releasable_owner_ids = prior_job_owner_ids.clone();
+                    }
+                }
+                if *proven_stopped
+                    && !*unclaimed
+                    && entry.drain_state == crate::RollingDrainState::Draining
+                    && (prior_job_owner_ids.is_empty() || !releasable_owner_ids.is_empty())
                     && evidence_error.is_none()
                 {
                     already_stopped.push(generation.clone());
+                    if !releasable_owner_ids.is_empty() {
+                        released_stopped_generation_jobs
+                            .insert(generation.clone(), releasable_owner_ids);
+                    }
                 }
                 if entry.drain_state == crate::RollingDrainState::Draining {
                     let reason = if let Some(error) = evidence_error {
                         Some(error.to_string())
                     } else if observed_active_jobs.is_some_and(|count| count > 0) {
                         Some(format!("{} active jobs", observed_active_jobs.unwrap()))
+                    } else if observed_active_jobs.is_none()
+                        && !already_stopped.contains(generation)
+                        && stopped_generation_job_owner_ids.contains_key(generation)
+                    {
+                        Some(format!(
+                            "daemon proven stopped; {} job owner(s) need workload-absence attestation",
+                            prior_job_owner_ids.len()
+                        ))
                     } else if observed_active_jobs.is_none()
                         && !already_stopped.contains(generation)
                     {
@@ -2244,11 +2289,13 @@ fn reconcile_with_operations(
                     // A proven-stopped generation cannot be observed, so its
                     // proof of stop stands in for an observed zero; both
                     // still require an empty durable owner set.
+                    let owners = job_owner_ids_for(&generations, generation, &entry.endpoint);
                     entry.drain_state == crate::RollingDrainState::Draining
                         && entry.endpoint == *session
                         && (entry.observed_active_jobs == Some(0)
                             || already_stopped.contains(generation))
-                        && job_owner_ids_for(&generations, generation, &entry.endpoint).is_empty()
+                        && (owners.is_empty()
+                            || released_stopped_generation_jobs.get(generation) == Some(&owners))
                 });
             if should_remove {
                 if let Err(error) = verify_retained_evidence(
@@ -2305,6 +2352,10 @@ fn reconcile_with_operations(
     // A release is only reported for generations that actually retired.
     released_unverified_evidence
         .retain(|generation, _| retired_generation_ids.contains(generation));
+    released_stopped_generation_jobs
+        .retain(|generation, _| retired_generation_ids.contains(generation));
+    stopped_generation_job_owner_ids
+        .retain(|generation, _| !retired_generation_ids.contains(generation));
     Ok(GenerationReconcileResult {
         retired_generation_ids,
         retirement_blockers,
@@ -2312,6 +2363,8 @@ fn reconcile_with_operations(
             .map_or(0, |registry| registry.retired_evidence.len()),
         evidence_blocked_generation_ids,
         released_unverified_evidence,
+        stopped_generation_job_owner_ids,
+        released_stopped_generation_jobs,
     })
 }
 
@@ -3477,6 +3530,7 @@ mod tests {
                 &operations,
                 GenerationReconcilePolicy {
                     release_unverified_evidence: true,
+                    ..Default::default()
                 },
             )
             .expect("reconcile with release");
@@ -3521,6 +3575,7 @@ mod tests {
                 &operations,
                 GenerationReconcilePolicy {
                     release_unverified_evidence: true,
+                    ..Default::default()
                 },
             )
             .expect("reconcile");
@@ -4587,6 +4642,128 @@ mod tests {
             assert_eq!(projection[0].generation, "lease-live");
             assert!(operations.stopped_leases.borrow().is_empty());
             assert!(operations.terminated_pids.borrow().is_empty());
+        });
+    }
+
+    /// A proven-stopped draining generation that still owns a job its dead
+    /// daemon can never settle (#15779): stopped generation `lease-stopped`
+    /// with `job-stuck`, live admission owner `lease-live` with `job-live`.
+    fn stopped_generation_with_stuck_job(proven_stopped: bool) -> FakeEndpointOperations {
+        let stopped = session("lease-stopped", "daemon-stopped", Some(101));
+        let live = session("lease-live", "daemon-live", Some(202));
+        record_job("runner-a", &stopped, "job-stuck").expect("record stuck job");
+        activate(
+            "runner-a",
+            &stopped,
+            "lease-live".to_string(),
+            live.clone(),
+            &["job-stuck".to_string()],
+        )
+        .expect("activate live generation");
+        record_job("runner-a", &live, "job-live").expect("record live job");
+        let operations = FakeEndpointOperations::default();
+        if proven_stopped {
+            operations
+                .stopped_leases_proven
+                .borrow_mut()
+                .insert("lease-stopped".to_string());
+        }
+        operations
+            .active_jobs
+            .borrow_mut()
+            .insert("lease-live".to_string(), 1);
+        operations
+    }
+
+    fn owned_job_ids(runner_id: &str, generation: &str) -> Vec<String> {
+        status_job_owners(runner_id)
+            .expect("job owners")
+            .into_iter()
+            .find(|owners| owners.generation == generation)
+            .map(|owners| owners.job_ids)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn stopped_generation_job_owner_blocks_by_default_and_names_attestation() {
+        test_support::with_isolated_home(|_| {
+            let operations = stopped_generation_with_stuck_job(true);
+
+            let result = reconcile_with("runner-a", &operations).expect("reconcile");
+
+            assert!(result.retired_generation_ids.is_empty());
+            assert_eq!(
+                result
+                    .retirement_blockers
+                    .get("lease-stopped")
+                    .map(String::as_str),
+                Some("daemon proven stopped; 1 job owner(s) need workload-absence attestation")
+            );
+            assert_eq!(
+                result.stopped_generation_job_owner_ids.get("lease-stopped"),
+                Some(&vec!["job-stuck".to_string()])
+            );
+            assert!(result.released_stopped_generation_jobs.is_empty());
+            assert_eq!(owned_job_ids("runner-a", "lease-stopped"), ["job-stuck"]);
+        });
+    }
+
+    #[test]
+    fn attested_release_retires_stopped_generation_and_keeps_live_owner() {
+        test_support::with_isolated_home(|_| {
+            let operations = stopped_generation_with_stuck_job(true);
+
+            let result = reconcile_with_operations(
+                "runner-a",
+                &operations,
+                GenerationReconcilePolicy {
+                    release_stopped_generation_jobs: true,
+                    ..Default::default()
+                },
+            )
+            .expect("attested reconcile");
+
+            assert_eq!(result.retired_generation_ids, ["lease-stopped"]);
+            assert_eq!(
+                result.released_stopped_generation_jobs.get("lease-stopped"),
+                Some(&vec!["job-stuck".to_string()])
+            );
+            assert!(result.stopped_generation_job_owner_ids.is_empty());
+            assert!(!result.retirement_blockers.contains_key("lease-stopped"));
+            let projection = status_projection("runner-a").expect("projection");
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].generation, "lease-live");
+            assert_eq!(owned_job_ids("runner-a", "lease-live"), ["job-live"]);
+            // An already-stopped daemon is never asked to stop again.
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn attestation_never_releases_a_generation_not_proven_stopped() {
+        test_support::with_isolated_home(|_| {
+            let operations = stopped_generation_with_stuck_job(false);
+
+            let result = reconcile_with_operations(
+                "runner-a",
+                &operations,
+                GenerationReconcilePolicy {
+                    release_stopped_generation_jobs: true,
+                    ..Default::default()
+                },
+            )
+            .expect("reconcile");
+
+            assert!(result.retired_generation_ids.is_empty());
+            assert!(result.released_stopped_generation_jobs.is_empty());
+            assert_eq!(
+                result
+                    .retirement_blockers
+                    .get("lease-stopped")
+                    .map(String::as_str),
+                Some("endpoint identity/active work unavailable; stop is not authorized")
+            );
+            assert_eq!(owned_job_ids("runner-a", "lease-stopped"), ["job-stuck"]);
         });
     }
 

@@ -32,7 +32,7 @@ const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CAPTURE_JOIN_GRACE: Duration = Duration::from_secs(2);
 const PROCESS_TREE_CLEANUP_DEADLINE: Duration = Duration::from_secs(4);
 #[cfg(target_os = "linux")]
-const EXECUTION_PROTOCOL_IDENTITY_LEN: usize = 8;
+const EXECUTION_PROTOCOL_IDENTITY_LEN: usize = 16;
 #[cfg(target_os = "linux")]
 const EXECUTION_PROTOCOL_TERMINAL_LEN: usize = 5;
 #[cfg(target_os = "linux")]
@@ -65,6 +65,12 @@ impl ExecutionIdentity {
             root_pgid: Some(wait_pid),
             starttime_ticks: None,
         }
+    }
+
+    /// Linux `/proc/<root>/stat` start time of the workload root, captured by
+    /// its parent before the root can be reaped. `None` off Linux.
+    pub fn starttime_ticks(&self) -> Option<u64> {
+        self.starttime_ticks
     }
 
     pub fn recovery_process_group(&self) -> u32 {
@@ -517,7 +523,7 @@ pub struct ControllerChildGuard {
     #[cfg(target_os = "linux")]
     protocol_write_fd: AtomicI32,
     #[cfg(target_os = "linux")]
-    root_identity: Mutex<Option<(u32, u32)>>,
+    root_identity: Mutex<Option<(u32, u32, Option<u64>)>>,
     #[cfg(all(unix, not(target_os = "linux")))]
     owned_processes: Mutex<Vec<UnixProcessIdentity>>,
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -670,12 +676,13 @@ impl ControllerChildGuard {
             let mut identity = [0_u8; EXECUTION_PROTOCOL_IDENTITY_LEN];
             read_exact_fd(self.child_registration_read_fd, &mut identity)?;
             let root_pid = u32::from_ne_bytes(identity[..4].try_into().expect("root pid"));
-            let root_pgid = u32::from_ne_bytes(identity[4..].try_into().expect("root pgid"));
+            let root_pgid = u32::from_ne_bytes(identity[4..8].try_into().expect("root pgid"));
+            let starttime = u64::from_ne_bytes(identity[8..].try_into().expect("root starttime"));
             *self
                 .root_identity
                 .lock()
                 .map_err(|_| io::Error::other("execution identity lock poisoned"))? =
-                Some((root_pid, root_pgid));
+                Some((root_pid, root_pgid, (starttime != 0).then_some(starttime)));
             let _ = child;
             Ok(())
         }
@@ -696,7 +703,7 @@ impl ControllerChildGuard {
     fn execution_identity(&self, wait_pid: u32) -> io::Result<ExecutionIdentity> {
         #[cfg(target_os = "linux")]
         {
-            let (root_pid, root_pgid) = self
+            let (root_pid, root_pgid, starttime_ticks) = self
                 .root_identity
                 .lock()
                 .map_err(|_| io::Error::other("execution identity lock poisoned"))?
@@ -707,7 +714,7 @@ impl ControllerChildGuard {
                 wait_pid,
                 root_pid,
                 root_pgid: Some(root_pgid),
-                starttime_ticks: linux_process_stat(root_pid).map(|stat| stat.starttime_ticks),
+                starttime_ticks,
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -2338,9 +2345,14 @@ fn execution_supervisor_loop(
     liveness_read_fd: RawFd,
     protocol_write_fd: RawFd,
 ) -> ! {
+    // The supervisor is the root's parent and has not reaped it yet, so the
+    // root's `/proc` entry exists even if it already exited. Reading the start
+    // time here, rather than in the controller after `spawn` returns, keeps a
+    // short-lived root from being reaped before its identity is captured.
     let mut identity = [0_u8; EXECUTION_PROTOCOL_IDENTITY_LEN];
     identity[..4].copy_from_slice(&root_pid.to_ne_bytes());
-    identity[4..].copy_from_slice(&root_pid.to_ne_bytes());
+    identity[4..8].copy_from_slice(&root_pid.to_ne_bytes());
+    identity[8..].copy_from_slice(&supervisor_read_root_starttime(root_pid).to_ne_bytes());
     if protocol_write_fd < 0 || !write_all_fd(protocol_write_fd, &identity) {
         unsafe { libc::_exit(1) };
     }
@@ -2460,6 +2472,81 @@ fn execution_supervisor_loop(
 
         supervisor_idle(&mut liveness_fd);
     }
+}
+
+/// Async-signal-safe read of `/proc/<pid>/stat` field 22 for the post-fork
+/// supervisor: no allocation, raw syscalls only. Returns 0 when unreadable.
+#[cfg(target_os = "linux")]
+fn supervisor_read_root_starttime(pid: u32) -> u64 {
+    let mut path = [0_u8; 32];
+    let prefix = b"/proc/";
+    path[..prefix.len()].copy_from_slice(prefix);
+    let mut digits = [0_u8; 10];
+    let mut value = pid;
+    let mut count = 0;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut end = prefix.len();
+    for index in (0..count).rev() {
+        path[end] = digits[index];
+        end += 1;
+    }
+    let suffix = b"/stat\0";
+    path[end..end + suffix.len()].copy_from_slice(suffix);
+
+    let mut stat = [0_u8; 1024];
+    let length = unsafe {
+        let fd = libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return 0;
+        }
+        let length = libc::read(fd, stat.as_mut_ptr().cast(), stat.len());
+        libc::close(fd);
+        length
+    };
+    if length <= 0 {
+        return 0;
+    }
+    parse_stat_starttime(&stat[..length as usize]).unwrap_or(0)
+}
+
+/// Field 22 of a `/proc/<pid>/stat` line: the 20th field after `comm`, which
+/// is the last `)`-terminated token.
+#[cfg(any(target_os = "linux", test))]
+fn parse_stat_starttime(stat: &[u8]) -> Option<u64> {
+    let close = stat.iter().rposition(|byte| *byte == b')')?;
+    let mut field = 0;
+    let mut ticks: Option<u64> = None;
+    let mut in_token = false;
+    for byte in &stat[close + 1..] {
+        if byte.is_ascii_whitespace() {
+            if in_token && field == 20 {
+                return ticks;
+            }
+            in_token = false;
+            continue;
+        }
+        if !in_token {
+            in_token = true;
+            field += 1;
+        }
+        if field == 20 {
+            let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+            ticks = Some(
+                ticks
+                    .unwrap_or(0)
+                    .checked_mul(10)?
+                    .checked_add(digit as u64)?,
+            );
+        }
+    }
+    (in_token && field == 20).then_some(ticks).flatten()
 }
 
 #[cfg(target_os = "linux")]
@@ -4062,6 +4149,36 @@ impl CapturedOutput {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn supervisor_stat_parser_reads_field_22_after_a_hostile_comm() {
+        let stat = b"4242 (a) b) c) S 1 4242 4242 0 -1 4194560 100 0 0 0 7 3 0 0 20 0 1 0 987654 1000 10 18446744073709551615\n";
+        assert_eq!(parse_stat_starttime(stat), Some(987654));
+        assert_eq!(parse_stat_starttime(b"4242 (sh) S 1 2"), None);
+        assert_eq!(parse_stat_starttime(b"no close paren"), None);
+    }
+
+    /// The supervisor reaps the root as soon as it exits, so a controller that
+    /// read `/proc` after `spawn` lost the identity of short-lived commands.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervised_identity_keeps_the_start_time_of_a_root_that_already_exited() {
+        for _ in 0..50 {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            command
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn supervised root");
+            let identity = owner.identity();
+            assert!(
+                identity.starttime_ticks().is_some_and(|ticks| ticks > 0),
+                "root start time is captured before the supervisor reaps it: {identity:?}"
+            );
+            assert_eq!(identity.root_pgid, Some(identity.root_pid));
+            let _ = owner.drain_and_reap();
+        }
+    }
 
     #[cfg(all(unix, not(target_os = "linux")))]
     #[test]

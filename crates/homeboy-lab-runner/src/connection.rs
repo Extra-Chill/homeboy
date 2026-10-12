@@ -807,9 +807,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
-    // different configured executable halfway through the transaction.
-    let promotion_lease =
-        homeboy_core::runtime_promotion::acquire("runner daemon reconnect", runner_id.to_string())?;
+    // different configured executable halfway through the transaction. The
+    // lease lives below the injected data root, like binary selection's, so an
+    // isolated reconnect never waits on the host's live Cook pins (#14362).
+    let promotion_lease = homeboy_core::runtime_promotion::acquire_in_root(
+        &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
+        "runner daemon reconnect",
+        runner_id.to_string(),
+    )?;
     promotion_lease.assert_generation()?;
     let runner = load_in_roots(roots, runner_id)?;
     let session_path = session_path_in_root(roots.config(), runner_id);
@@ -2528,6 +2533,8 @@ fn reconcile_status_with_outcome_in_roots_with_policy(
         retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
         evidence_blocked_generation_ids: generation_reconcile.evidence_blocked_generation_ids,
         released_unverified_evidence: generation_reconcile.released_unverified_evidence,
+        stopped_generation_job_owner_ids: generation_reconcile.stopped_generation_job_owner_ids,
+        released_stopped_generation_jobs: generation_reconcile.released_stopped_generation_jobs,
     })
 }
 
@@ -2541,6 +2548,11 @@ pub struct RunnerReconcileStatusOutcome {
     pub evidence_blocked_generation_ids: std::collections::BTreeSet<String>,
     /// Generations retired under `--release-unverified-evidence`, with reasons.
     pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
+    /// Proven-stopped draining generations still pinned by job owners that
+    /// only a workload-absence attestation can release (#15779).
+    pub stopped_generation_job_owner_ids: std::collections::BTreeMap<String, Vec<String>>,
+    /// Job owners released under that attestation, by retired generation.
+    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The result of a reconcile that was allowed to apply the operator-attested
@@ -4661,6 +4673,7 @@ pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,
     service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
 };
+pub(crate) use session_store::controller_id;
 use session_store::*;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 
