@@ -144,10 +144,32 @@ pub(crate) fn cache_enabled() -> bool {
 ///
 /// `lifecycle` runs the dependency lifecycle in the directory it is given,
 /// with `component` already pointing its `local_path` at that directory.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_with_cache<F>(
     component: &Component,
     source: &Path,
     excludes: &[String],
+    lifecycle: F,
+) -> Result<PreparedDependencyCopy>
+where
+    F: FnOnce(&Component, &Path) -> Result<()>,
+{
+    prepare_with_cache_excluding(component, source, excludes, &[], lifecycle)
+}
+
+/// [`prepare_with_cache`], omitting `consumer_excludes` when a cached tree is
+/// copied out to this consumer.
+///
+/// A published entry holds the full post-lifecycle tree, including
+/// package-manager installs the consumer never ships. Copying it goes through a
+/// staged, fingerprinted snapshot, so an unfiltered copy of a plugin with
+/// per-block `node_modules` meant ~240k files staged and hashed on every cache
+/// hit (#15797). The entry itself is unchanged and still serves later keys.
+pub(crate) fn prepare_with_cache_excluding<F>(
+    component: &Component,
+    source: &Path,
+    excludes: &[String],
+    consumer_excludes: &[String],
     lifecycle: F,
 ) -> Result<PreparedDependencyCopy>
 where
@@ -166,6 +188,7 @@ where
                 component,
                 source,
                 excludes,
+                consumer_excludes,
                 &root,
                 &key,
                 &consumer_path,
@@ -196,10 +219,12 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_through_cache<F>(
     component: &Component,
     source: &Path,
     excludes: &[String],
+    consumer_excludes: &[String],
     root: &Path,
     key: &str,
     consumer_path: &Path,
@@ -212,7 +237,7 @@ where
     let entry = root.join(key);
 
     if entry_is_complete(&entry) {
-        copy_snapshot_to_directory(&entry.join(ENTRY_TREE), consumer_path, &[])?;
+        copy_snapshot_to_directory(&entry.join(ENTRY_TREE), consumer_path, consumer_excludes)?;
         touch(&entry.join(ENTRY_META));
         return Ok(CacheOutcome::Hit);
     }
@@ -268,7 +293,7 @@ where
         ));
     }
 
-    copy_snapshot_to_directory(&entry.join(ENTRY_TREE), consumer_path, &[])?;
+    copy_snapshot_to_directory(&entry.join(ENTRY_TREE), consumer_path, consumer_excludes)?;
     evict(root, key);
     Ok(CacheOutcome::Miss)
 }
@@ -590,6 +615,78 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .filter(|name| !name.starts_with('.'))
             .collect()
+    }
+
+    /// Lifecycle double for #15797: a build that leaves block-level
+    /// `node_modules` next to its build output, like a multi-block plugin.
+    fn block_build(
+        counter: &Arc<AtomicUsize>,
+    ) -> impl FnOnce(&Component, &Path) -> Result<()> + '_ {
+        move |_, path| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let io = |err: std::io::Error| Error::internal_io(err.to_string(), None);
+            let block = path.join("blocks/calendar");
+            fs::create_dir_all(block.join("build")).map_err(io)?;
+            fs::create_dir_all(block.join("node_modules/react")).map_err(io)?;
+            fs::write(block.join("build/index.js"), "built").map_err(io)?;
+            fs::write(block.join("node_modules/react/index.js"), "dep").map_err(io)?;
+            fs::write(path.join("built.txt"), "built").map_err(io)
+        }
+    }
+
+    #[test]
+    fn consumer_copies_omit_consumer_excludes_on_miss_and_hit_but_the_entry_keeps_them() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let parent = tempfile::tempdir().expect("parent");
+            let (source, component) = checkout(parent.path(), "block-plugin");
+            fs::write(source.join(".gitignore"), "built.txt\nblocks/\n").expect("gitignore");
+            git(&source, &["add", "."]);
+            git(&source, &["commit", "-q", "-m", "ignore block outputs"]);
+            let counter = Arc::new(AtomicUsize::new(0));
+            let consumer_excludes = vec!["**/node_modules/".to_string()];
+
+            let miss = prepare_with_cache_excluding(
+                &component,
+                &source,
+                &excludes(),
+                &consumer_excludes,
+                block_build(&counter),
+            )
+            .expect("miss");
+            let hit = prepare_with_cache_excluding(
+                &component,
+                &source,
+                &excludes(),
+                &consumer_excludes,
+                block_build(&counter),
+            )
+            .expect("hit");
+
+            assert_eq!(counter.load(Ordering::SeqCst), 1);
+            assert_eq!(miss.outcome, CacheOutcome::Miss);
+            assert_eq!(hit.outcome, CacheOutcome::Hit);
+            for prepared in [&miss, &hit] {
+                assert!(prepared
+                    .path
+                    .join("blocks/calendar/build/index.js")
+                    .is_file());
+                assert!(prepared.path.join("built.txt").is_file());
+                assert!(
+                    !prepared.path.join("blocks/calendar/node_modules").exists(),
+                    "consumer copy omits node_modules"
+                );
+            }
+            let root = cache_root().expect("cache root");
+            let entry = root.join(&published_entries(&root)[0]);
+            assert!(
+                entry
+                    .join(ENTRY_TREE)
+                    .join("blocks/calendar/node_modules/react/index.js")
+                    .is_file(),
+                "the published entry is not filtered"
+            );
+            let _ = home;
+        });
     }
 
     #[test]
