@@ -412,6 +412,7 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
 mod durable_progress;
 mod handoff_and_proxy;
 mod lifecycle_store;
+mod non_terminal_transitions;
 mod operation_claims;
 mod private_attachment;
 mod runner_exec;

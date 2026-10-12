@@ -687,7 +687,9 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
         )
         .unwrap_or(Value::Null),
     );
-    lifecycle_store.write_record(&record)?;
+    // Fenced at the revision the cancellation committed, so nothing written
+    // after it is replaced by this annotation (#15718).
+    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::ExpireLabHandoff)?;
     Ok(true)
 }
 
@@ -826,7 +828,7 @@ fn terminalize_lost_accepted_lab_job_in_store(
     if let Some(handoff) = metadata.get_mut("runner_handoff") {
         handoff["state"] = json!("lost");
     }
-    lifecycle_store.write_record(&terminal)?;
+    lifecycle_store.commit_record(&mut terminal)?;
     *record = terminal;
     Ok(())
 }

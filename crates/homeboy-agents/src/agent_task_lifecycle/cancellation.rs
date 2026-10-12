@@ -165,6 +165,23 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     )
 }
 
+/// Apply a cancellation annotation to the record read under the config lock
+/// rather than to the caller's copy, which a process signal, a service
+/// reconciliation or a runner call may have left stale (#15718). Only the
+/// annotation is applied; anything committed in between is kept.
+fn annotate_stored_record(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    annotate: impl FnOnce(&mut AgentTaskRunRecord),
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store
+        .mutate_record(run_id, |stored| {
+            annotate(stored);
+            true
+        })?
+        .ok_or_else(|| Error::internal_unexpected("cancellation annotation was not applied"))
+}
+
 /// The store-rooted counterpart of [`cancel_run`].
 ///
 /// Alias resolution and cancellation are one loop: this re-resolves the Cook
@@ -775,16 +792,17 @@ fn cancel_resolved_run_in_store(
         ) {
             homeboy_core::process::ProcessIdentityState::Live => {
                 let termination = homeboy_core::process::terminate_process_tree(pid)?;
-                record.ensure_metadata_object().insert(
-                    "detached_cook_handoff_cancellation".to_string(),
-                    json!({
-                        "child_pid": pid,
-                        "signal": termination.signal,
-                        "signalled_pids": termination.signalled_pids,
-                        "killed_pids": termination.killed_pids,
-                    }),
-                );
-                lifecycle_store.write_record(&record)?;
+                let evidence = json!({
+                    "child_pid": pid,
+                    "signal": termination.signal,
+                    "signalled_pids": termination.signalled_pids,
+                    "killed_pids": termination.killed_pids,
+                });
+                record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+                    stored
+                        .ensure_metadata_object()
+                        .insert("detached_cook_handoff_cancellation".to_string(), evidence);
+                })?;
             }
             homeboy_core::process::ProcessIdentityState::Dead => {}
             homeboy_core::process::ProcessIdentityState::IdentityMismatch
@@ -810,10 +828,11 @@ fn cancel_resolved_run_in_store(
         )
         .map_err(Error::internal_unexpected)?;
     if service_cleanup != serde_json::json!({ "transport": "local", "services": [] }) {
-        record
-            .ensure_metadata_object()
-            .insert("managed_service_cleanup".to_string(), service_cleanup);
-        lifecycle_store.write_record(&record)?;
+        record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+            stored
+                .ensure_metadata_object()
+                .insert("managed_service_cleanup".to_string(), service_cleanup);
+        })?;
     }
     if record
         .candidate_adoption
@@ -831,18 +850,20 @@ fn cancel_resolved_run_in_store(
             .and_then(|attempt| attempt.gate_process_group);
         let reason = reason.unwrap_or("cancel requested").to_string();
         let now = now_timestamp();
-        let attempt = record.candidate_adoption.as_mut().expect("active adoption");
-        attempt.state = "cancel_requested".to_string();
-        attempt.phase = "cancelling_gate".to_string();
-        attempt.terminal_error = Some(reason.clone());
-        attempt.updated_at = now.clone();
-        attempt.heartbeat_at = now.clone();
-        record.ensure_metadata_object().insert(
-            "candidate_adoption_cancel_requested_at".to_string(),
-            json!(now),
-        );
-        record.updated_at = Some(now);
-        lifecycle_store.write_record(&record)?;
+        record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+            if let Some(attempt) = stored.candidate_adoption.as_mut() {
+                attempt.state = "cancel_requested".to_string();
+                attempt.phase = "cancelling_gate".to_string();
+                attempt.terminal_error = Some(reason.clone());
+                attempt.updated_at = now.clone();
+                attempt.heartbeat_at = now.clone();
+            }
+            stored.ensure_metadata_object().insert(
+                "candidate_adoption_cancel_requested_at".to_string(),
+                json!(now),
+            );
+            stored.updated_at = Some(now);
+        })?;
 
         if let Some(process_group) = process_group {
             if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
@@ -869,15 +890,17 @@ fn cancel_resolved_run_in_store(
             }
         }
         let now = now_timestamp();
-        let attempt = record.candidate_adoption.as_mut().expect("active adoption");
-        attempt.state = "cancelled".to_string();
-        attempt.phase = "terminal".to_string();
-        attempt.terminal_error = Some(reason);
-        attempt.completed_at = Some(now.clone());
-        attempt.updated_at = now.clone();
-        attempt.heartbeat_at = now.clone();
-        record.updated_at = Some(now);
-        lifecycle_store.write_record(&record)?;
+        record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+            if let Some(attempt) = stored.candidate_adoption.as_mut() {
+                attempt.state = "cancelled".to_string();
+                attempt.phase = "terminal".to_string();
+                attempt.terminal_error = Some(reason);
+                attempt.completed_at = Some(now.clone());
+                attempt.updated_at = now.clone();
+                attempt.heartbeat_at = now.clone();
+            }
+            stored.updated_at = Some(now);
+        })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
     // A pending POST may have been accepted despite a lost response. Resolve
@@ -931,8 +954,9 @@ fn cancel_resolved_run_in_store(
             .and_then(serde_json::Value::as_str)
             .unwrap_or_else(|| record.updated_at.as_deref().unwrap_or("unknown"))
             .to_string();
-        terminalize_running_provider_executions(record.ensure_metadata_object(), &cancelled_at);
-        lifecycle_store.write_record(&record)?;
+        record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+            terminalize_running_provider_executions(stored.ensure_metadata_object(), &cancelled_at);
+        })?;
         crate::controller_scratch::finalize_run_at_explicit_roots(
             &lifecycle_store.data_root(),
             &lifecycle_store.artifact_root(),
@@ -966,11 +990,12 @@ fn cancel_resolved_run_in_store(
             })
     {
         let now = now_timestamp();
-        record.ensure_metadata_object().insert(
-            "cancellation_deferred_for_terminal_provider".to_string(),
-            json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
-        );
-        lifecycle_store.write_record(&record)?;
+        record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+            stored.ensure_metadata_object().insert(
+                "cancellation_deferred_for_terminal_provider".to_string(),
+                json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
+            );
+        })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
 
@@ -1104,8 +1129,9 @@ fn cancel_resolved_run_in_store(
             );
         }
         if !job.status.is_terminal() {
-            retain_pending_runner_cancellation(&mut record, job, events, reason);
-            lifecycle_store.write_record(&record)?;
+            record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
+                retain_pending_runner_cancellation(stored, job, events, reason);
+            })?;
             return Ok(CancelResolvedOutcome::Cancelled(record));
         }
     }

@@ -12,9 +12,13 @@
 //! the revision, and appends a `run.transitioned` event in that transaction. A
 //! stale writer gets [`AgentTaskTransitionError::Conflict`] and writes nothing.
 //!
-//! This first slice covers terminal outcomes only. Non-terminal writes still go
-//! through `write_record`/`mutate_record`, which bump the revision on every
-//! commit so a terminal transition decided before them is detected.
+//! Non-terminal writes are fenced the same way. A caller-held snapshot is
+//! committed only as [`AgentTaskTransition::Annotate`], which may not change
+//! the run state, the Lab handoff or workspace ownership; those move only
+//! through a typed [`AgentTaskTransition::Advance`], which validates the
+//! state it leaves against the stored record.
+//! `mutate_record` re-reads under the config lock and commits at the revision
+//! it read, so no production writer can commit a stale snapshot.
 
 use super::*;
 
@@ -88,6 +92,139 @@ pub enum AgentTaskTransition {
     /// [`Self::ProjectAggregate`], the revision check is what makes carrying
     /// the prepared record safe.
     CommitRecord { prepared: Box<AgentTaskRunRecord> },
+    /// Commit a record the caller prepared from the record at the expected
+    /// revision, changing neither the run state, nor the Lab handoff, nor
+    /// workspace ownership. This is the only form a caller-held snapshot can
+    /// be committed in; it records no transition event.
+    Annotate { prepared: Box<AgentTaskRunRecord> },
+    /// A typed non-terminal state or ownership change, prepared from the
+    /// record at the expected revision and validated against it.
+    Advance {
+        kind: AgentTaskAdvance,
+        prepared: Box<AgentTaskRunRecord>,
+    },
+}
+
+/// The non-terminal state and ownership transitions a run can make. Each is
+/// validated against the stored record it replaces; a conflict names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTaskAdvance {
+    /// Create the run from a plan submission, or replace its plan-derived
+    /// fields on re-submission.
+    Submit,
+    /// A consumer claimed the run: `Queued` -> `Running`, or a new owner
+    /// reclaimed a running run whose owner is gone.
+    Start,
+    /// Return a live run to the queue before provider work begins.
+    Requeue,
+    /// Publish or refresh the controller's pending Lab handoff.
+    PendLabHandoff,
+    /// Bind the runner daemon's accepted job, moving the run to `Running`.
+    BindLabHandoff,
+    /// Drop an unaccepted Lab handoff so the run executes locally.
+    ReleaseLabHandoff,
+    /// Mark an unaccepted Lab handoff expired on a run already cancelled.
+    ExpireLabHandoff,
+}
+
+impl AgentTaskAdvance {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Submit => "submit",
+            Self::Start => "start",
+            Self::Requeue => "requeue",
+            Self::PendLabHandoff => "pend_lab_handoff",
+            Self::BindLabHandoff => "bind_lab_handoff",
+            Self::ReleaseLabHandoff => "release_lab_handoff",
+            Self::ExpireLabHandoff => "expire_lab_handoff",
+        }
+    }
+
+    /// Why `prepared` is not this transition from `stored`, if it is not.
+    fn violation(
+        self,
+        stored: &AgentTaskRunRecord,
+        prepared: &AgentTaskRunRecord,
+    ) -> Option<&'static str> {
+        let handoff_state =
+            |record: &AgentTaskRunRecord| record.lab_handoff.as_ref().map(|h| h.state);
+        match self {
+            Self::Submit => None,
+            Self::Start => (stored.state.is_terminal()
+                || prepared.state != AgentTaskRunState::Running)
+                .then_some("start must move a live run to running"),
+            Self::Requeue => (stored.state.is_terminal()
+                || prepared.state != AgentTaskRunState::Queued)
+                .then_some("requeue must return a live run to the queue"),
+            Self::PendLabHandoff => (stored.state.is_terminal()
+                || prepared.state != stored.state
+                || accepted(stored).is_some()
+                || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Pending))
+            .then_some("a pending Lab handoff requires a live, unaccepted run"),
+            Self::BindLabHandoff => match (accepted(stored), accepted(prepared)) {
+                _ if prepared.state != AgentTaskRunState::Running => {
+                    Some("binding a Lab handoff must leave the run running")
+                }
+                (_, None) => Some("binding a Lab handoff must accept a runner job"),
+                (Some(stored), Some(prepared))
+                    if stored.runner_job_id != prepared.runner_job_id =>
+                {
+                    Some("an accepted Lab handoff cannot be rebound to another job")
+                }
+                // Late acceptance may supersede only the synthetic expiry
+                // cancellation of an unaccepted handoff.
+                _ if stored.state.is_terminal()
+                    && handoff_state(stored) != Some(AgentTaskLabHandoffState::Expired) =>
+                {
+                    Some("a terminal run cannot bind a Lab handoff")
+                }
+                _ => None,
+            },
+            Self::ReleaseLabHandoff => (stored.state.is_terminal()
+                || prepared.state != stored.state
+                || accepted(stored).is_some()
+                || prepared.lab_handoff.is_some())
+            .then_some("only a live, unaccepted Lab handoff can be released"),
+            Self::ExpireLabHandoff => (stored.state != AgentTaskRunState::Cancelled
+                || prepared.state != stored.state
+                || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Expired))
+            .then_some("only a cancelled run's Lab handoff can expire"),
+        }
+    }
+}
+
+/// The runner daemon's accepted handoff, when the record carries one.
+fn accepted(record: &AgentTaskRunRecord) -> Option<&AgentTaskLabHandoff> {
+    record.lab_handoff.as_ref().filter(|handoff| {
+        handoff.state == AgentTaskLabHandoffState::Accepted
+            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
+            && handoff.runner_job_id.is_some()
+    })
+}
+
+/// Why `prepared` changes something only a typed transition may change.
+fn ownership_change(
+    stored: &AgentTaskRunRecord,
+    prepared: &AgentTaskRunRecord,
+) -> Option<&'static str> {
+    let lease_owner = |record: &AgentTaskRunRecord| {
+        record
+            .workspace_owner_lease
+            .as_ref()
+            .map(|lease| (lease.workspace.clone(), lease.owner_id.clone()))
+    };
+    if prepared.state != stored.state {
+        Some("the run state")
+    } else if prepared.lab_handoff != stored.lab_handoff {
+        Some("the Lab handoff")
+    } else if prepared.workspace_identity != stored.workspace_identity
+        || prepared.workspace_claim != stored.workspace_claim
+        || lease_owner(prepared) != lease_owner(stored)
+    {
+        Some("workspace ownership")
+    } else {
+        None
+    }
 }
 
 impl AgentTaskTransition {
@@ -96,16 +233,27 @@ impl AgentTaskTransition {
             Self::Terminate { .. } => "terminate",
             Self::ProjectAggregate { .. } => "project_aggregate",
             Self::CommitRecord { .. } => "commit_record",
+            Self::Annotate { .. } => "annotate",
+            Self::Advance { kind, .. } => kind.name(),
         }
     }
 
-    /// The terminal state this transition commits.
+    /// Whether the commit is recorded as a durable `run.transitioned` event:
+    /// transitions into a terminal state. A non-terminal advance is already
+    /// recorded by the state progress event its write emits, and annotations
+    /// are not transitions; neither may grow the unpruned durable log.
+    pub(crate) fn records_event(&self) -> bool {
+        !matches!(self, Self::Annotate { .. } | Self::Advance { .. })
+    }
+
+    /// The state this transition commits.
     pub fn target_state(&self) -> AgentTaskRunState {
         match self {
             Self::Terminate { outcome, .. } => outcome.run_state(),
-            Self::ProjectAggregate { prepared, .. } | Self::CommitRecord { prepared } => {
-                prepared.state
-            }
+            Self::ProjectAggregate { prepared, .. }
+            | Self::CommitRecord { prepared }
+            | Self::Annotate { prepared }
+            | Self::Advance { prepared, .. } => prepared.state,
         }
     }
 
@@ -142,8 +290,48 @@ impl AgentTaskTransition {
                 validate_prepared_terminal_record(&prepared, &stored, "a terminal record commit")?;
                 Ok((*prepared, stored_aggregate, false))
             }
+            Self::Annotate { prepared } => {
+                validate_identity(&prepared, &stored, "an annotation")?;
+                if let Some(field) = ownership_change(&stored, &prepared) {
+                    return Err(Error::validation_invalid_argument(
+                        "transition",
+                        format!("an annotation cannot change {field}; commit a typed transition"),
+                        Some(stored.run_id.clone()),
+                        None,
+                    ));
+                }
+                Ok((*prepared, stored_aggregate, false))
+            }
+            Self::Advance { kind, prepared } => {
+                validate_identity(&prepared, &stored, kind.name())?;
+                if let Some(problem) = kind.violation(&stored, &prepared) {
+                    return Err(Error::validation_invalid_argument(
+                        "transition",
+                        format!("{problem} (stored state {:?})", stored.state),
+                        Some(stored.run_id.clone()),
+                        None,
+                    ));
+                }
+                Ok((*prepared, stored_aggregate, false))
+            }
         }
     }
+}
+
+fn validate_identity(
+    prepared: &AgentTaskRunRecord,
+    stored: &AgentTaskRunRecord,
+    what: &str,
+) -> Result<()> {
+    if prepared.run_id != stored.run_id || prepared.plan_id != stored.plan_id {
+        return Err(Error::validation_invalid_argument(
+            "transition",
+            format!("{what} must keep the stored run and plan identity"),
+            Some(stored.run_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_prepared_terminal_record(
@@ -202,6 +390,12 @@ pub enum AgentTaskTransitionError {
 /// `reason_code` carried in the details of a converted conflict, so callers
 /// that only see [`Error`] can still recognize it.
 pub const AGENT_TASK_TRANSITION_CONFLICT: &str = "agent_task_transition_conflict";
+
+/// Whether `error` is a converted [`AgentTaskTransitionError::Conflict`]: a
+/// writer committed after the caller read the record, and nothing was written.
+pub(crate) fn is_transition_conflict(error: &Error) -> bool {
+    error.details["reason_code"] == serde_json::json!(AGENT_TASK_TRANSITION_CONFLICT)
+}
 
 impl From<Error> for AgentTaskTransitionError {
     fn from(error: Error) -> Self {

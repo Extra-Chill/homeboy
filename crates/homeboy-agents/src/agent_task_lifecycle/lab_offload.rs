@@ -340,7 +340,7 @@ pub fn record_local_lab_identity_fallback_in_store(
             "transport_retry_attempts": 0,
         }),
     );
-    lifecycle_store.write_record_in_place(&mut record)?;
+    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::ReleaseLabHandoff)?;
     Ok(record)
 }
 
@@ -359,28 +359,25 @@ pub fn record_lab_offload_phase_executions_in_store(
     phase: &str,
     execution_ids: impl IntoIterator<Item = String>,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if record.state.is_terminal() {
-        return Ok(record);
-    }
+    let run_id = sanitize_run_id(run_id);
     let execution_ids: Vec<String> = execution_ids
         .into_iter()
         .filter(|id| !id.trim().is_empty())
         .collect();
-    record.updated_at = Some(now_timestamp());
-    let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    let metadata = record.ensure_metadata_object();
-    record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
-    metadata.insert(
-        "materialization_execution_ids".to_string(),
-        json!(execution_ids),
-    );
-    metadata.insert(
-        "materialization_resume".to_string(),
-        json!("resume reuses the controller proxy and recorded completed staging"),
-    );
-    lifecycle_store.write_record_in_place(&mut record)?;
-    Ok(record)
+    annotate_live_record(lifecycle_store, &run_id, |record| {
+        record.updated_at = Some(now_timestamp());
+        let phase_started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+        let metadata = record.ensure_metadata_object();
+        record_lab_offload_phase_metadata(metadata, phase, &phase_started_at);
+        metadata.insert(
+            "materialization_execution_ids".to_string(),
+            json!(execution_ids),
+        );
+        metadata.insert(
+            "materialization_resume".to_string(),
+            json!("resume reuses the controller proxy and recorded completed staging"),
+        );
+    })
 }
 
 // The ambient `record_lab_staging_controller_job()` shim that used to sit here
@@ -398,25 +395,21 @@ pub fn record_lab_staging_controller_job_in_store(
     runner_id: &str,
     controller_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if record.state.is_terminal() {
-        return Ok(record);
-    }
-    record.updated_at = Some(now_timestamp());
-    let started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    let metadata = record.ensure_metadata_object();
-    record_lab_offload_phase_metadata(metadata, "materializing", &started_at);
-    metadata.insert(
-        "lab_staging_controller_job_id".to_string(),
-        json!(controller_job_id),
-    );
-    metadata.insert(
-        "lab_staging_controller_runner_id".to_string(),
-        json!(runner_id),
-    );
-    metadata.insert("materialization_owner".to_string(), json!("controller_job"));
-    lifecycle_store.write_record_in_place(&mut record)?;
-    Ok(record)
+    annotate_live_record(lifecycle_store, &sanitize_run_id(run_id), |record| {
+        record.updated_at = Some(now_timestamp());
+        let started_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+        let metadata = record.ensure_metadata_object();
+        record_lab_offload_phase_metadata(metadata, "materializing", &started_at);
+        metadata.insert(
+            "lab_staging_controller_job_id".to_string(),
+            json!(controller_job_id),
+        );
+        metadata.insert(
+            "lab_staging_controller_runner_id".to_string(),
+            json!(runner_id),
+        );
+        metadata.insert("materialization_owner".to_string(), json!("controller_job"));
+    })
 }
 
 // The ambient `record_lab_admission_reservation()` shim that used to sit here
@@ -437,29 +430,25 @@ pub fn record_lab_admission_reservation_in_store(
     reservation_job_id: &str,
     lease_expires_at_ms: u64,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    if record.state.is_terminal() {
-        return Ok(record);
-    }
-    record.updated_at = Some(now_timestamp());
-    let reserved_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    let record_run_id = record.run_id.clone();
-    let metadata = record.ensure_metadata_object();
-    metadata.insert(
-        "lab_admission_reservation".to_string(),
-        json!({
-            "state": "reserved",
-            "runner_id": runner_id,
-            "daemon_lease_id": daemon_lease_id,
-            "reservation_job_id": reservation_job_id,
-            "lease_expires_at_ms": lease_expires_at_ms,
-            "reserved_at": reserved_at,
-            "reclaim": "the runner daemon reconciles this reservation automatically once its lease expires without a live controller",
-            "cancel_command": format!("homeboy agent-task cancel {record_run_id}"),
-        }),
-    );
-    lifecycle_store.write_record_in_place(&mut record)?;
-    Ok(record)
+    annotate_live_record(lifecycle_store, &sanitize_run_id(run_id), |record| {
+        record.updated_at = Some(now_timestamp());
+        let reserved_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+        let record_run_id = record.run_id.clone();
+        let metadata = record.ensure_metadata_object();
+        metadata.insert(
+            "lab_admission_reservation".to_string(),
+            json!({
+                "state": "reserved",
+                "runner_id": runner_id,
+                "daemon_lease_id": daemon_lease_id,
+                "reservation_job_id": reservation_job_id,
+                "lease_expires_at_ms": lease_expires_at_ms,
+                "reserved_at": reserved_at,
+                "reclaim": "the runner daemon reconciles this reservation automatically once its lease expires without a live controller",
+                "cancel_command": format!("homeboy agent-task cancel {record_run_id}"),
+            }),
+        );
+    })
 }
 
 // The ambient `record_lab_staging_controller_failure()` shim that used to sit here
@@ -477,21 +466,23 @@ pub fn record_lab_staging_controller_failure_in_store(
     phase: &str,
     controller_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let metadata = record.ensure_metadata_object();
-    metadata.insert(
-        "lab_staging_controller_failure".to_string(),
-        json!({
-            "phase": phase,
-            "controller_job_id": controller_job_id,
-            "classification": "lab_staging",
-            "retry_command": format!("homeboy agent-task retry {run_id}"),
-            "cleanup_status": "controller-owned cleanup pending terminal confirmation",
-        }),
-    );
-    record.updated_at = Some(now_timestamp());
-    lifecycle_store.write_record_in_place(&mut record)?;
-    Ok(record)
+    let run_id = sanitize_run_id(run_id);
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        metadata.insert(
+            "lab_staging_controller_failure".to_string(),
+            json!({
+                "phase": phase,
+                "controller_job_id": controller_job_id,
+                "classification": "lab_staging",
+                "retry_command": format!("homeboy agent-task retry {run_id}"),
+                "cleanup_status": "controller-owned cleanup pending terminal confirmation",
+            }),
+        );
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Lab staging failure was not recorded"))
 }
 
 /// Persist bounded parse evidence on the canonical run record so status and
@@ -538,7 +529,28 @@ pub fn record_lab_staging_json_error(
     }
     metadata.insert("lab_staging_diagnostic".to_string(), diagnostic);
     record.updated_at = Some(now_timestamp());
-    lifecycle_store.write_record(&record)
+    lifecycle_store.commit_record(&mut record)
+}
+
+/// Apply a Lab offload progress annotation to the record read under the
+/// config lock, unless the run is already terminal. Returns the stored record
+/// either way; anything committed concurrently is kept (#15718).
+fn annotate_live_record(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    annotate: impl FnOnce(&mut AgentTaskRunRecord),
+) -> Result<AgentTaskRunRecord> {
+    let annotated = lifecycle_store.mutate_record(run_id, |record| {
+        if record.state.is_terminal() {
+            return false;
+        }
+        annotate(record);
+        true
+    })?;
+    match annotated {
+        Some(record) => Ok(record),
+        None => lifecycle_store.read_record(run_id),
+    }
 }
 
 fn record_lab_offload_phase_metadata(
@@ -848,7 +860,10 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-    lifecycle_store.write_record_in_place(&mut record)?;
+    // Fenced at the revision the acceptance was validated against: a write
+    // committed since (a cancellation request, progress, a competing
+    // acceptance) fails this commit instead of being overwritten (#15718).
+    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::BindLabHandoff)?;
     Ok(record)
 }
 
@@ -1071,7 +1086,7 @@ fn record_lab_offload_proxy_in_store(
     }
     record.updated_at = Some(now_timestamp());
     update_lifecycle_heartbeat(&mut record);
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.commit_record(&mut record)?;
     lifecycle_store.read_record(&record.run_id)
 }
 
@@ -1196,7 +1211,12 @@ fn fail_missing_lab_attempt_plan_in_store(
         }),
     );
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    lifecycle_store.write_record(record)
+    // A terminal winner committed since the record was read is kept.
+    *record = match lifecycle_store.commit_terminal_record(record)? {
+        super::terminal_transition::TerminalRecordCommit::Committed(committed)
+        | super::terminal_transition::TerminalRecordCommit::Superseded(committed) => committed,
+    };
+    Ok(())
 }
 
 fn detached_lab_plan(run_id: &str, input: &DetachedLabRunRecord<'_>) -> AgentTaskPlan {

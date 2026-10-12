@@ -2267,8 +2267,13 @@ fn reserve_cook_retry_lifecycle(
                 lifecycle_store,
                 &source.run_id,
                 &operation_key,
-                result.clone(),
+                result,
             ) {
+                // The successor is the durable side effect. Once it is bound,
+                // the reservation stands; the claim's lease expires and the
+                // next retry completes it idempotently. The claim itself can no
+                // longer vanish under a stale source-record write: every
+                // record write is fenced on its revision (#15718).
                 let recovered = agent_task_lifecycle::find_unbound_cook_retry_successor_in_store(
                     lifecycle_store,
                     &source.run_id,
@@ -2279,12 +2284,6 @@ fn reserve_cook_retry_lifecycle(
                 if recovered.as_ref().map(|record| record.run_id.as_str()) != Some(retry_run_id) {
                     return Err(error);
                 }
-                agent_task_lifecycle::recover_completed_cook_operation_in_store(
-                    lifecycle_store,
-                    &source.run_id,
-                    &operation_key,
-                    result,
-                )?;
             }
             Ok(CookRetryReservation {
                 run_id: retry_run_id.to_string(),
