@@ -12,7 +12,7 @@
 # back a released fix the gate depended on. Nothing in the repository could see
 # either one (#13437).
 #
-# The scheduled run is advisory, like audit-debt.yml, and for the same reason:
+# The scheduled run is advisory for a simple reason:
 # this repository already has one required gate that nothing can pass, and a
 # second always-red check teaches the same lesson as no check at all.
 #

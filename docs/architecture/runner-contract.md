@@ -8,7 +8,7 @@ This is the authoritative reference for extension authors wiring a new
 runner and for core maintainers improving the cross-extension surface.
 
 For the cross-command verification phase model (`syntax`, `lint`, `typecheck`,
-`audit`, `test`), see
+`test`), see
 [`docs/internals/development/contracts/verification-phases.md`](../internals/development/contracts/verification-phases.md).
 
 ## Runner-owned service observation
@@ -78,12 +78,9 @@ Four capabilities are first-class in core:
 | `lint` | `lint.extension_script` | extension-owned lint runner | `homeboy review lint` |
 | `test` | `test.extension_script` | extension-owned test runner | `homeboy review test` |
 | `build` | `build.extension_script` | extension-owned build runner | `homeboy review build`, `homeboy release` |
-| `audit` | *built-in to core* | n/a | `homeboy review audit` |
 
 `lint`, `test`, and `build` are shell-script capabilities: extensions own
-the runtime. `audit` is a core-owned framework (pattern detectors, shared
-scaffolding checks, orphaned-test detection, etc.) — extensions don't
-implement it directly.
+the runtime.
 
 Component-owned scripts use the same capability contract without extension
 claiming. They run sequentially in the component root and set
@@ -136,7 +133,7 @@ variables most runners care about:
 | `HOMEBOY_PROJECT_PATH` | core (when in project scope) | Absolute path to project root |
 | `HOMEBOY_SETTINGS_JSON` | core | JSON blob of merged settings |
 | `HOMEBOY_STEP` / `HOMEBOY_SKIP` | core | CSV step filter (see above) |
-| `HOMEBOY_FIX_ONLY` | `homeboy refactor --from lint --write` | `"1"` → run fixers, skip validation |
+| `HOMEBOY_FIX_ONLY` | `homeboy review lint --fix` | `"1"` → run fixers, skip validation |
 | `HOMEBOY_DEBUG` | user | `"1"` → verbose runner output |
 | `HOMEBOY_RUNTIME_*` | core | Paths to core-provided runtime helpers (see below) |
 | `HOMEBOY_DELEGATED_RUN_STATUS_FILE` | core | Optional delegated-runtime status JSON path for extension runners that hand work to a child provider |
@@ -560,9 +557,9 @@ set. The script is expected to:
 3. Write failures sidecar if `HOMEBOY_TEST_FAILURES_FILE` is set.
 4. Exit per the convention above.
 
-`homeboy review test` does not run lint or audit. Those are separate primitive
-commands (`homeboy review lint`, `homeboy review audit`) that composed workflows can run
-alongside test when they need a full verification sequence.
+`homeboy review test` does not run lint. That is a separate primitive
+command (`homeboy review lint`) that composed workflows can run alongside
+test when they need a full verification sequence.
 
 Core handles baseline comparison, coverage threshold enforcement,
 test-drift detection, and analysis mode — extensions don't implement
@@ -602,10 +599,12 @@ addresses both by splitting the selection.
 ### `homeboy review lint`
 
 Invokes `lint.extension_script` directly. Supports step filtering
-(`--step phpcs`, `--skip phpstan`) via the env pairs above. In fix-only
-mode (`homeboy refactor --from lint --write`), sets
-`HOMEBOY_FIX_ONLY=1` which signals the runner to run fixers and skip
-validation.
+(`--step phpcs`, `--skip phpstan`) via the env pairs above. With `--fix`,
+core diagnoses first, then invokes each declared fixer route with
+`HOMEBOY_FIX_ONLY=1` (and `HOMEBOY_STEP=<fixer>`), which signals the runner
+to run fixers and skip validation. Core keeps only in-scope edits, runs the
+extension's `scripts.format` hook on changed files, and re-runs diagnostics
+to verify the result.
 
 ### `homeboy review build`
 
@@ -617,13 +616,6 @@ artifacts, version targets) — see [release-pipeline.md](release-pipeline.md).
 Invokes `trace.extension_script` with the trace-specific sidecar and artifact variables documented above. The runner drives the requested scenario and writes a trace results envelope to `HOMEBOY_TRACE_RESULTS_FILE`.
 
 When `--attach` is present, core observes the declared already-running local targets before and after the runner executes. `fswatch` attachments also collect passive `file.watch` timeline events during the run. This augments the trace evidence but does not replace the scenario: the extension script still runs normally, and attach handling does not own the target lifecycle.
-
-### `homeboy review audit`
-
-Runs entirely in core. No extension script invoked. Audit rules read
-the component's manifest for configuration
-(`audit.feature_patterns`, `audit.test_mapping`, etc.) but the detectors
-themselves live in `crates/homeboy-code-audit/src/`.
 
 ## Authoring a new runner
 

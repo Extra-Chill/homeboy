@@ -793,18 +793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-audit-contract"
-version = "0.1.0"
-dependencies = [
- "homeboy-engine-primitives",
- "homeboy-finding",
- "homeboy-product-identity",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "homeboy-cli"
 version = "0.1.0"
 dependencies = [
@@ -813,8 +801,8 @@ dependencies = [
  "clap",
  "fs4",
  "glob",
+ "glob-match",
  "homeboy-agents",
- "homeboy-audit-contract",
  "homeboy-command-contract",
  "homeboy-control-plane-contract",
  "homeboy-core",
@@ -822,13 +810,10 @@ dependencies = [
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
  "homeboy-fuzz",
- "homeboy-issues",
  "homeboy-lab-contract",
  "homeboy-lab-runner",
  "homeboy-lab-runner-contract",
  "homeboy-product-identity",
- "homeboy-refactor",
- "homeboy-refactor-contract",
  "homeboy-release",
  "homeboy-resource-topology-contract",
  "homeboy-review",
@@ -856,29 +841,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-code-audit"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "glob-match",
- "homeboy-audit-contract",
- "homeboy-core",
- "homeboy-engine-primitives",
- "homeboy-error",
- "homeboy-extension-contract",
- "homeboy-finding",
- "homeboy-paths",
- "homeboy-product-identity",
- "regex",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml",
-]
-
-[[package]]
 name = "homeboy-command-contract"
 version = "0.1.0"
 dependencies = [
@@ -891,7 +853,6 @@ dependencies = [
 name = "homeboy-component-contract"
 version = "0.1.0"
 dependencies = [
- "homeboy-audit-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-extension-contract",
@@ -934,8 +895,6 @@ dependencies = [
  "heck",
  "homeboy-api-jobs-contract",
  "homeboy-artifact-ref-contract",
- "homeboy-audit-contract",
- "homeboy-code-audit",
  "homeboy-command-contract",
  "homeboy-component-contract",
  "homeboy-control-plane-contract",
@@ -950,7 +909,6 @@ dependencies = [
  "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-redaction",
- "homeboy-refactor-contract",
  "homeboy-release-contract",
  "homeboy-resource-topology-contract",
  "homeboy-runner-contract",
@@ -1031,14 +989,12 @@ dependencies = [
 name = "homeboy-extension-contract"
 version = "0.1.0"
 dependencies = [
- "homeboy-audit-contract",
  "homeboy-control-plane-contract",
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-finding",
  "homeboy-lifecycle-contract",
  "homeboy-product-identity",
- "homeboy-refactor-contract",
  "semver",
  "serde",
  "serde_json",
@@ -1068,16 +1024,6 @@ name = "homeboy-gate-contract"
 version = "0.1.0"
 dependencies = [
  "clap",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "homeboy-issues"
-version = "0.1.0"
-dependencies = [
- "homeboy-code-audit",
- "homeboy-core",
  "serde",
  "serde_json",
 ]
@@ -1176,32 +1122,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-refactor"
-version = "0.1.0"
-dependencies = [
- "glob",
- "glob-match",
- "homeboy-audit-contract",
- "homeboy-code-audit",
- "homeboy-core",
- "homeboy-engine-primitives",
- "homeboy-extension-contract",
- "homeboy-refactor-contract",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "homeboy-refactor-contract"
-version = "0.1.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "homeboy-release"
 version = "0.1.0"
 dependencies = [
@@ -1252,8 +1172,6 @@ name = "homeboy-review"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "homeboy-audit-contract",
- "homeboy-code-audit",
  "homeboy-core",
  "homeboy-extension-contract",
  "homeboy-finding",

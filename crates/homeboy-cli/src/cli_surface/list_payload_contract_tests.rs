@@ -76,10 +76,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "nested sub-resource under data.pin, shared with add/remove/update",
     ),
     (
-        "refactor undo list",
-        "command-tagged snapshot report; follow-up candidate",
-    ),
-    (
         "release readiness list",
         "retained operation records for one component; follow-up candidate",
     ),

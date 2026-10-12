@@ -99,12 +99,6 @@ fn review_actions_accept_their_shared_post_action_options_in_help() {
     let home = tempfile::tempdir().expect("temporary home");
 
     for (action, target, option, expected) in [
-        (
-            "audit",
-            "fixture",
-            "--changed-since=main",
-            "Audit code conventions",
-        ),
         ("lint", "fixture", "--changed-only", "Lint a component"),
         (
             "test",
@@ -167,10 +161,10 @@ fn startup_help_applies_the_same_review_option_projection() {
 }
 
 #[test]
-fn review_audit_and_lint_reject_cross_position_changed_scopes_in_help_and_runtime() {
+fn review_lint_rejects_cross_position_changed_scopes_in_help_and_runtime() {
     let home = tempfile::tempdir().expect("temporary home");
 
-    for action in ["audit", "lint"] {
+    for action in ["lint"] {
         for args in [
             [
                 "review",
@@ -244,7 +238,7 @@ fn review_rejects_conflicting_parent_and_action_values_before_execution() {
             "review",
             "--path",
             "parent-path",
-            "audit",
+            "lint",
             "fixture",
             "--path",
             "child-path",
@@ -258,16 +252,6 @@ fn review_rejects_conflicting_parent_and_action_values_before_execution() {
             "fixture",
             "--changed-since",
             "child-base",
-        ]
-        .as_slice(),
-        [
-            "review",
-            "--audit-profile",
-            "full",
-            "audit",
-            "fixture",
-            "--audit-profile",
-            "pr",
         ]
         .as_slice(),
     ] {

@@ -393,7 +393,6 @@ glob.
 - `homepage`
 - `source_url`
 - `deploy`
-- `audit`
 - `executable`
 - `platform`
 - `cli`

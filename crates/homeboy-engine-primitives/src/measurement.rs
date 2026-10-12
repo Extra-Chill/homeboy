@@ -9,21 +9,18 @@
 //!
 //! # Why this is shared
 //!
-//! Three places in this repository had independently grown a local version of
+//! Several places in this repository had independently grown a local version of
 //! this rule, and they disagreed with one another about what to do when the
 //! instrument came back empty:
 //!
 //! * `homeboy-core/src/extension/test/run.rs::test_run_status` had the best of them
 //!   — "a zero count or an all-skipped result proves only that the runner
 //!   started" — and failed closed to `"failed"`.
-//! * `homeboy-code-audit/src/engine.rs` (#10557 / #10574) hard-errors on an
-//!   empty corpus, because an audit that scanned zero of 1,817 files had been
-//!   reporting `passed: true` in seven seconds for weeks.
 //! * `homeboy-core/src/extension/lint/run/workflow.rs` had none, and still renders
 //!   an unconditional `passed` when changed-file scoping resolves to zero
 //!   runnable scopes — including when the changed set was *not* empty.
 //!
-//! This module is the one place those three answers are reconciled. It is
+//! This module is the one place those answers are reconciled. It is
 //! deliberately behaviour-free apart from the classification itself: it decides
 //! what a measurement *permits*, and leaves the caller to decide what it wants.
 //!

@@ -3,7 +3,6 @@ use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
 use crate::extension::resolve::ExtensionExecutionContext;
-use homeboy_audit_contract::ExtensionPhaseTiming;
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
@@ -11,6 +10,7 @@ use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::CommandOutput;
 use homeboy_engine_primitives::shell;
+use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_extension_contract::{ExtensionCapability, TestSecretEnvProjection};
 use serde_json::json;
 

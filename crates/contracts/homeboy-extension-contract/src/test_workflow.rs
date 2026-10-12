@@ -77,8 +77,6 @@ pub struct DriftReport {
     pub total_drifted_files: usize,
     /// Total drift references found.
     pub total_drift_references: usize,
-    /// Changes that could be auto-fixed with refactor transform.
-    pub auto_fixable: usize,
 }
 
 /// Captured tail of a test runner's stdout/stderr.
@@ -120,17 +118,6 @@ pub struct RawTestOutput {
     /// Maximum stderr bytes retained by the self-check capture buffer.
     #[serde(skip_serializing_if = "is_zero", default)]
     pub stderr_limit_bytes: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AutoFixDriftOutput {
-    pub since: String,
-    pub auto_fixable_changes: usize,
-    pub generated_rules: usize,
-    pub replacements: usize,
-    pub files_modified: usize,
-    pub written: bool,
-    pub rerun_recommended: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

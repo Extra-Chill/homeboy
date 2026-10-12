@@ -3,119 +3,64 @@
 ## Synopsis
 
 ```sh
-homeboy refactor <COMPONENT> --from <SOURCE>... [OPTIONS]
-homeboy refactor <COMPONENT> --all [OPTIONS]
-homeboy refactor <COMMAND>
-homeboy refactor refs <symbol> [--component <id>...] [--path <path>]
-homeboy refactor undo [--id <ID>]
-homeboy refactor undo list
-homeboy refactor undo delete <ID>
+homeboy refactor rename --from <FROM> --to <TO> [OPTIONS]
 ```
 
 ## Description
 
-Structural refactoring tools for planning and applying code changes across a codebase.
+`refactor` hosts one subcommand, `rename`: rename a term across a codebase with
+automatic case-variant generation, word-boundary matching, and file renames.
 
-The top-level `refactor` command can now build a merged refactor plan from one or more fix sources:
-
-```sh
-# Preview a merged plan from selected sources
-homeboy refactor homeboy --from audit --from lint --from test
-
-# Preview a merged plan from all known sources
-homeboy refactor homeboy --from all
-
-# Apply the merged plan
-homeboy refactor homeboy --from all --write
-
-# Use a one-shot extension for an unregistered checkout
-homeboy refactor --path . --from lint --extension wordpress --write
-```
-
-Supported sources today:
-
-- `audit`
-- `lint`
-- `test`
-
-`--from all` expands to all known sources in canonical order.
-
-`--all` still works as a compatibility alias, but prefer `--from all` so source
-selection stays in one extensible input model.
-
-For unregistered checkouts, pass `--extension <ID>` to choose the extension for
-the current source run without writing component configuration.
-
-The refactor planner is source-driven and generic; CI is just one consumer of this interface.
-
-## Subcommands
-
-The following subcommands remain available for targeted refactors:
-
-### `refs`
-
-```sh
-homeboy refactor refs <symbol> [--component <id>...] [--components <id,id>] [--path <path>]
-homeboy refactor refs <symbol> [--scope code|config|all] [--context key|variable|parameter|all]
-```
-
-Read-only reference discovery for a symbol or term. The output separates code,
-docs, strings, and comments, and marks generated Homeboy-owned references such as
-`CHANGELOG.md` separately from actionable references.
-
-### `undo`
-
-```sh
-homeboy refactor undo [--id <ID>]
-homeboy refactor undo list
-homeboy refactor undo delete <ID>
-```
-
-Restore files from the latest or selected undo snapshot, list available
-snapshots, or delete a snapshot without restoring it. This is the snapshot
-restore path used by refactor/audit-fix flows.
+Lint autofix lives in `homeboy review lint --fix`.
 
 ### `rename`
-
-```sh
-homeboy refactor rename --from <FROM> --to <TO> [OPTIONS]
-```
-
-Rename a term across a codebase with automatic case-variant generation.
 
 **Required:**
 - `--from <FROM>`: Term to rename from
 - `--to <TO>`: Term to rename to
 
-**Target (one required):**
-- `-c, --component <ID>`: Component ID (uses its `local_path` as the root)
-- `--path <PATH>`: Directory path to refactor
+**Target (defaults to the current directory):**
+- `-c, --component <ID>`: Component ID, repeatable (uses its `local_path` as the root)
+- `--components <ID,ID>`: Comma-separated component IDs
+- `--path <PATH>`: Directory to refactor (single target only)
+
+Multiple components produce a `refactor.bulk` result with one entry per target.
 
 **Options:**
-- `--scope <SCOPE>`: What files to include — `code`, `config`, or `all` (default: `all`)
-- `--literal`: Exact string matching — no boundary detection, no case variants
-- `--write`: Apply changes to disk (default is dry-run)
+- `--scope <SCOPE>`: Which files to include: `code`, `config`, or `all` (default: `all`)
+- `--literal`: Exact string matching with no boundary detection and no case variants
+- `--files <GLOB>`: Include only files matching this glob (repeatable; any extension)
+- `--exclude <GLOB>`: Exclude files matching this glob (repeatable)
+- `--variant <FROM=TO>`: Add an explicit variant mapping (repeatable), for project-specific spellings such as acronyms
+- `--no-file-renames`: Content edits only; leave file and directory names alone
+- `--context <CONTEXT>`: Syntactic filter: `key` (strings and property access), `variable`/`var`, `parameter`/`param`, or `all` (default)
+- `--write`: Apply changes to disk (default is a dry-run preview)
 
 ## Standard Mode
 
-By default, `refactor rename` generates case variants from the base term and matches them with word-boundary awareness.
+By default, `rename` splits `--from` and `--to` into words and generates every
+naming convention for both, plus plural forms of each:
 
-Given `--from widget --to gadget`, the engine generates:
+| Convention | From | To |
+|------------|------|----|
+| snake_case | `foo_bar` | `baz_qux` |
+| UPPER_SNAKE | `FOO_BAR` | `BAZ_QUX` |
+| PascalCase | `FooBar` | `BazQux` |
+| camelCase | `fooBar` | `bazQux` |
+| kebab | `foo-bar` | `baz-qux` |
+| Title-Kebab-Case | `Foo-Bar` | `Baz-Qux` |
+| Title_Snake_Case | `Foo_Bar` | `Baz_Qux` |
+| Display Name | `Foo Bar` | `Baz Qux` |
 
-| Variant | From | To |
-|---------|------|----|
-| lowercase | `widget` | `gadget` |
-| PascalCase | `Widget` | `Gadget` |
-| UPPER_CASE | `WIDGET` | `GADGET` |
-| plural | `widgets` | `gadgets` |
-| plural PascalCase | `Widgets` | `Gadgets` |
-| plural UPPER | `WIDGETS` | `GADGETS` |
+When a generated variant has no matches, the engine searches case-insensitively
+and reports the casing the codebase actually uses (for example `WPAgent` when
+`WpAgent` was generated) as a discovered variant.
 
-**Boundary detection** ensures matches occur at sensible positions:
-- Word boundaries: `pub mod widget;` ✓
-- CamelCase joins: `WidgetManifest` ✓ (matches `Widget`)
-- Snake_case compounds: `load_widget`, `WIDGET_DIR` ✓
-- No false positives: `widgetry` ✗ (lowercase follows, not a boundary)
+**Boundary detection** keeps matches at sensible positions:
+- Word boundaries: `pub mod widget;` matches
+- CamelCase joins: `WidgetManifest` matches `Widget`
+- Snake_case compounds: `load_widget`, `WIDGET_DIR` match
+- No false positives: `widgetry` does not match `widget`
 
 ```sh
 # Preview all changes (dry-run)
@@ -130,45 +75,52 @@ homeboy refactor rename --from widget --to gadget --path ./src --scope code --wr
 
 ## Literal Mode
 
-With `--literal`, the engine matches the exact `--from` string as-is — no case variants, no boundary detection. Every substring occurrence is matched.
-
-This is useful for compound renames where inserting characters breaks boundary rules:
+With `--literal`, the engine matches the exact `--from` string with no case
+variants and no boundary detection; every substring occurrence matches. Use it
+for compound renames where inserting characters breaks boundary rules:
 
 ```sh
-# Rename a hyphenated slug
 homeboy refactor rename --literal --from sampleplugin-events --to sample-plugin-events --path . --write
-
-# Rename an underscored prefix
-homeboy refactor rename --literal --from sampleplugin_events --to sample_plugin_events --path . --write
-
-# Rename constants
 homeboy refactor rename --literal --from SAMPLEPLUGIN_EVENTS --to SAMPLE_PLUGIN_EVENTS --path . --write
 ```
 
-Since literal mode has no case-variant generation, run multiple passes for different casings (UPPER, snake, hyphen).
+Run one pass per casing in literal mode.
 
 ## File Walking
 
-The engine walks the target directory recursively, scanning files with these extensions:
-
-`rs`, `php`, `js`, `jsx`, `ts`, `tsx`, `mjs`, `json`, `toml`, `yaml`, `yml`, `md`, `txt`, `sh`, `bash`, `py`, `rb`, `go`, `swift`, `lock`
+The engine walks the target directory recursively. `--scope code` scans source
+files except JSON/TOML/YAML; `--scope config` scans only JSON/TOML/YAML; `all`
+scans the default source extensions plus repository config dotfiles such as
+`.editorconfig` and `.npmrc`.
 
 **Always skipped** (any depth): `node_modules`, `vendor`, `.git`, `.svn`, `.hg`
 
-**Skipped at root only**: `build`, `dist`, `target`, `cache`, `tmp` — these are safe to skip at root (build artifacts), but scanned at deeper levels (e.g. a `scripts/build/` directory inside your project may contain source files).
-
-## Collision Detection
-
-Dry-run output includes warnings for potential issues:
-
-- **File collisions**: A rename target path already exists on disk
-- **Duplicate identifiers**: A rename would create two fields/variables with the same name at the same indentation level (e.g. renaming `widgets` → `gadgets` when a `gadgets` field already exists in the same struct)
-
-Warnings are informational — `--write` applies changes even when warnings exist, but logs them to stderr.
+**Skipped at root only**: build output directories such as `build`, `dist`,
+`target`, `cache`, and `tmp`. Directories with these names deeper in the tree
+are scanned.
 
 ## File Renames
 
-In addition to content edits, the engine detects files and directories whose names contain the rename term and generates path renames. For example, in a project containing `src/widget/widget.rs`, renaming `widget` → `gadget` would generate the path rename `src/widget/widget.rs` → `src/gadget/gadget.rs`.
+Files whose paths contain a variant are renamed too. In a project containing
+`src/widget/widget.rs`, renaming `widget` to `gadget` produces
+`src/widget/widget.rs` → `src/gadget/gadget.rs`, including non-source files
+inside renamed directories. Source directories emptied by the move are removed.
+
+## Collision Detection
+
+Dry-run output includes warnings for:
+
+- **File collisions**: a rename target path already exists on disk
+- **Duplicate identifiers**: a rename would create two fields or variables with the same name at the same indentation level
+
+Warnings are informational. `--write` applies changes when warnings exist and logs them to stderr.
+
+## Write Safety
+
+`--write` is all-or-nothing. Content edits and file moves are journaled as they
+land; if any step fails (for example a destination that appeared after
+planning), every applied edit and move is reverted and the command fails with
+the cause and the rollback outcome.
 
 ## JSON Output
 
@@ -182,7 +134,7 @@ In addition to content edits, the engine detects files and directories whose nam
     "scope": "all",
     "dry_run": true,
     "variants": [
-      { "from": "widget", "to": "gadget", "label": "lowercase" },
+      { "from": "widget", "to": "gadget", "label": "exact" },
       { "from": "Widget", "to": "Gadget", "label": "PascalCase" }
     ],
     "total_references": 42,
@@ -208,11 +160,11 @@ In addition to content edits, the engine detects files and directories whose nam
 
 ## Exit Code
 
-- `0`: References found (and applied if `--write`)
-- `1`: No references found
+- `0`: The preview or apply completed, including when no references were found
+- `1`: Invalid arguments, unresolved targets, a failed apply, or any failed target in a multi-component run
 
 ## Related
 
 - [component](component.md)
-- [self](self.md) — embedded documentation topics and codebase maps
+- [review](review.md)
 - [JSON output contract](../architecture/output-system.md)

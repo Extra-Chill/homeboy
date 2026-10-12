@@ -76,10 +76,6 @@ For artifacts produced outside Homeboy, write `./artifacts/manifest.json` before
 
 Use these intentionally. They are recovery/operator paths, not the default release flow.
 
-## Code Factory Context
-
-The broader Code Factory model is lint + fix, test + fix, audit + fix, release, and deploy. See [Code Factory](../concepts/code-factory.md).
-
 ## Reference
 
 - [release command](../commands/release.md)

@@ -2134,8 +2134,7 @@ fn findings_command_lists_records() {
         let (output, _) = findings::findings(
             &test_store(),
             findings::RunsFindingsArgs {
-                command: None,
-                run_id: Some(run.id),
+                run_id: run.id,
                 tool: Some("lint".to_string()),
                 file: Some("src/foo.php".to_string()),
                 fingerprint: None,

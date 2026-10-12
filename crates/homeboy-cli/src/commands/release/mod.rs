@@ -233,8 +233,8 @@ pub struct ReleaseExecuteArgs {
 
     /// Skip pre-release quality checks.
     ///
-    /// Bare `--skip-checks` skips ALL quality gates (audit, lint, test).
-    /// `--skip-checks=lint` (or `audit`/`test`, comma- or space-separated)
+    /// Bare `--skip-checks` skips ALL quality gates (lint, test).
+    /// `--skip-checks=lint` (or `test`, comma- or space-separated)
     /// skips only the named checks while leaving working_tree, remote_sync,
     /// and the remaining quality checks active.
     #[arg(long, num_args = 0.., value_name = "CHECK", value_delimiter = ',')]
@@ -242,7 +242,7 @@ pub struct ReleaseExecuteArgs {
 
     /// Bypass the package/build-structure validation while still running the build.
     ///
-    /// `--skip-checks` only covers audit/lint/test; it does NOT cover the
+    /// `--skip-checks` only covers lint/test; it does NOT cover the
     /// build-structure validation that the packaging extension runs inside the
     /// `preflight.package`/`package` steps. Use this flag when an operator knows
     /// a build-structure assertion is a false positive and wants to ship anyway.
@@ -491,12 +491,12 @@ impl ReleaseExecuteArgs {
     ///
     /// - Flag absent → `(false, [])`: run every quality gate.
     /// - Bare `--skip-checks` → `(true, [])`: skip all quality gates.
-    /// - `--skip-checks=lint` (or `audit`/`test`, repeatable/comma-separated) →
+    /// - `--skip-checks=lint` (or `test`, repeatable/comma-separated) →
     ///   `(false, ["lint"])`: skip only the named gates.
     ///
     /// Unknown check names are rejected so a typo never silently runs the gate.
     fn resolve_skip_checks(&self) -> homeboy::core::Result<(bool, Vec<String>)> {
-        const SKIPPABLE_CHECKS: [&str; 3] = ["audit", "lint", "test"];
+        const SKIPPABLE_CHECKS: [&str; 2] = ["lint", "test"];
         match &self.skip_checks {
             None => Ok((false, Vec::new())),
             Some(values) if values.is_empty() => Ok((true, Vec::new())),
@@ -1119,7 +1119,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         None
     };
     if readiness.is_some() {
-        for gate in ["audit", "lint", "test"] {
+        for gate in ["lint", "test"] {
             if !skip_checks_granular.iter().any(|existing| existing == gate) {
                 skip_checks_granular.push(gate.to_string());
             }
@@ -2483,7 +2483,7 @@ jobs:
     #[test]
     fn portable_child_success_rejects_mismatched_gate_evidence() {
         let mut child = valid_child_evidence();
-        child.gate = "audit".to_string();
+        child.gate = "test".to_string();
 
         let error = validate_portable_child_success(
             &child,
@@ -2661,14 +2661,8 @@ jobs:
         .expect("lab preflight is enabled");
 
         assert_eq!(*dispatcher.calls.borrow(), vec!["test"]);
-        assert_eq!(readiness.gate_results[0].gate, "audit");
+        assert_eq!(readiness.gate_results[0].gate, "lint");
         assert_eq!(readiness.gate_results[0].status, "skipped");
-        assert_eq!(
-            readiness.gate_results[0].reason.as_deref(),
-            Some("no-release-audit-policy")
-        );
-        assert_eq!(readiness.gate_results[1].gate, "lint");
-        assert_eq!(readiness.gate_results[1].status, "skipped");
         assert!(release::readiness_is_valid(&readiness));
     }
 
@@ -2730,7 +2724,7 @@ jobs:
         assert!(readiness
             .gate_results
             .iter()
-            .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
+            .filter(|gate| ["lint", "test"].contains(&gate.gate.as_str()))
             .all(|gate| gate.status == "skipped"));
     }
 

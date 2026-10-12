@@ -9,8 +9,8 @@ use homeboy::core::observation::{
 };
 use homeboy_core::extension::test as extension_test;
 use homeboy_core::extension::test::{
-    build_test_summary, detect_test_drift, parse_test_failures_from_text,
-    parse_test_results_failures_file, parse_test_results_file, parse_test_results_text, report,
+    build_test_summary, parse_test_failures_from_text, parse_test_results_failures_file,
+    parse_test_results_file, parse_test_results_text, report,
     run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
     TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
@@ -70,18 +70,6 @@ pub struct TestArgs {
     #[arg(long)]
     pub analyze: bool,
 
-    /// Detect test drift — cross-reference production changes with test files
-    #[arg(long)]
-    pub drift: bool,
-
-    /// Write fixes to disk for workflows that support it
-    #[arg(long)]
-    pub write: bool,
-
-    /// Git ref to compare against for drift detection (tag, commit, branch)
-    #[arg(long, value_name = "REF", default_value = "HEAD~10")]
-    pub since: String,
-
     // Limit test execution to files changed since a git ref (PR impact
     // scope). Shared changed-scope group (#11140) — one declaration for
     // `--changed-since`, the caller-injected changeset, and the hidden Lab
@@ -90,7 +78,7 @@ pub struct TestArgs {
     pub changed: LabChangedScopeArgs,
 
     /// Run using env and passthrough args from a single extension-declared CI test job.
-    #[arg(long, value_name = "ID", conflicts_with = "drift")]
+    #[arg(long, value_name = "ID")]
     pub ci_job: Option<String>,
 
     /// Compare this test result with a cached measurement of the base revision.
@@ -145,9 +133,6 @@ impl TestArgs {
             coverage_min: None,
             baseline_args: BaselineArgs::default(),
             analyze: false,
-            drift: false,
-            write: false,
-            since: "HEAD~10".to_string(),
             changed: LabChangedScopeArgs::default(),
             ci_job: None,
             differential: false,
@@ -173,8 +158,7 @@ impl TestArgs {
                 "test baseline and ratchet modes write source-owned baseline state on the controller",
             );
         }
-        LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
-            .release_gate()
+        LabCommandContract::portable(TEST_LAB_LABEL, None, true, &[]).release_gate()
     }
 
     pub(crate) fn should_use_self_check_dispatch(&self, cli_passthrough_args: &[String]) -> bool {
@@ -182,8 +166,6 @@ impl TestArgs {
             && !self.coverage
             && self.coverage_min.is_none()
             && !self.analyze
-            && !self.drift
-            && !self.write
             && !self.changed.is_scoped()
             && self.ci_job.is_none()
             && !self.differential
@@ -199,7 +181,7 @@ impl TestArgs {
 ///
 /// Clap's `trailing_var_arg = true` + `allow_hyphen_values = true` captures all arguments
 /// after the positional component arg — including flags that Clap also parsed into named
-/// fields. This means `--analyze`, `--drift`, etc. end up in both `args.analyze = true`
+/// fields. This means `--analyze`, `--coverage`, etc. end up in both `args.analyze = true`
 /// AND `args.args = ["--analyze"]`. The extension test runner passes `args.args` through
 /// to the underlying tool (e.g. PHPUnit), which then fails on unknown flags.
 ///
@@ -274,30 +256,6 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     )?;
     let effective_id = ctx.component_id.clone();
     let ci_job = resolve_ci_job_for_command(args.ci_job.as_deref(), &ctx.component, "test")?;
-
-    // Drift detection mode — delegate to core drift workflow (read-only)
-    // Fixes are owned by `homeboy refactor --from test --write`.
-    if args.drift {
-        let observation =
-            start_test_observation(&ctx.component_id, &ctx.source_path, &args, "drift", None);
-        let result = detect_test_drift(&effective_id, &ctx.component, &args.since);
-        let run_id = observation
-            .as_ref()
-            .map(|observation| observation.run_id().to_string());
-        let result = match result {
-            Ok(result) => {
-                finish_test_drift_observation(observation, &result);
-                result
-            }
-            Err(error) => {
-                finish_test_observation_error(observation, &error);
-                return Err(error);
-            }
-        };
-        let (mut output, exit_code) = report::from_drift_workflow(result);
-        attach_test_actionable(&mut output, run_id);
-        return Ok((output, exit_code));
-    }
 
     // Main test workflow — delegate to core
     let runner = ObservedWorkflowRunner::create(format!("test {}", effective_id))?;
@@ -411,12 +369,6 @@ fn validate_differential_args(args: &TestArgs) -> homeboy::core::Result<()> {
     }
 
     let mut incompatible = Vec::new();
-    if args.drift {
-        incompatible.push("--drift");
-    }
-    if args.write {
-        incompatible.push("--write");
-    }
     if args.coverage || args.coverage_min.is_some() {
         incompatible.push("--coverage/--coverage-min");
     }
@@ -719,7 +671,7 @@ impl Drop for DifferentialWorktree {
             &["worktree", "remove", "--force", &path],
             "remove differential test baseline",
         );
-        let _ = std::fs::remove_dir_all(&self.path); // homeboy-audit: allow-thin-command-adapter
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -1372,30 +1324,6 @@ fn persist_validation_progress_artifacts(observation: &TestObservation) {
     }
 }
 
-fn finish_test_drift_observation(
-    observation: Option<TestObservation>,
-    workflow: &extension_test::DriftWorkflowResult,
-) {
-    let Some(observation) = observation else {
-        return;
-    };
-
-    let metadata = merge_metadata(
-        observation.active.initial_metadata().clone(),
-        serde_json::json!({
-            "observation_status": if workflow.exit_code == 0 { "pass" } else { "fail" },
-            "exit_code": workflow.exit_code,
-            "drift": workflow.report,
-        }),
-    );
-    let status = if workflow.exit_code == 0 {
-        RunStatus::Pass
-    } else {
-        RunStatus::Fail
-    };
-    observation.active.finish(status, Some(metadata));
-}
-
 fn finish_test_observation_error(
     observation: Option<TestObservation>,
     error: &homeboy::core::Error,
@@ -1480,9 +1408,6 @@ fn test_observation_command(component_id: &str, args: &TestArgs) -> String {
     if args.analyze {
         parts.push("--analyze".to_string());
     }
-    if args.drift {
-        parts.push("--drift".to_string());
-    }
     if let Some(changed_since) = args.changed.changed_since() {
         parts.push(format!("--changed-since={changed_since}"));
     }
@@ -1516,14 +1441,12 @@ fn test_observation_initial_metadata(
         "coverage": args.coverage,
         "coverage_min": args.coverage_min,
         "analyze": args.analyze,
-        "drift": args.drift,
         "baseline": {
             "baseline": args.baseline_args.baseline,
             "ignore_baseline": args.baseline_args.ignore_baseline,
             "ratchet": args.baseline_args.ratchet,
         },
         "changed_since": args.changed.changed_since(),
-        "since": args.since,
         "json_summary": args.json_summary,
         "differential": args.differential,
         "differential_base": args.differential_base,
@@ -1537,9 +1460,7 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use clap::Parser;
-    use homeboy::core::component::Component;
     use homeboy::core::observation::{FindingListFilter, ObservationStore};
-    use homeboy::refactor::{build_test_refactor_request, TestSourceOptions};
     use homeboy_core::extension::test::{TestAnalysisInput, TestCounts, TestFailure};
     use std::fs;
     use std::path::PathBuf;
@@ -1589,10 +1510,7 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
-            drift: None,
-            auto_fix_drift: None,
             test_scope: None,
             summary: None,
             raw_output: None,
@@ -2023,12 +1941,11 @@ mod tests {
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
-                autofix: None,
                 hints: None,
                 test_scope: None,
                 summary: None,
                 raw_output: None,
-                extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
+                extension_phase_timings: vec![homeboy_extension_contract::ExtensionPhaseTiming {
                     name: "provider-test".to_string(),
                     duration_ms: 1,
                     status: Some("failed".to_string()),
@@ -2120,7 +2037,6 @@ mod tests {
                 coverage: None,
                 baseline_comparison: None,
                 analysis: Some(analysis),
-                autofix: None,
                 hints: None,
                 test_scope: None,
                 summary: None,
@@ -2227,7 +2143,6 @@ mod tests {
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
-                    autofix: None,
                     hints: None,
                     test_scope: None,
                     summary: None,
@@ -2279,7 +2194,7 @@ mod tests {
                 start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
                     .expect("observation");
             let run_id = observation.active.run_id().to_string();
-            let timing = homeboy_audit_contract::ExtensionPhaseTiming {
+            let timing = homeboy_extension_contract::ExtensionPhaseTiming {
                 name: "provider-test".to_string(),
                 duration_ms: 1,
                 status: Some("failed".to_string()),
@@ -2309,7 +2224,6 @@ mod tests {
                 coverage: None,
                 baseline_comparison: None,
                 analysis: None,
-                autofix: None,
                 hints: None,
                 test_scope: None,
                 summary: None,
@@ -2461,21 +2375,22 @@ mod tests {
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
-                    autofix: None,
                     hints: None,
                     test_scope: None,
                     summary: None,
                     raw_output: None,
-                    extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
-                        name: "provider-test".to_string(),
-                        duration_ms: 1,
-                        status: Some("completed".to_string()),
-                        message: None,
-                        artifacts: vec![serde_json::json!({
-                            "ref": "artifact://files/test-results.json"
-                        })],
-                        metadata: Default::default(),
-                    }],
+                    extension_phase_timings: vec![
+                        homeboy_extension_contract::ExtensionPhaseTiming {
+                            name: "provider-test".to_string(),
+                            duration_ms: 1,
+                            status: Some("completed".to_string()),
+                            message: None,
+                            artifacts: vec![serde_json::json!({
+                                "ref": "artifact://files/test-results.json"
+                            })],
+                            metadata: Default::default(),
+                        },
+                    ],
                     cargo_target: None,
                 };
 
@@ -2530,7 +2445,6 @@ mod tests {
             coverage: None,
             baseline_comparison: None,
             analysis: None,
-            autofix: None,
             hints: None,
             test_scope: None,
             summary: None,
@@ -2547,7 +2461,7 @@ mod tests {
                 stdout_limit_bytes: 0,
                 stderr_limit_bytes: 0,
             }),
-            extension_phase_timings: vec![homeboy_audit_contract::ExtensionPhaseTiming {
+            extension_phase_timings: vec![homeboy_extension_contract::ExtensionPhaseTiming {
                 name: "provider".to_string(),
                 duration_ms: 0,
                 status: None,
@@ -2622,7 +2536,6 @@ mod tests {
                     coverage: None,
                     baseline_comparison: None,
                     analysis: None,
-                    autofix: None,
                     hints: None,
                     test_scope: None,
                     summary: None,
@@ -2693,13 +2606,11 @@ mod tests {
     fn filter_strips_multiple_boolean_flags() {
         let args = vec![
             "--analyze".to_string(),
-            "--drift".to_string(),
             "--baseline".to_string(),
             "--ignore-baseline".to_string(),
             "--ratchet".to_string(),
             "--skip-lint".to_string(),
             "--coverage".to_string(),
-            "--write".to_string(),
         ];
         let result = filter_homeboy_flags(&args);
         assert!(result.is_empty());
@@ -2707,14 +2618,6 @@ mod tests {
 
     #[test]
     fn filter_strips_value_flags_space_separated() {
-        let args = vec![
-            "--since".to_string(),
-            "v0.36.0".to_string(),
-            "--filter=SomeTest".to_string(),
-        ];
-        let result = filter_homeboy_flags(&args);
-        assert_eq!(result, vec!["--filter=SomeTest"]);
-
         let args = vec![
             "--changed-since".to_string(),
             "origin/main".to_string(),
@@ -2735,7 +2638,7 @@ mod tests {
     #[test]
     fn filter_strips_value_flags_equals_form() {
         let args = vec![
-            "--since=v0.36.0".to_string(),
+            "--changed-since=v0.36.0".to_string(),
             "--filter=SomeTest".to_string(),
         ];
         let result = filter_homeboy_flags(&args);
@@ -2799,7 +2702,7 @@ mod tests {
         let args = vec![
             "--analyze".to_string(),
             "--skip-lint".to_string(),
-            "--since".to_string(),
+            "--changed-since".to_string(),
             "v0.35.0".to_string(),
             "--filter=FlowAbilities".to_string(),
             "--coverage-min=80".to_string(),
@@ -2828,36 +2731,6 @@ mod tests {
         ];
         let result = filter_homeboy_flags(&args);
         assert_eq!(result, vec!["--filter=SomeTest"]);
-    }
-
-    #[test]
-    fn test_fix_builds_canonical_refactor_request() {
-        let component = Component::new(
-            "demo".to_string(),
-            "/tmp/demo".to_string(),
-            String::new(),
-            None,
-        );
-
-        let request = build_test_refactor_request(
-            component.clone(),
-            PathBuf::from("/tmp/demo"),
-            vec![("runner".to_string(), serde_json::json!("ci"))],
-            TestSourceOptions {
-                selected_files: Some(vec!["tests/demo_test.rs".to_string()]),
-                skip_lint: true,
-                script_args: vec!["--filter=DemoTest".to_string()],
-            },
-            true,
-        );
-
-        assert_eq!(request.component.id, component.id);
-        assert_eq!(request.sources, vec!["test".to_string()]);
-        assert!(request.write);
-        assert_eq!(request.settings.len(), 1);
-        assert!(request.lint.selected_files.is_none());
-        assert_eq!(request.test.selected_files.as_ref().unwrap().len(), 1);
-        assert!(request.test.skip_lint);
     }
 }
 #[cfg(test)]

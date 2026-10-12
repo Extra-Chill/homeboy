@@ -101,8 +101,7 @@ impl CommandArgumentProvenance {
             //
             // The runtime parses an extension-augmented command, whose global
             // and flattened argument layout surfaces such ids, so any command
-            // reaching this collector aborted the process. `homeboy refactor
-            // rename` did exactly that. `try_get_raw` reports the same
+            // reaching this collector aborted the process. `try_get_raw` reports the same
             // distinction as a recoverable error, so use it as the guard.
             if matches.try_get_raw(id.as_str()).is_err() {
                 continue;

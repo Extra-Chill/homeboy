@@ -45,10 +45,7 @@ For each stale reference:
 ### 4. Verify Code Examples
 
 ### 5. Verify Changes
-```sh
-homeboy review audit <component>
-```
-Run focused grep/source checks and repository quality gates that cover the changed docs. If `homeboy review audit` reports documentation-reference findings, fix them before completion.
+Run focused grep/source checks and repository quality gates that cover the changed docs.
 
 ## Forbidden Content
 

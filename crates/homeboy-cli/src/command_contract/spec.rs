@@ -90,9 +90,9 @@ pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth statu
 // classification matches on; they live in the homeboy-lab-contract crate and are
 // re-exported here so existing `spec::*_LAB_LABEL` call sites are unchanged.
 pub(crate) use homeboy_lab_contract::lab::labels::{
-    AUDIT_LAB_LABEL, BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL,
-    REFACTOR_LAB_LABEL, REVIEW_LAB_LABEL, RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL,
-    RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL, TRACE_LAB_LABEL,
+    BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
+    RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL,
+    TRACE_LAB_LABEL,
 };
 
 pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_LABEL: &str = "rig source management";
@@ -311,12 +311,6 @@ const TRACE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummar
     hint_label: TRACE_LAB_LABEL,
 }];
 
-const REFACTOR_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
-    contract_labels: &[REFACTOR_LAB_LABEL],
-    message_label: "refactor source runs",
-    hint_label: "refactor source runs",
-}];
-
 const RIG_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     CommandLabSupportSummary {
         contract_labels: &[RIG_CHECK_LAB_LABEL],
@@ -391,7 +385,7 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
 const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
+const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const API_REQUEST_DANGEROUS_FLAGS: &[&str] = &["--apply", "METHOD!=GET"];
@@ -871,42 +865,17 @@ const GIT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
 ];
 
-const REFACTOR_SOURCE_REWRITE_PATHS: &[&str] = &[
-    "rename",
-    "add",
-    "move",
-    "propagate",
-    "transform",
-    "decompose",
-];
-
-const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        REFACTOR_SOURCE_REWRITE_PATHS,
-        guarded_mutating_safety(&["--write"]),
-        "reports a plan by default; pass --write to rewrite source files",
-    ),
-    paths_safety(
-        &["undo delete"],
-        mutating_safety(),
-        "deletes an undo snapshot without restoring it",
-    ),
-];
+const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["rename"],
+    guarded_mutating_safety(REFACTOR_DANGEROUS_FLAGS),
+    "reports a plan by default; pass --write to rewrite source files",
+)];
 
 const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     &["delete-row", "drop-table"],
     operator_safety(None, &[]),
     "default output is a non-mutating plan; pass --apply to mutate",
 )];
-
-/// `review audit-baseline` is the real clap path; `review audit baseline` only
-/// exists as a pre-parse argv rewrite in `commands::utils::args`, so declaring
-/// safety against that spelling silently classifies the command as read-only.
-const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
-    "audit-baseline refresh",
-    "audit-baseline merge",
-    "audit-baseline prune",
-];
 
 const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
     "controller init",
@@ -995,11 +964,6 @@ const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         mutating_safety(),
         "copies an existing runner-side file into the persisted local artifact store and records it against a run",
     ),
-    paths_safety(
-        &["findings reconcile", "findings reconcile-run"],
-        operator_safety(Some("--dry-run"), &["--apply"]),
-        "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state",
-    ),
 ];
 
 const EXTENSION_MUTATING_PATHS: &[&str] = &[
@@ -1067,31 +1031,11 @@ const UPGRADE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "inspects a persisted upgrade operation without mutating the controller",
 )];
 
-const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["docs map"],
-        guarded_mutating_safety(&["--write"]),
-        "default JSON output is non-mutating; pass --write to write markdown docs to disk",
-    ),
-    paths_safety(
-        &["cleanup-runtime-tmp"],
-        operator_safety(None, &["--apply"]),
-        "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
-    ),
-];
-
-const REVIEW_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
-    paths_safety(
-        &["ci autofix"],
-        operator_safety(None, &[]),
-        "commits and pushes prepared CI autofix changes",
-    ),
-    paths_safety(
-        REVIEW_AUDIT_BASELINE_PATHS,
-        mutating_safety(),
-        "mutates persisted audit baseline data in component configuration",
-    ),
-];
+const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["cleanup-runtime-tmp"],
+    operator_safety(None, &["--apply"]),
+    "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
+)];
 
 macro_rules! declare_command_specs {
     ($(($variant:ident, $handler:path, $value:expr),)*) => {
@@ -1102,10 +1046,6 @@ macro_rules! declare_command_specs {
 crate::builtin_json_command_descriptors!(declare_command_specs);
 
 pub const COMMAND_DOC_REGISTRY: &[CommandDocSpec] = &[
-    CommandDocSpec {
-        slug: "audit-rules",
-        kind: CommandDocKind::Support,
-    },
     CommandDocSpec {
         slug: "cargo",
         kind: CommandDocKind::RuntimeExtensionCommand,

@@ -18,10 +18,6 @@ fn extension_capability_owns_labels_and_scripts() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
         "name": "Example",
         "version": "0.0.0",
-        "scripts": {
-            "compiler_warnings": "compiler-warnings.sh",
-            "compiler_warning_fixes": "compiler-warning-fixes.sh"
-        },
         "runtime": { "runtimes": { "node": { "version": "24" } } },
         "lint": { "extension_script": "lint.sh" },
         "test": {
@@ -66,14 +62,6 @@ fn extension_capability_owns_labels_and_scripts() {
             .and_then(|test| test.result_parse.as_ref())
             .map(|spec| spec.adapters.clone()),
         Some(vec!["custom-json".to_string()])
-    );
-    assert_eq!(
-        manifest.compiler_warnings_script(),
-        Some("compiler-warnings.sh")
-    );
-    assert_eq!(
-        manifest.compiler_warning_fixes_script(),
-        Some("compiler-warning-fixes.sh")
     );
 
     for (capability, label, script, requires_script) in [
@@ -754,29 +742,6 @@ fn archive_install_required_header_rejects_missing_selector() {
     .expect_err("required_header must declare a selector");
 
     assert!(err.to_string().contains("exactly one of file or file_glob"));
-}
-
-#[test]
-fn test_drift_ignores_audit_test_mapping_fallback() {
-    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Example",
-        "version": "0.0.0",
-        "audit": {
-            "test_mapping": {
-                "source_dirs": ["src"],
-                "test_dirs": ["tests"],
-                "test_file_pattern": "tests/{dir}/{name}_test.{ext}",
-                "inline_tests": true
-            }
-        }
-    }))
-    .unwrap();
-
-    assert_eq!(
-        manifest.test_mapping().map(|mapping| mapping.inline_tests),
-        Some(true)
-    );
-    assert_eq!(manifest.test_drift(), None);
 }
 
 #[test]

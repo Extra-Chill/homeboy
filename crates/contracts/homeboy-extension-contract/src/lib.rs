@@ -26,8 +26,8 @@
 //! contract an extension script reads at execution time.
 //!
 //! Modules reached only indirectly are still part of this surface. `fuzz_config`
-//! and `autofix_config` are glob-imported by [`manifest`], and `runtime_helper`
-//! is reached through `fuzz_config`.
+//! is glob-imported by [`manifest`], and `runtime_helper` is reached through
+//! `fuzz_config`.
 //!
 //! ## 3. Extension-produced domain results
 //!
@@ -75,7 +75,6 @@ pub use manifest_toolchain_config::{
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
 pub mod agent_task_executor_declaration;
-pub mod autofix_config;
 pub mod bench_artifact;
 pub mod bench_diagnostics;
 pub mod bench_distribution;
@@ -120,13 +119,9 @@ pub use test_analysis::{
 pub use test_duration::{SlowTestFinding, TestDurations, TestUnitDuration};
 pub use test_parsing::{CoverageOutput, TestFailureSummaryItem, TestSummaryOutput, UncoveredFile};
 pub use test_result::{TestCounts, TestScopeOutput};
-pub use test_results::{
-    AutoFixDriftWorkflowResult, DriftWorkflowResult, MainTestWorkflowResult, TestCommandOutput,
-    TestRunWorkflowResult,
-};
+pub use test_results::{MainTestWorkflowResult, TestCommandOutput, TestRunWorkflowResult};
 pub use test_workflow::{
-    AutoFixDriftOutput, ChangeType, DriftReport, DriftedTest, ProductionChange, RawTestOutput,
-    TestBaselineComparison,
+    ChangeType, DriftReport, DriftedTest, ProductionChange, RawTestOutput, TestBaselineComparison,
 };
 pub use trace_parsing::{
     TraceArtifact, TraceAssertion, TraceAssertionStatus, TraceCanonicalCheck,
@@ -143,7 +138,9 @@ pub use ci_context::CiContext;
 pub use lint_result::{
     FormattingFindings, LintSummaryOutput, SelfCheckCaptureMetadata, StreamCaptureMetadata,
 };
-pub use lint_results::LintCommandOutput;
+pub use lint_results::{
+    AppliedLintFix, FixResultsSummary, LintCommandOutput, PrimitiveFixCount, RuleFixCount,
+};
 pub mod core_compat;
 pub mod exec_context;
 pub mod extension_contract_producer;

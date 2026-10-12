@@ -10,12 +10,11 @@ The shared phase vocabulary is:
 1. `syntax` — parser-level validation such as `php -l`, `rustc --emit=metadata`, or equivalent
 2. `lint` — static lint findings from PHPCS, ESLint, clippy, rustfmt, etc.
 3. `typecheck` — type/system checks such as PHPStan, `tsc --noEmit`, or `cargo check`
-4. `audit` — Homeboy structural analysis such as duplicates, orphaned tests, and code smells
-5. `test` — behavioral test harness execution such as PHPUnit, cargo test, or npm test
+4. `test` — behavioral test harness execution such as PHPUnit, cargo test, or npm test
 
 These phases are a contract, not a requirement that one command runs all of
 them. `homeboy review test` runs only the `test` phase. `homeboy review lint` runs only the
-`lint` phase. `homeboy review audit` runs only the `audit` phase. A composed command
+`lint` phase. A composed command
 or CI wrapper can run the phases in canonical order when it needs a full check.
 
 ## Exit codes
@@ -23,7 +22,7 @@ or CI wrapper can run the phases in canonical order when it needs a full check.
 Every primitive command uses the same exit code convention:
 
 - `0`: clean
-- `1`: findings, lint violations, audit findings, or test failures
+- `1`: findings, lint violations, or test failures
 - `2` or higher: infrastructure failure such as missing dependencies, harness bootstrap failure, or runtime crash
 
 This distinction matters because code findings should fail CI differently from
@@ -79,7 +78,6 @@ Composed workflows should treat primitive commands as independent inputs:
 syntax     -> optional primitive / extension runner
 lint       -> homeboy review lint
 typecheck  -> optional primitive / extension runner
-audit      -> homeboy review audit
 test       -> homeboy review test
 ```
 

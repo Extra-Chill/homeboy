@@ -2,7 +2,6 @@
 //! cannot offload a scoped command directly.
 
 pub(crate) struct ReviewLabFallbackCommands {
-    pub(crate) audit: String,
     pub(crate) lint: String,
     pub(crate) test: String,
 }
@@ -66,7 +65,6 @@ pub(crate) fn review_lab_fallback_commands(
     }
 
     Some(ReviewLabFallbackCommands {
-        audit: fallback_command("review audit", &common),
         lint: fallback_command("review lint", &common),
         test: fallback_command("review test", &common),
     })

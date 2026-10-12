@@ -3,7 +3,7 @@ name = "homeboy-review"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Review subsystem for homeboy: renders the scoped audit + lint + test umbrella (the review command) into human- and machine-readable output. Depends on homeboy-core; core does not depend on it."
+description = "Review subsystem for homeboy: renders the scoped lint + test umbrella (the review command) into human- and machine-readable output. Depends on homeboy-core; core does not depend on it."
 publish = false
 
 [lib]
@@ -12,9 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
-homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
-homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -22,4 +20,3 @@ chrono = "0.4"
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }
-homeboy-code-audit = { version = "0.1.0", path = "../homeboy-code-audit", features = ["test-support"] }

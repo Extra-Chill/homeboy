@@ -1596,10 +1596,7 @@ fn missing_required_extensions(args: &[String], required_extensions: &[String]) 
 }
 
 fn command_accepts_extension_override(arg: &str) -> bool {
-    matches!(
-        arg,
-        "audit" | "bench" | "fuzz" | "lint" | "refactor" | "review" | "test"
-    )
+    matches!(arg, "bench" | "fuzz" | "lint" | "review" | "test")
 }
 
 #[cfg(test)]
@@ -3345,7 +3342,7 @@ mod tests {
             .expect("create runner");
             let args = vec![
                 "homeboy".to_string(),
-                "audit".to_string(),
+                "lint".to_string(),
                 "--changed-since".to_string(),
                 "base".to_string(),
             ];
@@ -3359,7 +3356,7 @@ mod tests {
                 command: homeboy_core::lab_contract::LabCommandContract {
                     workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
                     ..homeboy_core::lab_contract::LabCommandContract::portable(
-                        "audit",
+                        "lint",
                         None,
                         false,
                         &[],

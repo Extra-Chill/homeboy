@@ -9,7 +9,6 @@ use support::write_file;
 
 const LINT_JSON: &str = include_str!("fixtures/failure_digest/lint.json");
 const TEST_JSON: &str = include_str!("fixtures/failure_digest/test.json");
-const AUDIT_JSON: &str = include_str!("fixtures/failure_digest/audit.json");
 const TOOLING_JSON: &str = include_str!("fixtures/failure_digest/tooling.json");
 
 fn tmp_dir(name: &str) -> tempfile::TempDir {
@@ -22,7 +21,7 @@ fn render(dir: &Path, results: &str, autofix_enabled: bool, autofix_attempted: b
         results: results.to_string(),
         run_url: Some("https://github.com/Extra-Chill/homeboy/actions/runs/123".to_string()),
         tooling_json: None,
-        commands: Some("audit,lint,test".to_string()),
+        commands: Some("lint,test".to_string()),
         autofix_commands: None,
         autofix_enabled,
         autofix_attempted,
@@ -429,31 +428,13 @@ mod digest_rendering_tests {
     }
 
     #[test]
-    fn renders_audit_failure_digest_from_fixture() {
-        let guard = tmp_dir("audit");
-        let dir = guard.path();
-        write_file(dir, "audit.json", AUDIT_JSON);
-
-        let markdown = render(dir, r#"{"audit":"fail"}"#, false, false);
-
-        assert!(markdown.contains("### Audit Failure Digest"));
-        assert!(markdown.contains("- Alignment score: **0.812**"));
-        assert!(markdown.contains("- New findings since baseline: **1**"));
-    }
-
-    #[test]
     fn renders_mixed_failures_with_autofix_enabled_not_attempted() {
         let guard = tmp_dir("mixed-autofix");
         let dir = guard.path();
         write_file(dir, "lint.json", LINT_JSON);
         write_file(dir, "test.json", TEST_JSON);
 
-        let markdown = render(
-            dir,
-            r#"{"lint":"fail","test":"fail","audit":"pass"}"#,
-            true,
-            false,
-        );
+        let markdown = render(dir, r#"{"lint":"fail","test":"fail"}"#, true, false);
 
         assert!(markdown.contains("### Lint Failure Digest"));
         assert!(markdown.contains("### Test Failure Digest"));
@@ -480,18 +461,10 @@ mod digest_rendering_tests {
         let guard = tmp_dir("missing");
         let dir = guard.path();
 
-        let markdown = render(
-            dir,
-            r#"{"lint":"fail","test":"fail","audit":"fail"}"#,
-            false,
-            false,
-        );
+        let markdown = render(dir, r#"{"lint":"fail","test":"fail"}"#, false, false);
 
         assert!(markdown.contains("- No structured lint details available."));
         assert!(markdown.contains("- No structured test failure details available."));
-        assert!(markdown.contains("- No structured audit findings available."));
-        assert!(markdown
-            .contains("- Full audit log: https://github.com/Extra-Chill/homeboy/actions/runs/123"));
     }
 
     #[test]
@@ -499,18 +472,11 @@ mod digest_rendering_tests {
         let guard = tmp_dir("error-statuses");
         let dir = guard.path();
 
-        let markdown = render(
-            dir,
-            r#"{"lint":"error","test":"error","audit":"error"}"#,
-            false,
-            false,
-        );
+        let markdown = render(dir, r#"{"lint":"error","test":"error"}"#, false, false);
 
         assert!(markdown.contains("### Lint Failure Digest"));
         assert!(markdown.contains("### Test Failure Digest"));
-        assert!(markdown.contains("### Audit Failure Digest"));
         assert!(markdown.contains("- Overall: **human_needed**"));
-        assert!(markdown.contains("  - `audit`"));
         assert!(markdown.contains("  - `lint`"));
         assert!(markdown.contains("  - `test`"));
     }

@@ -305,14 +305,14 @@ Supported helper placeholders are `{repo}`, `{number}`, `{url}`, and `{head_sha}
 2. **Sticky whole-body comment**: `--key <key>` finds or updates one comment tagged with `<!-- homeboy:key=<key> -->`. The provided body replaces the whole managed comment body.
 3. **Sectioned managed comment**: `--comment-key <outer> --section-key <inner>` updates one section inside a shared comment tagged with `<!-- homeboy:comment-key=<outer> -->`. Other sections are preserved.
 
-Sectioned comments are used by Homeboy Action to keep lint, test, audit, and tooling metadata in one managed PR comment without clobbering sibling sections:
+Sectioned comments are used by Homeboy Action to keep lint, test, and tooling metadata in one managed PR comment without clobbering sibling sections:
 
 ```sh
 homeboy git pr comment homeboy \
   --number 123 \
   --comment-key homeboy-ci-results \
   --section-key lint \
-  --section-order lint,test,audit \
+  --section-order lint,test \
   --header "## Homeboy Results" \
   --footer-file /tmp/tooling.md \
   --body-file /tmp/lint.md
@@ -443,7 +443,7 @@ homeboy git cherry-pick abc1234
 homeboy git cherry-pick --pr 123
 
 # GitHub issue and PR helpers
-homeboy git issue find homeboy --label audit --state open
+homeboy git issue find homeboy --label bug --state open
 homeboy git pr create homeboy --base main --head docs-refresh-git-command --title "docs: refresh git command workflows" --body-file /tmp/pr.md
 homeboy git pr comment homeboy --number 123 --key docs-check --body-file /tmp/comment.md
 ```

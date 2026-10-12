@@ -65,7 +65,6 @@ fn test_build_preflight_steps() {
             "preflight.bump_policy",
             "preflight.test_secret_env",
             "preflight.dependencies",
-            "preflight.audit",
             "preflight.lint",
             "preflight.test",
             "preflight.changelog_bootstrap"
@@ -274,7 +273,7 @@ fn release_plan_marks_quality_preflights_disabled_when_checks_are_skipped() {
     };
 
     let steps = build_preflight_steps(&options, None, &[]);
-    for step_id in ["preflight.audit", "preflight.lint", "preflight.test"] {
+    for step_id in ["preflight.lint", "preflight.test"] {
         let quality = steps
             .iter()
             .find(|step| step.id == step_id)
@@ -350,7 +349,6 @@ fn tagged_head_recovery_skips_mutable_source_gates() {
         for step_id in [
             "preflight.test_secret_env",
             "preflight.dependencies",
-            "preflight.audit",
             "preflight.lint",
             "preflight.test",
         ] {
@@ -388,10 +386,6 @@ fn release_plan_records_explicit_quality_preflights() {
     };
 
     let steps = build_preflight_steps(&options, None, &[]);
-    let audit = steps
-        .iter()
-        .find(|step| step.id == "preflight.audit")
-        .expect("audit step");
     let dependencies = steps
         .iter()
         .find(|step| step.id == "preflight.dependencies")
@@ -409,11 +403,6 @@ fn release_plan_records_explicit_quality_preflights() {
         .find(|step| step.id == "preflight.changelog_bootstrap")
         .expect("changelog bootstrap step");
 
-    assert_eq!(audit.status, PlanStepStatus::Disabled);
-    assert_eq!(
-        audit.inputs.get("reason").and_then(|value| value.as_str()),
-        Some("no-release-audit-policy")
-    );
     assert_eq!(dependencies.status, PlanStepStatus::Ready);
     assert_eq!(dependencies.needs, vec!["preflight.test_secret_env"]);
     assert_eq!(lint.status, PlanStepStatus::Ready);

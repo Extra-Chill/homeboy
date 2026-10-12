@@ -6,7 +6,7 @@ Homeboy commands operate on different kinds of things. The shared scope model ma
 
 | Scope | Meaning | Typical commands |
 | --- | --- | --- |
-| `component` | A source checkout or registered codebase. | `build`, `test`, `lint`, `audit`, `release`, `changes`, `version`, `bench` |
+| `component` | A source checkout or registered codebase. | `build`, `test`, `lint`, `release`, `changes`, `version`, `bench` |
 | `project` | A runtime target: site, server, domain, base path, database/API context, and deploy destination. | `wp`, `db`, `logs`, `api`, `auth`, `deploy` |
 | `rig` | A reproducible local environment composed from component paths, services, symlinks, and pipelines. | `rig up`, `rig check`, `rig down`, rig-pinned `bench`/`trace` |
 | `fleet` | A group of projects/targets. | fleet status/check/exec, multi-target deploy |

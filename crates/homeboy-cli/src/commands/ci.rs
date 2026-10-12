@@ -27,10 +27,6 @@ use failure_log_triage::{CiFailureTriageOutput, CiFailureTriageRequest};
 use gate::{DifferentialGateDecision, DifferentialGateInput, DifferentialGateSide};
 use homeboy::core::ci_profile::{self, CiInventory, CiRunOutput, CiRunSelection};
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
-use homeboy::refactor::{
-    run_autofix_transaction, CiContext, TransactionOutcome, TransactionRequest,
-    AUTOFIX_COMMIT_PREFIX,
-};
 use plan::{CiEventContext, CiPlan};
 use scope::{GithubActionsContext, MergeBaseResolver, ResolvedScope, ScopeRequest};
 
@@ -56,13 +52,6 @@ pub enum CiCommand {
     Plan(CiPlanArgs),
     /// Run an extension-declared CI job or profile locally.
     Run(CiRunArgs),
-    /// Run the end-to-end CI autofix transaction (branch prep, drift-only
-    /// filtering, push-target resolution, commit, and push).
-    ///
-    /// This is the core-owned transaction the action calls instead of
-    /// re-implementing branch/commit/push orchestration in shell. It assumes
-    /// the working tree already contains the autofix changes to commit.
-    Autofix(CiAutofixArgs),
     /// Resolve a CI event context into the Homeboy scope (changed vs full)
     /// and the per-command `--changed-since` flags.
     ///
@@ -231,48 +220,9 @@ pub struct CiScopeArgs {
 }
 
 #[derive(Args)]
-pub struct CiAutofixArgs {
-    #[command(flatten)]
-    pub comp: PositionalComponentArgs,
-
-    #[command(flatten)]
-    pub extension_override: ExtensionOverrideArgs,
-
-    /// Target repository to push to (`owner/repo`). Defaults to `origin`.
-    #[arg(long)]
-    pub target_repo: Option<String>,
-
-    /// Repository backing the current `origin` remote (`owner/repo`).
-    #[arg(long)]
-    pub origin_repo: Option<String>,
-
-    /// Branch to push to (PR head branch or autofix branch).
-    #[arg(long)]
-    pub target_branch: Option<String>,
-
-    /// GitHub App / access token for the push (enables workflow re-runs and
-    /// cross-repo pushes). Falls back to the `APP_TOKEN` env var.
-    #[arg(long)]
-    pub token: Option<String>,
-
-    /// Git identity to commit as. Defaults to the CI bot identity.
-    #[arg(long)]
-    pub git_identity: Option<String>,
-
-    /// Commit message for authored (non-drift) fixes. Defaults to a generic
-    /// autofix subject.
-    #[arg(long)]
-    pub message: Option<String>,
-
-    /// Classify and resolve the push target without committing or pushing.
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Args)]
 pub struct CiPlanArgs {
-    /// Raw, comma-separated command request (e.g. `audit,lint,test` or
-    /// `refactor --from all`). When empty, commands are inferred from
+    /// Raw, comma-separated command request (e.g. `lint,test` or `bench`).
+    /// When empty, commands are inferred from
     /// `--context`.
     #[arg(long, default_value = "")]
     pub commands: String,
@@ -323,7 +273,6 @@ pub enum CiOutput {
     List(CiListOutput),
     Plan(CiPlanCommandOutput),
     Run(CiRunCommandOutput),
-    Autofix(CiAutofixCommandOutput),
     Scope(CiScopeCommandOutput),
     DifferentialGate(CiDifferentialGateCommandOutput),
     Triage(CiFailureTriageOutput),
@@ -349,16 +298,6 @@ pub struct CiScopeCommandOutput {
 pub type CiPlanCommandOutput = CommandReport<CiPlan>;
 
 #[derive(Debug, Serialize)]
-pub struct CiAutofixCommandOutput {
-    pub command: &'static str,
-    pub component_id: String,
-    pub source_path: PathBuf,
-    pub push_target: String,
-    #[serde(flatten)]
-    pub outcome: TransactionOutcome,
-}
-
-#[derive(Debug, Serialize)]
 pub struct CiRunCommandOutput {
     pub command: &'static str,
     pub component_id: String,
@@ -372,7 +311,6 @@ pub fn run(args: CiArgs) -> CmdResult<CiOutput> {
         CiCommand::List(args) => run_list(args),
         CiCommand::Plan(args) => run_plan(args),
         CiCommand::Run(args) => run_ci(args),
-        CiCommand::Autofix(args) => run_autofix(args),
         CiCommand::Scope(args) => run_scope(args),
         CiCommand::DifferentialGate(args) => run_differential_gate(args),
         CiCommand::Triage(args) => run_triage(args),
@@ -421,7 +359,7 @@ fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
 
 /// Input-key to repository mapping declared in `homeboy.json`.
 ///
-/// Read the same way the audit layer rules are: pull the key, deserialize, and
+/// Pull the key, deserialize, and
 /// treat any failure as "not configured". A malformed block must not take the
 /// command down, because reporting the pins it *can* attribute is still useful.
 fn configured_pin_repositories(root: &std::path::Path) -> BTreeMap<String, String> {
@@ -617,61 +555,6 @@ fn run_ci(args: CiRunArgs) -> CmdResult<CiOutput> {
     ))
 }
 
-fn run_autofix(args: CiAutofixArgs) -> CmdResult<CiOutput> {
-    let ctx = execution_context::resolve(&ResolveOptions {
-        component_id: args.comp.component.clone(),
-        path_override: args.comp.path.clone(),
-        capability: None,
-        settings_overrides: Vec::new(),
-        settings_profile_json_overrides: Vec::new(),
-        settings_json_overrides: Vec::new(),
-        extension_overrides: args.extension_override.extensions.clone(),
-    })?;
-
-    let token = args
-        .token
-        .clone()
-        .or_else(|| std::env::var("APP_TOKEN").ok().filter(|t| !t.is_empty()));
-    let ci = CiContext {
-        target_repo: args.target_repo.clone(),
-        origin_repo: args.origin_repo.clone(),
-        target_branch: args.target_branch.clone(),
-        token,
-    };
-    let push_target = ci.resolve_push_target();
-
-    let fix_commit_message = args
-        .message
-        .clone()
-        .unwrap_or_else(|| AUTOFIX_COMMIT_PREFIX.to_string());
-
-    let outcome = run_autofix_transaction(TransactionRequest {
-        repo_path: &ctx.source_path,
-        component: &ctx.component,
-        ci,
-        git_identity: args.git_identity.as_deref(),
-        fix_commit_message,
-        dry_run: args.dry_run,
-    })?;
-
-    let exit_code = if outcome.committed || args.dry_run || outcome.status == "no-changes" {
-        0
-    } else {
-        1
-    };
-
-    Ok((
-        CiOutput::Autofix(CiAutofixCommandOutput {
-            command: "ci.autofix",
-            component_id: ctx.component_id,
-            source_path: ctx.source_path,
-            push_target,
-            outcome,
-        }),
-        exit_code,
-    ))
-}
-
 fn ci_run_selection(args: &CiRunArgs) -> homeboy::core::Result<CiRunSelection> {
     match (&args.job, &args.profile) {
         (Some(job), None) => Ok(CiRunSelection::Job(job.clone())),
@@ -754,7 +637,7 @@ mod tests {
             "ci",
             "plan",
             "--commands",
-            "audit,lint,test",
+            "lint,test",
             "--context",
             "pr",
         ])
@@ -770,7 +653,7 @@ mod tests {
             panic!("expected ci plan");
         };
 
-        assert_eq!(args.commands, "audit,lint,test");
+        assert_eq!(args.commands, "lint,test");
         assert_eq!(args.context, "pr");
     }
 

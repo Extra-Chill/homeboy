@@ -73,10 +73,6 @@ pub mod capacity;
 pub mod change_artifact;
 pub mod ci_profile;
 pub mod cleanup;
-// code_audit lives in its own crate (homeboy-code-audit). Re-exported as
-// `crate::code_audit` so the in-crate consumers and the provider impls (which
-// reference code_audit's provider traits) keep working unchanged.
-pub use homeboy_code_audit as code_audit;
 pub mod command_execution_plan;
 pub use homeboy_command_contract as command_invocation;
 pub use homeboy_control_plane_contract as control_plane_contract;
@@ -140,10 +136,9 @@ pub mod parsed_command_preflight;
 pub mod performance_hotspots;
 pub mod reaping;
 // `phase_timing` (PhaseTimer/PhaseSpan/PhaseStatus/PhaseTimingReport) is a
-// std-only timing primitive shared by deploy, release, and the audit engine. It
-// lives in homeboy-engine-primitives so a future homeboy-code-audit crate can
-// depend on the slim primitives base rather than all of homeboy-core; this
-// re-export keeps the existing crate::phase_timing path working.
+// std-only timing primitive shared by deploy and release. It lives in
+// homeboy-engine-primitives; this re-export keeps the existing
+// crate::phase_timing path working.
 pub use homeboy_engine_primitives::phase_timing;
 pub use homeboy_gate_contract::plan;
 pub mod process;
@@ -157,7 +152,6 @@ pub mod quality;
 // redaction moved to the internal `homeboy-redaction` crate. Re-exported here so
 // existing `crate::redaction::*` call sites keep working unchanged.
 pub use homeboy_redaction as redaction;
-pub mod refactor_transform_provider;
 pub mod release_provider;
 pub mod release_set;
 pub mod repository_integrity;
@@ -228,7 +222,6 @@ pub mod defaults;
 // Re-export relocated modules so existing `homeboy::api`, `homeboy::auth`, etc. paths keep working.
 // Consumers within the crate have been updated to canonical paths; these re-exports
 // preserve the public API for external users of the library.
-pub use code_audit::codebase_map;
 pub use engine::cli_tool;
 pub use engine::hooks;
 pub use server::api;

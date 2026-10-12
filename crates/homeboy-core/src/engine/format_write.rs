@@ -1,6 +1,6 @@
 //! Post-write formatting for code-modifying commands.
 //!
-//! Any command that writes source code (`refactor --write`) should
+//! Any command that writes source code (`review lint --fix`) should
 //! call `format_after_write()` after writing files. This runs the project's
 //! extension-owned formatter to ensure generated code matches project style.
 //!

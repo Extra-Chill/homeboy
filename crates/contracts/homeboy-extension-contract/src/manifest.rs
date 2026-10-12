@@ -8,11 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::api::v1::{
-    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNING_FIXES_CAPABILITY_ID,
-    FINGERPRINT_FILE_CAPABILITY_PREFIX, REFACTOR_FILE_CAPABILITY_PREFIX,
-};
-use crate::autofix_config::*;
 use crate::ci_config::*;
 use crate::extension_contract_producer::*;
 use crate::external_check_detail_resolver::*;
@@ -28,7 +23,6 @@ use crate::notification_transport_config::*;
 use crate::sidecar_config::*;
 use crate::test_drift::*;
 use crate::trace_config::*;
-use homeboy_audit_contract::*;
 
 /// Unified extension manifest decomposed into capability groups.
 ///
@@ -79,8 +73,6 @@ pub struct ExtensionManifest {
     /// which is indistinguishable from a correct manifest that declares none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deployment_providers: Vec<DeploymentProviderManifest>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audit: Option<AuditCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executable: Option<ExecutableCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,11 +138,6 @@ pub struct ExtensionManifest {
     pub fuzz: Option<FuzzConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceConfig>,
-    /// Post-write verify command used as a safety gate after `refactor --from ...`
-    /// autofix writes to disk. If the command exits non-zero, the written files
-    /// are reverted and the fixes are reclassified as declined. See #1167.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub autofix_verify: Option<AutofixVerifyConfig>,
     /// Structured run-directory sidecars this extension declares as a public
     /// machine-readable contract.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -336,18 +323,6 @@ impl ExtensionManifest {
             .is_some()
     }
 
-    /// Whether this extension contributes audit reference paths.
-    ///
-    /// An `audit` block that only carries detector rules, ignore patterns, or
-    /// doc targets is not an executable audit capability — only
-    /// `setup_references` is.
-    pub fn has_audit(&self) -> bool {
-        self.audit
-            .as_ref()
-            .and_then(|c| c.setup_references.as_ref())
-            .is_some()
-    }
-
     pub fn lint_script(&self) -> Option<&str> {
         self.lint
             .as_ref()
@@ -397,12 +372,6 @@ impl ExtensionManifest {
             .and_then(|c| c.extension_script.as_deref())
     }
 
-    pub fn audit_script(&self) -> Option<&str> {
-        self.audit
-            .as_ref()
-            .and_then(|c| c.setup_references.as_deref())
-    }
-
     pub fn trace_runner_capabilities(&self) -> &[String] {
         self.trace
             .as_ref()
@@ -434,28 +403,11 @@ impl ExtensionManifest {
             .map(|provider| provider.script.as_str())
     }
 
-    /// Convenience accessor for the optional test mapping config
-    /// declared under the audit capability.
-    pub fn test_mapping(&self) -> Option<&TestMappingConfig> {
-        self.audit.as_ref().and_then(|a| a.test_mapping.as_ref())
-    }
-
     /// Convenience accessor for the test drift selection contract.
     ///
     /// Only the canonical `test.drift` field declares drift behavior.
     pub fn test_drift(&self) -> Option<TestDriftConfig> {
         self.test.as_ref().and_then(|t| t.drift.clone())
-    }
-
-    /// Convenience accessor for extension-supplied generic audit detector rules.
-    pub fn audit_detector_rules(&self) -> Option<&AuditConfig> {
-        self.audit.as_ref().map(|a| &a.detector_rules)
-    }
-
-    /// Convenience: autofix verify config, if this extension declares one.
-    /// See [`AutofixVerifyConfig`] for the contract.
-    pub fn autofix_verify(&self) -> Option<&AutofixVerifyConfig> {
-        self.autofix_verify.as_ref()
     }
 
     /// Convenience: get deploy verifications (empty if no deploy capability).
@@ -516,52 +468,6 @@ impl ExtensionManifest {
             .unwrap_or(&[])
     }
 
-    /// Convenience: get audit ignore claim patterns (empty if no audit capability).
-    pub fn audit_ignore_claim_patterns(&self) -> &[String] {
-        self.audit
-            .as_ref()
-            .map(|a| a.ignore_claim_patterns.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// Convenience: get audit feature patterns (empty if no audit capability).
-    pub fn audit_feature_patterns(&self) -> &[String] {
-        self.audit
-            .as_ref()
-            .map(|a| a.feature_patterns.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// Convenience: get feature labels map (empty if no audit capability).
-    pub fn audit_feature_labels(&self) -> &HashMap<String, String> {
-        static EMPTY: std::sync::LazyLock<HashMap<String, String>> =
-            std::sync::LazyLock::new(HashMap::new);
-        self.audit
-            .as_ref()
-            .map(|a| &a.feature_labels)
-            .unwrap_or(&EMPTY)
-    }
-
-    /// Convenience: get doc targets map (empty if no audit capability).
-    pub fn audit_doc_targets(&self) -> &HashMap<String, DocTarget> {
-        static EMPTY: std::sync::LazyLock<HashMap<String, DocTarget>> =
-            std::sync::LazyLock::new(HashMap::new);
-        self.audit
-            .as_ref()
-            .map(|a| &a.doc_targets)
-            .unwrap_or(&EMPTY)
-    }
-
-    /// Convenience: get feature context rules (empty if no audit capability).
-    pub fn audit_feature_context(&self) -> &HashMap<String, FeatureContextRule> {
-        static EMPTY: std::sync::LazyLock<HashMap<String, FeatureContextRule>> =
-            std::sync::LazyLock::new(HashMap::new);
-        self.audit
-            .as_ref()
-            .map(|a| &a.feature_context)
-            .unwrap_or(&EMPTY)
-    }
-
     /// Convenience: get database config from platform capability.
     pub fn database(&self) -> Option<&DatabaseConfig> {
         self.platform.as_ref().and_then(|p| p.database.as_ref())
@@ -593,187 +499,14 @@ impl ExtensionManifest {
         self.provided_file_extensions().iter().any(|e| e == ext)
     }
 
-    /// Get the fingerprint script path (relative to extension dir), if configured.
-    pub fn fingerprint_script(&self) -> Option<&str> {
-        self.scripts.as_ref().and_then(|s| s.fingerprint.as_deref())
-    }
-
-    /// Get the refactor script path (relative to extension dir), if configured.
-    pub fn refactor_script(&self) -> Option<&str> {
-        self.scripts.as_ref().and_then(|s| s.refactor.as_deref())
-    }
-
     /// Get the format script path (relative to extension dir), if configured.
     pub fn format_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.format.as_deref())
-    }
-
-    /// Get the compiler warning script path (relative to extension dir), if configured.
-    pub fn compiler_warnings_script(&self) -> Option<&str> {
-        self.scripts
-            .as_ref()
-            .and_then(|s| s.compiler_warnings.as_deref())
-    }
-
-    /// Get the compiler warning fixes script path (relative to extension dir), if configured.
-    pub fn compiler_warning_fixes_script(&self) -> Option<&str> {
-        self.scripts
-            .as_ref()
-            .and_then(|s| s.compiler_warning_fixes.as_deref())
-    }
-
-    /// Capability ids this extension provides over the JSON-stdin invocation
-    /// contract, in deterministic order.
-    ///
-    /// Catalog projection advertises exactly these, and API invocation resolves
-    /// exactly these through [`Self::json_capability_script`]. Deriving both
-    /// from one place is what keeps an advertised capability invocable: the two
-    /// used to be written out separately, and `format-file.<ext>` was advertised
-    /// while the invocation path had no branch for it.
-    ///
-    /// `format-file.<ext>` is deliberately absent. Format scripts take file
-    /// arguments rather than JSON on stdin, so they are a different invocation
-    /// shape and are projected separately.
-    pub fn json_capability_ids(&self) -> Vec<String> {
-        let mut capabilities = Vec::new();
-        if self.compiler_warnings_script().is_some() {
-            capabilities.push(COMPILER_WARNINGS_CAPABILITY_ID.to_string());
-        }
-        if self.compiler_warning_fixes_script().is_some() {
-            capabilities.push(COMPILER_WARNING_FIXES_CAPABILITY_ID.to_string());
-        }
-        if self.fingerprint_script().is_some() {
-            capabilities.extend(
-                self.provided_file_extensions()
-                    .iter()
-                    .map(|file_extension| {
-                        format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}{file_extension}")
-                    }),
-            );
-        }
-        if self.refactor_script().is_some() {
-            capabilities.extend(
-                self.provided_file_extensions()
-                    .iter()
-                    .map(|file_extension| {
-                        format!("{REFACTOR_FILE_CAPABILITY_PREFIX}{file_extension}")
-                    }),
-            );
-        }
-        capabilities
-    }
-
-    /// Script implementing one JSON-stdin capability, if this extension
-    /// provides it. Returns `None` for a capability this extension does not
-    /// advertise, including capabilities that use another invocation shape.
-    pub fn json_capability_script(&self, capability_id: &str) -> Option<&str> {
-        match capability_id {
-            COMPILER_WARNINGS_CAPABILITY_ID => self.compiler_warnings_script(),
-            COMPILER_WARNING_FIXES_CAPABILITY_ID => self.compiler_warning_fixes_script(),
-            capability if capability.starts_with(FINGERPRINT_FILE_CAPABILITY_PREFIX) => self
-                .handles_file_extension(
-                    capability.trim_start_matches(FINGERPRINT_FILE_CAPABILITY_PREFIX),
-                )
-                .then(|| self.fingerprint_script())
-                .flatten(),
-            capability if capability.starts_with(REFACTOR_FILE_CAPABILITY_PREFIX) => self
-                .handles_file_extension(
-                    capability.trim_start_matches(REFACTOR_FILE_CAPABILITY_PREFIX),
-                )
-                .then(|| self.refactor_script())
-                .flatten(),
-            _ => None,
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-
-    /// Every advertised JSON-stdin capability must resolve to a script.
-    ///
-    /// This is the invariant that was already broken once: `format-file.<ext>`
-    /// was advertised by catalog projection while the invocation path had no
-    /// branch for it, so it resolved and then failed as not provided.
-    #[test]
-    fn every_advertised_json_capability_resolves_to_a_script() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "id": "fixture",
-            "name": "Fixture",
-            "version": "1.0.0",
-            "provides": { "file_extensions": ["rs", "ts"] },
-            "scripts": {
-                "fingerprint": "bin/fingerprint",
-                "refactor": "bin/refactor",
-                "format": "bin/format",
-                "compiler_warnings": "bin/warnings",
-                "compiler_warning_fixes": "bin/fixes",
-            }
-        }))
-        .expect("fixture manifest");
-
-        let advertised = manifest.json_capability_ids();
-        assert!(
-            advertised.contains(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}rs"))
-                && advertised.contains(&format!("{REFACTOR_FILE_CAPABILITY_PREFIX}ts"))
-                && advertised.contains(&COMPILER_WARNINGS_CAPABILITY_ID.to_string()),
-            "got {advertised:?}"
-        );
-        for capability_id in &advertised {
-            assert!(
-                manifest.json_capability_script(capability_id).is_some(),
-                "advertised capability '{capability_id}' does not resolve to a script"
-            );
-        }
-
-        // Format takes file arguments rather than JSON on stdin, so it is
-        // deliberately not part of this contract and must not be advertised as
-        // though it were invocable here.
-        assert!(!advertised
-            .iter()
-            .any(|id| id.starts_with(crate::api::v1::FORMAT_FILE_CAPABILITY_PREFIX)));
-        assert!(manifest
-            .json_capability_script(&format!(
-                "{}rs",
-                crate::api::v1::FORMAT_FILE_CAPABILITY_PREFIX
-            ))
-            .is_none());
-    }
-
-    #[test]
-    fn a_capability_for_an_unprovided_file_extension_does_not_resolve() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "id": "fixture",
-            "name": "Fixture",
-            "version": "1.0.0",
-            "provides": { "file_extensions": ["rs"] },
-            "scripts": { "fingerprint": "bin/fingerprint" }
-        }))
-        .expect("fixture manifest");
-
-        assert!(manifest
-            .json_capability_script(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}rs"))
-            .is_some());
-        assert!(manifest
-            .json_capability_script(&format!("{FINGERPRINT_FILE_CAPABILITY_PREFIX}py"))
-            .is_none());
-    }
-
-    #[test]
-    fn an_extension_without_scripts_advertises_no_json_capabilities() {
-        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "id": "fixture",
-            "name": "Fixture",
-            "version": "1.0.0",
-            "provides": { "file_extensions": ["rs"] }
-        }))
-        .expect("fixture manifest");
-
-        assert!(manifest.json_capability_ids().is_empty());
-        assert!(manifest
-            .json_capability_script("compiler-warnings")
-            .is_none());
-    }
     use super::*;
 
     fn manifest(transports: Vec<NotificationTransportConfig>) -> ExtensionManifest {

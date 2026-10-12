@@ -22,9 +22,7 @@ pub enum AgentTaskToolCommand {
 pub struct AgentTaskToolDispatchArgs {}
 
 pub(crate) fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
-    // homeboy-audit: allow-thin-command-adapter
     match dispatch_raw_result() {
-        // homeboy-audit: allow-thin-command-adapter
         Ok(result) => {
             println!("{}", result);
             0
@@ -37,7 +35,6 @@ pub(crate) fn dispatch_raw(_args: AgentTaskToolDispatchArgs) -> i32 {
 }
 
 fn dispatch_raw_result() -> Result<String, String> {
-    // homeboy-audit: allow-thin-command-adapter
     let mut stdin = String::new();
     std::io::stdin()
         .read_to_string(&mut stdin)
@@ -46,7 +43,7 @@ fn dispatch_raw_result() -> Result<String, String> {
     let request: AgentToolRequest = serde_json::from_str(&stdin)
         .map_err(|error| format!("invalid agent tool request JSON: {error}"))?;
     let policy = policy_from_env()?;
-    let outcome = dispatch_agent_tool_request(&policy, &request); // homeboy-audit: allow-thin-command-adapter
+    let outcome = dispatch_agent_tool_request(&policy, &request);
 
     serde_json::to_string(&outcome.result)
         .map_err(|error| format!("failed to serialize agent tool result JSON: {error}"))

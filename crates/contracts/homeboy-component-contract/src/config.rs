@@ -93,13 +93,9 @@ pub struct ScopeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit: Option<CommandScopeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lint: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<CommandScopeConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refactor: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

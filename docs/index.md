@@ -39,7 +39,6 @@ Mental models and vocabulary:
 - [Homeboy model](concepts/homeboy-model.md)
 - [Structured evidence](concepts/structured-evidence.md)
 - [Headless agent orchestration](concepts/headless-agent-orchestration.md)
-- [Code Factory](concepts/code-factory.md)
 
 ## Reference
 

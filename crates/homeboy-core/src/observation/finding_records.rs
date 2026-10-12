@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
-use crate::code_audit;
 use crate::finding::{FindingProducer, FindingSource, HomeboyFinding};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -187,24 +186,6 @@ pub fn finding_records_from_lint(
     findings: &[HomeboyFinding],
 ) -> Vec<NewFindingRecord> {
     finding_records_from_homeboy_findings(run_id, findings.iter().cloned())
-}
-
-pub fn homeboy_finding_from_audit(finding: &code_audit::Finding) -> HomeboyFinding {
-    HomeboyFinding::from(finding)
-}
-
-pub fn finding_record_from_audit(run_id: &str, finding: &code_audit::Finding) -> NewFindingRecord {
-    NewFindingRecord::from_homeboy_finding(run_id, homeboy_finding_from_audit(finding))
-}
-
-pub fn finding_records_from_audit(
-    run_id: &str,
-    findings: &[code_audit::Finding],
-) -> Vec<NewFindingRecord> {
-    findings
-        .iter()
-        .map(|finding| finding_record_from_audit(run_id, finding))
-        .collect()
 }
 
 pub fn finding_records_from_annotations_dir(

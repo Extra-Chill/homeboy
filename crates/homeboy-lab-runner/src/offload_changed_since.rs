@@ -424,7 +424,7 @@ mod tests {
 
         let args = vec![
             "homeboy".to_string(),
-            "audit".to_string(),
+            "lint".to_string(),
             "--changed-since".to_string(),
             "base".to_string(),
         ];
@@ -439,7 +439,7 @@ mod tests {
             preflight.args,
             vec![
                 "homeboy".to_string(),
-                "audit".to_string(),
+                "lint".to_string(),
                 "--changed-since".to_string(),
                 base_sha,
             ]

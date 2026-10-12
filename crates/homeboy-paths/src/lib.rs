@@ -863,9 +863,9 @@ mod workspace_membership {
 ///
 /// Measured with a probe rather than inferred: append a deliberately
 /// misformatted function to all 1,819 `.rs` files, run `cargo fmt --all`, and
-/// see which copies survive verbatim. 44 did. Six were the deliberately
-/// standalone `tests/fixtures/audit_runtime` corpus; the rest are the two
-/// mechanisms above plus four files in no module tree at all.
+/// see which copies survive verbatim. 44 did. Six were a deliberately
+/// standalone fixture corpus; the rest are the two mechanisms above plus four
+/// files in no module tree at all.
 ///
 /// Note the `#[path]` attribute itself is *not* a blind spot -- rustfmt,
 /// rustc, and clippy all follow it. Only macro expansion hides modules.
@@ -882,25 +882,12 @@ mod formatter_visibility {
     /// Files that are in no module tree at all: rustc never compiles them, so
     /// they are dead weight that also confuses filesystem-based tooling.
     ///
-    /// Both are left in place deliberately, not overlooked:
-    ///
-    /// - `structural_tests.rs` lives in `homeboy-code-audit`, which is being
-    ///   restructured under #10557/#10558.
-    /// - `decompose_test.rs` is carried in the `homeboy.json` audit baseline
-    ///   (`test_quality::tests/core/refactor/decompose_test.rs::VacuousTest`) --
-    ///   the audit corpus walks the filesystem, so it scans and reports on a
-    ///   file the compiler never sees. Deleting it requires a baseline edit,
-    ///   and `homeboy.json` is owned by the same in-flight work.
-    ///
     /// This list is asserted as an exact set in both directions, so fixing one
     /// of these forces its removal here rather than letting the list rot.
-    const KNOWN_ORPHANS: &[&str] = &[
-        "crates/homeboy-code-audit/src/structural_tests.rs",
-        "tests/core/refactor/decompose_test.rs",
-    ];
+    const KNOWN_ORPHANS: &[&str] = &[];
 
-    /// Not a crate: a fixture corpus the audit detectors scan as *data*. It is
-    /// correctly unreachable from any crate root.
+    /// Not a crate: fixture corpora scanned as *data*. They are correctly
+    /// unreachable from any crate root.
     const FIXTURE_PREFIX: &str = "tests/fixtures/";
 
     fn workspace_root() -> PathBuf {
@@ -1038,7 +1025,7 @@ mod formatter_visibility {
     ///
     /// Takes the undecluttered line because the argument it needs *is* a string
     /// literal, so it re-checks the decluttered form to reject an `include!`
-    /// that only appears inside one (the audit detectors carry such literals as
+    /// that only appears inside one (some sources carry such literals as
     /// template text).
     fn include_value(line: &str) -> Option<String> {
         if !declutter(line).contains("include!(") {

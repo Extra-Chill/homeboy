@@ -1049,47 +1049,19 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // IDs/aliases participate in cross-entity collision detection. Core owns
     // the collision invariant but must not depend on these optional features.
     homeboy_tunnel::register();
-    // Register the audit manifest provider so code_audit can read extension
-    // manifests (detector rules, test mappings, provided extensions) without
-    // depending on the extension layer's loader — the seam that lets audit
-    // become its own crate.
     // Register the in-core release provider so core's status mechanics
     // (fleet/project/context/git change reporting/tag-gap) get deploy+release
     // behavior through the hook. Moves out with deploy/release when they
     // become the homeboy-release crate.
     crate::release::provider_impl::register();
     crate::release::register_action_delegate();
-    homeboy_core::extension::audit_manifest_provider::register();
     homeboy_core::extension::component_script::register_component_script_runner();
     homeboy_core::extension::build::register_component_build_runner();
     homeboy_core::extension::lifecycle::register_component_install_runner();
-    // Register extension-backed audit providers so code_audit can load
-    // grammars, run fallback fingerprint scripts, and collect compiler
-    // warnings without depending on the extension registry or script runner.
-    homeboy_core::extension::audit_fingerprint_script_provider::register();
-    homeboy_core::extension::audit_grammar_source_provider::register();
-    homeboy_core::extension::audit_compiler_warning_provider::register();
-    // Register the audit recorded-artifact provider so the artifact-portability
-    // detector can read past runs' artifacts from the observation store without
-    // code_audit depending on observation — the last seam before audit becomes
-    // its own crate.
-    crate::core::observation::audit_artifact_provider::register();
-    // Register the audit fixability provider so code_audit can report how
-    // fixable its findings are without calling up into the refactor engine's
-    // fix planner — the seam that removes the last code_audit->refactor edge.
     // Register the rig toolchain provider so core's extension exec-env
     // builder can prepend the rig toolchain PATH.
     crate::rig::provider::register();
     crate::stack::provider::register();
-    crate::refactor::audit_fixability_provider::register();
-    // Register the refactor transform provider so core's extension
-    // test-drift auto-fixer can apply generated transform rules.
-    crate::refactor::transform_provider::register();
-    // Register the audit component provider so code_audit can resolve the
-    // component under audit (path, extension ids, audit rules, scope excludes)
-    // without depending on the component layer — the last cross-layer seam
-    // before audit becomes its own crate.
-    crate::core::component::audit_provider::register();
     // Register the runner-evidence provider so observation::runs_service can
     // enrich run/artifact lookups with live runner + daemon evidence without
     // core depending on runner behavior. (Runner is still in-crate today;
@@ -6396,59 +6368,6 @@ mod tests {
         .expect("extension manifest");
     }
 
-    #[cfg(unix)]
-    fn write_audit_extension(home: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let extension_dir = home.join(".config/homeboy/extensions/sample-audit");
-        let scripts_dir = extension_dir.join("scripts");
-        std::fs::create_dir_all(&scripts_dir).expect("audit extension scripts dir");
-        std::fs::write(
-            extension_dir.join("sample-audit.json"),
-            serde_json::json!({
-                "name": "Sample Audit",
-                "version": "0.0.0",
-                "provides": {
-                    "file_extensions": ["sample"],
-                    "capabilities": ["fingerprint"]
-                },
-                "scripts": { "fingerprint": "scripts/fingerprint.sh" }
-            })
-            .to_string(),
-        )
-        .expect("audit extension manifest");
-        std::fs::write(
-            extension_dir.join("grammar.json"),
-            serde_json::json!({
-                "language": { "id": "sample", "extensions": ["sample"] },
-                "comments": { "line": ["//"], "block": [], "doc": [] },
-                "strings": { "quotes": ["\""], "escape": "\\", "multiline": [] },
-                "patterns": {
-                    "function": {
-                        "regex": "fn\\s+(\\w+)\\s*\\(([^)]*)\\)",
-                        "captures": { "name": 1, "params": 2 },
-                        "context": "any",
-                        "skip_comments": true,
-                        "skip_strings": true
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .expect("audit extension grammar");
-        let script = scripts_dir.join("fingerprint.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"aggregate_literals\":[{\"type_name\":\"Policy\",\"fields\":[\"allow\"],\"line\":1}]}'\n",
-        )
-        .expect("audit fingerprint script");
-        let mut permissions = std::fs::metadata(&script)
-            .expect("audit fingerprint script metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(script, permissions).expect("executable audit fingerprint script");
-    }
-
     #[test]
     fn output_format_names_are_rejected_as_global_output_paths() {
         let err = output_runtime::validate_output_file_path("json")
@@ -6691,52 +6610,6 @@ mod tests {
             }
             _ => panic!("`homeboy --version` should resolve to the version fast path"),
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cli_startup_registers_both_extension_audit_providers() {
-        const CHILD: &str = "HOMEBOY_AUDIT_STARTUP_PROVIDER_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(
-                std::env::current_exe().expect("current test executable"),
-            )
-            .args([
-                "cli_startup_registers_both_extension_audit_providers",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .status()
-            .expect("run startup provider assertions in an isolated test process");
-            assert!(
-                status.success(),
-                "isolated startup test exited with {status}"
-            );
-            return;
-        }
-
-        crate::test_support::with_isolated_home(|home| {
-            write_audit_extension(home.path());
-
-            let exit = CliRuntime::new()
-                .run_from_args(vec!["homeboy".to_string(), "--version".to_string()]);
-
-            assert_eq!(exit, std::process::ExitCode::SUCCESS);
-            let grammar = crate::core::code_audit::core_fingerprint::load_grammar_for_ext("sample")
-                .expect("CLI startup should make the extension grammar provider reachable");
-            assert_eq!(grammar.language.id, "sample");
-
-            let source = home.path().join("policy.sample");
-            let fingerprint = crate::core::code_audit::fingerprint::fingerprint_content(
-                &source,
-                home.path(),
-                "fn decide() {}",
-            )
-            .expect("CLI startup should make both audit providers reachable");
-            assert_eq!(fingerprint.methods, vec!["decide"]);
-            assert_eq!(fingerprint.aggregate_literals.len(), 1);
-            assert_eq!(fingerprint.aggregate_literals[0].type_name, "Policy");
-        });
     }
 
     /// Renders the help the binary actually prints for `argv`, by driving the
@@ -7236,18 +7109,16 @@ mod tests {
     /// would have forwarded the flag to the underlying test runner instead.
     ///
     /// `--summary` is the umbrella's own compact-output selector, and
-    /// `review/mod.rs` already maps it onto `json_summary` for the test and audit
-    /// phases and onto `summary` for lint — so accepting it directly on each
+    /// `review/mod.rs` already maps it onto `json_summary` for the test
+    /// phase and onto `summary` for lint — so accepting it directly on each
     /// phase makes the phase surface agree with the umbrella that drives it.
     #[test]
     fn summary_is_accepted_across_the_review_umbrella_and_every_phase() {
         let phases: &[&[&str]] = &[
             &["homeboy", "review", "lint", "homeboy", "--summary"],
             &["homeboy", "review", "test", "homeboy", "--summary"],
-            &["homeboy", "review", "audit", "homeboy", "--summary"],
             &["homeboy", "review", "lint", "homeboy", "--json-summary"],
             &["homeboy", "review", "test", "homeboy", "--json-summary"],
-            &["homeboy", "review", "audit", "homeboy", "--json-summary"],
         ];
 
         for args in phases {
@@ -7299,10 +7170,6 @@ mod tests {
                     "true",
                 ],
                 "agent-task cook/run-plan/retry --run",
-            ),
-            (
-                &["homeboy", "--runner", "homeboy-lab", "review", "audit"],
-                "review audit",
             ),
             (
                 &[

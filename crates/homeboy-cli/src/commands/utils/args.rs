@@ -254,18 +254,7 @@ fn arg_takes_value(arg: &Arg) -> bool {
 
 /// Apply all argument normalizations in sequence.
 pub fn normalize(args: Vec<String>) -> Vec<String> {
-    mark_explicit_passthrough(normalize_review_audit_baseline(args))
-}
-
-fn normalize_review_audit_baseline(mut args: Vec<String>) -> Vec<String> {
-    if let Some(position) = args.windows(3).position(|window| {
-        matches!(window[0].as_str(), "review")
-            && matches!(window[1].as_str(), "audit")
-            && matches!(window[2].as_str(), "baseline")
-    }) {
-        args.splice(position + 1..position + 3, ["audit-baseline".to_string()]);
-    }
-    args
+    mark_explicit_passthrough(args)
 }
 
 #[cfg(test)]
@@ -498,56 +487,6 @@ mod normalize_tests {
             ".homeboy/experiments/change",
         ]));
 
-        assert!(Cli::try_parse_from(args).is_ok());
-    }
-
-    #[test]
-    fn review_audit_baseline_uses_hidden_parse_target() {
-        let args = normalize(argv(&[
-            "homeboy", "review", "audit", "baseline", "refresh", "--path", ".",
-        ]));
-
-        assert_eq!(
-            args,
-            argv(&[
-                "homeboy",
-                "review",
-                "audit-baseline",
-                "refresh",
-                "--path",
-                ".",
-            ])
-        );
-        assert!(Cli::try_parse_from(args).is_ok());
-    }
-
-    #[test]
-    fn review_audit_baseline_normalizes_after_global_options() {
-        let args = normalize(argv(&[
-            "homeboy",
-            "--placement",
-            "local",
-            "review",
-            "audit",
-            "baseline",
-            "validate",
-            "--path",
-            ".",
-        ]));
-
-        assert_eq!(
-            args,
-            argv(&[
-                "homeboy",
-                "--placement",
-                "local",
-                "review",
-                "audit-baseline",
-                "validate",
-                "--path",
-                ".",
-            ])
-        );
         assert!(Cli::try_parse_from(args).is_ok());
     }
 
@@ -1083,8 +1022,8 @@ pub struct BaselineArgs {
 
 /// The `--changed-since` scope contract, declared once.
 ///
-/// Six commands (`audit`, `lint`, `test`, `build`, `review`, `refactor`)
-/// each declared this flag independently, with three different doc comments,
+/// Several commands (`lint`, `test`, `build`, `review`) each declared this
+/// flag independently, with three different doc comments,
 /// two different `value_name`s, and — in `lint`/`review` — hand-written
 /// `conflicts_with` pairs pointing at each other (#11140). The
 /// `#[arg(skip)] precomputed_changed_files` escape hatch that lets a caller
@@ -1096,22 +1035,11 @@ pub struct BaselineArgs {
 /// a flag to a command that did not already accept it:
 ///
 /// - [`ChangedSinceArgs`] — `--changed-since` plus the skip escape hatch.
-///   Flattened by `audit`, `build`, `refactor`.
+///   Flattened by `build`.
 /// - [`LabChangedScopeArgs`] — adds the hidden `--lab-changed-files-json`
 ///   handoff payload. Flattened by `test`.
 /// - [`ChangedScopeArgs`] — adds `--changed-only` working-tree scoping.
 ///   Flattened by `lint` and `review`.
-///
-/// ## Known divergence (surfaced, deliberately not changed)
-///
-/// `audit --changed-since` disables Lab offload entirely (see
-/// `AUDIT_CHANGED_SINCE_LAB_UNSUPPORTED_REASON` in `commands/audit.rs`) while
-/// `lint --changed-since` treats the same scoping as a Lab-portable release
-/// gate. Both spellings resolve to the identical field on the same shared
-/// group now, so the divergence lives entirely in each command's
-/// `lab_contract()` where it is visible. Whether audit's carve-out is still
-/// warranted is a behavior decision for a separate issue — this group only
-/// makes the asymmetry legible.
 #[derive(Args, Debug, Clone, Default)]
 pub struct ChangedSinceArgs {
     /// Only operate on files changed since this git ref (branch, tag, or SHA).

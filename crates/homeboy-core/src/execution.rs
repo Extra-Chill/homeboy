@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn request_round_trips_with_plan() {
-        let plan = HomeboyPlan::for_component(PlanKind::Refactor, "homeboy");
+        let plan = HomeboyPlan::for_component(PlanKind::Quality, "homeboy");
         let request = ExecutionRequest {
             id: "exec-1".to_string(),
             mode: ExecutionMode::CapturePatch,

@@ -10,9 +10,9 @@ use super::*;
 #[test]
 fn test_create() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
 
-    assert_eq!(job.operation, "audit");
+    assert_eq!(job.operation, "lint");
     assert_eq!(job.status, JobStatus::Queued);
     assert_eq!(job.event_count, 1);
     assert!(job.source_snapshot.is_none());
@@ -183,7 +183,7 @@ fn test_create_with_source_snapshot() {
 #[test]
 fn test_get() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
 
     assert_eq!(store.get(job.id).expect("job is readable").id, job.id);
 }
@@ -191,7 +191,7 @@ fn test_get() {
 #[test]
 fn test_list() {
     let store = JobStore::default();
-    let first = store.create("audit");
+    let first = store.create("lint");
     let second = store.create("lint");
 
     let mut jobs = store.list();
@@ -204,7 +204,7 @@ fn test_list() {
 #[test]
 fn test_start() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
 
     let running = store.start(job.id).expect("job starts");
     assert_eq!(running.status, JobStatus::Running);
@@ -214,7 +214,7 @@ fn test_start() {
 #[test]
 fn test_append_event() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
     store.start(job.id).expect("job starts");
 
     let event = store
@@ -233,7 +233,7 @@ fn test_append_event() {
 #[test]
 fn test_complete() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
     store.start(job.id).expect("job starts");
 
     let completed = store
@@ -359,7 +359,7 @@ fn test_progress() {
 #[test]
 fn job_lifecycle_records_status_events_in_order() {
     let store = JobStore::default();
-    let job = store.create("audit");
+    let job = store.create("lint");
 
     store.start(job.id).expect("job starts");
     store
@@ -618,7 +618,7 @@ fn durable_store_reconciles_running_jobs_as_stale_after_restart() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join("jobs.json");
     let store = JobStore::open(&path).expect("durable store opens");
-    let job = store.create("audit");
+    let job = store.create("lint");
     store.start(job.id).expect("job starts");
 
     let reopened = JobStore::open(&path).expect("durable store reopens");

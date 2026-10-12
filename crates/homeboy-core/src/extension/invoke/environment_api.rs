@@ -17,7 +17,7 @@ use crate::extension::catalog::{
     load_extension, load_extension_from_dir, resolve_api, validate_operation_request,
 };
 
-use super::api::{execute_capability_process, process_evidence};
+use super::capability_process::{execute_capability_process, process_evidence};
 
 pub const ENV_PROVIDER_COMMAND_PAYLOAD_ENV: &str = "HOMEBOY_ENV_PROVIDER_COMMAND_PAYLOAD";
 const ENV_PROVIDER_COMMAND_PAYLOAD_SCHEMA: &str = "homeboy/env-provider-command/v1";
@@ -212,14 +212,7 @@ fn resolve_environment(
     secret_env_names.dedup();
     let script_path = Path::new(extension_path).join(&config.script);
     let working_directory = context.working_directory.to_string_lossy();
-    let output = match execute_capability_process(
-        &script_path,
-        &working_directory,
-        None,
-        &environment,
-        &request.extension_id,
-        ENVIRONMENT_CAPABILITY_ID,
-    ) {
+    let output = match execute_capability_process(&script_path, &working_directory, &environment) {
         Ok(output) => output,
         Err(error) => {
             return failure(
