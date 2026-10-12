@@ -171,12 +171,18 @@ pub(super) fn ownership_path(runner_id: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn controller_id() -> String {
-    let root = paths::homeboy().expect("resolve Homeboy config root");
-    let persisted = persisted_controller_id(&root, system_hostname().as_deref())
-        .expect("persist controller identity");
+    // The identity is resolved once per process: it names this controller's
+    // service unit, daemon state and sessions, so it must not change mid-run
+    // even if the config root's environment does.
+    static PERSISTED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let persisted = PERSISTED.get_or_init(|| {
+        let root = paths::homeboy().expect("resolve Homeboy config root");
+        persisted_controller_id(&root, system_hostname().as_deref())
+            .expect("persist controller identity")
+    });
     controller_id_from_scope(
         std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
-        persisted,
+        persisted.clone(),
     )
 }
 
