@@ -7925,11 +7925,31 @@ fn run_cook_spine(
                         &options,
                         &run_id,
                     )?;
-                    dispatcher.dispatch_attempt(
+                    let dispatched = dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
                         effective_baseline.map(CookFollowUpBaseline::capability),
-                    )
+                    );
+                    // A detached dispatcher hands the baseline to Lab staging,
+                    // which materializes it from a separate controller job
+                    // after `dispatch_attempt` returns. Dropping the guard at
+                    // the end of this scope ran `git worktree remove` under
+                    // that job, failing every first-attempt Lab Cook with
+                    // "workspace identity does not match its admission
+                    // attestation" (IO error). #15379 fixed the retry path
+                    // only; preserve the dispatched baseline here as well and
+                    // leave reaping to artifact retention (#15815). A rejected
+                    // dispatch hands nothing off, so its baseline is still
+                    // dropped (and removed) here as before.
+                    if dispatched.is_ok() {
+                        if let Some(baseline) = initial_baseline {
+                            baseline.preserve_for_retry();
+                        }
+                        if let Some(baseline) = re_materialized_baseline {
+                            baseline.preserve_for_retry();
+                        }
+                    }
+                    dispatched
                 } else {
                     admit_explicit_cook_workspace_before_provider(
                         lifecycle_store,

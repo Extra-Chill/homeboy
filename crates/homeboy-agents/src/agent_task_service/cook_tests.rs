@@ -5209,6 +5209,41 @@ struct AttestingRetryableTransportDispatcher {
     observations: Arc<Mutex<Vec<(String, Value, Value, bool)>>>,
 }
 
+/// Detached dispatcher that accepts the attempt and records the workspace
+/// root it was handed, like Lab staging which reads it after return (#15815).
+#[derive(Debug)]
+struct BaselineCapturingDetachedDispatcher {
+    roots: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for BaselineCapturingDetachedDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-baseline-capturing-detached" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        if let Some(root) = plan.tasks[0].workspace.root.clone() {
+            self.roots.lock().expect("roots").push(root);
+        }
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "baseline-capturing-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct FlakyPreparationDispatcher {
     failures_remaining: AtomicUsize,
@@ -13836,6 +13871,95 @@ fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
         assert!(observations
             .iter()
             .all(|(_, _, predecessor, _)| predecessor == &source_identity));
+    });
+}
+
+/// Regression for #15815: a first-attempt Cook with a dirty candidate gets a
+/// controller-owned baseline worktree that is handed to a detached dispatcher.
+/// Lab staging reads it after `dispatch_attempt` returns, so the baseline must
+/// still exist after the dispatch scope ends (the retry path got the same fix
+/// in #15379).
+#[test]
+fn first_attempt_initial_baseline_outlives_detached_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository root");
+        let primary = temp.path().join("primary");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&primary).expect("create primary repository");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git fixture command");
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&primary, &["init", "--initial-branch=main"]);
+        git(&primary, &["config", "user.email", "agent@example.test"]);
+        git(&primary, &["config", "user.name", "Agent"]);
+        std::fs::write(primary.join("fixture.txt"), "base\n").expect("write base fixture");
+        git(&primary, &["add", "fixture.txt"]);
+        git(&primary, &["commit", "-m", "base"]);
+        git(
+            &primary,
+            &[
+                "remote",
+                "add",
+                "origin",
+                primary.to_str().expect("UTF-8 primary path"),
+            ],
+        );
+        git(
+            &primary,
+            &["fetch", "origin", "main:refs/remotes/origin/main"],
+        );
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                source.to_str().expect("UTF-8 source path"),
+                "HEAD",
+            ],
+        );
+        std::fs::write(source.join("fixture.txt"), "candidate\n").expect("write candidate fixture");
+
+        let roots = Arc::new(Mutex::new(Vec::new()));
+        let mut options = batch_cook_options(
+            "cook-initial-baseline-lifetime",
+            Arc::new(BaselineCapturingDetachedDispatcher {
+                roots: Arc::clone(&roots),
+            }),
+        );
+        options.identity.initial_run_id = "cook-initial-baseline-lifetime-attempt-1".to_string();
+        options.workspace.to_worktree = source.display().to_string();
+        options.workspace.source_worktree_path = Some(source.clone());
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+                ..Default::default()
+            });
+        options.identity.initial_plan.tasks[0].workspace.root = Some(source.display().to_string());
+        options.identity.initial_plan.tasks[0].metadata["cook_workspace_identity"] =
+            crate::agent_task_workspace_identity::attest_workspace(&source)
+                .expect("attest admitted source workspace");
+
+        let _ = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)));
+
+        let roots = roots.lock().expect("captured roots");
+        let baseline = roots
+            .first()
+            .expect("detached dispatch received a workspace root");
+        assert_ne!(
+            std::path::Path::new(baseline),
+            source.as_path(),
+            "a dirty first attempt dispatches a controller-owned baseline"
+        );
+        assert!(
+            std::path::Path::new(baseline).join("fixture.txt").exists(),
+            "the dispatched baseline must survive dispatch_attempt returning: {baseline}"
+        );
     });
 }
 
