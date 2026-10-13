@@ -70,7 +70,7 @@ const ACKNOWLEDGED_RAW_ARGV_FLAG_SCANS: &[(&str, &str)] = &[
         "scans past the separator: a forwarded runner flag can satisfy this predicate",
     ),
     (
-        "commands/infra/route.rs::portable_deferred_args",
+        "commands/infra/route.rs::portable_route_args",
         "scans past the separator: strips placement flags from forwarded arguments too",
     ),
     (
