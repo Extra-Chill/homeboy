@@ -1772,6 +1772,21 @@ mod tests {
     }
 
     #[test]
+    fn batch_prepare_is_controller_planning_not_a_hot_workload() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "batch-prepare",
+            "--repo",
+            "homeboy",
+            "--bundle-runner",
+            "homeboy-lab",
+            "https://github.com/Extra-Chill/homeboy/issues/8025",
+        ]);
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn verified_agent_task_cook_can_offload_its_provider_attempt() {
         let cli = Cli::parse_from([
             "homeboy",

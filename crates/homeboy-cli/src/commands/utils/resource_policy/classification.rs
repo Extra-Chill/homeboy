@@ -203,13 +203,15 @@ pub(super) fn agent_task_resource_behavior(
 /// treated as a portable, offloadable hot command. That allowed the whole
 /// coordinator to be dispatched to Lab, where it timed out before creating its
 /// local batch record/worktrees and stranded the run (#8025).
+/// A cook-batch and its `batch-prepare` step are controller-local planning:
+/// the batch only admits a workflow, and its children are ordinary Cooks with
+/// their own admission.
 pub(super) fn is_controller_owned_fanout_coordination(command: &Commands) -> bool {
     matches!(
         command,
         Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
-            }),
+            command: agent_task::AgentTaskCommand::Fanout(_)
+                | agent_task::AgentTaskCommand::BatchPrepare(_),
         })
     )
 }

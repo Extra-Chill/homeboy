@@ -6527,6 +6527,39 @@ mod tests {
         );
     }
 
+    /// `cook --wait` on an unmaterialized admission must not end while the
+    /// admission's replay is materializing the attempt: the recipe-only window
+    /// is not terminal until the admission itself is.
+    #[test]
+    fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() {
+        crate::test_support::with_isolated_home(|_| {
+            let recipe_only = (
+                json!({ "status": "recipe_only_recovery_required", "run_id": "cook-a-attempt-1" }),
+                0,
+            );
+            let poller = |run_id: &str, await_materialization: bool| StatusPoller {
+                args: StatusArgs {
+                    run_id: run_id.to_string(),
+                    ..Default::default()
+                },
+                await_materialization,
+            };
+            agent_task_lifecycle::submit_plan(
+                &AgentTaskPlan::new("cook-a", Vec::new()),
+                Some("cook-a"),
+            )
+            .expect("queued admission");
+            assert!(!poller("cook-a", true).is_terminal(&recipe_only));
+            // A plain status watch reports the recipe-only state as its answer.
+            assert!(poller("cook-a", false).is_terminal(&recipe_only));
+            // An admission with no durable record cannot be waited on.
+            assert!(poller("cook-absent", true).is_terminal(&recipe_only));
+            agent_task_lifecycle::cancel_run("cook-a", Some("admission abandoned"))
+                .expect("terminal admission");
+            assert!(poller("cook-a", true).is_terminal(&recipe_only));
+        });
+    }
+
     #[test]
     fn stale_generic_lab_replay_status_has_no_executable_action() {
         crate::test_support::with_isolated_home(|_| {
