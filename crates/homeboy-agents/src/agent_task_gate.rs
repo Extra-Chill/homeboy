@@ -872,6 +872,10 @@ pub struct AgentTaskGateLinkedExtensionProvenance {
     pub source_revision: Option<String>,
     /// Destination relative to the isolated HOME.
     pub destination: String,
+    /// Extension-declared HOME-relative runtime directories linked from the
+    /// executing host's HOME (#15836).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2499,7 +2503,15 @@ impl SelectedGateEnvironment {
             .collect();
         let destination_root = home.join(".config/homeboy/extensions");
         let report = link_runner_extensions(&host_extensions, &destination_root, &ids, &explicit)?;
+        let host_home = std::env::var_os("HOME").map(PathBuf::from);
         for linked in report {
+            let declared = homeboy_core::extension::catalog::load_extension(&linked.id)
+                .map(|manifest| manifest.isolated_home_paths)
+                .unwrap_or_default();
+            let home_paths = match host_home.as_deref() {
+                Some(host_home) => link_declared_home_paths(host_home, &home, &declared)?,
+                None => Vec::new(),
+            };
             self.report
                 .linked_extensions
                 .push(AgentTaskGateLinkedExtensionProvenance {
@@ -2512,6 +2524,7 @@ impl SelectedGateEnvironment {
                     id: linked.id,
                     source: linked.source.display().to_string(),
                     source_revision: linked.source_revision,
+                    home_paths,
                 });
         }
         Ok(())
@@ -3518,6 +3531,56 @@ fn preserve_playwright_cache(
             .preserved
             .insert(NAME.to_string(), format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"));
     }
+}
+
+/// Link extension-declared HOME-relative runtime directories from the host
+/// HOME into the isolated gate HOME (#15836). Invalid declarations and
+/// directories absent on this host are skipped; an existing destination is
+/// left untouched. Returns the linked relative paths.
+fn link_declared_home_paths(
+    host_home: &Path,
+    gate_home: &Path,
+    declared: &[String],
+) -> Result<Vec<String>> {
+    let mut linked = Vec::new();
+    for path in declared {
+        if homeboy_extension_contract_validate_home_path(path).is_err() {
+            continue;
+        }
+        let source = host_home.join(path);
+        if !source.is_dir() {
+            continue;
+        }
+        let destination = gate_home.join(path);
+        if fs::symlink_metadata(&destination).is_ok() {
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+            })?;
+        }
+        let source = source.canonicalize().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(source.display().to_string()))
+        })?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &destination).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(destination.display().to_string()))
+        })?;
+        #[cfg(not(unix))]
+        {
+            let _ = (&source, &destination);
+            continue;
+        }
+        linked.push(path.clone());
+    }
+    Ok(linked)
+}
+
+fn homeboy_extension_contract_validate_home_path(path: &str) -> Result<()> {
+    homeboy_extension_contract::manifest::validate_isolated_home_paths(std::slice::from_ref(
+        &path.to_string(),
+    ))
 }
 
 struct LinkedRunnerExtension {
@@ -9194,6 +9257,46 @@ mod tests {
         assert!(
             !report.contains("s3cret"),
             "secret values never enter the report"
+        );
+    }
+
+    /// Regression for #15836: declared HOME-relative runtime dirs are linked
+    /// into the isolated HOME; undeclared, missing and invalid paths are not.
+    #[cfg(unix)]
+    #[test]
+    fn declared_extension_home_paths_are_linked_into_isolated_home() {
+        let host = tempfile::tempdir().expect("host home");
+        std::fs::create_dir_all(host.path().join(".cache/homeboy/wp-codebox/source"))
+            .expect("cache");
+        std::fs::create_dir_all(host.path().join(".ssh")).expect("undeclared secret dir");
+        let gate = tempfile::tempdir().expect("gate home");
+        let declared = vec![
+            ".cache/homeboy/wp-codebox".to_string(),
+            ".cache/homeboy/missing".to_string(),
+            "../escape".to_string(),
+            "/abs".to_string(),
+        ];
+
+        let linked = link_declared_home_paths(host.path(), gate.path(), &declared).expect("link");
+
+        assert_eq!(linked, vec![".cache/homeboy/wp-codebox".to_string()]);
+        let dest = gate.path().join(".cache/homeboy/wp-codebox");
+        assert!(std::fs::symlink_metadata(&dest)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(dest.join("source").is_dir());
+        assert!(
+            !gate.path().join(".ssh").exists(),
+            "undeclared HOME state stays hidden"
+        );
+        assert!(!gate.path().join(".cache/homeboy/missing").exists());
+
+        // Re-linking is a no-op rather than an error.
+        assert!(
+            link_declared_home_paths(host.path(), gate.path(), &declared)
+                .expect("relink")
+                .is_empty()
         );
     }
 }
