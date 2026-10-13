@@ -69,6 +69,44 @@ impl LabGateTransport for NativeLabGateTransport {
     }
 }
 
+/// Secret identity names the admitted component's test capability declares.
+///
+/// A Lab gate runs `homeboy review test <component>` on the runner, where the
+/// extension child requires its declared `test.secret_env` (for example a test
+/// database). Declaring the names on the exec lets the runner resolve them from
+/// its own runner-deferred `secret_env` refs; no controller value crosses
+/// (#15824). Only names the component's test extension declares are requested,
+/// so unrelated runner secrets never reach a gate. An unresolvable component or
+/// declaration yields no names and the gate reports its own error, as before.
+fn admitted_component_test_secret_env_names(
+    admitted_component_id: Option<&str>,
+    cwd: &Path,
+) -> Vec<String> {
+    let Ok(component) = homeboy_core::component::resolve_effective(
+        admitted_component_id,
+        Some(&cwd.to_string_lossy()),
+        None,
+    ) else {
+        return Vec::new();
+    };
+    homeboy_core::extension::test::declared_secret_env_names(&component).unwrap_or_default()
+}
+
+fn lab_gate_exec_options(
+    command: Vec<String>,
+    run_id: &str,
+    secret_env_names: Vec<String>,
+) -> crate::RunnerExecOptions {
+    crate::RunnerExecOptions {
+        command,
+        run_id: Some(run_id.to_string()),
+        print_handoff: false,
+        detach_after_handoff: true,
+        secret_env_names,
+        ..Default::default()
+    }
+}
+
 fn execute_owned(
     cwd: &Path,
     request: &LabGateRequest,
@@ -217,13 +255,11 @@ fn execute_owned(
     }
     crate::lab::offload::materialize_lab_at_files_on_runner(&request.runner_id, &at_files)?;
     command = crate::lab_args::remap_lab_at_file_args(&command, &at_files);
-    let options = crate::RunnerExecOptions {
-        command,
-        run_id: Some(run_id.to_string()),
-        print_handoff: false,
-        detach_after_handoff: true,
-        ..Default::default()
-    };
+    let secret_env_names = admitted_component_test_secret_env_names(
+        request.environment.admitted_component_id.as_deref(),
+        cwd,
+    );
+    let options = lab_gate_exec_options(command, run_id, secret_env_names);
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);
     let (output, _) = crate::exec_request(execution)?;
@@ -523,3 +559,35 @@ pub fn register() {
 
 #[cfg(test)]
 mod native_tests;
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::*;
+
+    #[test]
+    fn lab_gate_exec_declares_component_test_secret_names() {
+        let names = vec![
+            "WP_CODEBOX_DB_HOST".to_string(),
+            "WP_CODEBOX_DB_PASSWORD".to_string(),
+        ];
+        let options =
+            lab_gate_exec_options(vec!["homeboy".to_string()], "lab-gate-x", names.clone());
+        assert_eq!(options.secret_env_names, names);
+        assert!(
+            options.env.is_empty(),
+            "secret values never travel in request env"
+        );
+        assert_eq!(options.run_id.as_deref(), Some("lab-gate-x"));
+        assert!(options.detach_after_handoff);
+    }
+
+    #[test]
+    fn unresolvable_admitted_component_declares_no_secret_names() {
+        let dir = tempfile::tempdir().expect("cwd");
+        assert!(admitted_component_test_secret_env_names(
+            Some("homeboy-15824-no-such-component"),
+            dir.path()
+        )
+        .is_empty());
+    }
+}
