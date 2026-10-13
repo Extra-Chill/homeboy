@@ -98,7 +98,10 @@ pub(crate) use coverage::reconcile_fuzz_coverage;
 pub(crate) use coverage_reconciliation_persistence::persist_fuzz_coverage_reconciliation;
 pub(crate) use result_envelope_persistence::persist_fuzz_run_result_envelope;
 pub use run_dir_writers::{persist_fuzz_execution_request, persist_fuzz_sequence_plan};
-pub use run_evidence_persistence::{persist_fuzz_run_evidence, FuzzRunEvidence};
+pub use run_evidence_persistence::{
+    fuzz_finding_records, persist_fuzz_run_evidence, FuzzRunEvidence, FuzzRunPersisted,
+    FUZZ_FINDING_TOOL,
+};
 pub(crate) use schemas::FUZZ_COVERAGE_RECONCILIATION_SCHEMA;
 pub use schemas::{
     FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA, FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_SCHEMA,

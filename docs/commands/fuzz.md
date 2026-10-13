@@ -56,11 +56,20 @@ Run one workload through the fuzz command surface:
 homeboy fuzz run --rig <rig-id> --workload <workload-id>
 ```
 
-The run output should include a persisted run id. Inspect the recorded evidence
-through `homeboy runs` instead of opening temporary runner paths directly:
+The run output should include a persisted run id. Fuzz runs use the same
+observation lifecycle as bench, trace, test, and lint: the `fuzz` run row is
+recorded as `running` when the workload starts and is terminalized with the
+campaign verdict (or as `error` when execution fails before evidence is
+recorded). `--run-id` keeps a caller-owned stable id; running it again restarts
+that row as a fresh attempt. Campaign findings are also recorded in the shared
+findings store (tool `fuzz`), each carrying its typed
+`homeboy/fuzz-finding/v1` envelope as `metadata.fuzz_finding`. Inspect the
+recorded evidence through `homeboy runs` instead of opening temporary runner
+paths directly:
 
 ```bash
 homeboy runs show <run-id>
+homeboy runs findings <run-id> --tool fuzz
 homeboy runs artifact get <run-id> <artifact-id> --output <path>
 homeboy fuzz replay --run-id <run-id> --case-id <case-id> --dry-run
 ```
@@ -205,7 +214,9 @@ default is still planning-only: it emits structured entries and canonical
 Pass `--execute` or use `homeboy fuzz run-campaign` to execute the same entries
 sequentially through the existing `fuzz run` primitive. Pass `--dry-run` to emit
 the structured campaign dispatch records without execution, and `--resume` to
-skip entries whose planned run id is already persisted. The manifest is
+skip entries whose planned run id is already persisted. An entry whose run row
+was left `running` by an interrupted attempt (its owner process is gone) is
+re-run rather than skipped. The manifest is
 product-neutral and may contain `id`, `workloads`,
 `workload_ids`, `lab_runner`, and `required_artifacts`; product-specific details
 belong in manifest metadata that downstream runners consume, not in Homeboy core.

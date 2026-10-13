@@ -253,7 +253,6 @@ pub mod runner;
 pub mod runs;
 pub(crate) mod runs_proof_summary;
 pub(crate) mod runs_summary;
-pub mod schedule;
 pub mod self_cmd;
 pub mod server;
 pub mod source;

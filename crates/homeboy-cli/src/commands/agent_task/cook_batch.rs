@@ -62,6 +62,12 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
             None,
         ));
     }
+    // Every child shares these gates and the Cook spine rejects a reviewer-
+    // unsafe one; reject it here, file gates included, before any wave work
+    // exists (#15672).
+    let mut visible = args.gates.clone();
+    visible.snapshot_file_inputs()?;
+    homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)?;
     if let CookBatchJoin::MinSucceeded(min) = args.join {
         if min as usize > children.len() {
             return Err(Error::validation_invalid_argument(
@@ -796,6 +802,39 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("--bundle-runner")));
+    }
+
+    /// #15672: a public `--verify-file` gate naming a machine-local path is
+    /// rejected at batch admission, naming the token, before any wave exists.
+    #[test]
+    fn reviewer_unsafe_verify_file_is_rejected_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("gate.sh");
+        std::fs::write(&gate, "cargo test > /tmp/be-canonical-steps.$$\n").unwrap();
+        let gate = gate.display().to_string();
+        let mut argv = vec!["--repo", "scratch", "--verify-file", gate.as_str()];
+        argv.extend(ISSUES);
+        let error = cook_batch(parse(&argv), Placement::Local).expect_err("unsafe gate");
+        let problem = error.details["problem"].as_str().expect("problem text");
+        assert!(
+            problem.contains("`/tmp/be-canonical-steps.$$` (machine-local absolute path)"),
+            "{problem}"
+        );
+
+        let mut argv = vec![
+            "--repo",
+            "scratch",
+            "--verify",
+            "cargo test",
+            "--private-verify",
+            "check http://localhost:5432",
+        ];
+        argv.extend(ISSUES);
+        let args = parse(&argv);
+        let mut visible = args.gates.clone();
+        visible.snapshot_file_inputs().unwrap();
+        homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)
+            .expect("a private gate is never published to reviewers");
     }
 
     #[test]

@@ -408,12 +408,7 @@ fn wait_for_daemon_with_lifetime(
             let idle_jobs =
                 super::JobStore::active_count_at_path(state_path.with_file_name("jobs.json"))
                     .is_ok_and(|count| count == 0);
-            let idle_schedules = crate::schedule::list_health(chrono::Utc::now())
-                .is_ok_and(|schedules| schedules.iter().all(|schedule| !schedule.running));
-            if !idle_jobs
-                || !idle_schedules
-                || launcher.as_ref().is_some_and(|launcher| launcher.is_live())
-            {
+            if !idle_jobs || launcher.as_ref().is_some_and(|launcher| launcher.is_live()) {
                 idle.touch();
             } else if idle.expired(draining)
                 || idle.replaced_and_settled(super::lifetime::running_executable_replaced())

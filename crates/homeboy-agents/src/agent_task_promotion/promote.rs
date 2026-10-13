@@ -1035,12 +1035,19 @@ fn promote_with_provider_and_checkpoint_internal(
         let worktree_path = options.source_worktree_path.as_deref();
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
-        let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(&options, worktree_path, None, None, observation_store)?
-        } else {
-            PromotionGateRun::without_gates(options.dry_run)
+        // Homeboy proved this attempt changed nothing. There is no candidate:
+        // gating the unchanged tree would only report the destination's prior
+        // state as this attempt's verdict, and an empty candidate must never
+        // read as green (#15294).
+        let unchanged_attempt = outcome.is_verified_unchanged_attempt();
+        let gates = match worktree_path {
+            Some(worktree_path) if !unchanged_attempt => {
+                run_promotion_gates(&options, worktree_path, None, None, observation_store)?
+            }
+            _ => PromotionGateRun::without_gates(options.dry_run),
         };
         let status = match gates.status {
+            _ if unchanged_attempt => AgentTaskPromotionStatus::NoChanges,
             AgentTaskPromotionStatus::Applied => AgentTaskPromotionStatus::VerifiedNoChanges,
             AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionStatus::NoChangesGateFailed,
             _ => AgentTaskPromotionStatus::NoChanges,
@@ -1061,8 +1068,11 @@ fn promote_with_provider_and_checkpoint_internal(
             .map(|(path, base)| capture_declared_base(path, Some(base)))
             .transpose()?
             .flatten();
+        // Commits already on the destination are not this attempt's candidate
+        // when Homeboy proved the attempt itself changed nothing.
         let changed_files = verified_base
             .as_ref()
+            .filter(|_| !unchanged_attempt)
             .map(|base| {
                 git_output(
                     worktree_path.expect("verified base requires a worktree path"),

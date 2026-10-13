@@ -176,31 +176,37 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
         std::fs::write(&results_path, "{}").expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
-        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: None,
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        let persisted = persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: None,
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run")
-        .run
-        .expect("run record");
+        .run;
 
         assert_eq!(persisted.id, "proof-1");
         assert_eq!(persisted.kind, "fuzz");
@@ -323,28 +329,35 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
 
         std::fs::write(&results_path, "{}").expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
-        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: Some(&request_path),
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: None,
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: None,
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
@@ -610,28 +623,35 @@ fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
             persisted_plan_path.to_string_lossy().to_string()
         )));
 
-        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: Some(&request_path),
-            sequence_plan_path: Some(&persisted_plan_path),
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: None,
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: Some(&persisted_plan_path),
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: Some(&persisted_plan_path),
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: None,
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run");
 
         let store = ObservationStore::open_initialized().expect("store");
@@ -712,28 +732,35 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
         )
         .expect("results file");
 
-        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: Some(&request_path),
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: Some(&campaign),
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: Some(&request_path),
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: Some(&campaign),
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run");
 
         let store = ObservationStore::open_initialized().expect("store");
@@ -789,31 +816,37 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
         std::fs::write(&results_path, "{}").expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
-        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: None,
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        let persisted = persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: None,
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run")
-        .run
-        .expect("run record");
+        .run;
 
         assert!(persisted.id.starts_with("fuzz-"));
         let store = ObservationStore::open_initialized().expect("store");
@@ -842,28 +875,35 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
         .expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
-        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "passed",
-            exit_code: 0,
-            success: true,
-            args: &args,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: Some(&campaign),
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        let persisted = persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "passed",
+                exit_code: 0,
+                success: true,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: Some(&campaign),
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::satisfied(),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run");
 
         assert_eq!(persisted.evidence_refs.len(), 1);
@@ -1418,36 +1458,42 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
         .expect("results file");
         std::fs::create_dir_all(&artifacts_dir).expect("artifacts dir");
 
-        let persisted = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: args.run_id.as_deref(),
-            component_id: "component-a",
-            rig_id: args.rig.as_deref(),
-            rig_package: None,
-            workload_id: args.workload_id.as_deref(),
-            workload_path: Some("/tmp/fuzz/parser.json"),
-            status: "failed",
-            exit_code: 1,
-            success: false,
-            args: &args,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: None,
-            expected_metric_gates: &[],
-            evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::from_violations(vec![
-                homeboy::fuzz::FuzzEvidenceViolation::new(
-                    homeboy::fuzz::FuzzEvidenceViolationCode::ResultsUnparseable,
-                    "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
-                )
-            ]),
-            component_revision: None,
-            postprocess: &[],
-            payloads: &[],
-        })
+        let persisted = persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: args.run_id.as_deref(),
+                component_id: "component-a",
+                rig_id: args.rig.as_deref(),
+                rig_package: None,
+                workload_id: args.workload_id.as_deref(),
+                workload_path: Some("/tmp/fuzz/parser.json"),
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                component_revision: None,
+            },
+            FuzzRunEvidenceInput {
+                status: "failed",
+                exit_code: 1,
+                success: false,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: None,
+                expected_metric_gates: &[],
+                evidence_contract: &homeboy::fuzz::FuzzEvidenceContract::from_violations(vec![
+                    homeboy::fuzz::FuzzEvidenceViolation::new(
+                        homeboy::fuzz::FuzzEvidenceViolationCode::ResultsUnparseable,
+                        "fuzz results schema must be homeboy/fuzz-campaign/v1, got unsupported/fuzz-result/v1",
+                    )
+                ]),
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist fuzz run")
-        .run
-        .expect("run record");
+        .run;
 
         assert_eq!(persisted.id, "proof-bad-results");
         assert_eq!(persisted.status, "fail");
@@ -2088,28 +2134,35 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
         let contract = fuzz_evidence_contract(None, None, None, &artifact_refs);
         let args = fuzz_run_args_with_run_id("evidence-contract-run");
 
-        persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-            run_id: Some("evidence-contract-run"),
-            component_id: "component-a",
-            rig_id: Some("package-fuzz"),
-            rig_package: None,
-            workload_id: Some("parser"),
-            workload_path: None,
-            status: "failed",
-            exit_code: 1,
-            success: false,
-            args: &args,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            results_path: &results_path,
-            artifacts_dir: &artifacts_dir,
-            results: Some(&campaign),
-            expected_metric_gates: &[],
-            evidence_contract: &contract,
-            component_revision: Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0"),
-            postprocess: &[],
-            payloads: &[],
-        })
+        persist_observed_fuzz_run(
+            FuzzRunObservationStart {
+                run_id: Some("evidence-contract-run"),
+                component_id: "component-a",
+                rig_id: Some("package-fuzz"),
+                rig_package: None,
+                workload_id: Some("parser"),
+                workload_path: None,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                component_revision: Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0"),
+            },
+            FuzzRunEvidenceInput {
+                status: "failed",
+                exit_code: 1,
+                success: false,
+                args: &args,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                results_path: &results_path,
+                artifacts_dir: &artifacts_dir,
+                results: Some(&campaign),
+                expected_metric_gates: &[],
+                evidence_contract: &contract,
+                postprocess: &[],
+                payloads: &[],
+            },
+        )
         .expect("persist evidence");
 
         let store = ObservationStore::open_initialized().expect("store");
@@ -2149,6 +2202,25 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
         assert!(run.metadata_json.get("results_error").is_none());
         assert!(run.metadata_json.get("missing_artifact_refs").is_none());
 
+        // Campaign findings land in the shared findings store, carrying the
+        // typed fuzz finding envelope as their payload.
+        let findings = store
+            .list_findings(homeboy::core::observation::FindingListFilter {
+                run_id: Some("evidence-contract-run".to_string()),
+                ..Default::default()
+            })
+            .expect("findings");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].tool, homeboy::fuzz::FUZZ_FINDING_TOOL);
+        assert_eq!(findings[0].severity.as_deref(), Some("high"));
+        assert_eq!(findings[0].message, "panic");
+        assert_eq!(findings[0].fingerprint.as_deref(), Some("finding-1"));
+        assert_eq!(
+            findings[0].metadata_json["fuzz_finding"]["schema"],
+            homeboy::fuzz::FUZZ_FINDING_SCHEMA
+        );
+        assert_eq!(findings[0].metadata_json["fuzz_finding"]["status"], "open");
+
         // And the reviewer projection reads back the separated verdicts.
         let proof = homeboy::fuzz::derive_fuzz_proof(&run)
             .expect("valid evidence")
@@ -2172,26 +2244,53 @@ fn persisted_fuzz_evidence_records_the_classified_contract_and_result_totals() {
             "product_finding"
         );
 
-        let mut invalid = run.clone();
-        invalid.id = "invalid-evidence-producer".to_string();
-        invalid.metadata_json["evidence_contract"]["complete"] = serde_json::json!(true);
-        let error = homeboy::fuzz::persist_fuzz_run_evidence(homeboy::fuzz::FuzzRunEvidence {
-            run: invalid,
-            results_path: &results_path,
-            execution_request_path: None,
-            sequence_plan_path: None,
-            artifacts_dir: &artifacts_dir,
-            campaign: None,
-            envelope: None,
-            postprocess: Vec::new(),
-            payloads: &[],
-        })
+        // A producer contradicting its own evidence contract never reaches the
+        // store: the running observation is terminalized as an error that
+        // carries only the rejection, with no contract and no evidence rows.
+        let mut contradictory = run.metadata_json.clone();
+        contradictory["evidence_contract"]["complete"] = serde_json::json!(true);
+        let invalid_observation =
+            homeboy::core::observation::ActiveObservation::start_with_stable_id(
+                homeboy::core::observation::NewRunRecord::builder("fuzz")
+                    .component_id("component-a")
+                    .build(),
+                "invalid-evidence-producer",
+            )
+            .expect("start invalid producer run");
+        let error = homeboy::fuzz::persist_fuzz_run_evidence(
+            &invalid_observation,
+            homeboy::fuzz::FuzzRunEvidence {
+                status: homeboy::core::observation::RunStatus::Pass,
+                metadata: contradictory,
+                results_path: &results_path,
+                execution_request_path: None,
+                sequence_plan_path: None,
+                artifacts_dir: &artifacts_dir,
+                campaign: Some(&campaign),
+                envelope: None,
+                postprocess: Vec::new(),
+                payloads: &[],
+            },
+        )
         .expect_err("contradictory evidence must not persist");
         assert_eq!(error.details["valid"], false);
-        assert!(store
+        let invalid_row = store
             .get_run("invalid-evidence-producer")
-            .expect("no invalid row")
-            .is_none());
+            .expect("read invalid row")
+            .expect("terminalized invalid row");
+        assert_eq!(invalid_row.status, "error");
+        assert!(invalid_row.metadata_json.get("evidence_contract").is_none());
+        assert!(store
+            .list_artifacts("invalid-evidence-producer")
+            .expect("artifacts")
+            .is_empty());
+        assert!(store
+            .list_findings(homeboy::core::observation::FindingListFilter {
+                run_id: Some("invalid-evidence-producer".to_string()),
+                ..Default::default()
+            })
+            .expect("findings")
+            .is_empty());
 
         let mut unstructured = run.clone();
         unstructured.id = "unstructured-evidence-run".to_string();

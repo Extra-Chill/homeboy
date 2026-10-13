@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
     deploy, extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner,
-    runs, runtime, schedule, self_cmd, server, source, ssh, status, trace, tunnel, upgrade,
-    workflow, worktree,
+    runs, runtime, self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow,
+    worktree,
 };
 
 mod argument_provenance;
@@ -208,8 +208,6 @@ pub enum Commands {
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
     Extension(extension::ExtensionArgs),
-    /// Declare homeboy commands that run on a cadence
-    Schedule(schedule::ScheduleArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
     /// Remove declared reconstructable artifacts from managed worktrees

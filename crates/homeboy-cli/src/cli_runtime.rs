@@ -1034,6 +1034,9 @@ fn register_startup_providers_after_reconcile(
     // A workflow instance is a daemon job that submits `step` jobs and
     // evaluates gates; it never runs work itself.
     homeboy::core::daemon::workflow_job::register_workflow_job_driver();
+    // The daemon registers built-in cadences (`homeboy.retention`) through
+    // the same admission the CLI uses.
+    crate::commands::workflow::register_builtin_cadence_factory();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when

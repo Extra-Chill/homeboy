@@ -1803,6 +1803,15 @@ pub(crate) fn project_cook_observation(
     {
         return projected;
     }
+    // The provider finished, but the Cook ended without a change. There is no
+    // candidate to recover, so it must not read as `candidate_recoverable`
+    // (#15294).
+    if terminal["phase"] == "terminal"
+        && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
+    {
+        projected.state = AgentTaskRunState::PartialFailure;
+        return projected;
+    }
     let recipes = CookRecipeStore::new(store.roots().clone());
     let recipe = recipes.load_recipe(cook_id).ok();
     let verified =
@@ -2986,10 +2995,67 @@ fn cook_remediation_same_provider(
 ) -> Option<bool> {
     // A gate result authenticates the durable candidate and identifies this as
     // same-provider gate remediation, even when a timed-out provider omitted
-    // its terminal executor identity.
-    promotion.status.gate_failed().then_some(true).or_else(|| {
-        terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
-    })
+    // its terminal executor identity. A Homeboy-verified unchanged attempt is
+    // likewise authenticated by Homeboy's own checkout proof: its follow-up
+    // re-runs the same task, so it is a same-provider retry (#15294).
+    (promotion.status.gate_failed() || no_change_remediation(promotion, aggregate))
+        .then_some(true)
+        .or_else(|| {
+            terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
+        })
+}
+
+const NO_CHANGE_PROVIDER_MESSAGE_LIMIT: usize = 1_000;
+
+/// The operator-facing reason a Cook stopped without a change. It names the
+/// no-change outcome and quotes the provider's own final message, so an empty
+/// attempt reads as "the provider changed nothing" rather than as a gate,
+/// review-form, or ancestry failure (#15294).
+fn no_change_stop_reason(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    review_form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
+    attempt: u32,
+    attempt_limit: u32,
+) -> String {
+    let outcome = if no_change_remediation(promotion, aggregate) {
+        format!(
+            "attempt {attempt} of {attempt_limit} produced no change: the provider finished without editing the workspace and Homeboy verified the attempt checkout is unchanged from its base, so no gates ran and nothing was promoted"
+        )
+    } else {
+        format!(
+            "attempt {attempt} of {attempt_limit} produced no changed files; the task still requires a change"
+        )
+    };
+    let message = review_form
+        .map(|form| form.summary.trim())
+        .filter(|summary| !summary.is_empty())
+        .map(|summary| {
+            let mut bounded: String = summary
+                .chars()
+                .take(NO_CHANGE_PROVIDER_MESSAGE_LIMIT)
+                .collect();
+            if bounded.len() < summary.len() {
+                bounded.push('…');
+            }
+            format!("provider's final message: {bounded}")
+        })
+        .unwrap_or_else(|| "the provider returned no final message".to_string());
+    format!("{outcome}; {message}")
+}
+
+/// Whether this promotion records an attempt Homeboy proved changed nothing.
+fn no_change_remediation(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> bool {
+    promotion.status == AgentTaskPromotionStatus::NoChanges
+        && promotion.changed_files.is_empty()
+        && aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == promotion.source.task_id)
+            .is_some_and(crate::agent_task::AgentTaskOutcome::is_verified_unchanged_attempt)
 }
 
 fn follow_up_budget_scope(
@@ -5320,6 +5386,43 @@ fn rooted_status(
     .record)
 }
 
+/// Reviewers re-run a Cook's visible gates, so at least one `--verify` gate
+/// must yield a reviewer-safe command. The rule is static on the gate text:
+/// admission and preview call this before any workspace or provider work, and
+/// the spine re-checks it for every Cook it runs. The error names each rejected
+/// token and the rule it hit.
+pub fn validate_reviewer_visible_gates(verify: &[String], cook_id: Option<&str>) -> Result<()> {
+    if verify.is_empty()
+        || verify.iter().any(|command| {
+            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
+        })
+    {
+        return Ok(());
+    }
+    let mut rejected: Vec<String> = Vec::new();
+    for command in verify {
+        for unsafe_token in crate::agent_task_review_dossier::reviewer_unsafe_tokens(command) {
+            let entry = format!("`{}` ({})", unsafe_token.token, unsafe_token.rule);
+            if !rejected.contains(&entry) {
+                rejected.push(entry);
+            }
+        }
+    }
+    let rejected = if rejected.is_empty() {
+        "the gate command is empty".to_string()
+    } else {
+        format!("rejected tokens: {}", rejected.join(", "))
+    };
+    Err(Error::validation_invalid_argument(
+        "verification",
+        format!(
+            "Cook has no visible gate that can produce a reviewer-safe command; {rejected}. Move static machine-local values into gate environment configuration (--gate-env), or move checks that need runtime-computed local values into --private-verify, before provider work"
+        ),
+        cook_id.map(str::to_string),
+        None,
+    ))
+}
+
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
@@ -5349,18 +5452,7 @@ fn run_cook_spine(
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     project_attempt_prompt_template(&mut options);
-    if !options.gates.verify.is_empty()
-        && !options.gates.verify.iter().any(|command| {
-            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
-        })
-    {
-        return Err(Error::validation_invalid_argument(
-            "verification",
-            "Cook has no visible gate that can produce a reviewer-safe command; move machine-local values into gate environment configuration before provider work",
-            Some(options.identity.cook_id.clone()),
-            None,
-        ));
-    }
+    validate_reviewer_visible_gates(&options.gates.verify, Some(&options.identity.cook_id))?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -7871,11 +7963,13 @@ fn run_cook_spine(
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
-                    stop_reason: Some(
-                        "cook completed provider execution but produced no changed \
-     files; task likely still requires review or retry"
-                            .to_string(),
-                    ),
+                    stop_reason: Some(no_change_stop_reason(
+                        &promotion,
+                        &aggregate,
+                        review_form.as_ref(),
+                        attempt,
+                        attempt_limit,
+                    )),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));

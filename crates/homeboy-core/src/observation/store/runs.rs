@@ -487,6 +487,23 @@ impl ObservationStore {
         self.start_run_with_context_id_and_mission(run, context, Some(id), None)
     }
 
+    /// Start a run under a caller-owned, stable identifier, replacing an earlier
+    /// attempt recorded under the same id.
+    ///
+    /// Workloads such as fuzz let the operator choose the run id (`--run-id`) so
+    /// campaigns can address a run deterministically and re-run it. A re-run is
+    /// a fresh attempt: the row returns to `running` with the new command
+    /// context, and findings recorded by the earlier attempt are cleared so the
+    /// findings store describes only the attempt that owns the row. The id is
+    /// never taken over from a run of another kind.
+    pub fn restart_run_with_id(&self, run: NewRunRecord, id: String) -> Result<RunRecord> {
+        let context = run
+            .run_context
+            .clone()
+            .with_missing_from(RunContext::subprocess_compatibility_from_env());
+        self.insert_run_record(run, context, Some(id), None, true)
+    }
+
     /// Atomically start a run and bind it to its canonical mission.
     pub fn start_run_in_mission(&self, run: NewRunRecord, mission_id: &str) -> Result<RunRecord> {
         let context = run
@@ -772,10 +789,24 @@ impl ObservationStore {
 
     fn start_run_with_context_id_and_mission(
         &self,
+        run: NewRunRecord,
+        context: RunContext,
+        requested_id: Option<String>,
+        mission_id: Option<&str>,
+    ) -> Result<RunRecord> {
+        self.insert_run_record(run, context, requested_id, mission_id, false)
+    }
+
+    /// Insert a `running` run row. With `restart`, an existing row under the
+    /// same id and kind is reset to a fresh attempt instead of conflicting, and
+    /// the findings recorded by the earlier attempt are cleared.
+    fn insert_run_record(
+        &self,
         mut run: NewRunRecord,
         context: RunContext,
         requested_id: Option<String>,
         mission_id: Option<&str>,
+        restart: bool,
     ) -> Result<RunRecord> {
         if let Some(route) = crate::notification_route::current() {
             route.insert_into_metadata(&mut run.metadata_json);
@@ -790,10 +821,29 @@ impl ObservationStore {
         let metadata_json =
             serialize_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
 
-        execute_with_retry("insert run record", || {
+        let on_conflict = if restart {
+            r#"
+                ON CONFLICT(id) DO UPDATE SET
+                    component_id = excluded.component_id,
+                    started_at = excluded.started_at,
+                    finished_at = NULL,
+                    status = excluded.status,
+                    command = excluded.command,
+                    cwd = excluded.cwd,
+                    homeboy_version = excluded.homeboy_version,
+                    git_sha = excluded.git_sha,
+                    rig_id = excluded.rig_id,
+                    metadata_json = excluded.metadata_json
+                WHERE runs.kind = excluded.kind
+            "#
+        } else {
+            ""
+        };
+        let applied = execute_with_retry("insert run record", || {
             let transaction = self.connection.unchecked_transaction()?;
-            transaction.execute(
-                r#"
+            let rows = transaction.execute(
+                &format!(
+                    r#"
                 INSERT INTO runs(
                     id,
                     kind,
@@ -807,7 +857,9 @@ impl ObservationStore {
                     rig_id,
                     metadata_json
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                "#,
+                {on_conflict}
+                "#
+                ),
                 params![
                     id,
                     run.kind,
@@ -833,8 +885,23 @@ impl ObservationStore {
                     params![mission_id, id],
                 )?;
             }
-            transaction.commit()
+            if restart && rows > 0 {
+                transaction.execute("DELETE FROM findings WHERE run_id = ?1", params![id])?;
+            }
+            transaction.commit()?;
+            Ok(rows > 0)
         })?;
+        if !applied {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                format!(
+                    "run id already belongs to a run that is not a {} run",
+                    run.kind
+                ),
+                Some(id),
+                None,
+            ));
+        }
 
         self.get_run(&id)?.ok_or_else(|| {
             Error::internal_unexpected(format!(
@@ -2556,6 +2623,81 @@ mod tests {
                 "running"
             );
             assert!(store.is_notification_delivered("already-failed").unwrap());
+        });
+    }
+
+    #[test]
+    fn restart_run_with_id_replaces_an_earlier_attempt_of_the_same_kind_only() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let first = store
+                .restart_run_with_id(
+                    NewRunRecord::builder("fuzz")
+                        .component_id("component-a")
+                        .command("homeboy fuzz run component-a --run-id stable")
+                        .metadata(serde_json::json!({ "attempt": 1 }))
+                        .build(),
+                    "stable".to_string(),
+                )
+                .expect("first attempt");
+            assert_eq!(first.status, "running");
+            store
+                .finish_run("stable", RunStatus::Fail, None)
+                .expect("finish first attempt");
+            store
+                .record_findings(&[NewFindingRecord {
+                    run_id: "stable".to_string(),
+                    tool: "fuzz".to_string(),
+                    rule: None,
+                    file: None,
+                    line: None,
+                    severity: Some("high".to_string()),
+                    fingerprint: Some("first".to_string()),
+                    message: "first attempt finding".to_string(),
+                    fixable: None,
+                    metadata_json: serde_json::json!({}),
+                }])
+                .expect("first attempt finding");
+
+            let second = store
+                .restart_run_with_id(
+                    NewRunRecord::builder("fuzz")
+                        .component_id("component-a")
+                        .command("homeboy fuzz run component-a --run-id stable --seed 2")
+                        .metadata(serde_json::json!({ "attempt": 2 }))
+                        .build(),
+                    "stable".to_string(),
+                )
+                .expect("second attempt");
+            assert_eq!(second.status, "running");
+            assert!(second.finished_at.is_none());
+            assert_eq!(second.metadata_json["attempt"], 2);
+            assert!(second
+                .command
+                .as_deref()
+                .is_some_and(|command| command.contains("--seed 2")));
+            assert!(store
+                .list_findings(FindingListFilter {
+                    run_id: Some("stable".to_string()),
+                    ..FindingListFilter::default()
+                })
+                .expect("findings")
+                .is_empty());
+
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("bench").build(),
+                    "foreign".to_string(),
+                )
+                .expect("foreign run");
+            let error = store
+                .restart_run_with_id(NewRunRecord::builder("fuzz").build(), "foreign".to_string())
+                .expect_err("a run id of another kind is never taken over");
+            assert_eq!(error.details["field"], "run_id");
+            assert_eq!(
+                store.get_run("foreign").expect("read").expect("row").kind,
+                "bench"
+            );
         });
     }
 

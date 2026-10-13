@@ -1417,6 +1417,21 @@ mod tests {
 
         preflight_dispatch_provider_admission(&request, &catalog)
             .expect("the generic path admits the reachable fallback");
+
+        // The same unready primary, pinned by an acknowledged explicit model,
+        // fails admission instead of binding the configured fallback
+        // (#15837, #15409, #15018).
+        let mut pinned = request;
+        pinned.model = Some("pinned-model".to_string());
+        pinned.core.acknowledge_model_override = true;
+        let error = preflight_dispatch_provider_admission(&pinned, &catalog)
+            .expect_err("a pinned model is never substituted by a rotation entry");
+        assert!(
+            format!("{} {:?} {}", error.message, error.hints, error.details).contains(&required),
+            "the failure names the pinned route's missing credential: {} {}",
+            error.message,
+            error.details
+        );
     }
 
     #[test]

@@ -32,7 +32,65 @@ pub struct WorkflowDefinition {
     pub budget: Option<Budget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterate: Option<Iterate>,
+    /// Optional cadence: `workflow run` registers the definition with the
+    /// daemon, which admits one instance per due slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every: Option<Every>,
     pub steps: Vec<StepDefinition>,
+}
+
+/// The shortest cadence: the daemon admits due cadences once per
+/// orchestration tick, so a shorter interval could not be honoured.
+pub const MIN_EVERY_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Every {
+    /// Time between due slots, for example `1h` or `24h`.
+    pub interval: String,
+    /// UTC time of day (`HH:MM` or `HH:MMZ`) the slot grid is anchored to.
+    /// Without it the grid starts when the cadence is registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// A slot that comes due while the previous instance is still running is
+    /// skipped. This is the only overlap policy.
+    #[serde(default)]
+    pub overlap: Overlap,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Overlap {
+    #[default]
+    Skip,
+}
+
+impl Every {
+    pub fn interval(&self) -> Result<Duration> {
+        let interval = crate::duration::parse_duration("every.interval", &self.interval)?;
+        if interval < MIN_EVERY_INTERVAL {
+            return Err(invalid("every.interval", "a cadence is at least 1m"));
+        }
+        Ok(interval)
+    }
+
+    /// Offset of `at` from UTC midnight.
+    pub fn at_offset(&self) -> Result<Option<Duration>> {
+        let Some(at) = &self.at else {
+            return Ok(None);
+        };
+        let clock = at.strip_suffix('Z').unwrap_or(at);
+        let parsed = clock
+            .split_once(':')
+            .filter(|(hours, minutes)| hours.len() == 2 && minutes.len() == 2)
+            .and_then(|(hours, minutes)| {
+                Some((hours.parse::<u64>().ok()?, minutes.parse::<u64>().ok()?))
+            })
+            .filter(|(hours, minutes)| *hours < 24 && *minutes < 60);
+        let (hours, minutes) = parsed
+            .ok_or_else(|| invalid("every.at", format!("`{at}` is not a UTC time like 03:00Z")))?;
+        Ok(Some(Duration::from_secs(hours * 3600 + minutes * 60)))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -276,7 +334,7 @@ fn collect_strings<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
 }
 
 /// Features of the workflow format that a later Homeboy release implements.
-const LATER_TOP_LEVEL: &[(&str, &str)] = &[("every", "`every` cadence"), ("notify", "`notify`")];
+const LATER_TOP_LEVEL: &[(&str, &str)] = &[("notify", "`notify`")];
 
 impl WorkflowDefinition {
     /// Parse a definition without validating it.
@@ -307,11 +365,15 @@ impl WorkflowDefinition {
                 format!("workflow schema must be `{WORKFLOW_SCHEMA}`"),
             ));
         }
-        if !template::valid_name(&self.id) {
+        if !valid_workflow_id(&self.id) {
             return Err(invalid(
                 "id",
-                "workflow id must be non-empty letters, digits, `_` or `-`",
+                "workflow id must be non-empty letters, digits, `_`, `-` or `.`",
             ));
+        }
+        if let Some(every) = &self.every {
+            every.interval()?;
+            every.at_offset()?;
         }
         for name in self.inputs.keys() {
             if !template::valid_name(name) {
@@ -685,6 +747,13 @@ impl WorkflowDefinition {
     }
 }
 
+/// A workflow id also names its registry file and its built-ins
+/// (`homeboy.retention`), so it may contain `.`; step and input names may not,
+/// because templates use `.` as a separator.
+fn valid_workflow_id(id: &str) -> bool {
+    !id.starts_with('.') && template::valid_name(&id.replace('.', "_"))
+}
+
 fn cook_value_is_valid(value: &Value) -> bool {
     match value {
         Value::String(_) | Value::Number(_) | Value::Bool(_) => true,
@@ -810,7 +879,17 @@ mod tests {
                 "cannot be retried",
             ),
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
-            (|v| v["every"] = json!({"interval": "24h"}), "not supported"),
+            (|v| v["notify"] = json!({"on": ["failed"]}), "not supported"),
+            (|v| v["every"] = json!({"interval": "30s"}), "at least 1m"),
+            (
+                |v| v["every"] = json!({"interval": "1h", "at": "25:00Z"}),
+                "not a UTC time",
+            ),
+            (
+                |v| v["every"] = json!({"interval": "1h", "overlap": "allow"}),
+                "unknown variant",
+            ),
+            (|v| v["id"] = json!(".hidden"), "workflow id"),
             (
                 |v| v["steps"][0]["max_parallel"] = json!(2),
                 "apply only to a `foreach` step",
@@ -898,6 +977,21 @@ mod tests {
         assert!(Join::All.passes(3, 3) && !Join::All.passes(2, 3));
         assert!(Join::Any.passes(1, 3) && !Join::Any.passes(0, 3));
         assert!(Join::MinSucceeded(2).passes(2, 3) && !Join::MinSucceeded(2).passes(1, 3));
+    }
+
+    #[test]
+    fn every_parses_its_interval_and_utc_anchor() {
+        let mut value = base();
+        value["id"] = json!("homeboy.retention");
+        value["every"] = json!({"interval": "2h", "at": "03:30Z", "overlap": "skip"});
+        let definition = definition(value).unwrap();
+        let every = definition.every.as_ref().unwrap();
+        assert_eq!(every.interval().unwrap(), Duration::from_secs(7200));
+        assert_eq!(
+            every.at_offset().unwrap(),
+            Some(Duration::from_secs(3 * 3600 + 30 * 60))
+        );
+        assert_eq!(every.overlap, Overlap::Skip);
     }
 
     #[test]

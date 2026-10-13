@@ -1123,6 +1123,7 @@ fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit(
             assert!(
                 active_status
                     .safety
+                    .expect("active record safety")
                     .reasons
                     .iter()
                     .any(|reason| reason.contains("live current working directory")),
@@ -1293,6 +1294,142 @@ fn create_returns_existing_matching_task_worktree_idempotently() {
         assert_eq!(existing.record, created.record);
         assert!(created.reconciliation.is_none());
         assert!(existing.reconciliation.is_none());
+    });
+}
+
+fn local_branch_present(source: &Path, branch: &str) -> bool {
+    git::run_git(
+        source,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        "git show-ref",
+    )
+    .is_ok()
+}
+
+fn remove_for_recreate(id: &str, cleanup_branch: bool) -> WorktreeRemoveOutput {
+    remove(WorktreeRemoveOptions {
+        id: id.to_string(),
+        force: true,
+        cleanup_branch,
+        allow_unmerged_branch: false,
+        reason: Some("recreate fixture".to_string()),
+        reaper: None,
+    })
+    .expect("remove task worktree")
+}
+
+fn assert_superseded_recreate(
+    removed: &TaskWorktreeRecord,
+    recreated: WorktreeCreateOutput,
+    branch: &str,
+) {
+    assert_eq!(recreated.record.id, removed.id);
+    assert_eq!(recreated.record.state, TaskWorktreeState::Active);
+    assert!(
+        recreated.record.lifecycle_revision > removed.lifecycle_revision,
+        "successor revision must stay monotonic past the removed record"
+    );
+    let reconciliation = recreated.reconciliation.expect("supersede evidence");
+    assert_eq!(reconciliation.action, WorktreeCreateAction::Superseded);
+    assert_eq!(reconciliation.previous.git_registration, "removed");
+    assert_eq!(reconciliation.current.git_registration, "registered");
+    let path = PathBuf::from(&recreated.record.worktree_path);
+    assert!(path.exists());
+    assert_eq!(
+        git::run_git(&path, &["branch", "--show-current"], "git branch")
+            .unwrap()
+            .trim(),
+        branch
+    );
+    let status = status(&removed.id).expect("status of recreated handle");
+    assert_eq!(status.record.state, TaskWorktreeState::Active);
+}
+
+#[test]
+fn create_supersedes_a_removed_record_whose_path_and_branch_are_gone() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "supersede-fixture");
+        let created = create(options.clone()).expect("create task worktree");
+        let removed = remove_for_recreate(&created.record.id, true);
+        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+        assert!(!PathBuf::from(&removed.record.worktree_path).exists());
+        assert!(!local_branch_present(&source, &options.branch));
+
+        let recreated = create(options).expect("re-create the removed handle");
+
+        assert_superseded_recreate(&removed.record, recreated, "fix/restore");
+    });
+}
+
+#[test]
+fn create_supersedes_a_removed_record_whose_empty_branch_survived() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "supersede-branch");
+        let created = create(options.clone()).expect("create task worktree");
+        let removed = remove_for_recreate(&created.record.id, false);
+        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+        assert!(!PathBuf::from(&removed.record.worktree_path).exists());
+        assert!(local_branch_present(&source, &options.branch));
+
+        let recreated = create(options).expect("re-create the removed handle");
+
+        assert_superseded_recreate(&removed.record, recreated, "fix/restore");
+    });
+}
+
+#[test]
+fn create_refuses_a_removed_record_whose_path_reappeared() {
+    crate::test_support::with_isolated_home(|home| {
+        let (_, options) = registered_create_fixture(home.path(), "supersede-path");
+        let created = create(options.clone()).expect("create task worktree");
+        let removed = remove_for_recreate(&created.record.id, true);
+        let path = PathBuf::from(&removed.record.worktree_path);
+        fs::create_dir_all(&path).expect("foreign directory at the handle path");
+        fs::write(path.join("keep.txt"), "foreign\n").expect("foreign content");
+
+        let error = create(options).expect_err("unproven path must not be adopted");
+
+        assert!(error.message.contains("without a matching active"));
+        assert_eq!(
+            fs::read_to_string(path.join("keep.txt")).unwrap(),
+            "foreign\n"
+        );
+        assert_eq!(
+            status(&removed.record.id).unwrap().record.state,
+            TaskWorktreeState::Removed
+        );
+    });
+}
+
+#[test]
+fn status_reports_a_removed_record_and_names_an_absent_handle() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, options) = registered_create_fixture(home.path(), "status-removed");
+        let created = create(options).expect("create task worktree");
+        remove_for_recreate(&created.record.id, true);
+
+        let removed = status(&created.record.id).expect("status of removed record");
+        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+        assert!(
+            removed.safety.is_none(),
+            "a removed record owns no checkout"
+        );
+
+        // Neither the retired path nor the source checkout is inspected.
+        let path = PathBuf::from(&created.record.worktree_path);
+        fs::create_dir_all(&path).expect("unrelated directory at the old path");
+        fs::rename(&source, home.path().join("moved-source")).expect("move source away");
+        let removed = status(&created.record.id).expect("status without its checkouts");
+        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+
+        let absent = status("status-removed@never-created").expect_err("absent handle");
+        assert_eq!(absent.code, crate::ErrorCode::ValidationInvalidArgument);
+        assert!(absent.message.contains("No task-worktree record exists"));
     });
 }
 
@@ -3005,8 +3142,9 @@ fn status_repairs_missing_source_checkout_from_component_checkout() {
             source.path().canonicalize().unwrap()
         );
         assert_eq!(updated.source_checkout, output.record.source_checkout);
-        assert!(output.safety.worktree_missing);
-        assert!(output.safety.safe);
+        let safety = output.safety.expect("active record safety");
+        assert!(safety.worktree_missing);
+        assert!(safety.safe);
     });
 }
 

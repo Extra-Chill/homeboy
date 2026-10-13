@@ -7225,6 +7225,9 @@ pub(crate) fn validate_cook_request_with_provenance(
             ]),
         ));
     }
+    // The Cook spine enforces this too; preview and admission apply the same
+    // static rule before any destination or provider work (#15672).
+    homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&args.gates.verify, None)?;
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
     let configured_rotations =

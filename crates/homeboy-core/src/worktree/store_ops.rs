@@ -564,6 +564,14 @@ fn create_with_store_unlocked(
         .exists()
         .then(|| read_record(store_dir, &id))
         .transpose()?;
+    // A removed record is terminal history, not a claim on the handle (#15838).
+    // Creation supersedes it: the handle is allocated afresh below and the new
+    // record continues the old lifecycle revision, while the removal itself
+    // stays auditable in the reaping audit and this create's reconciliation.
+    let (existing, superseded) = match existing {
+        Some(record) if record.state == TaskWorktreeState::Removed => (None, Some(record)),
+        existing => (existing, None),
+    };
     let identity = task_worktree_workspace_identity(&target.component_id, &id)?;
     if let Some(record) = &existing {
         verify_create_record_identity(
@@ -748,17 +756,30 @@ fn create_with_store_unlocked(
         branch_cleanup_intent: BranchCleanupIntent::DeleteWhenMerged,
         created_at: chrono::Utc::now().to_rfc3339(),
         state: TaskWorktreeState::Active,
-        lifecycle_revision: 0,
+        // Superseding keeps the revision monotonic so a fence captured against
+        // the removed record can never match its successor.
+        lifecycle_revision: superseded
+            .as_ref()
+            .map_or(0, |previous| previous.lifecycle_revision.saturating_add(1)),
         terminal_workspace_authority: None,
     };
     record.workspace_identity = Some(record.effective_workspace_identity()?);
+    let reconciliation = superseded
+        .map(|previous| -> Result<WorktreeCreateReconciliation> {
+            Ok(WorktreeCreateReconciliation {
+                action: WorktreeCreateAction::Superseded,
+                previous: create_evidence(&previous, "removed".to_string())?,
+                current: create_evidence(&record, "registered".to_string())?,
+            })
+        })
+        .transpose()?;
     write_record_unlocked(store_dir, &record)?;
     Ok(WorktreeCreateOutput {
         handoff_freshness: handoff_observation
             .map(|observation| complete_handoff_freshness(&record, observation))
             .transpose()?,
         record,
-        reconciliation: None,
+        reconciliation,
     })
 }
 
@@ -1232,8 +1253,8 @@ fn verify_create_record_identity(
     let expected_path = normalize_missing_path(worktree_path);
     let record_path = normalize_missing_path(Path::new(&record.worktree_path));
     let record_source = Path::new(&record.source_checkout).canonicalize().ok();
-    if record.state != TaskWorktreeState::Active
-        || record.component_id != component_id
+    debug_assert_eq!(record.state, TaskWorktreeState::Active);
+    if record.component_id != component_id
         || record.branch != branch
         || record_path != expected_path
         || record_source.as_deref() != Some(source_checkout)
@@ -1243,7 +1264,7 @@ fn verify_create_record_identity(
             "branch",
             "Existing task-worktree record does not prove the declared worktree identity",
             Some(record.id.clone()),
-            Some(vec!["Record component, source checkout, contained path, branch, state, and workspace identity must match exactly.".to_string()]),
+            Some(vec!["Record component, source checkout, contained path, branch, and workspace identity must match exactly.".to_string()]),
         ));
     }
     Ok(())
@@ -2091,8 +2112,14 @@ pub(super) fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWor
 
 pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
     let mut record = read_record(store_dir, id)?;
+    if record.state == TaskWorktreeState::Removed {
+        return Ok(WorktreeStatusOutput {
+            record,
+            safety: None,
+        });
+    }
     repair_record_source_checkout_if_needed(&mut record, store_dir)?;
-    let safety = safety_report(&record)?;
+    let safety = Some(safety_report(&record)?);
     Ok(WorktreeStatusOutput { record, safety })
 }
 
@@ -2894,7 +2921,22 @@ pub(super) fn write_adopted_record(
 }
 
 pub(super) fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeRecord> {
-    read_record_path(&record_path(store_dir, id))
+    let path = record_path(store_dir, id);
+    if !path.exists() {
+        // An absent handle is a lookup answer, not an I/O fault (#15838).
+        // Records live in the data root of the host that created them, so a
+        // runner-owned worktree is never visible from the controller.
+        return Err(Error::validation_invalid_argument(
+            "id",
+            "No task-worktree record exists for this handle in this host's Homeboy data root",
+            Some(id.to_string()),
+            Some(vec![format!("record path: {}", path.display())]),
+        )
+        .with_hint(
+            "Run `homeboy worktree list` on the host that created the worktree (for a runner: `homeboy runner exec <runner> -- homeboy worktree status <id>`).",
+        ));
+    }
+    read_record_path(&path)
 }
 
 pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {

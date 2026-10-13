@@ -61,6 +61,12 @@ pub struct AgentTaskUsage {
 
 pub const AGENT_TASK_USAGE_METADATA_KEY: &str = "provider_usage";
 
+/// Homeboy-owned outcome metadata: Homeboy verified that the attempt left its
+/// checkout exactly at the attempt base, so the provider changed nothing
+/// (#15364). Providers cannot assert it; normalization strips it from provider
+/// payloads before Homeboy's own verification runs.
+pub const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_verified";
+
 #[cfg(test)]
 use homeboy_core::redaction::RedactionPolicy;
 
@@ -142,6 +148,13 @@ impl AgentTaskOutcome {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|model| !model.is_empty())
+    }
+
+    /// Whether Homeboy proved this attempt produced no change: its change
+    /// artifact was empty and its checkout is unchanged from the attempt base.
+    /// Such an attempt has no candidate to verify or promote (#15294).
+    pub fn is_verified_unchanged_attempt(&self) -> bool {
+        self.metadata.get(HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY) == Some(&Value::Bool(true))
     }
 }
 
