@@ -1801,6 +1801,15 @@ pub(crate) fn project_cook_observation(
     {
         return projected;
     }
+    // The provider finished, but the Cook ended without a change. There is no
+    // candidate to recover, so it must not read as `candidate_recoverable`
+    // (#15294).
+    if terminal["phase"] == "terminal"
+        && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
+    {
+        projected.state = AgentTaskRunState::PartialFailure;
+        return projected;
+    }
     let recipes = CookRecipeStore::new(store.roots().clone());
     let recipe = recipes.load_recipe(cook_id).ok();
     let verified =
@@ -4203,10 +4212,67 @@ fn cook_remediation_same_provider(
 ) -> Option<bool> {
     // A gate result authenticates the durable candidate and identifies this as
     // same-provider gate remediation, even when a timed-out provider omitted
-    // its terminal executor identity.
-    promotion.status.gate_failed().then_some(true).or_else(|| {
-        terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
-    })
+    // its terminal executor identity. A Homeboy-verified unchanged attempt is
+    // likewise authenticated by Homeboy's own checkout proof: its follow-up
+    // re-runs the same task, so it is a same-provider retry (#15294).
+    (promotion.status.gate_failed() || no_change_remediation(promotion, aggregate))
+        .then_some(true)
+        .or_else(|| {
+            terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
+        })
+}
+
+const NO_CHANGE_PROVIDER_MESSAGE_LIMIT: usize = 1_000;
+
+/// The operator-facing reason a Cook stopped without a change. It names the
+/// no-change outcome and quotes the provider's own final message, so an empty
+/// attempt reads as "the provider changed nothing" rather than as a gate,
+/// review-form, or ancestry failure (#15294).
+fn no_change_stop_reason(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    review_form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
+    attempt: u32,
+    attempt_limit: u32,
+) -> String {
+    let outcome = if no_change_remediation(promotion, aggregate) {
+        format!(
+            "attempt {attempt} of {attempt_limit} produced no change: the provider finished without editing the workspace and Homeboy verified the attempt checkout is unchanged from its base, so no gates ran and nothing was promoted"
+        )
+    } else {
+        format!(
+            "attempt {attempt} of {attempt_limit} produced no changed files; the task still requires a change"
+        )
+    };
+    let message = review_form
+        .map(|form| form.summary.trim())
+        .filter(|summary| !summary.is_empty())
+        .map(|summary| {
+            let mut bounded: String = summary
+                .chars()
+                .take(NO_CHANGE_PROVIDER_MESSAGE_LIMIT)
+                .collect();
+            if bounded.len() < summary.len() {
+                bounded.push('…');
+            }
+            format!("provider's final message: {bounded}")
+        })
+        .unwrap_or_else(|| "the provider returned no final message".to_string());
+    format!("{outcome}; {message}")
+}
+
+/// Whether this promotion records an attempt Homeboy proved changed nothing.
+fn no_change_remediation(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> bool {
+    promotion.status == AgentTaskPromotionStatus::NoChanges
+        && promotion.changed_files.is_empty()
+        && aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == promotion.source.task_id)
+            .is_some_and(crate::agent_task::AgentTaskOutcome::is_verified_unchanged_attempt)
 }
 
 fn follow_up_budget_scope(
@@ -9114,11 +9180,13 @@ fn run_cook_spine(
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
-                    stop_reason: Some(
-                        "cook completed provider execution but produced no changed \
-     files; task likely still requires review or retry"
-                            .to_string(),
-                    ),
+                    stop_reason: Some(no_change_stop_reason(
+                        &promotion,
+                        &aggregate,
+                        review_form.as_ref(),
+                        attempt,
+                        attempt_limit,
+                    )),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));
