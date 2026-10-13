@@ -9796,6 +9796,17 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
         options.retry_policy.max_attempts = 2;
         options.identity.initial_plan.tasks[0].executor.selector = Some("old-selector".to_string());
         options.identity.initial_plan.tasks[0].executor.model = Some("old-model".to_string());
+        options.identity.initial_plan.options.rotation = Some(
+            crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                entries: vec![
+                    crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        model: Some("configured-fallback".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
         options.identity.initial_plan.tasks[0].instructions = "preserved prompt".to_string();
         options.identity.initial_plan.tasks[0].workspace.root =
             Some("preserved-worktree".to_string());
@@ -9873,6 +9884,10 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
         assert_eq!(
             overridden.options.execution_budget.max_provider_rotations,
             0
+        );
+        assert!(
+            overridden.options.rotation.is_none(),
+            "an acknowledged model override must not keep a fallback rotation"
         );
         assert_eq!(
             overridden.metadata["cook_provider_route_overrides"],

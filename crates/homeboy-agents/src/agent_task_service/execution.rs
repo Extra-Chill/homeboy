@@ -2074,6 +2074,9 @@ fn apply_cook_provider_route_override(
 
     let pin_route = override_.model.is_some() && override_.acknowledge_model_override;
     if pin_route {
+        // A pinned route carries no rotation, so readiness routing cannot
+        // substitute a configured entry for the acknowledged model (#15837).
+        plan.options.rotation = None;
         plan.options.execution_budget.max_provider_rotations = 0;
     }
     if plan.metadata.is_null() {
