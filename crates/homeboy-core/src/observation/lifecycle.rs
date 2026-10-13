@@ -29,6 +29,24 @@ impl ActiveObservation {
         Self::start(record).ok()
     }
 
+    /// Start an observation under a caller-owned, stable run id.
+    ///
+    /// Re-running the same id restarts the row as a fresh attempt (see
+    /// [`ObservationStore::restart_run_with_id`]); an id owned by a run of
+    /// another kind is refused.
+    pub fn start_with_stable_id(record: NewRunRecord, run_id: &str) -> crate::Result<Self> {
+        let store = ObservationStore::open_initialized()?;
+        let initial_metadata = record.metadata_json.clone();
+        let run = store.restart_run_with_id(record, run_id.to_string())?;
+        std::env::set_var(ACTIVE_RUN_ID_ENV, &run.id);
+
+        Ok(Self {
+            store,
+            run,
+            initial_metadata,
+        })
+    }
+
     /// Reopen a durable running observation in a detached worker.
     pub fn resume(run_id: &str) -> crate::Result<Self> {
         let store = ObservationStore::open_initialized()?;
@@ -88,6 +106,21 @@ impl ActiveObservation {
             status,
             Some(merge_metadata(self.initial_metadata.clone(), metadata)),
         );
+    }
+
+    /// Terminalize the run with merged metadata and surface a persistence
+    /// failure, for workloads whose evidence contract makes the terminal write
+    /// part of the result rather than a best-effort side effect.
+    pub fn try_finish_with_merged_metadata(
+        &self,
+        status: RunStatus,
+        metadata: serde_json::Value,
+    ) -> crate::Result<RunRecord> {
+        self.store.finish_run(
+            self.run_id(),
+            status,
+            Some(merge_metadata(self.initial_metadata.clone(), metadata)),
+        )
     }
 
     pub fn finish_error(&self, metadata: Option<serde_json::Value>) {
@@ -312,6 +345,37 @@ mod tests {
     fn test_start_best_effort() {
         with_isolated_home(|_| {
             assert!(ActiveObservation::start_best_effort(run_record()).is_some());
+        });
+    }
+
+    #[test]
+    fn test_start_with_stable_id() {
+        with_isolated_home(|_| {
+            let observation =
+                ActiveObservation::start_with_stable_id(run_record(), "stable-run").expect("start");
+            assert_eq!(observation.run_id(), "stable-run");
+            observation.finish(RunStatus::Pass, None);
+
+            let rerun = ActiveObservation::start_with_stable_id(run_record(), "stable-run")
+                .expect("re-run the same stable id");
+            assert_eq!(rerun.run().status, "running");
+        });
+    }
+
+    #[test]
+    fn test_try_finish_with_merged_metadata() {
+        with_isolated_home(|_| {
+            let observation = active_observation();
+            let run = observation
+                .try_finish_with_merged_metadata(
+                    RunStatus::Fail,
+                    serde_json::json!({ "status": "failed" }),
+                )
+                .expect("finish");
+
+            assert_eq!(run.status, "fail");
+            assert_eq!(run.metadata_json["phase"], "initial");
+            assert_eq!(run.metadata_json["status"], "failed");
         });
     }
 

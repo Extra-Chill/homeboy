@@ -2,13 +2,12 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use homeboy::core::artifact_ref::EvidenceRef;
 use homeboy::core::artifacts::{run_artifact_postprocess_steps, ArtifactPostprocessContext};
 use homeboy::core::engine::execution_context;
 use homeboy::core::engine::invocation::InvocationRequirements;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
-use homeboy::core::observation::{RunRecord, RunStatus};
+use homeboy::core::observation::{ActiveObservation, NewRunRecord, RunStatus};
 use homeboy::fuzz::{
     fuzz_campaign_case_totals, fuzz_campaign_finding_totals, fuzz_gate_profile_contract,
     parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzEvidenceContract,
@@ -18,7 +17,7 @@ use homeboy::fuzz::{
     FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
-use homeboy_core::{self, extension::invoke::ExtensionRunner};
+use homeboy_core::extension::invoke::{build_scenario_runner, ScenarioRunnerOptions};
 use homeboy_extension_contract::fuzz_config::FuzzConfig;
 use homeboy_extension_contract::ExtensionCapability;
 use uuid::Uuid;
@@ -114,6 +113,30 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     )?;
     let execution_request_path =
         homeboy::fuzz::persist_fuzz_execution_request(&run_dir, &execution_request)?;
+    let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
+    // The component revision was always available from the resolved execution
+    // context; fuzz simply never recorded it, which is why `runs dossier`
+    // reported `git_sha: null` for a campaign whose product revision was known
+    // (#10514).
+    let component_revision = homeboy::core::git::short_head_revision_at(&ctx.source_path);
+    let observation = start_fuzz_run_observation(FuzzRunObservationStart {
+        run_id: Some(&effective_run_id),
+        component_id: &ctx.component_id,
+        rig_id: rig_id.as_deref(),
+        rig_package: rig_package.as_ref(),
+        workload_id: workload_id.as_deref(),
+        workload_path: workload_path.as_deref(),
+        args: &args,
+        execution_request_path: Some(&execution_request_path),
+        sequence_plan_path: sequence_plan_path.as_deref(),
+        component_revision: component_revision.as_deref(),
+    })?;
+    // Every failure past this point terminalizes the running observation, so
+    // the shared run row never stays `running` behind an error.
+    let interrupted = |error: homeboy::core::Error| {
+        finish_interrupted_fuzz_run_observation(&observation, &error);
+        error
+    };
     let runner_output = run_fuzz_extension_script(
         &ctx,
         &args,
@@ -128,7 +151,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             .as_ref()
             .map(|config| config.runtime_helpers.as_slice())
             .unwrap_or_default(),
-    )?;
+    )
+    .map_err(&interrupted)?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let artifacts_dir =
         run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
@@ -138,7 +162,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         selected_workload,
         &results_path,
         &artifacts_dir,
-    )?;
+    )
+    .map_err(&interrupted)?;
     let (mut results, results_error) = if results_path.exists() {
         match parse_fuzz_results_file(&results_path) {
             Ok(results) => (Some(results), None),
@@ -193,13 +218,16 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             &payload_root,
             &effective_run_id,
             homeboy::fuzz::FuzzPayloadBudget::default(),
-        )?
+        )
+        .map_err(&interrupted)?
         .payloads;
-        let json = serde_json::to_vec_pretty(campaign).map_err(|error| {
-            homeboy::core::Error::internal_unexpected(format!(
-                "failed to encode bounded fuzz results: {error}"
-            ))
-        })?;
+        let json = serde_json::to_vec_pretty(campaign)
+            .map_err(|error| {
+                homeboy::core::Error::internal_unexpected(format!(
+                    "failed to encode bounded fuzz results: {error}"
+                ))
+            })
+            .map_err(&interrupted)?;
         homeboy::core::io::write_output_file_atomically(
             &results_path,
             json,
@@ -210,80 +238,62 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
                 error.to_string(),
                 Some(results_path.display().to_string()),
             )
-        })?;
+        })
+        .map_err(&interrupted)?;
         payloads
     } else {
         Vec::new()
     };
-    let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
-    // The component revision was always available from the resolved execution
-    // context; fuzz simply never recorded it, which is why `runs dossier`
-    // reported `git_sha: null` for a campaign whose product revision was known
-    // (#10514).
-    let component_revision = homeboy::core::git::short_head_revision_at(&ctx.source_path);
-    let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-        run_id: Some(&effective_run_id),
-        component_id: &ctx.component_id,
-        rig_id: rig_id.as_deref(),
-        rig_package: rig_package.as_ref(),
-        workload_id: workload_id.as_deref(),
-        workload_path: workload_path.as_deref(),
-        status: &status,
-        exit_code,
-        success,
-        args: &args,
-        execution_request_path: Some(&execution_request_path),
-        sequence_plan_path: sequence_plan_path.as_deref(),
-        results_path: &results_path,
-        artifacts_dir: &artifacts_dir,
-        results: results.as_ref(),
-        expected_metric_gates: &expected_metric_gates,
-        evidence_contract: &evidence_contract,
-        component_revision: component_revision.as_deref(),
-        postprocess: &postprocess,
-        payloads: &payloads,
-    })?;
+    let persisted_evidence = persist_fuzz_run_evidence(
+        &observation,
+        FuzzRunEvidenceInput {
+            status: &status,
+            exit_code,
+            success,
+            args: &args,
+            execution_request_path: Some(&execution_request_path),
+            sequence_plan_path: sequence_plan_path.as_deref(),
+            results_path: &results_path,
+            artifacts_dir: &artifacts_dir,
+            results: results.as_ref(),
+            expected_metric_gates: &expected_metric_gates,
+            evidence_contract: &evidence_contract,
+            postprocess: &postprocess,
+            payloads: &payloads,
+        },
+    )
+    .map_err(&interrupted)?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
         combined_results_error,
         &results_path,
     );
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
-    let diagnostic = (!success)
-        .then(|| {
-            let result = serde_json::json!({
-                "workload_id": workload_id,
-                "campaign": results,
-            });
-            homeboy::core::observation::ObservationStore::open_initialized()
-                .ok()
-                .and_then(|store| {
-                    homeboy::core::observation::runs_service::require_run(&store, &effective_run_id)
-                        .ok()
-                })
-                .map(|run| {
-                    fuzz_failure_diagnostic(
-                        &run,
-                        Some(&effective_run_id),
-                        &result,
-                        &[&runner_output.stderr, &runner_output.stdout],
-                        persisted_evidence
-                            .evidence_refs
-                            .iter()
-                            .map(|reference| reference.canonical_uri().to_string())
-                            .collect(),
-                        // Without this the diagnosis never sees the evidence
-                        // failure and falls back to sniffing runner output.
-                        &evidence_contract,
-                        &fuzz_run_gates(
-                            results.as_ref(),
-                            args.effective_gate_profile().as_core(),
-                            &expected_metric_gates,
-                        ),
-                    )
-                })
-        })
-        .flatten();
+    let diagnostic = (!success).then(|| {
+        let result = serde_json::json!({
+            "workload_id": workload_id,
+            "campaign": results,
+        });
+        fuzz_failure_diagnostic(
+            &persisted_evidence.run,
+            Some(&effective_run_id),
+            &result,
+            &[&runner_output.stderr, &runner_output.stdout],
+            persisted_evidence
+                .evidence_refs
+                .iter()
+                .map(|reference| reference.canonical_uri().to_string())
+                .collect(),
+            // Without this the diagnosis never sees the evidence
+            // failure and falls back to sniffing runner output.
+            &evidence_contract,
+            &fuzz_run_gates(
+                results.as_ref(),
+                args.effective_gate_profile().as_core(),
+                &expected_metric_gates,
+            ),
+        )
+    });
     run_dir.finish(success);
 
     Ok((
@@ -872,13 +882,86 @@ fn fuzz_contract_unsupported(config: Option<&FuzzConfig>) -> Vec<&'static str> {
     unsupported
 }
 
-pub(super) struct FuzzRunEvidenceInput<'a> {
+/// Start-time identity of a fuzz run: everything known before the workload
+/// executes. Recorded as the initial metadata of the shared run observation.
+pub(super) struct FuzzRunObservationStart<'a> {
+    /// Caller-owned stable run id; a `fuzz-<uuid>` id is minted when absent.
     pub(super) run_id: Option<&'a str>,
     pub(super) component_id: &'a str,
     pub(super) rig_id: Option<&'a str>,
     pub(super) rig_package: Option<&'a homeboy_core::extension::bench::parsing::RigPackageEvidence>,
     pub(super) workload_id: Option<&'a str>,
     pub(super) workload_path: Option<&'a str>,
+    pub(super) args: &'a FuzzRunArgs,
+    pub(super) execution_request_path: Option<&'a Path>,
+    pub(super) sequence_plan_path: Option<&'a Path>,
+    /// Exact revision of the component source that was fuzzed.
+    pub(super) component_revision: Option<&'a str>,
+}
+
+/// Start the shared run observation for a fuzz workload.
+pub(super) fn start_fuzz_run_observation(
+    start: FuzzRunObservationStart<'_>,
+) -> homeboy::core::Result<ActiveObservation> {
+    let run_id = effective_fuzz_run_id(start.run_id);
+    let metadata = serde_json::json!({
+        "source": "homeboy fuzz run",
+        "status": "running",
+        "workload_id": start.workload_id,
+        "workload_path": start.workload_path,
+        "rig_package": start.rig_package,
+        "seed": start.args.seed.clone(),
+        "max_duration": start.args.max_duration.clone(),
+        "passthrough_args": start.args.args.clone(),
+        "execution_request_file": start.execution_request_path.map(|path| path.to_string_lossy().to_string()),
+        "sequence_plan_file": start.sequence_plan_path.map(|path| path.to_string_lossy().to_string()),
+        "tracker_refs": start.args.tracker_refs,
+        "requested_settings": fuzz_requested_settings(start.args),
+        "component_revision": start.component_revision,
+    });
+    let cwd = std::env::current_dir().ok();
+    ActiveObservation::start_with_stable_id(
+        NewRunRecord::builder("fuzz")
+            .component_id(start.component_id)
+            .command(fuzz_run_command(
+                start.component_id,
+                start.rig_id,
+                start.workload_id,
+                &run_id,
+                start.args,
+            ))
+            .optional_cwd_path(cwd.as_deref())
+            .homeboy_version(homeboy_product_identity::product_version())
+            .git_sha(start.component_revision.map(str::to_string))
+            .optional_rig_id(start.rig_id)
+            .metadata(metadata)
+            .build(),
+        &run_id,
+    )
+}
+
+/// Terminalize a fuzz run whose execution failed before its evidence was
+/// persisted, so the shared run row never stays `running` behind an error.
+fn finish_interrupted_fuzz_run_observation(
+    observation: &ActiveObservation,
+    error: &homeboy::core::Error,
+) {
+    let still_running = observation
+        .store()
+        .get_run(observation.run_id())
+        .ok()
+        .flatten()
+        .is_some_and(|run| run.status == RunStatus::Running.as_str());
+    if still_running {
+        observation.finish_error_with_merged_metadata(serde_json::json!({
+            "status": "error",
+            "error": error.message,
+        }));
+    }
+}
+
+/// Terminal outcome of a fuzz run, recorded on its running observation.
+pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) status: &'a str,
     pub(super) exit_code: i32,
     pub(super) success: bool,
@@ -892,92 +975,40 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     /// Classified evidence-contract verdict for this run. Persisted so a
     /// later reader does not have to re-sniff a collapsed error string.
     pub(super) evidence_contract: &'a FuzzEvidenceContract,
-    /// Exact revision of the component source that was fuzzed.
-    pub(super) component_revision: Option<&'a str>,
     pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
     pub(super) payloads: &'a [homeboy::fuzz::FuzzPayload],
 }
 
-pub(super) struct FuzzRunPersistedEvidence {
-    #[allow(dead_code)]
-    pub(super) run: Option<RunRecord>,
-    pub(super) evidence_refs: Vec<EvidenceRef>,
-}
-
 pub(super) fn persist_fuzz_run_evidence(
+    observation: &ActiveObservation,
     input: FuzzRunEvidenceInput<'_>,
-) -> homeboy::core::Result<FuzzRunPersistedEvidence> {
-    let run_id = input
-        .run_id
-        .filter(|run_id| !run_id.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("fuzz-{}", Uuid::new_v4()));
-    let now = chrono::Utc::now().to_rfc3339();
+) -> homeboy::core::Result<homeboy::fuzz::FuzzRunPersisted> {
+    let gates = fuzz_run_gates(
+        input.results,
+        input.args.effective_gate_profile().as_core(),
+        input.expected_metric_gates,
+    );
     let metadata = serde_json::json!({
-        "source": "homeboy fuzz run",
-        "workload_id": input.workload_id,
-        "workload_path": input.workload_path,
-        "rig_package": input.rig_package,
-        "seed": input.args.seed.clone(),
-        "max_duration": input.args.max_duration.clone(),
-        "passthrough_args": input.args.args.clone(),
-        "execution_request_file": input.execution_request_path.map(|path| path.to_string_lossy().to_string()),
-        "sequence_plan_file": input.sequence_plan_path.map(|path| path.to_string_lossy().to_string()),
-        "tracker_refs": input.args.tracker_refs,
         "exit_code": input.exit_code,
         "success": input.success,
         "status": input.status,
-        "requested_settings": fuzz_requested_settings(input.args),
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
         "evidence_contract": input.evidence_contract,
-        "component_revision": input.component_revision,
         // Case and finding totals are already in the parsed campaign; the run
         // record simply never carried them, which forced reviewers to read the
         // full result envelope to state "19/19 cases passed, 0 findings".
         "case_totals": input.results.map(fuzz_campaign_case_totals),
         "finding_totals": input.results.map(fuzz_campaign_finding_totals),
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
-        "gates": fuzz_run_gates(
-            input.results,
-            input.args.effective_gate_profile().as_core(),
-            input.expected_metric_gates
-        ),
-        "gate_status": gate_status(&fuzz_run_gates(
-            input.results,
-            input.args.effective_gate_profile().as_core(),
-            input.expected_metric_gates
-        )),
+        "gate_status": gate_status(&gates),
+        "gates": gates,
     });
-    let run = RunRecord {
-        id: run_id.clone(),
-        kind: "fuzz".to_string(),
-        component_id: Some(input.component_id.to_string()),
-        started_at: now.clone(),
-        finished_at: Some(now),
-        status: if input.success {
-            RunStatus::Pass.as_str().to_string()
-        } else {
-            RunStatus::Fail.as_str().to_string()
-        },
-        command: Some(fuzz_run_command(
-            input.component_id,
-            input.rig_id,
-            input.workload_id,
-            input.args,
-        )),
-        cwd: std::env::current_dir()
-            .ok()
-            .map(|path| path.to_string_lossy().to_string()),
-        homeboy_version: Some(homeboy_product_identity::product_version().to_string()),
-        git_sha: input.component_revision.map(str::to_string),
-        rig_id: input.rig_id.map(str::to_string),
-        metadata_json: metadata,
-    };
+    let component_id = observation.component_id().unwrap_or_default().to_string();
     let envelope = input
         .results
         .map(|campaign| {
             let mut envelope =
-                fuzz_result_envelope_from_campaign(input.args, input.component_id, campaign, None)?;
+                fuzz_result_envelope_from_campaign(input.args, &component_id, campaign, None)?;
             envelope.status = gate_status(&evaluate_fuzz_gates_for_profile(
                 campaign,
                 input.args.effective_gate_profile().as_core(),
@@ -1005,9 +1036,15 @@ pub(super) fn persist_fuzz_run_evidence(
             },
         )
         .collect::<Vec<_>>();
-    let (_run_id, evidence_refs) =
-        homeboy::fuzz::persist_fuzz_run_evidence(homeboy::fuzz::FuzzRunEvidence {
-            run: run.clone(),
+    homeboy::fuzz::persist_fuzz_run_evidence(
+        observation,
+        homeboy::fuzz::FuzzRunEvidence {
+            status: if input.success {
+                RunStatus::Pass
+            } else {
+                RunStatus::Fail
+            },
+            metadata,
             results_path: input.results_path,
             execution_request_path: input.execution_request_path,
             sequence_plan_path: input.sequence_plan_path,
@@ -1016,11 +1053,8 @@ pub(super) fn persist_fuzz_run_evidence(
             envelope,
             postprocess: generic_postprocess_outputs,
             payloads: input.payloads,
-        })?;
-    Ok(FuzzRunPersistedEvidence {
-        run: Some(run),
-        evidence_refs,
-    })
+        },
+    )
 }
 
 pub(super) fn fuzz_artifact_ref_validation(
@@ -1260,6 +1294,7 @@ fn fuzz_run_command(
     component_id: &str,
     rig_id: Option<&str>,
     workload_id: Option<&str>,
+    run_id: &str,
     args: &FuzzRunArgs,
 ) -> String {
     let mut parts = vec![
@@ -1274,9 +1309,7 @@ fn fuzz_run_command(
     if let Some(workload_id) = workload_id {
         parts.extend(["--workload".to_string(), workload_id.to_string()]);
     }
-    if let Some(run_id) = args.run_id.as_ref() {
-        parts.extend(["--run-id".to_string(), run_id.clone()]);
-    }
+    parts.extend(["--run-id".to_string(), run_id.to_string()]);
     for tracker_ref in &args.tracker_refs {
         parts.extend([
             "--tracker-ref".to_string(),
@@ -1476,18 +1509,32 @@ fn run_fuzz_extension_script(
             "Add fuzz.extension_script to execute workloads, or use `homeboy fuzz list` for manifest-only discovery",
         ));
     }
-    let mut runner = ExtensionRunner::for_context(execution_context)
-        .component(ctx.component.clone())
-        .settings(&args.setting_args.setting)
-        .settings_json(&args.setting_args.setting_json)
-        .path_override(args.comp.path.clone())
-        .with_run_dir(run_dir)
-        .env_provider_extensions(&env_provider_extensions)
-        .invocation_requirements(invocation_requirements)
-        .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
-        .script_args(&args.args);
+    // The shared workload runner owns the result-file and artifact-root slots;
+    // the remaining fuzz env keeps its current `HOMEBOY_FUZZ_*` names, which
+    // the extensions read until the generic workload env contract lands.
+    let artifacts_dir =
+        run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_ARTIFACTS_DIR);
+    let mut runner = build_scenario_runner(ScenarioRunnerOptions {
+        execution_context: &execution_context,
+        component: &ctx.component,
+        path_override: args.comp.path.clone(),
+        settings: &args.setting_args.setting,
+        settings_json: &args.setting_args.setting_json,
+        run_dir,
+        results_env: Some((FUZZ_RESULTS_FILE_PRODUCER_CONTRACT, results_path)),
+        scenario_env: None,
+        artifact_env: Some((FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT, &artifacts_dir)),
+        list_only_env: None,
+        extra_workloads_env: None,
+        env_provider_extensions: &env_provider_extensions,
+        invocation_requirements,
+    })?
+    .timeout(fuzz_max_duration(args.max_duration.as_deref())?)
+    .script_args(&args.args);
 
-    for (key, value) in env {
+    for (key, value) in env.into_iter().filter(|(key, _)| {
+        key != FUZZ_RESULTS_FILE_PRODUCER_CONTRACT && key != FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT
+    }) {
         runner = runner.env(&key, &value);
     }
     for (key, value) in helper_env {
@@ -1554,7 +1601,7 @@ pub(super) fn fuzz_runner_env(
     sequence_plan_path: Option<&Path>,
 ) -> homeboy::core::Result<Vec<(String, String)>> {
     let mut env = vec![(
-        "HOMEBOY_FUZZ_RESULTS_FILE".to_string(),
+        FUZZ_RESULTS_FILE_PRODUCER_CONTRACT.to_string(),
         results_path.to_string_lossy().to_string(),
     )];
     if let Some(execution_request_path) = execution_request_path {
@@ -1572,7 +1619,7 @@ pub(super) fn fuzz_runner_env(
         )
     })?;
     env.push((
-        "HOMEBOY_FUZZ_ARTIFACTS_DIR".to_string(),
+        FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT.to_string(),
         artifacts_dir.to_string_lossy().to_string(),
     ));
     if let Some(workload) = workload {
