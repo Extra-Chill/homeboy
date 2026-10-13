@@ -27,7 +27,7 @@ startup token. A subsequent command starts a new daemon using the retained
 durable store. Disposable clients do not need to leave a resident process behind.
 
 `homeboy daemon start` and foreground `serve` are explicitly resident launches,
-appropriate for continuous schedules and services. Set
+appropriate for workflow cadences and services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
 window for a supervised launch, or `0` for a resident automatic launch. Foreground
 `serve` lifetime is owned by its calling service manager. Superseded resident generations
@@ -319,8 +319,6 @@ preview/apply rules for future write endpoints.
 - [self](self.md)
 - [status](status.md)
 
-## Scheduled runs
+## Workflow cadences
 
-A running daemon fires due [schedules](schedule.md) without an external timer. It polls every 30 seconds by default; override with `HOMEBOY_DAEMON_SCHEDULE_TICK_SECS`, or set it to `0` to disable daemon-driven scheduling and drive `homeboy schedule tick` yourself.
-
-Each due schedule runs on its own thread, so a slow scheduled command delays neither the poll loop nor daemon shutdown. Markers left by a run the daemon did not finish are reclaimed at start.
+A running daemon admits due [workflow cadences](workflow.md#cadence-every) without an external timer. The admitting daemon's orchestration tick (every 60 seconds by default, `HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS`) admits one instance per due slot; `0` disables the tick and with it every cadence. Registrations live in `workflow-cadences.sqlite` beside the generation registry, so they survive daemon restarts and build rotations. At start the daemon registers the built-in `homeboy.retention` cadence unless the operator cancelled it.

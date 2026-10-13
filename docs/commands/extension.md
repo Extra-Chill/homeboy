@@ -29,13 +29,11 @@ inventory. `extension show <extension_id>` provides the same declared transport
 `id` and `schema` for one extension. These read-only outputs deliberately omit
 the transport command argv.
 
-Use the discovered ID as the route-less default or pair it with an explicit
-route for a schedule:
+Use the discovered ID as the route-less default:
 
 ```sh
 homeboy extension list
 homeboy config set /notifications/default_transport '"<transport-id>"'
-homeboy schedule add --notification-transport <transport-id> --notification-route '<transport-route>' ...
 ```
 
 ### Live readiness is explicit

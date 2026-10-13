@@ -4,7 +4,7 @@
 homeboy workflow validate <file|id|->
 homeboy workflow run <file|id|-> [--input NAME=VALUE]... [--instance NAME] [--on RUNNER] [--wait]
 homeboy workflow status [<instance>] [--watch]
-homeboy workflow cancel <instance>
+homeboy workflow cancel <instance|cadence-workflow-id>
 homeboy workflow approve <instance> <step>
 homeboy workflow list [--registered]
 ```
@@ -32,11 +32,12 @@ Statuses:
 ```jsonc
 {
   "schema": "homeboy/workflow/v1",
-  "id": "string",                       // registry id: ~/.config/homeboy/workflows/<id>.json, or run any path
+  "id": "string",                       // registry id: ~/.config/homeboy/workflows/<id>.json, or run any path; letters, digits, `_`, `-`, `.`
   "inputs":  { "<name>": { "required": true, "default": null } },
   "env":     { "public": ["NAME"], "secrets": ["SECRET_REF"] },   // the admitted environment; nothing else is inherited
   "budget":  { "max_step_runs": 20, "deadline": "12h" },          // hard stop → budget_exhausted
   "iterate": { "until": <gate>, "max_iterations": 4 },            // re-run the step graph until the gate passes
+  "every":   { "interval": "24h", "at": "03:00Z", "overlap": "skip" },  // optional cadence (see below)
   "steps": [
     {
       "id": "string",
@@ -55,7 +56,7 @@ Statuses:
 }
 ```
 
-`every` (cadence), `notify`, and the fan-out fields `foreach`, `max_parallel`, and `join` belong to later releases. A definition that uses them is refused with a message that names the field.
+`notify` and the fan-out fields `foreach`, `max_parallel`, and `join` belong to later releases. A definition that uses them is refused with a message that names the field.
 
 ### Step kinds
 
@@ -107,6 +108,20 @@ A step runs with `env_clear()` plus its admitted environment:
 - `env.secrets` are agent-task secret references, resolved when each step spawns. The daemon's own environment is never a source.
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
 
+### Cadence (`every`)
+
+`workflow run` on a definition with `every` registers it with the daemon instead of admitting one instance. The daemon then admits one instance per due slot.
+
+- **Registration.** The registration is the admitted request: the definition, the inputs, the captured environment, and the resolved programs. It is keyed by the workflow id; running `workflow run` again replaces it. An unchanged cadence keeps its slot grid; a changed `interval` or `at` starts a new grid. `--wait` and `--instance` do not apply. `--on RUNNER` registers it on that runner's daemon.
+- **Slots.** Slots are `anchor + k × interval`. With `at` (a UTC time of day, `HH:MM` or `HH:MMZ`) the anchor is that time, so `{"interval": "24h", "at": "03:00Z"}` fires daily at 03:00 UTC; without it the first slot is the moment of registration. `interval` is at least `1m`.
+- **Admission.** The admitting daemon's orchestration tick (60 seconds by default) admits each due slot. Slots missed while the daemon was stopped coalesce into the latest one.
+- **One instance per slot.** A slot's instance is named `every-<slot time>`, so its instance id is deterministic. A tick that re-fires a slot after a crash converges on the instance it already admitted, in this daemon generation or any other live one.
+- **Overlap skip.** A slot that comes due while the previous instance of the same cadence is not terminal is skipped and counted. `skip` is the only `overlap` policy.
+- **Where it lives.** Registrations are stored in `workflow-cadences.sqlite` beside the daemon generation registry, so they survive daemon restarts and build rotations. A daemon that is not running admits nothing: run the always-on cadences on a resident daemon (`homeboy daemon start`, or a runner's service daemon).
+- **Observe and stop.** `workflow list --registered` shows every cadence with its next due time, fire and skip counts, last instance, and last admission error. `workflow cancel <workflow-id>` stops a cadence; its instances are ordinary instances you can cancel separately.
+
+**Built-in `homeboy.retention`.** Homeboy ships one workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
+
 ### Daemon restarts
 
 An instance lives in the daemon generation that admitted it, and its checkpoint is that generation's job store. `workflow status`, `approve`, and `list` look in every registered generation, so an instance stays reachable after the admitting daemon is rotated to a new build.
@@ -116,11 +131,11 @@ When the daemon that owns an instance dies, the instance resumes on its own. The
 ## Commands
 
 - **`workflow validate`** parses and validates a definition and prints its digest and step graph.
-- **`workflow run`** admits an instance in the local daemon and prints its status. With `--wait` it follows the instance until it is terminal and exits non-zero unless it succeeded. `--on RUNNER` admits the same definition on that runner's daemon through `homeboy runner exec`, so the environment is admitted on the runner and an always-on runner can own the instance.
+- **`workflow run`** admits an instance in the local daemon and prints its status; a definition with `every` is registered as a cadence instead. With `--wait` it follows the instance until it is terminal and exits non-zero unless it succeeded. `--on RUNNER` admits the same definition on that runner's daemon through `homeboy runner exec`, so the environment is admitted on the runner and an always-on runner can own the instance.
 - **`workflow status`** is a pure projection of the job ledger: the instance status, each step's phase, outcome, attempt, key, and step job, the gates, and every finished iteration. `--watch` polls until the instance is terminal.
-- **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps.
+- **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one in the current iteration.
-- **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`.
+- **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence.
 
 ## Examples
 
@@ -186,7 +201,7 @@ When the daemon that owns an instance dies, the instance resumes on its own. The
 
 ### Example B: nightly repeating task (cadence + gate → Cook → gate)
 
-Requires `every` and `notify`, which arrive with workflow cadence; this release refuses the definition.
+Requires `notify`, which a later release implements; this release refuses the definition. Without `notify` it registers as a daily cadence at 07:00 UTC.
 
 ```json
 {

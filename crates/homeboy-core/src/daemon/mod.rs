@@ -55,6 +55,7 @@ pub mod runner_staging;
 pub(crate) mod runner_watch;
 pub mod step_job;
 mod stop;
+pub mod workflow_cadence;
 pub mod workflow_job;
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children
@@ -681,23 +682,49 @@ impl LocalControllerJobClient {
     /// This client's daemon first, then every other registered generation.
     fn workflow_endpoints(&self) -> Vec<String> {
         let mut endpoints = vec![self.endpoint.clone()];
-        if !generation_store::bypassed() {
-            for generation in generation_store::generations().unwrap_or_default() {
-                // A generation replaced in place serves at the address its
-                // own lease file records, which the registry may predate.
-                let address =
-                    validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
-                        .ok()
-                        .and_then(|validation| validation.state)
-                        .map(|state| state.address)
-                        .unwrap_or(generation.address);
-                let endpoint = format!("http://{address}");
-                if !endpoints.contains(&endpoint) {
-                    endpoints.push(endpoint);
-                }
+        for endpoint in generation_endpoints() {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
             }
         }
         endpoints
+    }
+
+    /// `GET /workflows/cadences`: every registered workflow cadence.
+    pub fn workflow_cadences(&self) -> Result<serde_json::Value> {
+        let path = "/workflows/cadences";
+        let response = self
+            .client
+            .get(format!("{}{path}", self.endpoint))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
+        self.workflow_payload(response, path)
+    }
+
+    /// `POST /workflows/cadences`: register `request` as a cadence template.
+    pub fn register_workflow_cadence(
+        &self,
+        request: &workflow_job::WorkflowJobRequest,
+    ) -> Result<serde_json::Value> {
+        let path = "/workflows/cadences";
+        let response = self
+            .client
+            .post(format!("{}{path}", self.endpoint))
+            .json(request)
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
+        self.workflow_payload(response, path)
+    }
+
+    /// `POST /workflows/cadences/<workflow>/cancel`.
+    pub fn cancel_workflow_cadence(&self, workflow: &str) -> Result<serde_json::Value> {
+        let path = format!("/workflows/cadences/{workflow}/cancel");
+        let response = self
+            .client
+            .post(format!("{}{path}", self.endpoint))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
+        self.workflow_payload(response, &path)
     }
 
     fn workflow_payload(
@@ -1879,21 +1906,25 @@ where
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
     recover_controller_jobs(&job_store);
-    crate::schedule::ensure_automatic_retention_schedule()?;
+    // Built-in cadences (`homeboy.retention`) are registered unless the
+    // operator opted out; a failure here must not keep the daemon down.
+    if let Err(error) = workflow_cadence::ensure_builtin_cadences(workflow_cadence::now_ms()) {
+        eprintln!(
+            "built-in workflow cadences were not registered: {}",
+            error.message
+        );
+    }
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
 
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
-    let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
     let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
     let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier =
         spawn_completion_notifier_for_lease(state.lease_id.clone(), completion_shutdown_rx);
-    let schedule_ticker =
-        spawn_schedule_ticker_for_lease(state.lease_id.clone(), schedule_shutdown_rx);
     let orchestration_reconciler = spawn_orchestration_reconciler(
         job_store.clone(),
         state.lease_id.clone(),
@@ -1986,14 +2017,12 @@ where
 
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
-    let _ = schedule_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = upload_shutdown_tx.send(());
     join_helpers_with_deadline(
         vec![
             ("local-child-reservation-reconciler", local_child_reconciler),
             ("completion-notifier", completion_notifier),
-            ("schedule-ticker", schedule_ticker),
             ("orchestration-reconciler", orchestration_reconciler),
             ("upload-reaper", upload_reaper),
         ],
@@ -2125,80 +2154,6 @@ fn spawn_upload_reaper(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<
     })
 }
 
-/// Environment variable overriding how often the daemon checks for due
-/// schedules, in seconds. Defaults to [`SCHEDULE_TICK_DEFAULT_INTERVAL_SECS`].
-///
-/// This is the *polling* cadence, not a schedule's own cadence. Polling more
-/// often than the shortest declared interval is harmless — a schedule that is
-/// not due is skipped — and it bounds how late a due schedule can fire.
-const SCHEDULE_TICK_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_SCHEDULE_TICK_SECS";
-const SCHEDULE_TICK_DEFAULT_INTERVAL_SECS: u64 = 30;
-
-/// Setting the tick interval to zero disables daemon-driven scheduling, for
-/// operators who would rather drive `homeboy schedule tick` themselves.
-fn schedule_tick_interval() -> Option<std::time::Duration> {
-    parse_schedule_tick_interval(std::env::var(SCHEDULE_TICK_INTERVAL_ENV).ok().as_deref())
-}
-
-/// Interval parsing, split from the environment read so it can be tested
-/// without mutating process-wide state under parallel tests.
-fn parse_schedule_tick_interval(configured: Option<&str>) -> Option<std::time::Duration> {
-    let seconds = configured
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(SCHEDULE_TICK_DEFAULT_INTERVAL_SECS);
-    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
-}
-
-/// Fire due schedules on a cadence so homeboy does not need an external timer
-/// to run its own periodic work (#10131).
-fn spawn_schedule_ticker_for_lease(
-    lease_id: String,
-    shutdown: mpsc::Receiver<()>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let Some(interval) = schedule_tick_interval() else {
-            // Disabled: still consume the shutdown signal so the join at
-            // teardown returns promptly.
-            let _ = shutdown.recv();
-            return;
-        };
-        schedule_tick_loop_for_lease(interval, Some(&lease_id), shutdown)
-    })
-}
-
-/// Poll for due schedules and dispatch them.
-///
-/// Runs are dispatched onto their own threads by the ticker, so a slow
-/// scheduled command delays neither this loop nor daemon shutdown. Stale
-/// `running` markers are reclaimed on every tick, so a live daemon cannot
-/// leave an enabled schedule un-run for many cadences.
-#[cfg(test)]
-fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
-    schedule_tick_loop_for_lease(interval, None, shutdown)
-}
-
-fn schedule_tick_loop_for_lease(
-    interval: Duration,
-    lease_id: Option<&str>,
-    shutdown: mpsc::Receiver<()>,
-) {
-    let runner: std::sync::Arc<dyn crate::schedule::ScheduleCommandRunner> =
-        match crate::schedule::SubprocessRunner::new() {
-            Ok(runner) => std::sync::Arc::new(runner),
-            Err(_) => return,
-        };
-    let ticker = crate::schedule::ScheduleTicker::new();
-
-    loop {
-        if lease_id.is_none_or(lifetime::owns_global_work) {
-            let _ = ticker.dispatch_due(chrono::Utc::now(), std::sync::Arc::clone(&runner));
-        }
-        if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
-            return;
-        }
-    }
-}
-
 /// Environment variable overriding how often the daemon reconciles orphaned
 /// agent-task orchestration state, in seconds. Defaults to
 /// [`ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS`].
@@ -2216,8 +2171,8 @@ const ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS: u64 = 60;
 /// Setting the tick interval to zero disables daemon-driven orchestration
 /// recovery, for operators who would rather drive
 /// `homeboy agent-task active --reconcile --apply` and
-/// `homeboy agent-task controller resume` themselves. Matches the schedule
-/// ticker's convention.
+/// `homeboy agent-task controller resume` themselves. Workflow cadences are
+/// admitted by this tick too, so zero also stops them.
 fn orchestration_tick_interval() -> Option<std::time::Duration> {
     parse_orchestration_tick_interval(
         std::env::var(ORCHESTRATION_TICK_INTERVAL_ENV)
@@ -2271,7 +2226,7 @@ fn spawn_orchestration_reconciler(
 /// The mechanisms are isolated from each other and from the loop: a
 /// reconcile that panics costs one pass, not the tick and not the daemon.
 /// Overlap is impossible by construction — the sleep happens after all
-/// passes return, exactly as the schedule ticker does it — and across
+/// passes return — and across
 /// generations only the admission owner drives global work.
 fn orchestration_tick_loop(
     job_store: JobStore,
@@ -2292,6 +2247,10 @@ fn orchestration_tick_loop(
             });
             isolated_tick(|| {
                 let _ = orchestration::drain_work_intents();
+            });
+            // Registered workflow cadences admit one instance per due slot.
+            isolated_tick(|| {
+                let _ = workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
             });
             // Observation runs (`runs` table) are reconciled here — one rule,
             // one cadence — not as a side effect of reads. HTTP GETs on runs
@@ -2753,6 +2712,23 @@ where
         }
         ("GET", "/workflows") => {
             daemon_endpoint_response("workflows.list", workflow_job::workflow_list(job_store))
+        }
+        ("GET", "/workflows/cadences") => match workflow_cadence::http_list() {
+            Ok(body) => daemon_endpoint_response("workflows.cadences.list", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", "/workflows/cadences") => match workflow_cadence::http_register(body) {
+            Ok(body) => daemon_endpoint_response("workflows.cadences.register", body),
+            Err(err) => error_response(400, err),
+        },
+        ("POST", path) if path.starts_with("/workflows/cadences/") && path.ends_with("/cancel") => {
+            let workflow = path
+                .trim_start_matches("/workflows/cadences/")
+                .trim_end_matches("/cancel");
+            match workflow_cadence::http_cancel(workflow) {
+                Ok(body) => daemon_endpoint_response("workflows.cadences.cancel", body),
+                Err(err) => error_response(404, err),
+            }
         }
         ("POST", path) if path.starts_with("/workflows/") && path.ends_with("/approvals") => {
             let instance = path
@@ -3857,6 +3833,28 @@ const DAEMON_ENDPOINT_PAYLOAD_POINTER: &str = "/data/body";
 /// Deliberately has no fallback. Accepting a second shape would let the reader
 /// keep succeeding after the writer moved, which converts the next envelope
 /// drift from a loud failure into a silent one.
+/// The address of every registered daemon generation. A generation replaced
+/// in place serves at the address its own lease file records, which the
+/// registry may predate.
+pub(crate) fn generation_endpoints() -> Vec<String> {
+    if generation_store::bypassed() {
+        return Vec::new();
+    }
+    let mut endpoints = Vec::new();
+    for generation in generation_store::generations().unwrap_or_default() {
+        let address = validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
+            .ok()
+            .and_then(|validation| validation.state)
+            .map(|state| state.address)
+            .unwrap_or(generation.address);
+        let endpoint = format!("http://{address}");
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
+        }
+    }
+    endpoints
+}
+
 pub(crate) fn daemon_endpoint_payload(response: &serde_json::Value) -> Option<&serde_json::Value> {
     response.pointer(DAEMON_ENDPOINT_PAYLOAD_POINTER)
 }
@@ -5725,91 +5723,29 @@ mod tests {
         assert!(controller_job_response(&wire).is_none());
     }
 
-    /// Polling cadence is independent of any schedule's own cadence, and an
-    /// operator can opt out of daemon-driven scheduling entirely.
-    #[test]
-    fn schedule_tick_interval_defaults_and_can_be_disabled() {
-        assert_eq!(
-            super::parse_schedule_tick_interval(None),
-            Some(Duration::from_secs(
-                super::SCHEDULE_TICK_DEFAULT_INTERVAL_SECS
-            ))
-        );
-        assert_eq!(
-            super::parse_schedule_tick_interval(Some(" 5 ")),
-            Some(Duration::from_secs(5))
-        );
-        assert_eq!(
-            super::parse_schedule_tick_interval(Some("0")),
-            None,
-            "zero disables daemon-driven scheduling"
-        );
-        assert_eq!(
-            super::parse_schedule_tick_interval(Some("not-a-number")),
-            Some(Duration::from_secs(
-                super::SCHEDULE_TICK_DEFAULT_INTERVAL_SECS
-            )),
-            "an unparseable value falls back to the default rather than disabling"
-        );
-    }
-
-    /// The daemon must not wait a full poll interval to shut down. The loop
-    /// blocks on `recv_timeout`, so the shutdown signal has to win the race.
-    #[test]
-    fn schedule_tick_loop_exits_promptly_on_shutdown() {
-        crate::test_support::with_isolated_home(|_| {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let handle = std::thread::spawn(move || {
-                // A long poll interval: only the shutdown signal can end this
-                // loop in reasonable time.
-                super::schedule_tick_loop(Duration::from_secs(300), rx);
-            });
-
-            std::thread::sleep(Duration::from_millis(50));
-            tx.send(()).expect("send shutdown");
-
-            let start = Instant::now();
-            handle.join().expect("ticker thread joins");
-            assert!(
-                start.elapsed() < Duration::from_secs(10),
-                "shutdown must not wait out the poll interval, took {:?}",
-                start.elapsed()
-            );
-        });
-    }
-
     #[test]
     fn daemon_tickers_exit_when_the_shutdown_owner_disappears() {
         crate::test_support::with_isolated_home(|_| {
-            for completion in [false, true] {
-                let (shutdown, receiver) = std::sync::mpsc::channel();
-                drop(shutdown);
-                let (done, finished) = std::sync::mpsc::channel();
-                let handle = std::thread::spawn(move || {
-                    if completion {
-                        super::completion_notify_loop_for_lease(
-                            Duration::from_secs(300),
-                            Some("not-the-admission-owner"),
-                            receiver,
-                        );
-                    } else {
-                        super::schedule_tick_loop_for_lease(
-                            Duration::from_secs(300),
-                            Some("not-the-admission-owner"),
-                            receiver,
-                        );
-                    }
-                    done.send(()).unwrap();
-                });
-                finished
-                    .recv_timeout(Duration::from_secs(2))
-                    .expect("a disconnected channel stops the ticker rather than spinning");
-                handle.join().expect("ticker exits");
-            }
+            let (shutdown, receiver) = std::sync::mpsc::channel();
+            drop(shutdown);
+            let (done, finished) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                super::completion_notify_loop_for_lease(
+                    Duration::from_secs(300),
+                    Some("not-the-admission-owner"),
+                    receiver,
+                );
+                done.send(()).unwrap();
+            });
+            finished
+                .recv_timeout(Duration::from_secs(2))
+                .expect("a disconnected channel stops the ticker rather than spinning");
+            handle.join().expect("ticker exits");
         });
     }
 
-    /// The orchestration tick follows the schedule ticker's conventions:
+    /// The orchestration tick interval has an env override; an
+    /// unparseable value falls back to the default, and zero disables it:
     /// env override, unparseable falls back to the default, zero disables.
     #[test]
     fn orchestration_tick_interval_defaults_and_can_be_disabled() {

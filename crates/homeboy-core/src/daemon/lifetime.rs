@@ -81,7 +81,7 @@ pub(super) fn configured_idle_timeout() -> Result<Option<Duration>> {
         })
 }
 
-/// Global schedules, mirrored observations, and orchestration belong to the
+/// Workflow cadences, mirrored observations, and orchestration belong to the
 /// admission owner. Draining generations only maintain their own durable work.
 pub(super) fn owns_global_work(lease_id: &str) -> bool {
     generation_store::admitting()
