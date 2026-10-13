@@ -306,8 +306,7 @@ fn workflow_cook_record(
     }
 }
 
-/// The settled canonical state of a Cook's latest attempt (or of its handoff
-/// parent, when no attempt materialized). A terminal attempt whose terminal
+/// The settled canonical state of a Cook. A terminal attempt whose terminal
 /// continuation (promotion and PR finalization) is still queued or running has
 /// not settled: the continuation decides its final state.
 fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
@@ -323,11 +322,6 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
     match continuation {
         Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed) => {
             return WorkflowRunOutcome::Pending;
-        }
-        // Promotion or finalization failed: the Cook holds a recoverable
-        // candidate (`agent-task cook-continue` resumes it), not a result.
-        Ok(super::CookContinuationState::Failed) => {
-            return WorkflowRunOutcome::Settled("candidate_recoverable".to_string());
         }
         // A runner-executed attempt that produced a candidate is promoted and
         // finalized by the terminal continuation the controller admits once
@@ -346,10 +340,11 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
         }
         _ => {}
     }
-    // The canonical run projection is the Cook's outcome: the attempt record
-    // alone reports the provider attempt, not the gates and promotion that
-    // decide whether the Cook produced a result (`agent-task status`).
-    let Ok(run) = crate::orchestration::run_exact_from_current_environment(&record.run_id) else {
+    // The Cook's outcome is its canonical subject read, the one `agent-task
+    // status <cook>` and the control-plane API serve: an attempt record alone
+    // reports a provider attempt, not the candidate, gates, and publication
+    // that decide whether the Cook produced its result.
+    let Ok(run) = crate::orchestration::run_from_current_environment(cook_id) else {
         return WorkflowRunOutcome::Pending;
     };
     if !run.state.is_terminal() {
