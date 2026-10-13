@@ -277,14 +277,29 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     }
 }
 
-/// The record that speaks for a Cook: its latest attempt from the durable
-/// recipe, or its handoff parent when no attempt has materialized.
-fn workflow_cook_record(cook_id: &str) -> Option<agent_task_lifecycle::AgentTaskRunRecord> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
-    super::resolve_cook_continuation_run_id(cook_id)
+/// The record that speaks for a Cook, or why it cannot answer yet.
+///
+/// The latest attempt the durable recipe declares speaks for the Cook. When
+/// that attempt has no lifecycle record yet (its replay is still materializing
+/// it), the handoff parent answers only once it is terminal: the step exit
+/// observer fails a handoff whose attempt never materialized. With no recipe,
+/// the handoff parent is the only record.
+fn workflow_cook_record(
+    cook_id: &str,
+) -> std::result::Result<agent_task_lifecycle::AgentTaskRunRecord, WorkflowRunOutcome> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .map_err(|_| WorkflowRunOutcome::Pending)?;
+    let parent = || store.read_record(cook_id);
+    let latest = super::load_recipe(cook_id)
         .ok()
-        .and_then(|run_id| store.read_record(&run_id).ok())
-        .or_else(|| store.read_record(cook_id).ok())
+        .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
+    match latest {
+        Some(run_id) => store.read_record(&run_id).or_else(|_| match parent() {
+            Ok(parent) if parent.state.is_terminal() => Ok(parent),
+            _ => Err(WorkflowRunOutcome::Pending),
+        }),
+        None => parent().map_err(|_| WorkflowRunOutcome::Unknown),
+    }
 }
 
 /// The settled run state of a Cook's latest attempt (or of its handoff parent,
@@ -292,8 +307,9 @@ fn workflow_cook_record(cook_id: &str) -> Option<agent_task_lifecycle::AgentTask
 /// continuation (promotion and PR finalization) is still queued or running has
 /// not settled: the continuation decides its final state.
 fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
-    let Some(record) = workflow_cook_record(cook_id) else {
-        return WorkflowRunOutcome::Unknown;
+    let record = match workflow_cook_record(cook_id) {
+        Ok(record) => record,
+        Err(outcome) => return outcome,
     };
     if !record.state.is_terminal() {
         return WorkflowRunOutcome::Pending;
@@ -318,7 +334,7 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
 /// The live state and phase of a Cook's latest attempt, `None` before its
 /// durable record exists.
 fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
-    let record = workflow_cook_record(cook_id)?;
+    let record = workflow_cook_record(cook_id).ok()?;
     Some(json!({
         "run_id": record.run_id,
         "state": record.state,
