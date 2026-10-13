@@ -635,6 +635,17 @@ impl LocalControllerJobClient {
                 Err(error) => last_error = Some(error),
             }
         }
+        for generation in self.workflow_generations() {
+            let Ok(store) = JobStore::open_without_reconciliation(
+                Path::new(&generation.state_dir).join("jobs.json"),
+            ) else {
+                continue;
+            };
+            if let Ok(mut view) = workflow_job::workflow_status(&store, instance) {
+                view["source"] = json!("retained_generation");
+                return Ok(view);
+            }
+        }
         Err(last_error.unwrap_or_else(|| {
             Error::validation_invalid_argument(
                 "instance",
@@ -660,7 +671,38 @@ impl LocalControllerJobClient {
                 entities.push(entity);
             }
         }
+        let mut seen = entities
+            .iter()
+            .filter_map(|entity| entity["instance"].as_str().map(str::to_string))
+            .collect::<std::collections::HashSet<_>>();
+        for generation in self.workflow_generations() {
+            let Ok(store) = JobStore::open_without_reconciliation(
+                Path::new(&generation.state_dir).join("jobs.json"),
+            ) else {
+                continue;
+            };
+            for mut entity in workflow_job::workflow_list(&store)["entities"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                let Some(instance) = entity["instance"].as_str().map(str::to_string) else {
+                    continue;
+                };
+                if seen.insert(instance) {
+                    entity["source"] = json!("retained_generation");
+                    entities.push(entity);
+                }
+            }
+        }
         Ok(json!({ "entities": entities }))
+    }
+
+    fn workflow_generations(&self) -> Vec<generation_store::LocalDaemonEndpoint> {
+        if generation_store::bypassed() {
+            return Vec::new();
+        }
+        generation_store::generations().unwrap_or_default()
     }
 
     /// `POST /workflows/<instance>/approvals` on the generation that owns it.

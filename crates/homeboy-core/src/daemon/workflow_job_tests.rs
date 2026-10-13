@@ -590,3 +590,48 @@ fn cancelling_mid_wave_stops_every_running_item() {
         );
     });
 }
+
+#[test]
+fn terminal_workflow_is_read_from_a_non_serving_generation_store() {
+    with_isolated_home(|home| {
+        let generation_dir = home.path().join("generations/retained");
+        std::fs::create_dir_all(&generation_dir).unwrap();
+        // Use an actual registered generation directory and durable job store;
+        // no listener is started at its advertised address.
+        let generation = generation_state("retained-workflow", &generation_dir);
+        crate::daemon::generation_store::seed(&generation).unwrap();
+        let store = JobStore::open_without_reconciliation(generation_dir.join("jobs.json"))
+            .unwrap()
+            .with_daemon_lease(generation.lease_id.clone());
+        let request = request(
+            json!({"schema":"homeboy/workflow/v1","id":"terminal","steps":[{"id":"done","exec":{"program":"sh","args":["-c","true"]}}]}),
+            home.path(),
+        );
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, job_id, 10).status,
+            JobStatus::Succeeded
+        );
+
+        let client = crate::daemon::LocalControllerJobClient::connect_to_existing_endpoint(
+            crate::daemon::generation_store::endpoint_for_lease(&generation.lease_id)
+                .unwrap()
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let status = client.workflow(&request.instance).unwrap();
+        assert_eq!(status["status"], "succeeded");
+        assert_eq!(status["source"], "retained_generation");
+        let list = client.workflow_list().unwrap();
+        let listed = list["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["instance"] == request.instance)
+            .unwrap();
+        assert_eq!(listed["status"], "succeeded");
+        assert_eq!(listed["source"], "retained_generation");
+    });
+}
