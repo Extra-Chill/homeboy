@@ -2078,6 +2078,21 @@ pub fn verify_replacement_gates(
     }
 }
 
+/// Supervision for replacement gates, built from the declared gate options
+/// exactly as Cook promotion builds it (#15856).
+fn replacement_gate_supervision(
+    gates: &crate::agent_task_gate::VerifyGateOptions,
+) -> crate::agent_task_gate::GateSupervision {
+    crate::agent_task_gate::GateSupervision {
+        timeout: gates.gate_timeout(),
+        no_progress_timeout: gates.gate_no_progress_timeout(),
+        heartbeat_interval: gates.gate_heartbeat_interval(),
+        on_spawn: Arc::new(|_, _| Ok(())),
+        on_heartbeat: Arc::new(|_| Ok(())),
+        is_cancelled: Arc::new(|| false),
+    }
+}
+
 fn verify_replacement_gates_owned(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -2182,42 +2197,49 @@ fn verify_replacement_gates_owned(
     let source = bind_persisted_promotion_artifact(source, &original)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
-    let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(run_id.to_string()),
-            source_path,
-            // Candidate identity remains rooted at the persisted promotion target.
-            // The corrected gate workspace is passed separately below.
-            source_worktree_path: None,
-            base_ref: Some(verified_base.base.clone()),
-            task_base_sha: inputs
-                .and_then(|value| value.get("task_base_sha"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            candidate_ref: inputs
-                .and_then(|value| value.get("candidate_ref"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            to_worktree: original.to_worktree.clone(),
-            task_id: Some(original.source.task_id.clone()),
-            artifact_id: Some(original.patch_artifact.id.clone()),
-            dry_run: false,
-            gates,
-            provider_invocation: None,
-            repository_integrity_evidence: original.repository_integrity_evidence.clone(),
-        },
-        &target_path,
-        &serde_json::to_value(&original)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        replacement_gate_workspace.as_deref(),
-        &observation_store,
-        || {
-            // This fence is deliberately irreversible. Artifact hydration and
-            // candidate validation are retryable; durable gates are not.
-            mark_replacement_gate_execution_started(lifecycle_store, run_id)
-        },
-    )?;
+    let original_value = serde_json::to_value(&original)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    // Replacement gates run under the same declared supervision as Cook
+    // promotion. Without this scope the gate runner falls back to its default
+    // no-progress budget and silently drops the operator's declaration (#15856).
+    let supervision = replacement_gate_supervision(&gates);
+    let mut replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
+        resume_promoted_patch_replacement_gates_in_observation_store(
+            AgentTaskPromotionRequest {
+                source,
+                source_run_id: Some(run_id.to_string()),
+                source_path,
+                // Candidate identity remains rooted at the persisted promotion target.
+                // The corrected gate workspace is passed separately below.
+                source_worktree_path: None,
+                base_ref: Some(verified_base.base.clone()),
+                task_base_sha: inputs
+                    .and_then(|value| value.get("task_base_sha"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                candidate_ref: inputs
+                    .and_then(|value| value.get("candidate_ref"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                to_worktree: original.to_worktree.clone(),
+                task_id: Some(original.source.task_id.clone()),
+                artifact_id: Some(original.patch_artifact.id.clone()),
+                dry_run: false,
+                gates,
+                provider_invocation: None,
+                repository_integrity_evidence: original.repository_integrity_evidence.clone(),
+            },
+            &target_path,
+            &original_value,
+            replacement_gate_workspace.as_deref(),
+            &observation_store,
+            || {
+                // This fence is deliberately irreversible. Artifact hydration and
+                // candidate validation are retryable; durable gates are not.
+                mark_replacement_gate_execution_started(lifecycle_store, run_id)
+            },
+        )
+    })?;
     super::cook_baseline::compare_gate_failures_to_verified_base(
         &mut replacement,
         &target_path,
@@ -8179,4 +8201,28 @@ pub(crate) fn source_spec_path(spec: &str) -> Option<PathBuf> {
     }
 
     Some(PathBuf::from(spec.strip_prefix('@').unwrap_or(spec)))
+}
+
+#[cfg(test)]
+mod replacement_gate_supervision_tests {
+    use super::replacement_gate_supervision;
+    use std::time::Duration;
+
+    /// Regression for #15856: the declared no-progress and wall-clock budgets
+    /// reach replacement gates instead of the gate runner's 300s default.
+    #[test]
+    fn replacement_gates_use_declared_budgets() {
+        let gates = crate::agent_task_gate::VerifyGateOptions {
+            gate_timeout_seconds: 2100,
+            gate_no_progress_timeout_seconds: 1500,
+            ..Default::default()
+        };
+        let supervision = replacement_gate_supervision(&gates);
+        assert_eq!(supervision.timeout, Duration::from_secs(2100));
+        assert_eq!(supervision.no_progress_timeout, Duration::from_secs(1500));
+        assert_eq!(
+            supervision.heartbeat_interval,
+            gates.gate_heartbeat_interval()
+        );
+    }
 }
