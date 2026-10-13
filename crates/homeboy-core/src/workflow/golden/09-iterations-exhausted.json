@@ -1,0 +1,169 @@
+{
+  "definition": {
+    "id": "loop",
+    "iterate": {
+      "max_iterations": 2,
+      "until": {
+        "equals": true,
+        "output": "/ok",
+        "step": "check"
+      }
+    },
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "program": "check"
+        },
+        "id": "check"
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/check/1/1",
+        "output": {
+          "ok": false
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/check/2/1",
+        "output": {
+          "ok": false
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "budget_exhausted",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/check/1/1",
+          "kind": "exec",
+          "program": "check",
+          "step": "check"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "check": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/check/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 2,
+          "key": "wf-golden/check/2/1",
+          "kind": "exec",
+          "program": "check",
+          "step": "check"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/check/1/1",
+        "output": {
+          "ok": false
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 2,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "check": {
+            "attempt": 1,
+            "carried": true,
+            "gates": {},
+            "key": "wf-golden/check/2/1",
+            "outcome": "succeeded",
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "reason": "the until gate did not pass within 2 iterations",
+          "status": "budget_exhausted"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/check/2/1",
+        "output": {
+          "ok": false
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 2,
+        "reason": "the until gate did not pass within 2 iterations",
+        "status": "budget_exhausted",
+        "step_runs": 2,
+        "steps": {
+          "check": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/check/2/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

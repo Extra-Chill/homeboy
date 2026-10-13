@@ -55,6 +55,7 @@ pub mod runner_staging;
 pub(crate) mod runner_watch;
 pub mod step_job;
 mod stop;
+pub mod workflow_job;
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children
 /// from this path rather than from configuration or `PATH`.
@@ -610,6 +611,119 @@ impl LocalControllerJobClient {
                 )
             })?;
         Ok(job)
+    }
+
+    /// `GET /workflows/<instance>`: the daemon's pure projection of one
+    /// workflow instance from its job ledger. An instance lives in the daemon
+    /// generation that admitted it, so every live generation is asked.
+    pub fn workflow(&self, instance: &str) -> Result<serde_json::Value> {
+        let path = format!("/workflows/{instance}");
+        let mut last_error = None;
+        for endpoint in self.workflow_endpoints() {
+            match self
+                .client
+                .get(format!("{endpoint}{path}"))
+                .send()
+                .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))
+                .and_then(|response| self.workflow_payload(response, &path))
+            {
+                Ok(mut view) => {
+                    view["daemon_endpoint"] = json!(endpoint);
+                    return Ok(view);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            Error::validation_invalid_argument(
+                "instance",
+                format!("no workflow instance `{instance}` in any live daemon generation"),
+                Some(instance.to_string()),
+                None,
+            )
+        }))
+    }
+
+    /// `GET /workflows` across every live daemon generation.
+    pub fn workflow_list(&self) -> Result<serde_json::Value> {
+        let mut entities = Vec::new();
+        for endpoint in self.workflow_endpoints() {
+            let Ok(response) = self.client.get(format!("{endpoint}/workflows")).send() else {
+                continue;
+            };
+            let Ok(list) = self.workflow_payload(response, "/workflows") else {
+                continue;
+            };
+            for mut entity in list["entities"].as_array().cloned().unwrap_or_default() {
+                entity["daemon_endpoint"] = json!(endpoint);
+                entities.push(entity);
+            }
+        }
+        Ok(json!({ "entities": entities }))
+    }
+
+    /// `POST /workflows/<instance>/approvals` on the generation that owns it.
+    pub fn approve_workflow_step(&self, instance: &str, step: &str) -> Result<serde_json::Value> {
+        let endpoint = self.workflow(instance)?["daemon_endpoint"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.endpoint.clone());
+        let path = format!("/workflows/{instance}/approvals");
+        let response = self
+            .client
+            .post(format!("{endpoint}{path}"))
+            .json(&json!({ "step": step }))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
+        self.workflow_payload(response, &path)
+    }
+
+    /// This client's daemon first, then every other registered generation.
+    fn workflow_endpoints(&self) -> Vec<String> {
+        let mut endpoints = vec![self.endpoint.clone()];
+        if !generation_store::bypassed() {
+            for generation in generation_store::generations().unwrap_or_default() {
+                // A generation replaced in place serves at the address its
+                // own lease file records, which the registry may predate.
+                let address =
+                    validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
+                        .ok()
+                        .and_then(|validation| validation.state)
+                        .map(|state| state.address)
+                        .unwrap_or(generation.address);
+                let endpoint = format!("http://{address}");
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        endpoints
+    }
+
+    fn workflow_payload(
+        &self,
+        response: reqwest::blocking::Response,
+        path: &str,
+    ) -> Result<serde_json::Value> {
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {path}")))
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            let message = ["/error/message", "/data/message", "/message"]
+                .iter()
+                .find_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            return Err(Error::validation_invalid_argument(
+                "workflow", message, None, None,
+            ));
+        }
+        Ok(daemon_endpoint_payload(&value)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
@@ -2640,6 +2754,24 @@ where
                 Err(err) => error_response(400, err),
             }
         }
+        ("GET", "/workflows") => {
+            daemon_endpoint_response("workflows.list", workflow_job::workflow_list(job_store))
+        }
+        ("POST", path) if path.starts_with("/workflows/") && path.ends_with("/approvals") => {
+            let instance = path
+                .trim_start_matches("/workflows/")
+                .trim_end_matches("/approvals");
+            match workflow_job::workflow_approve(job_store, instance, body) {
+                Ok(body) => daemon_endpoint_response("workflows.approve", body),
+                Err(err) => error_response(400, err),
+            }
+        }
+        ("GET", path) if path.starts_with("/workflows/") => {
+            match workflow_job::workflow_status(job_store, path.trim_start_matches("/workflows/")) {
+                Ok(body) => daemon_endpoint_response("workflows.status", body),
+                Err(err) => error_response(404, err),
+            }
+        }
         ("POST", "/admissions") => {
             match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
                 Ok(body) => daemon_endpoint_response("admissions.reserve", body),
@@ -4589,6 +4721,35 @@ fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
+    let controller_job = controller_job_state(&request)?;
+    let outcome = job_store.admit_controller_job(
+        format!("controller.{}", request.job_type),
+        request.idempotency_key.clone(),
+        controller_job,
+    )?;
+    let (job, compacted, disposition) = match outcome {
+        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => (
+            job_store.get(job_id)?,
+            false,
+            ControllerJobSubmissionDisposition::Created,
+        ),
+        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
+            let compacted = job_store.get(job.id).is_err();
+            (*job, compacted, ControllerJobSubmissionDisposition::Reused)
+        }
+    };
+    Ok(ControllerJobAdmission {
+        job,
+        disposition,
+        compacted,
+    })
+}
+
+/// Validate a typed controller-job request through its driver and build the
+/// durable state admission persists.
+pub(crate) fn controller_job_state(
+    request: &ControllerJobRequest,
+) -> Result<crate::api_jobs::ControllerJobState> {
     if request.job_type.trim().is_empty() || request.idempotency_key.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "type",
@@ -4628,28 +4789,9 @@ fn admit_controller_job(
         cancellation_reason: None,
         execution_claim_id: None,
         recovery_attempted: false,
+        parent_job_id: None,
     };
-    let outcome = job_store.admit_controller_job(
-        format!("controller.{}", request.job_type),
-        request.idempotency_key.clone(),
-        controller_job,
-    )?;
-    let (job, compacted, disposition) = match outcome {
-        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => (
-            job_store.get(job_id)?,
-            false,
-            ControllerJobSubmissionDisposition::Created,
-        ),
-        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
-            let compacted = job_store.get(job.id).is_err();
-            (*job, compacted, ControllerJobSubmissionDisposition::Reused)
-        }
-    };
-    Ok(ControllerJobAdmission {
-        job,
-        disposition,
-        compacted,
-    })
+    Ok(controller_job)
 }
 
 fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serde_json::Value {
@@ -4664,7 +4806,7 @@ fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serd
     })
 }
 
-fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
+pub(crate) fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
     let lease_id = job
         .daemon_lease_id
         .as_deref()
@@ -5097,6 +5239,11 @@ pub(crate) fn cancel_controller_job(
     // Resolve the persisted type/version, not a caller-controlled envelope.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
     let job = job_store.request_controller_cancellation(job_id, reason.to_string())?;
+    // The parent's cancellation is durable first, so it admits no new child;
+    // then every child it already submitted is cancelled with it.
+    for child in job_store.active_controller_children(job_id) {
+        let _ = cancel_controller_job(child, reason, job_store);
+    }
     let runtime = controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
@@ -5836,6 +5983,7 @@ mod tests {
                     cancellation_reason: None,
                     execution_claim_id: None,
                     recovery_attempted: false,
+                    parent_job_id: None,
                 },
             )
             .expect("admit staging dispatch");

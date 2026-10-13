@@ -290,6 +290,10 @@ pub(crate) struct ControllerJobState {
     pub(crate) execution_claim_id: Option<String>,
     #[serde(default)]
     pub(crate) recovery_attempted: bool,
+    /// The controller job that submitted this one (a workflow instance for its
+    /// step jobs). Cancelling a parent cancels its active children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parent_job_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1876,6 +1880,17 @@ impl JobStore {
         reason: String,
     ) -> Result<Job> {
         self.durable_transaction(|inner| {
+            self.request_controller_cancellation_locked(inner, job_id, reason)
+        })
+    }
+
+    fn request_controller_cancellation_locked(
+        &self,
+        inner: &mut JobStoreInner,
+        job_id: Uuid,
+        reason: String,
+    ) -> Result<Job> {
+        {
             let ownership = inner
                 .jobs
                 .get(&job_id)
@@ -1957,7 +1972,115 @@ impl JobStore {
                 .expect("controller job exists")
                 .job
                 .clone())
+        }
+    }
+
+    /// Commit one workflow decision atomically: the parent's new checkpoint,
+    /// every child it submits (job rows plus submission keys), and every
+    /// child it cancels. A parent whose cancellation is already durable admits
+    /// nothing more, so a cancellation cascade cannot miss a late child.
+    pub(crate) fn commit_controller_advance(
+        &self,
+        job_id: Uuid,
+        checkpoint: Value,
+        admissions: Vec<(String, String, ControllerJobState)>,
+        cancellations: Vec<(String, String)>,
+    ) -> Result<Vec<Uuid>> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                Error::internal_unexpected("controller worker lost its typed state")
+            })?;
+            if stored.job.status.is_terminal() || controller.cancellation_requested {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job is cancelled or terminal; it admits no more work",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            controller.checkpoint = Some(checkpoint);
+            let mut admitted = Vec::new();
+            for (operation, key, mut state) in admissions {
+                state.parent_job_id = Some(job_id);
+                admitted.push(
+                    match self.admit_controller_job_locked(inner, operation, key, state)? {
+                        ControllerJobSubmissionOutcome::Submitted(id) => id,
+                        ControllerJobSubmissionOutcome::Existing(job) => job.id,
+                    },
+                );
+            }
+            for (key, reason) in cancellations {
+                let Some(child) = inner
+                    .controller_submissions
+                    .get(&key)
+                    .map(|submission| submission.job_id)
+                else {
+                    continue;
+                };
+                let active = inner
+                    .jobs
+                    .get(&child)
+                    .is_some_and(|stored| !stored.job.status.is_terminal());
+                if active {
+                    self.request_controller_cancellation_locked(inner, child, reason)?;
+                }
+            }
+            Ok(admitted)
         })
+    }
+
+    /// The job admitted under a controller submission key, if it is retained.
+    pub(crate) fn controller_job_for_key(&self, idempotency_key: &str) -> Option<Job> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(submission) = inner.controller_submissions.get(idempotency_key) {
+            if let Some(stored) = inner.jobs.get(&submission.job_id) {
+                return Some(stored.job.clone());
+            }
+            return submission.terminal_job.clone();
+        }
+        inner
+            .expired_controller_submissions
+            .get(idempotency_key)
+            .and_then(|submission| submission.terminal_job.clone())
+    }
+
+    /// Nonterminal controller jobs a parent submitted.
+    pub(crate) fn active_controller_children(&self, parent_job_id: Uuid) -> Vec<Uuid> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut children = inner
+            .jobs
+            .values()
+            .filter(|stored| !stored.job.status.is_terminal())
+            .filter(|stored| {
+                stored
+                    .controller_job
+                    .as_ref()
+                    .and_then(|controller| controller.parent_job_id)
+                    == Some(parent_job_id)
+            })
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+        children.sort();
+        children
+    }
+
+    /// Controller jobs of one type, with their private typed state.
+    pub(crate) fn controller_jobs_of_type(&self, job_type: &str) -> Vec<(Job, ControllerJobState)> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let mut jobs = inner
+            .jobs
+            .values()
+            .filter_map(|stored| {
+                let controller = stored.controller_job.as_ref()?;
+                (controller.job_type == job_type).then(|| (stored.job.clone(), controller.clone()))
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|(job, _)| job.created_at_ms);
+        jobs
     }
 
     pub(crate) fn controller_cancellation_requested(&self, job_id: Uuid) -> bool {
@@ -2078,145 +2201,164 @@ impl JobStore {
         idempotency_key: String,
         controller_job: ControllerJobState,
     ) -> Result<ControllerJobSubmissionOutcome> {
+        self.durable_transaction(|inner| {
+            self.admit_controller_job_locked(inner, operation, idempotency_key, controller_job)
+        })
+    }
+
+    fn admit_controller_job_locked(
+        &self,
+        inner: &mut JobStoreInner,
+        operation: String,
+        idempotency_key: String,
+        controller_job: ControllerJobState,
+    ) -> Result<ControllerJobSubmissionOutcome> {
         let fingerprint = controller_submission_fingerprint(&controller_job);
         let now = timestamp_ms();
-        self.durable_transaction(|inner| {
-        if let Some(existing) = inner.controller_submissions.get(&idempotency_key) {
-            if existing.fingerprint != fingerprint {
-                return Err(controller_idempotency_conflict(&idempotency_key));
-            }
-            let job = inner.jobs.get(&existing.job_id).ok_or_else(|| {
-                Error::internal_unexpected("controller submission index points at a missing job")
-            })?;
-                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job.job.clone())));
-        }
-        if inner
-            .expired_controller_submissions
-            .contains_key(&idempotency_key)
         {
-            let submission = inner
+            if let Some(existing) = inner.controller_submissions.get(&idempotency_key) {
+                if existing.fingerprint != fingerprint {
+                    return Err(controller_idempotency_conflict(&idempotency_key));
+                }
+                let job = inner.jobs.get(&existing.job_id).ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "controller submission index points at a missing job",
+                    )
+                })?;
+                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(
+                    job.job.clone(),
+                )));
+            }
+            if inner
                 .expired_controller_submissions
-                .get(&idempotency_key)
-                .expect("submission exists");
-            if submission.fingerprint != fingerprint {
-                return Err(controller_idempotency_conflict(&idempotency_key));
-            }
-            if let Some(job) = submission.terminal_job.clone() {
-                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
-            }
-            return Err(Error::validation_invalid_argument(
+                .contains_key(&idempotency_key)
+            {
+                let submission = inner
+                    .expired_controller_submissions
+                    .get(&idempotency_key)
+                    .expect("submission exists");
+                if submission.fingerprint != fingerprint {
+                    return Err(controller_idempotency_conflict(&idempotency_key));
+                }
+                if let Some(job) = submission.terminal_job.clone() {
+                    return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
+                }
+                return Err(Error::validation_invalid_argument(
                 "idempotency_key",
                 "controller idempotency key belongs to compacted terminal work; choose a new key for a new attempt",
                 Some(idempotency_key),
                 None,
             ));
-        }
-        if let Some(tombstone) = self
-            .persistence
-            .as_ref()
-            .map(|persistence| {
-                lookup_tombstone(
-                    &persistence.path,
-                    ReplayTombstoneKind::Controller,
-                    &idempotency_key,
-                )
-            })
-            .transpose()?
-            .flatten()
-        {
-            if tombstone.fingerprint != fingerprint {
-                return Err(controller_idempotency_conflict(&idempotency_key));
             }
-            if let Some(job) = tombstone.terminal_job {
-                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
-            }
-            return Err(Error::validation_invalid_argument(
+            if let Some(tombstone) = self
+                .persistence
+                .as_ref()
+                .map(|persistence| {
+                    lookup_tombstone(
+                        &persistence.path,
+                        ReplayTombstoneKind::Controller,
+                        &idempotency_key,
+                    )
+                })
+                .transpose()?
+                .flatten()
+            {
+                if tombstone.fingerprint != fingerprint {
+                    return Err(controller_idempotency_conflict(&idempotency_key));
+                }
+                if let Some(job) = tombstone.terminal_job {
+                    return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(job)));
+                }
+                return Err(Error::validation_invalid_argument(
                 "idempotency_key",
                 "controller idempotency key belongs to compacted terminal work; choose a new key for a new attempt",
                 Some(idempotency_key),
                 None,
             ));
-        }
-        if let Some(active_idempotency_key) = controller_job.active_idempotency_key.as_deref() {
-            let active = inner.jobs.values().find(|stored| {
-                !stored.job.status.is_terminal()
-                    && stored
+            }
+            if let Some(active_idempotency_key) = controller_job.active_idempotency_key.as_deref() {
+                let active = inner.jobs.values().find(|stored| {
+                    !stored.job.status.is_terminal()
+                        && stored
+                            .controller_job
+                            .as_ref()
+                            .and_then(|state| state.active_idempotency_key.as_deref())
+                            == Some(active_idempotency_key)
+                });
+                if let Some(active) = active {
+                    let active_state = active
                         .controller_job
                         .as_ref()
-                        .and_then(|state| state.active_idempotency_key.as_deref())
-                        == Some(active_idempotency_key)
-            });
-            if let Some(active) = active {
-                let active_state = active
-                    .controller_job
-                    .as_ref()
-                    .expect("active controller submission has controller state");
-                if controller_submission_fingerprint(active_state) != fingerprint {
-                    return Err(controller_idempotency_conflict(active_idempotency_key));
+                        .expect("active controller submission has controller state");
+                    if controller_submission_fingerprint(active_state) != fingerprint {
+                        return Err(controller_idempotency_conflict(active_idempotency_key));
+                    }
+                    return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(
+                        active.job.clone(),
+                    )));
                 }
-                return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(active.job.clone())));
             }
-        }
-        let job = Job {
-            id: Uuid::new_v4(),
-            operation,
-            status: JobStatus::Queued,
-            created_at_ms: now,
-            updated_at_ms: now,
-            started_at_ms: None,
-            finished_at_ms: None,
-            event_count: 0,
-            source_snapshot: None,
-            path_materialization_plan: None,
-            stale_reason: None,
-            daemon_lease_id: self.daemon_lease_id.clone(),
-            target_runner_id: None,
-            target_project_id: None,
-            claim_id: None,
-            claimed_by_runner_id: None,
-            claimed_at_ms: None,
-            claim_expires_at_ms: None,
-            artifacts: Vec::new(),
-            runner_job_projection: None,
-        };
-        let job_id = job.id;
-        let mut event_data = serde_json::json!({ "controller_job": controller_job.public_request });
-        if let Some(run_id) = event_data["controller_job"]["durable_run_id"]
-            .as_str()
-            .filter(|run_id| !run_id.trim().is_empty())
-        {
-            event_data["durable_run_id"] = serde_json::json!(run_id);
-        }
-        let initial_event = JobEvent {
-            sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
-            job_id,
-            kind: JobEventKind::Status,
-            timestamp_ms: now,
-            message: Some("job queued".to_string()),
-            data: Some(event_data),
-        };
-        let mut stored = StoredJob {
-            job,
-            events: vec![initial_event],
-            admission_idempotency_key: None,
-            controller_job: Some(controller_job),
-            admission_lease: None,
-            remote_runner: None,
-            local_runner: None,
-            local_child: None,
-        };
-        stored.job.event_count = stored.events.len();
-        inner.jobs.insert(job_id, stored);
-        inner.controller_submissions.insert(
-            idempotency_key.clone(),
-            ControllerJobSubmission {
-                fingerprint,
+            let job = Job {
+                id: Uuid::new_v4(),
+                operation,
+                status: JobStatus::Queued,
+                created_at_ms: now,
+                updated_at_ms: now,
+                started_at_ms: None,
+                finished_at_ms: None,
+                event_count: 0,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                stale_reason: None,
+                daemon_lease_id: self.daemon_lease_id.clone(),
+                target_runner_id: None,
+                target_project_id: None,
+                claim_id: None,
+                claimed_by_runner_id: None,
+                claimed_at_ms: None,
+                claim_expires_at_ms: None,
+                artifacts: Vec::new(),
+                runner_job_projection: None,
+            };
+            let job_id = job.id;
+            let mut event_data =
+                serde_json::json!({ "controller_job": controller_job.public_request });
+            if let Some(run_id) = event_data["controller_job"]["durable_run_id"]
+                .as_str()
+                .filter(|run_id| !run_id.trim().is_empty())
+            {
+                event_data["durable_run_id"] = serde_json::json!(run_id);
+            }
+            let initial_event = JobEvent {
+                sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
                 job_id,
-                terminal_job: None,
-            },
-        );
-        Ok(ControllerJobSubmissionOutcome::Submitted(job_id))
-        })
+                kind: JobEventKind::Status,
+                timestamp_ms: now,
+                message: Some("job queued".to_string()),
+                data: Some(event_data),
+            };
+            let mut stored = StoredJob {
+                job,
+                events: vec![initial_event],
+                admission_idempotency_key: None,
+                controller_job: Some(controller_job),
+                admission_lease: None,
+                remote_runner: None,
+                local_runner: None,
+                local_child: None,
+            };
+            stored.job.event_count = stored.events.len();
+            inner.jobs.insert(job_id, stored);
+            inner.controller_submissions.insert(
+                idempotency_key.clone(),
+                ControllerJobSubmission {
+                    fingerprint,
+                    job_id,
+                    terminal_job: None,
+                },
+            );
+            Ok(ControllerJobSubmissionOutcome::Submitted(job_id))
+        }
     }
 
     /// Claim a controller job before starting a worker. This is intentionally a
@@ -3403,6 +3545,12 @@ fn recovered_terminal_agent_task_evidence(stored: &StoredJob) -> Option<Recovere
 impl JobHandle {
     pub fn job_id(&self) -> Uuid {
         self.job_id
+    }
+
+    /// The store this job lives in, for controller drivers that submit
+    /// children of their own.
+    pub(crate) fn store(&self) -> &JobStore {
+        &self.store
     }
 
     pub fn is_cancelled(&self) -> bool {

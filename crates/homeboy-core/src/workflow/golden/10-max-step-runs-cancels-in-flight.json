@@ -1,0 +1,224 @@
+{
+  "definition": {
+    "budget": {
+      "max_step_runs": 2
+    },
+    "id": "budget",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "a"
+      },
+      {
+        "exec": {
+          "args": [
+            "60"
+          ],
+          "program": "sleep"
+        },
+        "id": "b"
+      },
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "c",
+        "needs": [
+          "a"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/b/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "budget_exhausted",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "true",
+          "step": "a"
+        },
+        {
+          "args": [
+            "60"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/b/1/1",
+          "kind": "exec",
+          "program": "sleep",
+          "step": "b"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "b": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/b/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "c": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "cancel_step",
+          "key": "wf-golden/b/1/1",
+          "reason": "workflow budget exhausted: max_step_runs reached"
+        },
+        {
+          "command": "complete",
+          "reason": "max_step_runs reached",
+          "status": "budget_exhausted"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": "max_step_runs reached",
+        "status": "budget_exhausted",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/b/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "c": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/b/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": "max_step_runs reached",
+        "status": "budget_exhausted",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/b/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "c": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

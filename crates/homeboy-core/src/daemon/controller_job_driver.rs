@@ -178,6 +178,10 @@ impl ControllerJobHandle {
         self.job.job_id().to_string()
     }
 
+    pub(crate) fn job(&self) -> &JobHandle {
+        &self.job
+    }
+
     pub fn progress(&self, private_progress: Value) -> Result<()> {
         self.job
             .progress(self.driver.public_progress(&private_progress)?)

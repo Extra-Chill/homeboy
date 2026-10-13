@@ -32,6 +32,7 @@ fn terminal_controller_job_releases_active_key_for_next_retry_epoch() {
                     cancellation_reason: None,
                     execution_claim_id: None,
                     recovery_attempted: false,
+                    parent_job_id: None,
                 },
             )
             .expect("admit retry epoch");
@@ -82,6 +83,7 @@ fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombs
         cancellation_reason: None,
         execution_claim_id: None,
         recovery_attempted: false,
+        parent_job_id: None,
     };
     let submit = |key: &str| match store
         .admit_controller_job(
@@ -369,6 +371,7 @@ fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&st
                 cancellation_reason: None,
                 execution_claim_id: None,
                 recovery_attempted: false,
+                parent_job_id: None,
             },
         )
         .expect("admit staging dispatch");
@@ -463,6 +466,7 @@ fn admitted_owner_fixture_job(store: &JobStore, linked_durable_run_id: &str) -> 
                 cancellation_reason: None,
                 execution_claim_id: None,
                 recovery_attempted: false,
+                parent_job_id: None,
             },
         )
         .expect("admit owner fixture job");
