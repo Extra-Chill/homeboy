@@ -264,7 +264,7 @@ pub fn register_cook_step_hooks() {
     });
 }
 
-fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
+pub(super) fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     let Some(linked) = exit.linked_durable_run_id.as_deref() else {
         return Ok(());
     };
@@ -381,7 +381,18 @@ fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let parent = store.read_record(cook_id)?;
     if exit.cancelled {
-        if let Some(launcher_id) = parent.metadata["detached_cook_handoff"]["launcher_id"].as_str()
+        // A workflow `cook` step derives its Cook ID from its own step key, so
+        // it is that Cook's only owner: cancel the Cook, attempt and runner
+        // job included. A detached launch only cancels the launch generation
+        // it still owns.
+        if !exit.key.starts_with(COOK_LAUNCH_STEP_KEY_PREFIX) {
+            let _ = agent_task_lifecycle::cancel_run_in_store(
+                &store,
+                cook_id,
+                Some("workflow Cook step cancelled"),
+            );
+        } else if let Some(launcher_id) =
+            parent.metadata["detached_cook_handoff"]["launcher_id"].as_str()
         {
             let _ = agent_task_lifecycle::cancel_claimed_detached_cook_in_store(
                 &store,
