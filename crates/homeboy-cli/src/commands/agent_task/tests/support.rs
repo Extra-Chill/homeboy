@@ -14,8 +14,7 @@ pub(in crate::commands::agent_task) use super::super::args::{
 };
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
-    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs,
-    ValidatePlanArgs,
+    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::controller::{
     apply_controller_event, controller_from_spec, controller_materialize,
@@ -24,9 +23,8 @@ pub(in crate::commands::agent_task) use super::super::controller::{
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
-    run_cook_with_executor_and_dispatcher, run_loaded_plan,
-    run_resume_with_executor, run_submitted, run_submitted_with_executor,
-    validate_cook_request, validate_plan,
+    run_cook_with_executor_and_dispatcher, run_loaded_plan, run_resume_with_executor,
+    run_submitted, run_submitted_with_executor, validate_cook_request, validate_plan,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
     cancel, diagnose, evidence, logs, reconcile_run, replay_provider_boundary, status,

@@ -701,7 +701,10 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
         assert!(again.prerequisites.is_empty() && again.sha256.is_empty());
         let again_workspace = workspace("again");
         let again_path = Path::new(&again_workspace);
-        assert_eq!(git_output(again_path, &["rev-parse", "HEAD"]).unwrap(), second);
+        assert_eq!(
+            git_output(again_path, &["rev-parse", "HEAD"]).unwrap(),
+            second
+        );
         assert_eq!(
             git_output(again_path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
             "main"

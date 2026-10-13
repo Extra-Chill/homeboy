@@ -90,7 +90,7 @@ Lab offload support is intentionally command-specific:
 | `agent-task controller from-spec --resume` / `agent-task controller run-from-spec` / `agent-task controller materialize` | Yes | Yes | Portable controller spec materialization defaults to Lab when a default runner exists. |
 | `agent-task controller resume` | No | Yes | Runner-resident controller lifecycle work. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
-| `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
+| `agent-task run` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |
 | `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
 | `build` | No | No | Local quality gate; extension-owned build commands are not represented in the portable Lab contract yet. |

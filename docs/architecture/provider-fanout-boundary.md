@@ -38,32 +38,13 @@ finalization. Generic provider-neutral fanout scheduling remains an internal
 implementation seam for adapters and schedulers that need it; it is not the
 public CLI contract.
 
-Public batch-cook fanout lowers each cook into the normal cook-loop path, so
-Homeboy owns dispatch, promotion, deterministic gates, commit/push, and PR
-finalization per cook. Provider adapters still receive one normalized
+Public batch-cook fanout is a workflow: `fanout cook-batch` compiles to a
+`homeboy/workflow/v1` instance whose `foreach` step runs one ordinary
+`agent-task cook` per issue. Homeboy owns dispatch, promotion, deterministic
+gates, commit/push, and PR finalization per cook, and the workflow's `join`
+decides the batch outcome. Provider adapters still receive one normalized
 `AgentTaskRequest` at a time and return one normalized `AgentTaskOutcome` at a
 time.
-
-`fanout cook-batch` is the concise same-repository planner. A
-`homeboy/agent-task-batch-cook-fanout-plan/v1` submitted through `fanout
-run-plan` may instead contain cells for independent repositories. Before any
-child is admitted, Homeboy persists the fanout roster and a sanitized immutable
-cell manifest. The manifest retains each cell's repository, base/head,
-worktree, verification profile, provider policy, placement directive, evidence
-source identity, finalization intent, and Cook-recipe replay identity. Recipes
-remain the authoritative private execution records; the manifest never copies
-private gate commands, provider configuration, or evidence source paths.
-
-Durable batch fanout (`agent-task fanout submit-batch`) is the generic queue and
-reconcile surface for independent agent-task plans. It persists one child run
-per task and exposes stable read-side reports:
-
-- `homeboy/agent-task-batch-status/v1` reports the batch record, child run
-  states, per-state totals, and follow-up commands.
-- `homeboy/agent-task-batch-artifacts/v1` collates child run artifacts into a
-  provider-neutral `summary` and `manifest` keyed by `task_id`, `run_id`, and
-  child run state while preserving each child run's normal
-  `AgentTaskRunArtifacts` payload under `child_runs[]`.
 
 The artifact manifest contains Homeboy `AgentTaskArtifact` and
 `AgentTaskEvidenceRef` records only. Providers keep backend-native worker,

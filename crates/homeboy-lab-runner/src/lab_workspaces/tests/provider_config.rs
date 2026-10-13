@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::super::{
-    accepted_extra_lab_workspaces,
-    agent_task_plan_extra_workspaces, agent_task_plan_spec, declared_path_input_values,
-    extension_source_extra_workspaces, path_setting_values, path_values_extra_workspaces,
-    preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
-    provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
+    accepted_extra_lab_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
+    declared_path_input_values, extension_source_extra_workspaces, path_setting_values,
+    path_values_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+    provider_config_candidate_paths, provider_config_extra_workspaces,
+    resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces_from_entries, runtime_refresh_source_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
     workspace_mapping_entry, workspace_ref_extra_workspaces, ExtraLabWorkspace,

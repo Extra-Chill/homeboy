@@ -552,10 +552,7 @@ fn cancelling_mid_wave_stops_every_running_item() {
         let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
             .unwrap()
             .with_daemon_lease("workflow-test".to_string());
-        let request = request(
-            fan_out(json!("all"), "sleep 60"),
-            home.path(),
-        );
+        let request = request(fan_out(json!("all"), "sleep 60"), home.path());
         let job_id = admit(&store, &request);
         crate::daemon::start_controller_job(job_id, &store).unwrap();
         let key = |index: usize| format!("{}/work/1/item-{index}/1", request.instance);

@@ -1,4 +1,4 @@
-//! Agent-task command run submission, status, run-next, cancel, retry, and resume tests.
+//! Agent-task command run submission, status, queue claims, cancel, retry, and resume tests.
 
 use super::support::*;
 
@@ -1883,9 +1883,9 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             .expect("constrained fixture capacity");
             homeboy::core::defaults::reset_config_cache_for_test();
             let (failed, exit_code) = run_next_queued(Arc::new(CountingCookExecutor {
-                    executions: Arc::clone(&executions),
-                    patch_path: Some(patch.display().to_string()),
-                }))
+                executions: Arc::clone(&executions),
+                patch_path: Some(patch.display().to_string()),
+            }))
             .expect("queue reports its failed admission");
             assert_eq!(exit_code, 1, "{failed:#}");
             assert_eq!(failed["status"], "failed", "{failed:#}");
@@ -1914,7 +1914,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             assert!(terminal.aggregate_path.is_some());
             assert_eq!(executions.load(Ordering::SeqCst), 0);
             let (idle, idle_exit) = run_next_queued(Arc::new(CapturingExecutor::default()))
-            .expect("failed admission is not automatically replayed");
+                .expect("failed admission is not automatically replayed");
             assert_eq!(idle_exit, 0);
             assert_eq!(idle["claimed"], false);
             return;
@@ -3603,8 +3603,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let (_, exit_code) = run_next_queued(executor.clone())
-            .expect("run-next skips proxy");
+        let (_, exit_code) = run_next_queued(executor.clone()).expect("run-next skips proxy");
 
         assert_eq!(exit_code, 0);
         assert!(executor
@@ -5566,9 +5565,9 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
         let observed_status = Arc::new(Mutex::new(None));
 
         let (_value, exit_code) = run_next_queued(Arc::new(InspectingExecutor {
-                run_id: "run-next-a".to_string(),
-                observed_status: Arc::clone(&observed_status),
-            }))
+            run_id: "run-next-a".to_string(),
+            observed_status: Arc::clone(&observed_status),
+        }))
         .expect("claimed run completed");
 
         let observed = observed_status

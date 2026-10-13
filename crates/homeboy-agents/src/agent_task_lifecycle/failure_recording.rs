@@ -1816,15 +1816,6 @@ fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) 
         })
 }
 
-pub(crate) fn terminal_artifact_projection_is_verified(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<bool> {
-    terminal_artifact_projection_is_verified_with(record, aggregate, || {
-        homeboy_core::observation::ObservationStore::open_initialized()
-    })
-}
-
 /// [`terminal_artifact_projection_is_verified`] against an explicitly injected
 /// durable lifecycle root.
 ///
@@ -1880,18 +1871,6 @@ fn terminal_artifact_projection_is_verified_with(
         }
     }
     Ok(true)
-}
-
-/// Return a repairable diagnostic when an actionable patch is not yet readable
-/// from a verified controller-owned projection. Missing aggregates remain
-/// outside this check so historical terminal records keep their existing
-/// recovery behavior.
-pub(crate) fn terminal_artifact_projection_readiness(run_id: &str) -> Result<Option<String>> {
-    let record = store::read_record(&super::sanitize_run_id(run_id))?;
-    terminal_artifact_projection_readiness_for_record(
-        &record,
-        store::read_aggregate(&record.run_id),
-    )
 }
 
 /// [`terminal_artifact_projection_readiness`] against an explicitly injected
@@ -1980,17 +1959,6 @@ pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
                 lifecycle_store.open_observation_readonly()
             })
         },
-    )
-}
-
-fn terminal_artifact_projection_readiness_for_record(
-    record: &AgentTaskRunRecord,
-    aggregate: Result<AgentTaskAggregate>,
-) -> Result<Option<String>> {
-    terminal_artifact_projection_readiness_for_record_with(
-        record,
-        aggregate,
-        terminal_artifact_projection_is_verified,
     )
 }
 

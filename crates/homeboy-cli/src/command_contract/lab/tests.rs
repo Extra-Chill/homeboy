@@ -105,7 +105,6 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["agent-task", "cook", "--to-worktree", "repo@slug"],
     &["agent-task", "run-plan", "--plan", "-"],
     &["agent-task", "run", "run-1"],
-    &["agent-task", "run-next"],
     &["agent-task", "status", "run-1"],
     &["agent-task", "list"],
     &["agent-task", "active"],

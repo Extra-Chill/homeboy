@@ -3289,7 +3289,9 @@ fn review_next_actions(
     has_target: bool,
 ) -> Vec<String> {
     if record.state == AgentTaskRunState::Queued {
-        return vec!["run this queued durable task with `homeboy agent-task run <run-id>` or let a daemon claim it with `homeboy agent-task run-next`".to_string()];
+        return vec![
+            "run this queued durable task with `homeboy agent-task run <run-id>`".to_string(),
+        ];
     }
     if record.state == AgentTaskRunState::Running {
         return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`".to_string()];

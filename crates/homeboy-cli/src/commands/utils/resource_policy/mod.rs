@@ -11,8 +11,7 @@ use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_executable_agent_task_retry,
-    is_local_registry_management, is_plan_only_command,
+    is_executable_agent_task_retry, is_local_registry_management, is_plan_only_command,
 };
 use messages::{
     append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
@@ -1789,26 +1788,6 @@ mod tests {
         assert!(command.lab_offload_supported);
         assert!(command.allows_warm_runner_coordination);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
-    }
-
-    #[test]
-    fn fanout_run_plan_coordinator_can_offload_its_child_provider_attempts() {
-        // A validated batch-cook fanout run-plan must not be refused as
-        // local-only under resource policy: the coordinator stays on the
-        // controller while each child provider attempt is Lab-eligible (#9375).
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "run-plan",
-            "--input",
-            "@batch-cook-plan.json",
-        ]);
-        let command = hot_command(&cli.command).expect("fanout run-plan is resource managed");
-        assert!(command.lab_offload_supported);
-        assert!(command.allows_warm_runner_coordination);
-        assert!(command.lab_offload_unsupported_reason.is_none());
-        assert_eq!(command.label, "agent-task fanout run-plan");
     }
 
     #[test]

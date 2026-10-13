@@ -55,10 +55,7 @@ pub use super::agent_task_aggregate::{
     AgentTaskReconciliationDecision, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 
-pub use super::agent_task_contract::{
-    agent_task_core_contract, AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
-    AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
-};
+pub use super::agent_task_contract::agent_task_core_contract;
 
 // Plan/scheduler/execution context types are widely consumed and stay at the
 // facade root for ergonomics.
@@ -360,9 +357,9 @@ pub mod service {
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,
-        cook_continuation_owner_denial,
-        cook_continuation_replays_provider, cook_continuation_requires_model_provenance,
-        cook_request_is_review_form_only, enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion_with_progress,
+        cook_continuation_owner_denial, cook_continuation_replays_provider,
+        cook_continuation_requires_model_provenance, cook_request_is_review_form_only,
+        enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion_with_progress,
         hydrate_evidence_ref, hydrate_evidence_summary, live_owner_continuation_denial,
         liveness_for_record, load_recipe, load_recipe_for_attempt,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
@@ -378,19 +375,19 @@ pub mod service {
         reconstruct_options_for_record_with_dispatcher, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
         recover_cook_pr, recover_cook_pr_with_review_form, recover_missing_promotion_aggregate,
-        register_cook_step_hooks, register_promotion_job_driver,
-        resolve_cook_budget, resume, resume_cook, retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
-        run_loaded_plan, run_next, run_next_with_cook_dispatcher,
-        run_submitted, run_submitted_with_timeout, source_worktree_path, submit_plan_spec,
+        register_cook_step_hooks, register_promotion_job_driver, resolve_cook_budget, resume,
+        retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
+        run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_submitted,
+        run_submitted_with_timeout, source_worktree_path, submit_plan_spec,
         terminal_review_form_continuation_is_eligible,
         terminal_review_form_continuation_is_eligible_for_observation_readonly,
         terminal_transport_recovery_required, validate_recipe_attempt_record,
-        verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookReport, AgentTaskDiscoveryFilter,
-        AgentTaskDiscoveryReport, AgentTaskHydratedEvidence, AgentTaskLiveness,
-        AgentTaskPromotionRequest, AgentTaskRunResult, AgentTaskSuppliedReviewForm,
-        CookContinuationState, CookMode, CookProgressEvent, CookProviderRouteOverride,
-        CookRecipeStore, CookRequest, CookRuntime, CookService, DEFAULT_REVIEW_FORM_TIMEOUT_MS,
-        MAX_REVIEW_FORM_TIMEOUT_MS,
+        verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookReport,
+        AgentTaskDiscoveryFilter, AgentTaskDiscoveryReport, AgentTaskHydratedEvidence,
+        AgentTaskLiveness, AgentTaskPromotionRequest, AgentTaskRunResult,
+        AgentTaskSuppliedReviewForm, CookContinuationState, CookMode, CookProgressEvent,
+        CookProviderRouteOverride, CookRecipeStore, CookRequest, CookRuntime, CookService,
+        DEFAULT_REVIEW_FORM_TIMEOUT_MS, MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, promotion_source,

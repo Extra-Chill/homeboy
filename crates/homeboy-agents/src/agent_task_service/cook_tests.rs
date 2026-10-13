@@ -2452,7 +2452,6 @@ fn finalizing_cook_refuses_patch_absent_intentional_no_change_for_change_policy(
                 .metadata["cook_progress"]["terminal_status"],
             "no_candidate"
         );
-
     });
 }
 
@@ -2477,7 +2476,6 @@ fn finalizing_patch_cook_accepts_verified_already_satisfied_verdict() {
             .expect("restore terminal intentional-no-change report");
         assert_eq!(restarted.exit_code, 0);
         assert_eq!(restarted.value.status, "intentional_no_change");
-
     });
 }
 
@@ -8598,11 +8596,6 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
         )
         .expect("persist green promotion");
 
-        assert!(
-            agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)
-                .expect("read artifact projection")
-                .is_some()
-        );
         let recipe = super::super::load_recipe(&options.identity.cook_id).expect("load recipe");
         super::super::reconcile_recipe_attempt_for_continuation(&recipe, run_id)
             .expect("green applied candidate does not need provider artifact replay");

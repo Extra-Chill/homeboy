@@ -192,8 +192,7 @@ pub(super) fn materialize_git_bundle_controlled(
     // A thin transfer that cannot be installed (the cache lost objects between
     // the query and the install) falls back to the complete closure, which
     // never depends on runner state.
-    let prerequisites =
-        bundle_prerequisites(request.local_path, request.head, &cached, control)?;
+    let prerequisites = bundle_prerequisites(request.local_path, request.head, &cached, control)?;
     if !prerequisites.is_empty() {
         match transfer_git_bundle(
             runner,

@@ -1,4 +1,4 @@
-//! Durable run lifecycle handlers: cook, run-plan, run, run-next, submit,
+//! Durable run lifecycle handlers: cook, run-plan, run,
 //! resume, and retry.
 
 use serde_json::{json, Value};
@@ -11161,7 +11161,6 @@ fn explicit_local_retry_admission_refusal(
         None,
     ))
 }
-
 
 /// Generic fallback disclosure used when no provider supplies one. Also the
 /// sentinel that marks `ai_tool` as "not explicitly overridden by the operator",

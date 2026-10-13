@@ -63,7 +63,6 @@ fn runner_resident_agent_task_reads_are_low_noise_polling() {
 fn runner_resident_agent_task_execution_keeps_full_runner_evidence() {
     for args in [
         ["homeboy", "agent-task", "run", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "run-next"].as_slice(),
         ["homeboy", "agent-task", "controller", "resume", "loop-123"].as_slice(),
     ] {
         let contract = parsed_command(args)

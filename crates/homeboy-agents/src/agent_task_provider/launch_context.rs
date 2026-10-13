@@ -268,5 +268,4 @@ mod tests {
             .any(|name| name == &secret_name));
         assert!(!record.metadata.to_string().contains(&secret_value));
     }
-
 }

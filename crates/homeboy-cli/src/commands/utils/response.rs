@@ -649,17 +649,7 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: if exit_code == 0
-            && matches!(
-                (identity.command.as_str(), identity.operation.as_deref()),
-                ("agent-task", Some("fanout resume"))
-            ) {
-            // Resume can successfully reconcile a batch whose durable subject
-            // remains failed; retain that subject outcome below instead.
-            "succeeded".to_string()
-        } else {
-            status_for_result(Some(&data), exit_code)
-        },
+        status: status_for_result(Some(&data), exit_code),
         subject_state,
         run,
         refs,
@@ -685,10 +675,6 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
     match (identity.command.as_str(), identity.operation.as_deref()) {
         ("agent-task", Some("status")) => data
             .get("state")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        ("agent-task", Some("fanout resume")) => data
-            .get("status")
             .and_then(Value::as_str)
             .map(str::to_string),
         _ => None,
@@ -762,9 +748,8 @@ fn failure_diagnostics_for_data(
         return Some(diagnostics);
     }
 
-    let specialized_digest = release_failure_digest(data)
-        .or_else(|| cook_batch_failure_digest(data))
-        .or_else(|| formatting_failure_digest(data));
+    let specialized_digest =
+        release_failure_digest(data).or_else(|| formatting_failure_digest(data));
     if let Some(failure_digest) = specialized_digest {
         return Some(command_failed_diagnostics(exit_code, failure_digest));
     }
@@ -1533,111 +1518,6 @@ fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
     })
 }
 
-/// Lift the first blocked worktree row of a cook-batch preflight into the
-/// bounded command envelope. The blocked batch exits nonzero while the
-/// complete per-row evidence stays under `data.worktrees.rows` (#13702).
-fn cook_batch_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
-    if data.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-cook-batch/v1") {
-        return None;
-    }
-    let status = data.get("status").and_then(Value::as_str)?;
-    let primary = data
-        .get("primary_failure")
-        .filter(|value| value.is_object())?;
-    if status != "blocked" {
-        return cook_batch_child_failure_digest(status, data, primary);
-    }
-    let phase = primary
-        .get("phase")
-        .and_then(Value::as_str)
-        .unwrap_or("worktree_preflight");
-    let handle = primary
-        .get("handle")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let cause = primary
-        .get("reason")
-        .and_then(Value::as_str)
-        .unwrap_or("worktree preflight blocked without a reported reason");
-    let blocked_rows = data
-        .pointer("/causal_failures/total")
-        .and_then(Value::as_u64)
-        .unwrap_or(1);
-    let next_actions = primary
-        .get("next_action")
-        .and_then(Value::as_str)
-        .map(|command| {
-            vec![
-                CommandNextAction::new("create the blocked worktree", command)
-                    .with_kind(CommandNextActionKind::Repair),
-            ]
-        })
-        .unwrap_or_default();
-    Some(CommandFailureDigest {
-        summary: format!(
-            "cook-batch blocked in {phase} on worktree {handle} ({blocked_rows} blocked row(s)): {}",
-            bounded_text(cause, 1000)
-        ),
-        stdout_tail: None,
-        stderr_tail: None,
-        artifact_refs: Vec::new(),
-        next_actions,
-        retryable: None,
-    })
-}
-
-fn cook_batch_child_failure_digest(
-    status: &str,
-    data: &Value,
-    primary: &Value,
-) -> Option<CommandFailureDigest> {
-    if !matches!(status, "failed" | "partial_failure") {
-        return None;
-    }
-    let phase = primary
-        .get("phase")
-        .and_then(Value::as_str)
-        .unwrap_or("child_execution");
-    let classification = primary
-        .get("classification")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let cause = primary
-        .get("reason")
-        .and_then(Value::as_str)
-        .unwrap_or("child cooks failed without a reported reason");
-    let affected = primary
-        .get("affected_child_count")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            data.pointer("/causal_failures/total")
-                .and_then(Value::as_u64)
-        })
-        .unwrap_or(1);
-    let next_actions = primary
-        .get("next_action")
-        .and_then(Value::as_str)
-        .or_else(|| primary.pointer("/recovery/command").and_then(Value::as_str))
-        .map(|command| {
-            vec![
-                CommandNextAction::new("repair the shared child failure", command)
-                    .with_kind(CommandNextActionKind::Repair),
-            ]
-        })
-        .unwrap_or_default();
-    Some(CommandFailureDigest {
-        summary: format!(
-            "cook-batch {status} in {phase} classification={classification} ({affected} child(ren)): {}",
-            bounded_text(cause, 1000)
-        ),
-        stdout_tail: None,
-        stderr_tail: None,
-        artifact_refs: Vec::new(),
-        next_actions,
-        retryable: None,
-    })
-}
-
 /// Report a release that stopped short of publication without failing a step.
 ///
 /// The operator needs the state it reached and the command that finishes it,
@@ -2072,12 +1952,7 @@ fn tail_text(value: String) -> String {
 }
 
 fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
-    let raw_status = data.and_then(|value| {
-        value
-            .get("status")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/batch/state").and_then(Value::as_str))
-    });
+    let raw_status = data.and_then(|value| value.get("status").and_then(Value::as_str));
     let payload_status = raw_status.and_then(normalize_status);
     if exit_code != 0 {
         // A partial result is still a command failure, but retaining its precise
@@ -2801,45 +2676,6 @@ mod tests {
         }
     }
 
-    /// #13702 direction 2: reading a failed fanout batch is a successful
-    /// operation. The envelope reports the read; the batch's own state stays
-    /// in `data`.
-    #[test]
-    fn fanout_status_read_of_a_failed_batch_is_a_successful_envelope() {
-        let response = cli_response_for_json_result_for_identity(
-            &Ok(json!({
-                "schema": "homeboy/agent-task-fanout-status/v2",
-                "batch": {
-                    "status": "failed",
-                    "batch": {
-                        "batch_id": "cook-batch-homeboy-issue-13400-2-5665d644ed6f",
-                        "state": "failed",
-                    },
-                },
-            })),
-            0,
-            &CommandIdentity::with_operation("agent-task", "fanout status"),
-            Some(CommandPresentationEnvelope {
-                stdout: Some(
-                    "Fanout batch cook-batch-homeboy-issue-13400-2: failed (1 failed)\n"
-                        .to_string(),
-                ),
-                stderr: None,
-            }),
-        );
-        let value = serde_json::to_value(response).expect("serialize response");
-
-        assert_eq!(value["success"], true);
-        assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["status"], "succeeded");
-        assert!(value.get("subject_state").is_none());
-        assert_eq!(value["data"]["batch"]["batch"]["state"], "failed");
-        assert_eq!(
-            value["presentation"]["stdout"],
-            "Fanout batch cook-batch-homeboy-issue-13400-2: failed (1 failed)\n"
-        );
-    }
-
     /// #13702 direction 1: a cook-batch that only provisioned and planned —
     /// no agent ran, no PR opened — must not report `succeeded`. The
     /// plan-ready payload maps to the distinct `planned` status.
@@ -2865,77 +2701,6 @@ mod tests {
             assert_eq!(value["status"], "planned", "dry_run: {dry_run}");
             assert_ne!(value["status"], "succeeded");
         }
-    }
-
-    /// A blocked cook-batch preflight is a failed operation and must lift the
-    /// primary worktree blocker into the envelope instead of failing silently.
-    #[test]
-    fn blocked_cook_batch_names_its_primary_worktree_failure() {
-        let response = cli_response_for_json_result_for_identity(
-            &Ok(json!({
-                "schema": "homeboy/agent-task-cook-batch/v1",
-                "fanout_id": "issue-wave",
-                "status": "blocked",
-                "primary_failure": {
-                    "phase": "worktree_preflight",
-                    "handle": "homeboy@fix-a",
-                    "reason": "worktree creation failed: branch already exists",
-                    "next_action": "homeboy workspace worktrees add homeboy@fix-a",
-                },
-                "causal_failures": { "total": 1, "returned": 1, "omitted": 0 },
-            })),
-            1,
-            &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
-            None,
-        );
-        let value = serde_json::to_value(response).expect("serialize response");
-
-        assert_eq!(value["success"], false);
-        let summary = value["summary"].as_str().expect("named cause");
-        assert!(summary.contains("worktree_preflight"), "got: {summary}");
-        assert!(summary.contains("homeboy@fix-a"), "got: {summary}");
-        assert_eq!(
-            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
-            "homeboy workspace worktrees add homeboy@fix-a"
-        );
-    }
-
-    #[test]
-    fn failed_cook_batch_names_its_shared_child_root_cause() {
-        let response = cli_response_for_json_result_for_identity(
-            &Ok(json!({
-                "schema": "homeboy/agent-task-cook-batch/v1",
-                "fanout_id": "issue-wave",
-                "status": "failed",
-                "primary_failure": {
-                    "phase": "committed_harvest_preflight",
-                    "classification": "agent_task.committed_harvest_dirty_workspace",
-                    "reason": "refusing committed-change harvest from a workspace with pre-existing uncommitted changes",
-                    "affected_child_count": 3,
-                    "next_action": "homeboy agent-task cook-continue cook-1",
-                },
-                "causal_failures": { "total": 3, "returned": 3, "omitted": 0, "unique_causes": 1 },
-            })),
-            1,
-            &CommandIdentity::with_operation("agent-task", "fanout cook-batch"),
-            None,
-        );
-        let value = serde_json::to_value(response).expect("serialize response");
-
-        assert_eq!(value["success"], false);
-        let summary = value["summary"].as_str().expect("named cause");
-        assert!(
-            summary.contains("committed_harvest_preflight"),
-            "got: {summary}"
-        );
-        assert!(
-            summary.contains("agent_task.committed_harvest_dirty_workspace"),
-            "got: {summary}"
-        );
-        assert_eq!(
-            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
-            "homeboy agent-task cook-continue cook-1"
-        );
     }
 
     #[test]

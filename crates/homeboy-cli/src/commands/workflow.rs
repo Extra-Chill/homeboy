@@ -107,6 +107,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
                         "id": step.id,
                         "kind": kind_name(step.kind()),
                         "needs": step.needs,
+                        "foreach": step.foreach.is_some(),
                     })).collect::<Vec<_>>(),
                 }),
                 0,
@@ -634,9 +635,9 @@ mod tests {
                 continue;
             }
             let parsed = WorkflowDefinition::from_value(value.clone());
-            // Examples B (`every`, `notify`) and C (`foreach`) use fields a
-            // later release implements; this one refuses them.
-            if value["id"] == "cook-batch" || value["id"] == "homeboy-nightly-red-main" {
+            // Example B (`every`, `notify`) uses fields a later release
+            // implements; this one refuses it.
+            if value["id"] == "homeboy-nightly-red-main" {
                 assert!(parsed.is_err());
                 continue;
             }
@@ -648,7 +649,7 @@ mod tests {
             });
             examples += 1;
         }
-        assert!(examples >= 2);
+        assert!(examples >= 3);
     }
 
     #[test]

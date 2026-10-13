@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::LazyLock;
-use std::sync::{mpsc, Arc};
 #[cfg(test)]
 use std::sync::Mutex;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
@@ -65,13 +65,13 @@ use super::cook_pre_execution::{
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, cook_report_with_stores,
-    finalize_or_load_cook_pr, finalize_or_load_cook_pr_with_stores,
-    is_moving_base_finalization_error, moving_base_recovery_for_run_with_stores,
-    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
-    next_moving_base_recovery, persisted_promotion_for_attempt_in_store,
-    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
+    finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
+    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion_in_store,
+    moving_base_recovery_report, next_moving_base_recovery,
+    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
+    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure_with_store,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -2743,25 +2743,6 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
-    fn unbound_finalization_receipt_does_not_make_a_cook_exit_successfully() {
-        let mut report = report("review_ready", CookDisposition::Terminal);
-        report.latest_run_id = Some("newer-attempt".to_string());
-        report.selected_candidate = Some(serde_json::json!({
-            "cook_id": "cook",
-            "run_id": "older-canonical-attempt",
-            "incomplete": false,
-            "selected_task_id": "task",
-            "selected_artifact_id": "patch",
-        }));
-        report.finalization = Some(serde_json::json!({
-            "status": "review_ready",
-            "pr_number": 12291,
-        }));
-
-        assert_eq!(cook_report_exit_code(&report), 1);
-    }
-
-    #[test]
     fn a_pr_receipt_remains_completed_without_reloading_candidate_evidence() {
         let completion = cook_completion(
             None,
@@ -2920,150 +2901,6 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     Ok(options)
 }
 
-/// Resume one durable Cook through its original provider, promotion, gates, and
-/// finalization contract. Fanout supervisors use this child-local entrypoint so
-/// a blocked sibling cannot prevent a ready candidate from advancing.
-pub fn resume_cook<D>(
-    cook_id: &str,
-    executor: SharedAgentTaskExecutor,
-    reconstruct_dispatcher: D,
-    rerun_completed_gates: bool,
-) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
-where
-    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-{
-    let mut finalize = finalize_or_load_cook_pr;
-    let report = resume_batch_child_with_gate_rerun(
-        cook_id,
-        cook_id,
-        executor,
-        &reconstruct_dispatcher,
-        &mut finalize,
-        rerun_completed_gates,
-    )?;
-    Ok(AgentTaskRunResult {
-        exit_code: cook_report_exit_code(&report),
-        value: report,
-    })
-}
-
-fn resume_batch_child_with_gate_rerun<D, F>(
-    batch_id: &str,
-    cook_id: &str,
-    executor: SharedAgentTaskExecutor,
-    reconstruct_dispatcher: &D,
-    finalize: &mut F,
-    rerun_completed_gates: bool,
-) -> Result<AgentTaskCookReport>
-where
-    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    F: FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value>,
-{
-    if !super::recipe_exists(cook_id)? {
-        return Err(Error::validation_invalid_argument(
-            "cook_id",
-            format!(
-                "cook `{cook_id}` has no durable recipe; it never reached cook start and cannot be resumed"
-            ),
-            Some(cook_id.to_string()),
-            Some(vec![format!(
-                "Re-dispatch this cook, or inspect it with `homeboy agent-task status {cook_id}`."
-            )]),
-        ));
-    }
-    let recipe = super::load_recipe(cook_id)?;
-    let mut attempt_run_ids = recipe
-        .attempts
-        .iter()
-        .map(|attempt| attempt.run_id.clone())
-        .collect::<Vec<_>>();
-    if let Ok(index) = agent_task_lifecycle::cook_index(cook_id) {
-        attempt_run_ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
-    }
-    let checkpoint_run_id = attempt_run_ids.into_iter().find(|run_id| {
-        agent_task_lifecycle::exact_record(run_id)
-            .ok()
-            .is_some_and(|record| {
-                record
-                    .metadata
-                    .get("cook_recovery_source_checkpoint")
-                    .is_some()
-                    || record
-                        .metadata
-                        .get("latest_promotion")
-                        .and_then(|promotion| promotion.get("status"))
-                        .and_then(Value::as_str)
-                        == Some("verification_pending")
-            })
-    });
-    if checkpoint_run_id.is_none() {
-        agent_task_lifecycle::reconcile_terminal_artifact_projection(cook_id)?;
-        if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(cook_id)?
-        {
-            return Err(Error::validation_invalid_argument(
-                "cook_id",
-                format!("cook `{cook_id}` cannot resume until controller-side patch projection is ready: {reason}"),
-                Some(cook_id.to_string()),
-                Some(vec![format!(
-                    "Run `homeboy agent-task status {cook_id}` to reconcile the controller projection."
-                )]),
-            ));
-        }
-    }
-    // Faithfully reconstruct the recipe's transport so re-running `run_cook`
-    // matches the persisted durable inputs (a stripped dispatcher would look
-    // like a conflicting new cook). A terminal child is not re-dispatched — its
-    // `needs_execution` check is false — so the reconstructed transport is only
-    // used to satisfy the recipe contract, never to spend a provider attempt
-    // (#9525).
-    let attempt_dispatcher =
-        reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-    let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
-    options.gates.rerun_completed_gates = rerun_completed_gates;
-    if let Some(run_id) = checkpoint_run_id {
-        let attempt = recipe
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == run_id)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "cook_recovery_source_checkpoint",
-                    "checkpointed source attempt is absent from the durable cook recipe",
-                    Some(run_id.clone()),
-                    None,
-                )
-            })?;
-        // An earlier post-apply checkpoint remains the source of truth even if
-        // a later provider attempt failed and became the cook-index latest run.
-        options.identity.initial_run_id = attempt.run_id.clone();
-        options.identity.initial_plan = attempt.plan.clone();
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        agent_task_lifecycle::record_cook_recovery_checkpoint_in_store(
-            &lifecycle_store,
-            &attempt.run_id,
-            "verification_pending",
-            &format!("homeboy agent-task fanout resume {batch_id}"),
-        )?;
-    }
-    let side_effects =
-        CookSideEffects::new(|_, options, run_id, promotion| finalize(options, run_id, promotion));
-    let store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    Ok(CookService::run(
-        options,
-        CookRuntime::new(
-            executor,
-            &store,
-            &lifecycle_store,
-            side_effects,
-            &noop_cook_progress_observer,
-        ),
-        CookMode::Resume,
-    )?
-    .value)
-}
-
 pub(crate) fn apply_resource_guard_stop(
     report: &mut AgentTaskRunResult<AgentTaskCookReport>,
     metadata: &Value,
@@ -3105,10 +2942,6 @@ pub(crate) fn apply_resource_guard_stop(
         context.legal_actions = vec![remedy];
         context.diagnostic = Some(diagnostic);
     }
-}
-
-fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
-    i32::from(!report.completed_successfully())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

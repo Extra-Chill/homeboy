@@ -14,7 +14,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reference {
     Input(String),
-    StepOutput { step: String, pointer: String },
+    StepOutput {
+        step: String,
+        pointer: String,
+    },
     StepRunId(String),
     Iteration,
     Instance,

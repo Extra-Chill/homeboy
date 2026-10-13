@@ -107,5 +107,4 @@ mod tests {
             "--preview carries no aliases"
         );
     }
-
 }

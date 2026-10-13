@@ -16,9 +16,9 @@ pub(crate) mod candidate;
 pub mod capacity;
 pub mod contract;
 pub mod controller;
+pub mod cook_batch;
 pub(crate) mod default_branch;
 pub mod doctor;
-pub mod cook_batch;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod loop_definition;
@@ -32,22 +32,21 @@ pub mod tool;
 
 pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
-    AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskControllerApplyEventArgs,
-    AgentTaskControllerArgs, AgentTaskControllerCommand, AgentTaskControllerDispatchArgs,
-    AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
+    AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand,
+    AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
+    AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
     AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
     AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
-    AgentTaskBatchPrepareArgs, AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutCookBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
-    AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
-    CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs,
-    DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
-    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
-    RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
+    AgentTaskLoopArgs, AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
+    AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat,
+    CookContinueArgs, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
+    GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs,
+    PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
+    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
-    VerifyReplacementArgs,
+    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>

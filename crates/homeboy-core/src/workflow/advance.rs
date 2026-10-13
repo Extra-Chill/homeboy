@@ -638,7 +638,9 @@ impl Machine<'_> {
     /// then settle the step through its `join` once every item has settled.
     fn pump(&mut self, id: &str) {
         let definition = self.step_definition(id).clone();
-        let limit = definition.max_parallel.map_or(usize::MAX, |max| max as usize);
+        let limit = definition
+            .max_parallel
+            .map_or(usize::MAX, |max| max as usize);
         loop {
             if self.state.status.is_terminal() {
                 return;
@@ -795,7 +797,9 @@ impl Machine<'_> {
                 self.now_ms >= started.unwrap_or(self.now_ms) + timeout.as_millis() as u64
             };
             for (index, item) in step.items.iter().enumerate() {
-                if item.phase == StepPhase::Running && !item.timed_out && expired(item.started_at_ms)
+                if item.phase == StepPhase::Running
+                    && !item.timed_out
+                    && expired(item.started_at_ms)
                 {
                     cancels.push((step_definition.id.clone(), Some(index), item.key.clone()));
                 }

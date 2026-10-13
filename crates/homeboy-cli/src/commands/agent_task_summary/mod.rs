@@ -3,9 +3,7 @@ use serde_json::Value;
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
 };
-use super::agent_task::{
-    AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand,
-};
+use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
 mod controller;

@@ -86,6 +86,8 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
         return Ok((
             json!({
                 "schema": COOK_BATCH_SCHEMA,
+                // Planned, not run: the envelope reports `planned` (#13702).
+                "status": "ready",
                 "mode": "preview",
                 "instance": instance,
                 "children": children.len(),
@@ -137,7 +139,10 @@ fn compile(
     for (flag, value) in [
         ("--base", args.base.as_ref()),
         ("--prompt-template", args.prompt_template.as_ref()),
-        ("--bundle-runner", bundle_runner.map(str::to_string).as_ref()),
+        (
+            "--bundle-runner",
+            bundle_runner.map(str::to_string).as_ref(),
+        ),
     ] {
         if let Some(value) = value {
             prepare.extend([flag.to_string(), value.clone()]);
@@ -236,7 +241,10 @@ fn gate_flags(gates: &VerifyGateArgs) -> Result<Vec<(String, Value)>> {
     let mut flags = Vec::new();
     let absolute = |paths: &[String]| -> Result<Vec<String>> {
         let cwd = std::env::current_dir().map_err(|error| {
-            Error::internal_io(error.to_string(), Some("resolve the working directory".into()))
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve the working directory".into()),
+            )
         })?;
         Ok(paths
             .iter()
@@ -305,9 +313,11 @@ fn gate_flags(gates: &VerifyGateArgs) -> Result<Vec<(String, Value)>> {
     if gates.private_gate_reveal != defaults.private_gate_reveal {
         flags.push((
             "private-gate-reveal".to_string(),
-            json!(clap::ValueEnum::to_possible_value(&gates.private_gate_reveal)
-                .expect("gate reveal policy has a clap value")
-                .get_name()),
+            json!(
+                clap::ValueEnum::to_possible_value(&gates.private_gate_reveal)
+                    .expect("gate reveal policy has a clap value")
+                    .get_name()
+            ),
         ));
     }
     for (key, value, default) in [
@@ -499,8 +509,8 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
     let issues = parse_issues(&args.issues)?;
     let repo = registered_repo(&args.repo)?;
     let (repository, component) = super::run::cook_repository_names_for_selection(&repo, None)?;
-    let path = super::run::cook_component_path_for_repository_name(&component)?
-        .ok_or_else(|| {
+    let path =
+        super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "repo",
                 format!("--repo `{}` has no registered checkout", args.repo),
@@ -518,7 +528,10 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
     })?;
     // Resolve the base once: every child is cut from this exact commit.
     let _ = git(&path, &["fetch", "--quiet", "origin", &resolution.base]);
-    let base_sha = git(&path, &["rev-parse", &format!("{}^{{commit}}", resolution.from)])?;
+    let base_sha = git(
+        &path,
+        &["rev-parse", &format!("{}^{{commit}}", resolution.from)],
+    )?;
 
     let children = issues
         .iter()
@@ -554,7 +567,9 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
         .collect::<Vec<_>>();
     let bundle = match &args.bundle_runner {
         Some(runner) => prepare_workspace_bundle(runner, &path, &base_sha),
-        None => json!({ "status": "not_applicable", "reason": "the children are not placed on a Lab runner" }),
+        None => {
+            json!({ "status": "not_applicable", "reason": "the children are not placed on a Lab runner" })
+        }
     };
     Ok((
         json!({
@@ -605,7 +620,14 @@ fn prepare_workspace_bundle(runner: &str, repository: &Path, base_sha: &str) -> 
     let checkout_arg = checkout.display().to_string();
     if let Err(error) = git(
         repository,
-        &["worktree", "add", "--detach", "--quiet", &checkout_arg, base_sha],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "--quiet",
+            &checkout_arg,
+            base_sha,
+        ],
     ) {
         return bundle_failure(runner, base_sha, error.message);
     }
@@ -623,7 +645,10 @@ fn prepare_workspace_bundle(runner: &str, repository: &Path, base_sha: &str) -> 
             run_isolation_token: None,
         },
     );
-    let _ = git(repository, &["worktree", "remove", "--force", &checkout_arg]);
+    let _ = git(
+        repository,
+        &["worktree", "remove", "--force", &checkout_arg],
+    );
     match synced {
         Ok((output, _)) => json!({
             "status": "prepared",
@@ -728,7 +753,10 @@ mod tests {
         let prepare = value["steps"][0]["homeboy"].as_array().unwrap();
         assert_eq!(prepare[..2], [json!("agent-task"), json!("batch-prepare")]);
         assert!(prepare.contains(&json!("--bundle-runner")));
-        assert_eq!(prepare[prepare.len() - 3..], ISSUES.map(|issue| json!(issue)));
+        assert_eq!(
+            prepare[prepare.len() - 3..],
+            ISSUES.map(|issue| json!(issue))
+        );
         let cook = &value["steps"][1];
         assert_eq!(cook["foreach"], "{{steps.prepare.output/children}}");
         assert_eq!(cook["max_parallel"], 2);
