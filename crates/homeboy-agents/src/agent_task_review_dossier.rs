@@ -334,16 +334,13 @@ impl AiFilledReviewForm {
         Ok(Some(form))
     }
 
-    /// Reviewer-facing feedback describing exactly what a valid form requires.
-    /// Surfaced to the agent when the form is missing or incomplete so the
-    /// nudge loop can converge.
+    /// The validation requirements of a complete form, used in validation
+    /// errors and carried as `inputs.cook_loop.review_form_feedback` data.
     pub fn requirement_feedback() -> &'static str {
-        "Return a `review_form` object in your task outputs with: `pr_title` (a specific, single-line PR title for the actual change, at most 256 characters; not a generic Cook title), `summary` (what is changing and why), \
-`what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
- assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct from the \
-summary of what changed). Do not run or report verification commands: Homeboy runs the declared deterministic \
-gates itself and derives reviewer-visible verification exclusively from that durable candidate gate evidence. A \
-successful `used_for` is a genuine process reflection."
+        // A validation fact about the declared output schema, not agent
+        // instructions: Homeboy authors no agent-facing prose (#15818).
+        "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
+`summary`, `what_changed` (a non-empty list), `compatibility`, and `used_for` (distinct from `summary`)."
     }
 
     /// Validate that the agent filled every required slot with real content.

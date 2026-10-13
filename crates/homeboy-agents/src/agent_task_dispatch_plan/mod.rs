@@ -9,7 +9,7 @@
 use serde_json::Value;
 
 use crate::agent_task::{
-    AgentCommandPolicy, AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
+    AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest,
     AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
     AgentToolPolicy, AGENT_TASK_REQUEST_SCHEMA,
 };
@@ -239,12 +239,11 @@ pub fn build_dispatch_plan_with_provider_requirements(
         } else {
             read_prompt_spec(&prompt_spec.prompt)?
         };
-        let instructions = dispatch_instructions(
-            resolved_prompt.content.clone(),
-            request.task_url.as_deref(),
-            &command_policy,
-            managed_worktree,
-        );
+        // The model-visible prompt is the operator's prompt. The command
+        // policy, workspace, and task source travel as structured request data
+        // (`policy.tools.commands`, `workspace`, `source_refs`); Homeboy
+        // appends no prose of its own (#15818).
+        let instructions = resolved_prompt.content.clone();
         let task_id = prompt_spec.task_id.clone().unwrap_or_else(|| {
             request
                 .task_id
@@ -589,39 +588,6 @@ fn preflight_dispatch_provider_secrets_with_sources(
     })
 }
 
-fn dispatch_instructions(
-    instructions: String,
-    task_url: Option<&str>,
-    command_policy: &AgentCommandPolicy,
-    managed_worktree: bool,
-) -> String {
-    // The command policy is stated in the prompt as well as enforced. Homeboy
-    // structurally refuses a denied command at its own tool boundary, but a
-    // provider runtime that runs shell commands inside its own process never
-    // crosses that boundary — for those runtimes the agent has to be told, in
-    // terms it cannot miss, what it may not run and what to do instead.
-    let constraints = command_policy.prompt_constraints();
-    let mut instructions = match constraints {
-        Some(constraints) if !instructions.contains("Command policy (declared by the operator") => {
-            format!("{instructions}\n\n{constraints}")
-        }
-        _ => instructions,
-    };
-    if managed_worktree && !instructions.contains("Parallel worktree patch preservation:") {
-        instructions.push_str(
-            "\n\nParallel worktree patch preservation:\n- Never use `git stash`; its stack is shared by every worktree in the repository.\n- Before current-base reconciliation, run `homeboy git patch preserve <operation-id> --path <worktree>`. Restore only with `homeboy git patch restore <operation-id> --path <worktree>`, never by stack position.\n- Keep the durable patch evidence until restoration and cleanup state are recorded.",
-        );
-    }
-
-    if task_url.is_none() || instructions.contains("Generated change guardrails") {
-        return instructions;
-    }
-
-    format!(
-        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators when the task retains their semantics.\n- When dependency freshness, lifecycle, or validation gates fail, update and verify the relevant dependency checkout or declared component reference; successful gates remain authoritative for PR eligibility.\n- When existing behavior plus evidence and test coverage resolves the task, prefer evidence-only or test-only output.\n- In PR evidence, report source relationship, change kind, verification capability, and the evidence boundary for each runtime change."
-    )
-}
-
 fn resolve_dispatch_workspace(
     request: &AgentTaskDispatchRequest,
 ) -> Result<Option<DispatchWorkspaceTarget>> {
@@ -821,7 +787,7 @@ fn dispatch_client_context(request: &AgentTaskDispatchRequest) -> Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::{AgentCommandPolicyMode, AgentCommandRule};
+    use crate::agent_task::AgentCommandPolicyMode;
     use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_dispatch_service::{
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
@@ -834,53 +800,6 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn generated_change_guardrails_describe_positive_success_criteria() {
-        let instructions = dispatch_instructions(
-            "Implement the tracked change.".to_string(),
-            Some("https://example.test/issues/1"),
-            &AgentCommandPolicy::default(),
-            false,
-        );
-
-        assert!(instructions.contains("successful gates remain authoritative"));
-        assert!(instructions.contains("prefer evidence-only or test-only output"));
-        assert!(instructions.contains("the evidence boundary for each runtime change"));
-    }
-
-    /// An unconstrained policy must not add noise to the prompt.
-    #[test]
-    fn default_command_policy_adds_no_prompt_constraints() {
-        let instructions = dispatch_instructions(
-            "Implement the tracked change.".to_string(),
-            None,
-            &AgentCommandPolicy::default(),
-            false,
-        );
-
-        assert_eq!(instructions, "Implement the tracked change.");
-    }
-
-    #[test]
-    fn command_policy_is_stated_in_the_provider_prompt() {
-        let policy = AgentCommandPolicy {
-            deny: vec![AgentCommandRule::new("cargo test")],
-            reason: Some("this host routes builds to CI".to_string()),
-            ..AgentCommandPolicy::default()
-        };
-
-        let instructions = dispatch_instructions(
-            "Implement the tracked change.".to_string(),
-            None,
-            &policy,
-            false,
-        );
-
-        assert!(instructions.contains("`cargo test`"));
-        assert!(instructions.contains("this host routes builds to CI"));
-        assert!(instructions.contains("Make your edits, commit"));
-    }
-
-    #[test]
     fn managed_worktree_refuses_repository_global_stash_and_guides_safe_recovery() {
         let request = dispatch_request(DispatchRequestOverrides::default());
         let policy = resolve_dispatch_command_policy(&request, true).expect("managed policy");
@@ -889,17 +808,6 @@ mod tests {
         let denial = decision.denial().expect("stash denied");
         assert_eq!(denial.matched_pattern.as_deref(), Some("git stash*"));
         assert!(denial.reason.contains("repository-global"));
-
-        let instructions = dispatch_instructions(
-            "Reconcile with the current base.".to_string(),
-            None,
-            &policy,
-            true,
-        );
-        assert!(instructions.contains("Never use `git stash`"));
-        assert!(instructions.contains("homeboy git patch preserve <operation-id>"));
-        assert!(instructions.contains("homeboy git patch restore <operation-id>"));
-        assert!(instructions.contains("durable patch evidence"));
     }
 
     #[test]
@@ -938,7 +846,8 @@ mod tests {
                 .evaluate("timeout 1200 cargo test -p homeboy-agents")
                 .denial()
                 .is_some());
-            assert!(plan.tasks[0].instructions.contains("`cargo test`"));
+            // The policy is structured data; the prompt stays the operator's.
+            assert_eq!(plan.tasks[0].instructions, "Fix the bug.");
         });
     }
 
