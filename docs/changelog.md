@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.420.1] - 2026-10-13
+
+### Changed
+- Validate reviewer-safe gates at Cook and cook-batch admission
+- run and persist fuzz through the shared workload substrate
+- delete the agent-task loop and controller
+
+### Fixed
+- classify a verified empty attempt as no-change, not a green candidate
+- compile an acknowledged --model pin without a fallback rotation
+- let create supersede a removed task-worktree record
+- remap controller paths embedded in offloaded task instructions
+- reconcile missing records per record instead of refusing the page under remote claim authorities
+- bound controller scratch recovery to the attempt and reclaim aged recovery
+
 ## [0.420.0] - 2026-10-13
 
 ### Added
