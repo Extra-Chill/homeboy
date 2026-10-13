@@ -1206,7 +1206,7 @@ pub struct DaemonStartResult {
     pub lease_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonOrphanAdoptionResult {
     pub adopted_lease_id: String,
     pub dead_pid: u32,
@@ -1764,24 +1764,11 @@ pub fn serve_listener_until_shutdown(
     )
 }
 
-/// Whether a registered admission owner can no longer be serving.
-///
-/// An owner registered in the **same** state directory as this daemon was
-/// restarted in place: this process holds that directory's exclusive owner
-/// lock and has just written its own lease to `state.json`, so the previous
-/// lease cannot be serving. Reading `state.json` there would see this live
-/// daemon and wrongly keep admission with the dead lease (#15555). Owners in
-/// other directories (blue-green generations) are dead only when their own
-/// lease file proves the PID dead.
-fn admission_owner_is_dead(
-    endpoint: &generation_store::LocalDaemonEndpoint,
-    serving_state_dir: Option<&Path>,
-) -> bool {
-    let owner_dir = Path::new(&endpoint.state_dir);
-    if serving_state_dir.is_some_and(|serving| same_directory(serving, owner_dir)) {
-        return true;
-    }
-    validate_lease_file(&owner_dir.join("state.json"))
+/// Whether a registered admission owner in another state directory can no
+/// longer be serving: its own lease file proves the PID dead. An owner in this
+/// daemon's own directory was already succeeded in place (#15830).
+fn admission_owner_is_dead(endpoint: &generation_store::LocalDaemonEndpoint) -> bool {
+    validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))
         .map(|validation| {
             !validation.running
                 && validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
@@ -1866,14 +1853,15 @@ where
     };
     let state = write_state(local_addr)?;
     generation_store::seed(&state)?;
+    // This process holds the directory's owner lock: a generation registered
+    // here under another lease was restarted in place, and this daemon is it
+    // now. Taking over its routing keeps its work addressable (#15830).
+    generation_store::succeed_in_place(&state)?;
     // A daemon restarted in place must not leave admission with a dead
     // generation, or every status probe reports this live daemon as not
     // ready (#15456). A live previous owner (blue-green) keeps admission.
     if !generation_store::bypassed() {
-        let serving_state_dir = paths::daemon_state_file()?.parent().map(Path::to_path_buf);
-        generation_store::claim_admission_from_dead_owner(&state, |endpoint| {
-            admission_owner_is_dead(endpoint, serving_state_dir.as_deref())
-        })?;
+        generation_store::claim_admission_from_dead_owner(&state, admission_owner_is_dead)?;
     }
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
@@ -2337,6 +2325,15 @@ fn orchestration_tick_loop(
                     &serving_lease_id,
                     control::stop_drained_generation,
                 );
+            }
+        });
+        // A dead generation's checkpointed driver work resumes without an
+        // operator: its directory is restarted in place (#15830).
+        isolated_tick(|| {
+            if lifetime::owns_global_work(&serving_lease_id)
+                && generation_store::has_dead_generation(&serving_lease_id)
+            {
+                lifecycle_apply::adopt_dead_generations(DEFAULT_ADDR);
             }
         });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {

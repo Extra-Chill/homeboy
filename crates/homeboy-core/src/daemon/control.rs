@@ -1963,33 +1963,75 @@ pub(super) fn stop_registered_generation(
     endpoint: &generation_store::LocalDaemonEndpoint,
     force: bool,
 ) -> Result<super::DaemonStopResult> {
-    let exe = std::env::current_exe().map_err(|error| {
+    let mut args = vec!["daemon", "stop", "--lease-id", endpoint.lease_id.as_str()];
+    if force {
+        args.push("--force");
+    }
+    run_in_generation_frame(endpoint, &args, "daemon stop")
+}
+
+/// Adopt a registered generation's proven-dead lease in that generation's own
+/// frame (#15830). Its lease, owner lock, job store, and replacement daemon all
+/// live in its state directory, so the adoption runs there: it re-proves the
+/// lease dead, reconciles the jobs proven absent, and restarts the generation
+/// in place. The replacement's startup recovery resumes checkpointed driver
+/// work, and the directory's exclusive owner lock admits exactly one adopter.
+fn adopt_registered_generation(
+    endpoint: &generation_store::LocalDaemonEndpoint,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
+    addr: &str,
+) -> Result<DaemonOrphanAdoptionResult> {
+    let confirmed = confirmed_no_pid_job_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        "daemon",
+        "adopt-orphan",
+        "--lease-id",
+        endpoint.lease_id.as_str(),
+        "--addr",
+        addr,
+    ];
+    for job_id in &confirmed {
+        args.extend(["--confirm-untracked-child-dead", job_id.as_str()]);
+    }
+    run_in_generation_frame(endpoint, &args, "daemon adopt-orphan")
+}
+
+/// Run one lease-scoped daemon lifecycle command in the exact registered
+/// generation frame. Status, job checks, locks, and any replacement all address
+/// that generation's store; the invoking process's inherited state directory
+/// cannot select another owner.
+fn run_in_generation_frame<T: serde::de::DeserializeOwned>(
+    endpoint: &generation_store::LocalDaemonEndpoint,
+    args: &[&str],
+    operation: &str,
+) -> Result<T> {
+    let exe = super::lifetime::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve current executable".to_string()),
         )
     })?;
-    let mut command = Command::new(exe);
-    command
-        .args(["daemon", "stop", "--lease-id", &endpoint.lease_id])
+    let output = Command::new(exe)
+        .args(args)
         .env(crate::paths::DAEMON_STATE_DIR_ENV, &endpoint.state_dir)
         .env(DAEMON_ROUTER_DIR_ENV, generation_store::router_dir()?)
         .env(DAEMON_ROUTER_BYPASS_ENV, "1")
-        .stdin(Stdio::null());
-    if force {
-        command.arg("--force");
-    }
-    let output = command.output().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("retire drained daemon generation".to_string()),
-        )
-    })?;
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("run generation-bound {operation}")),
+            )
+        })?;
     let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!(
-                "read generation-bound daemon stop (exit {}; stderr: {})",
+                "read generation-bound {operation} (exit {}; stderr: {})",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             )),
@@ -1997,18 +2039,17 @@ pub(super) fn stop_registered_generation(
     })?;
     if !output.status.success() {
         let diagnostics = &envelope["diagnostics"];
+        let fallback = format!("generation-bound {operation} failed");
         return Err(Error::new(
             crate::error::ErrorCode::InternalUnexpected,
-            diagnostics["message"]
-                .as_str()
-                .unwrap_or("generation-bound daemon stop failed"),
+            diagnostics["message"].as_str().unwrap_or(&fallback),
             diagnostics["details"].clone(),
         ));
     }
     serde_json::from_value(envelope["data"].clone()).map_err(|error| {
         Error::internal_json(
             error.to_string(),
-            Some("decode generation-bound daemon stop".to_string()),
+            Some(format!("decode generation-bound {operation}")),
         )
     })
 }
@@ -2058,6 +2099,15 @@ pub fn adopt_orphaned_lease(
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     parse_bind_addr(addr)?;
+    // A registered lease is adopted in its own generation frame, wherever this
+    // process's inherited state directory points (#15830).
+    if let Some(endpoint) = (!generation_store::bypassed())
+        .then(|| generation_store::endpoint_for_lease(lease_id))
+        .transpose()?
+        .flatten()
+    {
+        return adopt_registered_generation(&endpoint, confirmed_no_pid_job_ids, addr);
+    }
     let _lock = acquire_daemon_operation_lock()?;
     adopt_orphaned_lease_with_operations(
         lease_id,
@@ -3612,7 +3662,12 @@ fn spawn_and_wait_for_lease_attempt(
                     })?;
                 // A restart can leave a registry naming the dead generation. Publish
                 // the verified replacement before accepting controller submissions.
-                generation_store::activate(&state)?;
+                // A frame-pinned start restarts that one generation in place; it
+                // inherits the generation's drain state rather than taking
+                // admission from a live owner (#15830).
+                if !generation_store::bypassed() {
+                    generation_store::activate(&state)?;
+                }
                 Ok(result)
             }
             Err(observation) => {

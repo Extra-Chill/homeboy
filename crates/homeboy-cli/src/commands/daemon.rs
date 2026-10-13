@@ -1637,6 +1637,15 @@ mod tests {
                     from_lease_id: "DEAD".to_string(),
                     to_lease_id: "LIVE".to_string(),
                 },
+                // #15830: a dead generation's work is adopted in its frame.
+                Step::ReconcileProvenJobs {
+                    lease_id: "DEAD".to_string(),
+                    job_ids: vec![uuid::Uuid::nil()],
+                },
+                Step::ResumeDriverWork {
+                    lease_id: "DEAD".to_string(),
+                    job_ids: vec![uuid::Uuid::nil()],
+                },
             ] {
                 let lifecycle = Plan::Transition { step };
                 assert_eq!(

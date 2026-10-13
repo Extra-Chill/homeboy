@@ -111,6 +111,25 @@ reasoning in the dead-lease recovery section below: the attestation is
 unverifiable in process by construction, so a dispatcher supplying it would be
 fabricating evidence.
 
+### Dead generations restart in place
+
+A daemon generation that died with durable work in its store is adopted in its
+own state directory: the lease is re-proven dead, jobs proven gone are
+reconciled, and a replacement daemon starts in that directory. The replacement
+takes over the generation's registry entry (its routing, drain state, and
+admission ownership) and its startup recovery resumes checkpointed driver work
+such as `workflow` instances and `lab.staging-dispatch` jobs. A job's lease is
+the lease that last claimed its execution. The directory's exclusive owner lock
+admits one replacement, so concurrent adopters converge on one driver.
+
+The admitting daemon performs this adoption on its orchestration tick for every
+dead generation whose own lifecycle plan is `reconcile_proven_jobs` or
+`resume_driver_work`. `homeboy daemon recover --yes` applies the same step
+immediately, and `homeboy daemon adopt-orphan --lease-id <lease>` runs in the
+lease's registered generation directory wherever it is invoked. A generation
+with a live workload process waits for it; one that needs an operator
+attestation still requires `--confirm-workload-processes-absent`.
+
 ## Local HTTP API
 
 The daemon binds to loopback only. `homeboy daemon start` writes the selected
