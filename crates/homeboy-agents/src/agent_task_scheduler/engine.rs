@@ -975,16 +975,18 @@ impl AgentTaskScheduler {
                         continue;
                     }
                 };
-                // Bind the attempt's Git registration to this durable lease.
-                // Recorded here, at the producer, so a registration whose
+                // Bind the attempt's base and Git registration to this durable
+                // lease. Recorded here, at the producer, so a registration whose
                 // directory later disappears can still be pruned by identity
-                // (#10568). A failure to record is not fatal: cleanup reads the
-                // live worktree's own `.git` pointer first, and only the
-                // already-deleted case depends on this row.
+                // (#10568) and terminal recovery bundles only the attempt's own
+                // commits (#15052). A failure to record is not fatal: cleanup
+                // reads the live worktree's own `.git` pointer first, and
+                // recovery without a base bundles all of HEAD.
                 if let Some(workspace) = attempt_workspace.as_ref() {
-                    let _ = crate::controller_scratch::record_attempt_git_worktree(
+                    let _ = crate::controller_scratch::record_attempt_workspace(
                         &scratch,
                         workspace.root(),
+                        workspace.base_sha(),
                     );
                 }
                 let task_base_sha = attempt_workspace
