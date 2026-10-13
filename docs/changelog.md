@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.421.0] - 2026-10-13
+
+### Added
+- every cadence and built-in homeboy.retention; delete schedule
+
 ## [0.420.1] - 2026-10-13
 
 ### Changed
