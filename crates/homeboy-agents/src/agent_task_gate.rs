@@ -757,6 +757,10 @@ pub struct AgentTaskGateEnvironment {
     /// (#15383). Explicit `extension_inputs` take precedence by id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_extensions: Vec<AgentTaskGateLinkedExtensionProvenance>,
+    /// Names (never values) of the admitted component's declared test secrets
+    /// carried from the executing process into the gate child (#15824).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_secret_env: Vec<String>,
     /// Controller-owned Rust cache setup evidence. This deliberately records
     /// cache state rather than exposing a controller filesystem path to gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2070,6 +2074,7 @@ fn run_gate_argv_local(
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
     selected_environment.configure_linked_extensions(cwd)?;
+    selected_environment.carry_declared_secret_env(cwd);
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if let Some(plan) = declared_plan {
@@ -2430,6 +2435,44 @@ impl SelectedGateEnvironment {
     /// directories under `extensions/` are shared assets (e.g. `scripts/`,
     /// `dependency-adapters/`) referenced by extensions and are linked too.
     /// Ids already materialized from explicit `extension_inputs` are kept.
+    /// Carry the admitted component's declared test secrets into the gate.
+    ///
+    /// `replace` mode clears the child environment and HOME isolation hides
+    /// Homeboy's secret mappings, so a nested `homeboy review test` could never
+    /// see the secrets its test extension declares (for example a WordPress
+    /// test database), even when the executing host (or the Lab runner, from
+    /// its `secret_env` refs) supplied them to this process (#15824). Only the
+    /// names the component's test capability declares are carried, only when
+    /// present here, and the report records names, never values.
+    fn carry_declared_secret_env(&mut self, cwd: &Path) {
+        let Ok(component) = homeboy_core::component::resolve_effective(
+            self.admitted_component_id.as_deref(),
+            Some(&cwd.to_string_lossy()),
+            None,
+        ) else {
+            return;
+        };
+        let names = homeboy_core::extension::test::declared_secret_env_names(&component)
+            .unwrap_or_default();
+        self.carry_secret_env_names(&names, |name| std::env::var(name).ok());
+    }
+
+    fn carry_secret_env_names(
+        &mut self,
+        names: &[String],
+        lookup: impl Fn(&str) -> Option<String>,
+    ) {
+        for name in names {
+            if self.values.contains_key(name) {
+                continue;
+            }
+            if let Some(value) = lookup(name).filter(|value| !value.is_empty()) {
+                self.values.insert(name.clone(), value);
+                self.report.declared_secret_env.push(name.clone());
+            }
+        }
+    }
+
     fn configure_linked_extensions(&mut self, cwd: &Path) -> Result<()> {
         let Some(home) = self.isolated_home.clone() else {
             return Ok(());
@@ -9099,5 +9142,58 @@ mod tests {
 
         assert!(linked.is_empty());
         assert!(!destination.join("wordpress").exists());
+    }
+
+    /// Regression for #15824: declared test secrets survive `replace` mode
+    /// and HOME isolation; values never enter the report.
+    #[test]
+    fn declared_secret_env_is_carried_into_replaced_gate_environment() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let policy = AgentTaskGateEnvironmentPolicy {
+            mode: AgentTaskGateEnvironmentMode::Replace,
+            isolate_home: true,
+            isolate_xdg: true,
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let mut selected =
+            selected_gate_environment(&policy, Some(root.path())).expect("gate environment");
+        let names = vec![
+            "WP_CODEBOX_DB_PASSWORD".to_string(),
+            "WP_CODEBOX_DB_HOST".to_string(),
+            "UNSET_DECLARED_SECRET".to_string(),
+        ];
+        selected.carry_secret_env_names(&names, |name| match name {
+            "WP_CODEBOX_DB_PASSWORD" => Some("s3cret".to_string()),
+            "WP_CODEBOX_DB_HOST" => Some("127.0.0.1".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(
+            selected
+                .values
+                .get("WP_CODEBOX_DB_PASSWORD")
+                .map(String::as_str),
+            Some("s3cret")
+        );
+        assert_eq!(
+            selected
+                .values
+                .get("WP_CODEBOX_DB_HOST")
+                .map(String::as_str),
+            Some("127.0.0.1")
+        );
+        assert!(!selected.values.contains_key("UNSET_DECLARED_SECRET"));
+        assert_eq!(
+            selected.report.declared_secret_env,
+            vec![
+                "WP_CODEBOX_DB_PASSWORD".to_string(),
+                "WP_CODEBOX_DB_HOST".to_string()
+            ]
+        );
+        let report = serde_json::to_string(&selected.report).expect("report json");
+        assert!(
+            !report.contains("s3cret"),
+            "secret values never enter the report"
+        );
     }
 }
