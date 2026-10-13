@@ -5274,9 +5274,15 @@ mod tests {
             // Exceed the sealed artifact bound with a clean Git worktree. The
             // deferred controller must stage this through its Git authority,
             // never ask the reverse worker to reach the private origin.
+            // Size from the bound itself: the bound is tuned for real plugin
+            // sources (#15812), and a hard-coded size silently drops back
+            // under it, routing through the sealed artifact instead. The
+            // per-file check is strict (`>`), so the payload alone is bound+1.
+            let oversize =
+                crate::runner_staging_operation::MAX_SOURCE_PACKAGE_FILE_BYTES as usize + 1;
             std::fs::write(
                 source.join("input.txt"),
-                [b"staged-source\n".as_slice(), &vec![b'x'; 3 * 1024 * 1024]].concat(),
+                [b"staged-source\n".as_slice(), &vec![b'x'; oversize]].concat(),
             )
             .expect("write source");
             for args in [
