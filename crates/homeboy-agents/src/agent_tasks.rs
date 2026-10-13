@@ -18,7 +18,6 @@
 //! - [`finalization`]: PR finalization contracts and backends.
 //! - [`gate`]: gate report contracts and visibility/reveal policies.
 //! - [`lifecycle`]: durable run record lifecycle helpers.
-//! - [`loop_controller`]: durable agent-task loop controller state contracts.
 //! - [`promotion`]: promotion-report contracts and entry points.
 //! - [`provider`]: executor provider contracts used by extensions.
 //! - [`scheduler`]: scheduling/plan/concurrency primitives.
@@ -97,13 +96,6 @@ pub use super::agent_tool_control_plane::dispatch_agent_tool_request;
 // matrix without depending on the implementation path.
 pub use super::agent_task::expand_agent_task_matrix;
 
-// Convenience re-exports of the loop-controller state enum and lineage record
-// that appear on the loop-controller surface and the durable run surface.
-pub use super::agent_task_loop_controller::AgentTaskLoopControllerState;
-pub use super::agent_task_loop_definition::{
-    compile_loop_definition, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
-};
-
 // Secret-env status type is referenced from review/dispatch commands.
 pub use super::agent_task_secrets::{
     secret_env_status, secret_env_status_with_fallbacks, AgentTaskSecretEnvStatus,
@@ -126,21 +118,6 @@ pub use super::agent_task_provider::{
 // area. Callers can import either the top-level names above or use the group
 // modules to disambiguate where contracts overlap (e.g. `lifecycle::status`
 // vs `service::status`).
-
-/// Cook-loop evaluation contracts and entry points.
-/// Durable controller execution service entry points and report contracts.
-pub mod controller_service {
-    pub use super::super::agent_task_controller_service::{
-        apply_event, apply_spec_dispatch_defaults, apply_spec_dispatch_defaults_with_cwd,
-        controller_request_dispatch_command, init, init_from_spec, list,
-        load_materialize_spec_source, mark_human_ready, plan_from_spec, prepare_controller_proof,
-        resolve_proof_profile, resume, resume_with_options, run_action, run_next,
-        AgentTaskRepoLoopSpec, AgentTaskRepoLoopSpecWorkflow, ControllerApplyEventRequest,
-        ControllerDispatchHook, ControllerDispatchOverrides, ControllerFromSpecRequest,
-        ControllerInitRequest, ControllerMarkHumanReadyRequest, ControllerPlanRequest,
-        ControllerResumeOptions, APPLY_EVENT_RESULT_SCHEMA,
-    };
-}
 
 /// Cook-loop evaluation contracts and entry points.
 pub mod cook_loop {
@@ -295,13 +272,6 @@ pub mod lifecycle {
         seed_queued_run_for_tests,
     };
     pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
-}
-
-/// Declarative loop definitions compiled into scheduler plans.
-pub mod loop_definition {
-    pub use super::super::agent_task_loop_definition::{
-        compile_loop_definition, AGENT_TASK_LOOP_DEFINITION_SCHEMA,
-    };
 }
 
 /// Promotion reports and entry point.

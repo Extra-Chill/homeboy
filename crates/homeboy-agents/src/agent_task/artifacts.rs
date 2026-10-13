@@ -192,11 +192,7 @@ impl AgentTaskArtifact {
 /// reviewer-facing) address; `label` is optional display text.
 ///
 /// This is the single `{kind, uri, label}` evidence-reference shape for
-/// `homeboy-agents`. It replaced two byte-identical clones in #10310:
-/// `AgentTaskLoopFailedChildEvidenceRef` (loop-controller diagnostics) and
-/// `ControllerRunEvidenceRef` (controller run-failure summaries). Both had the
-/// same three fields with the same serde attributes, so the collapse is
-/// wire-compatible in both directions.
+/// `homeboy-agents`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskEvidenceRef {
     pub kind: String,

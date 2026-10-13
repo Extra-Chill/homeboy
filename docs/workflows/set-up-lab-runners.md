@@ -133,7 +133,6 @@ homeboy runner status <runner-id>
 homeboy --runner <runner-id> review <component-id> --changed-since origin/main
 homeboy --runner <runner-id> bench <component-id> --baseline
 homeboy --runner <runner-id> trace <component-id> <scenario>
-homeboy --runner <runner-id> agent-task controller run-from-spec @controller.json --max-actions 5
 ```
 
 For runner-side checkouts, use `runner exec`:

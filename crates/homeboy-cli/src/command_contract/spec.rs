@@ -75,9 +75,6 @@ pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
     "not declared as Lab-routable in the command registry";
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
-pub(crate) const AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL: &str =
-    "agent-task controller from-spec --resume/run-from-spec/materialize";
-pub(crate) const AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL: &str = "agent-task controller resume";
 pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
     "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
@@ -249,14 +246,6 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
         contract_labels: &[AGENT_TASK_PROMOTE_LAB_LABEL],
         message_label: AGENT_TASK_PROMOTE_LAB_LABEL,
         hint_label: AGENT_TASK_PROMOTE_LAB_LABEL,
-    },
-    CommandLabSupportSummary {
-        contract_labels: &[
-            AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
-            AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL,
-        ],
-        message_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
-        hint_label: "agent-task controller from-spec --resume/run-from-spec/materialize/resume",
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
@@ -796,19 +785,6 @@ const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "reports a plan by default; pass --write to rewrite source files",
 )];
 
-const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
-    "controller init",
-    "controller from-spec",
-    "controller run-from-spec",
-    "controller materialize",
-    "controller events",
-    "controller apply-event",
-    "controller run-next",
-    "controller run",
-    "controller resume",
-    "controller mark-human-ready",
-];
-
 const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["verify-replacement"],
@@ -829,11 +805,6 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         &["reconcile"],
         with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
         "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
-    ),
-    paths_safety(
-        AGENT_TASK_CONTROLLER_PATHS,
-        mutating_safety(),
-        "mutates durable agent-task loop controller state",
     ),
     paths_safety(
         &["auth remove"],

@@ -13,8 +13,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 - **Lifecycle:** durable run submission, execution, inspection, cancellation, and retry.
 - **Cook/review:** workspace task conveniences that compose lifecycle runs with promotion, gates, and PR finalization.
 - **Provider:** executor discovery, machine-readable contracts, and redacted auth readiness.
-- **Prompt store:** Homeboy-owned markdown prompts for reusable cook/controller input.
-- **Loop/controller:** durable multi-agent loop state with on/off, revolutions, handoffs, continuation policy, and resume/stop controls.
+- **Prompt store:** Homeboy-owned markdown prompts for reusable cook input.
 
 ## Subcommands
 
@@ -831,8 +830,8 @@ handoff vocabulary. See
 
 `agent-task prompts` stores markdown prompt files under Homeboy's data directory,
 not under the current repo/worktree. Save prompt content with inline text,
-`@file`, or `-` for stdin, then reference it from `cook` or controller specs
-with `prompt:<id>` anywhere a prompt string is accepted.
+`@file`, or `-` for stdin, then reference it from `cook` or workflow `cook`
+steps with `prompt:<id>` anywhere a prompt string is accepted.
 
 ```bash
 homeboy agent-task prompts save issue-123 --input @prompt.md
@@ -844,44 +843,9 @@ Cook accepts one source through `--prompt`: `--prompt @file`, `--prompt -`, inli
 prompt text, and `prompt:<id>` references all use the same resolution behavior.
 Use `agent-task fanout cook-batch` for independent task waves.
 
-### Controller
+### Workflows
 
-| Subcommand | Purpose |
-|---|---|
-| `compile-loop` | Compile a declarative loop definition into an agent-task plan. |
-| `loop define\|status\|resume\|stop` | Operate durable defined loops with explicit on/off, revolutions, continuation policy, and handoffs. |
-| `controller` | Create, inspect, and resume durable multi-agent loop controller state. |
-
-`agent-task controller run-from-spec <SPEC> --max-actions <N>` is the stable
-bounded loop primitive for headless callers. It materializes an optional spec
-generator or repo-authored spec, applies `--inputs` and repeated
-`--policy-result` envelopes, initializes durable controller state, executes up to
-`N` pending controller actions, and returns one persisted status envelope with the
-materialized spec, controller initialization report, per-action results, final
-controller status, and artifact/status lineage recorded by the normal agent-task
-lifecycle.
-
-```bash
-homeboy agent-task controller run-from-spec @controller.json \
-  --inputs @run-inputs.json \
-  --policy-result @policy-result.json \
-  --max-actions 5 \
-  --dispatch-backend fixture
-```
-
-The command stops when no executable action remains, a terminal controller state
-is reached, an action fails, or `--max-actions` is reached. `--max-iterations` is
-accepted as an alias for `--max-actions` for loop-oriented callers. Execution
-remains provider-neutral: controller actions use their declared generic request
-shape, and `--dispatch-backend`, `--dispatch-selector`, `--dispatch-model`, and
-`--dispatch-provider-config` only provide defaults when an action omits them.
-
-Controller spec materialization commands are portable Lab commands:
-`controller from-spec --resume`, `controller run-from-spec`, and
-`controller materialize` auto-select the configured default Lab runner when
-global `--runner` is omitted. Use `--runner <id>` to choose a specific runner, or
-`--placement local` only when controller-machine execution is
-intentional.
+Pre-defined multi-step and repeating agent work (a command gate that launches a Cook, then re-checks) is a `homeboy/workflow/v1` definition run by [`homeboy workflow`](workflow.md). `agent-task cook` is one step kind inside it.
 
 ## Internal Bridge
 
@@ -889,166 +853,6 @@ intentional.
 runtime adapters that dispatch tool requests through Homeboy, but it is omitted
 from `homeboy agent-task --help` and the visible command surface because it is
 not an operator-facing workflow.
-
-## Controller Events
-
-`agent-task controller events` is the stable generic primitive for applying an
-external event to a durable controller. It accepts the same provider-neutral event
-shape as `agent-task controller apply-event` and returns
-`homeboy/agent-task-loop-controller-event-result/v1` with the updated controller
-record and any actions created by event policy evaluation.
-
-```bash
-homeboy agent-task controller events "$loop_id" \
-  --event-type task.completed \
-  --event-id task-123-completed \
-  --event-key task#123 \
-  --entity-id entity-123 \
-  --payload @event.json
-```
-
-Use `events` for downstream integrations that need a stable generic controller
-event contract. `apply-event` remains the explicit event-application spelling and
-uses the same request and response contract.
-
-## Controller Spec Materialization
-
-`agent-task controller materialize <SPEC> --inputs <JSON>` is the generic seam for
-repos that have a loop spec plus per-run inputs, but should not carry repo-local
-`build-homeboy-controller-run-spec` scripts. It returns
-`homeboy/agent-task-loop-spec-materialization/v1` with a cloned materialized spec;
-it does not initialize durable controller state or mutate the source spec file.
-
-The inputs payload may contain `inputs` and `metadata` objects. `inputs` are
-merged into each workflow's `inputs`, and `metadata` is merged into top-level spec
-metadata. Explicit values override same-named workflow input or metadata keys.
-
-```bash
-homeboy agent-task controller materialize \
-  @.github/homeboy/controllers/site-loop.json \
-  --inputs @run-inputs.json
-```
-
-Domains that evaluate their own policies can pass deterministic policy decisions
-without teaching Homeboy the policy semantics:
-
-```bash
-homeboy agent-task controller materialize \
-  @.github/homeboy/controllers/site-loop.json \
-  --policy-result @policy-result.json
-```
-
-The generic policy result envelope is:
-
-```json
-{
-  "policy_id": "example-policy",
-  "policy_inputs": { "requested_tier": "foundation" },
-  "policy_results": { "selected_tier": "foundation", "decision": "hold" },
-  "provenance": { "source": "policy-evaluator", "sha256": "..." }
-}
-```
-
-`policy_id` is required and must be unique per materialization. The other fields
-are optional JSON objects. Homeboy projects `policy_inputs` and `policy_results`
-under the same keys in every workflow's `inputs`, keyed by `policy_id`, and records
-the full envelope under top-level `metadata.policy_materialization`. Homeboy does
-not evaluate expressions, choose tiers, generate random seeds, or interpret the
-policy result; repo-owned evaluators supply the envelope.
-
-`agent-task controller from-spec` keeps its existing behavior: it reads a complete
-repo-authored controller spec, applies dispatch defaults for the spec checkout,
-and initializes or resumes durable controller state. Use `materialize` first when
-the spec needs deterministic run-input expansion before `from-spec`.
-
-`agent-task controller validate-proof <JSON>` validates a proof, materialized spec,
-or controller record without writing controller state. It returns
-`homeboy/proof-validation/v1` and exits non-zero when the input is not ready for a
-deterministic reviewer handoff.
-
-The validator is provider-neutral. It checks Homeboy proof envelopes for declared
-artifact references, reviewer-visible evidence refs, completed gates, and unresolved
-proof gaps. For `controller materialize` output, it reuses the generic loop compiler
-diagnostics so unsupported controller-only joins, gates, or graph shapes are reported
-instead of being silently accepted. For controller records, completed records must
-include a terminal outcome and must not retain pending actions.
-
-```bash
-homeboy agent-task controller materialize @controller.json --inputs @run.json \
-  --output-file materialized.json
-
-homeboy agent-task controller validate-proof @materialized.json
-homeboy agent-task controller validate-proof @proof.json
-```
-
-## Loop Spec Compilation
-
-`agent-task compile-loop --definition <SPEC>` compiles a declarative loop spec into
-an executable plan without submitting or running it. It
-accepts Homeboy's native `homeboy/agent-task-loop-definition/v1` shape and the
-repo-authored workflow-oriented loop spec shape used by WPSG-style controllers.
-
-Native loop definitions compile to `homeboy/agent-task-plan/v1`. Repo-style specs
-use the canonical controller-spec compiler and emit a generic Homeboy `agent_task`
-plan. Workflow ids become executable stages, and declared artifact flow becomes
-stage dependencies. This is the same compiler used by controller execution, so
-policies, phases, gates, metrics, and fan-out are validated by one implementation.
-
-Repo-style specs use `loop_id` for identity, `runtime_execution` for executable
-workflows, `entity_ids` for explicit fan-out entities, and `from_workflow_id` /
-`to_workflow_id` for artifact graph edges. These contracts reject unknown fields
-instead of silently dropping executable inputs. Keyed and array declarations
-remain supported; domain-specific additional data belongs in declared `metadata`
-or `inputs`. Retired alternate field spellings are not translated.
-
-Loop gate results use `satisfied`, `failed`, or `pending`; `missing` describes a
-declared gate without a recorded result. Only `satisfied` meets acceptance.
-Retired `passed`, `warn`, and `warning` result labels are rejected instead of
-being interpreted as satisfaction. Command checks are authored through the
-current typed gate-bundle contract.
-
-Repo-style specs may also declare an explicit `artifact_graph` edge list:
-
-```json
-{
-  "artifact_graph": {
-    "edges": [
-      {
-        "artifact_id": "site_plan",
-        "from_workflow_id": "plan-site",
-        "to_workflow_id": "build-site",
-        "required": true
-      }
-    ]
-  }
-}
-```
-
-`compile-loop` validates graph edges against declared artifacts and workflow
-`emits`/`consumes`, then materializes them as executable stage dependencies.
-
-## Durable Loops
-
-`agent-task loop` is reserved for defined, durable multi-agent loops. A loop is
-not a one-shot PR cook. It persists controller state, tracks whether it is on or
-off, counts revolutions, records continuation policy, and resumes or stops
-handoffs explicitly.
-
-```bash
-homeboy agent-task loop define @.github/homeboy/controllers/site-loop.json \
-  --on \
-  --revolution-limit 5
-
-homeboy agent-task loop status site-loop
-homeboy agent-task loop resume site-loop
-homeboy agent-task loop stop site-loop
-```
-
-Use `loop define --off` to register or update loop state without executing
-handoffs. Use `loop define --on --resume` when the operator wants to initialize
-the controller and immediately run pending handoffs. `loop resume` refuses to
-run off loops and stops once the persisted or supplied revolution limit is
-reached.
 
 ## Cook
 
@@ -1697,77 +1501,6 @@ Homeboy treats these declarations as generic contracts:
 - Provider-specific sessions, APIs, artifact namespaces, and backend payloads stay
   outside Homeboy core and are represented only as artifacts, evidence refs,
   diagnostics, workflow steps, or opaque metadata.
-
-## Durable Loop Controllers
-
-`agent-task controller` stores domain-agnostic controller state for multi-day
-multi-agent loops. The controller record lives outside any single agent-task run
-and can reference runs, artifacts, gates, reviews, waits, and human-ready work by
-stable ids instead of copying every payload inline.
-
-Create and inspect a controller:
-
-```bash
-homeboy agent-task controller init transformer-loop \
-  --phase generate \
-  --config-version transformer-v1
-
-homeboy agent-task controller status transformer-loop
-homeboy agent-task controller list
-```
-
-Apply external events, such as CI completion, PR review, human merge, scheduled
-wakeups, or artifact availability:
-
-```bash
-homeboy agent-task controller apply-event transformer-loop \
-  --event-type github.pr.merged \
-  --event-key Extra-Chill/homeboy#123 \
-  --entity-id pr:123 \
-  --payload @event.json
-```
-
-The payload may include a `policy` object using
-`homeboy/agent-task-loop-controller/v1` action names such as `spawn_task`,
-`fan_out`, `spawn_controller`, `spawn_subloop`, `wait_for_controller`, `join`,
-`retry`, `request_changes`, `run_gates`, `wait_for_event`, `mark_human_ready`,
-`complete`, `abandon`, and `escalate`. Actions with deterministic `dedupe_key`
-values are recorded once, so replaying a resumed controller does not duplicate
-already-open tasks, child controllers, or PR work.
-
-Nested controller actions are first-class state primitives. `spawn_controller`
-and its `spawn_subloop` alias record a parent-visible child controller ref with
-the parent loop id, spawning action id, optional entity id, request payload, and
-dedupe key. Controller records also include optional `parent_loop_id`,
-`parent_action_id`, and `parent_entity_id` fields so spawned child records can
-carry their parent provenance directly. `wait_for_controller` puts the parent in
-`waiting` state and records a wait that is satisfied when `controller status`
-observes the child controller in a terminal state (`completed`, `failed`,
-`human_ready`, `abandoned`, or `escalated` by default). Autonomous execution of
-pending spawn/wait actions is still owned by #3905; until that lands, these
-primitives define the durable schema, idempotency, and status visibility that
-the runner will execute.
-
-Mark work as explicitly ready for a human handoff:
-
-```bash
-homeboy agent-task controller mark-human-ready transformer-loop \
-  --entity-id pr:123 \
-  --reason "gates passed and review approved"
-```
-
-Gate bundles are represented as structured checks and results. Existing
-`--verify` command gates are compatible as the simplest `command` check type;
-long-running loops can reuse named bundles across repos and persist normalized
-`passed`, `failed`, or `warn` results against a loop, entity, PR, finding, or
-run.
-
-`retry` and `request_changes` are executable generic controller actions.
-`retry` queues a new durable agent-task run from the target run's original plan
-and records parent/child run lineage on the controller. `request_changes` records
-a normalized feedback artifact with `status: "changes_requested"` against the
-target run so downstream agents and reviewers can consume the same controller
-state without product-specific glue.
 
 ## Fixture Backend
 

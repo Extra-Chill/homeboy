@@ -34,35 +34,14 @@ fn declared_agent_task_secret_env_includes_provider_config_secrets() {
 }
 
 #[test]
-fn declared_agent_task_controller_run_from_spec_includes_dispatch_provider_config_secrets() {
-    let names = declared_agent_task_secret_env(&[
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "controller".to_string(),
-        "run-from-spec".to_string(),
-        "@controller-spec.json".to_string(),
-        "--dispatch-provider-config".to_string(),
-        serde_json::json!({
-            "provider": "example",
-            "secret_env": ["HOMEBOY_CONTROLLER_PROVIDER_TOKEN"]
-        })
-        .to_string(),
-    ]);
-
-    assert_eq!(names, vec!["HOMEBOY_CONTROLLER_PROVIDER_TOKEN".to_string()]);
-}
-
-#[test]
 fn lab_secret_env_handoff_plan_defers_provider_credentials_to_runner_references() {
     let plan = build_lab_secret_env_handoff_plan(
         &[LabSecretEnvSource::AgentTask],
         &[
             "homeboy".to_string(),
             "agent-task".to_string(),
-            "controller".to_string(),
-            "run-from-spec".to_string(),
-            "@controller-spec.json".to_string(),
-            "--dispatch-provider-config".to_string(),
+            "cook".to_string(),
+            "--provider-config".to_string(),
             serde_json::json!({
                 "provider": "example",
                 "secret_env": ["HOMEBOY_CONTROLLER_PROVIDER_TOKEN"]
@@ -71,7 +50,7 @@ fn lab_secret_env_handoff_plan_defers_provider_credentials_to_runner_references(
         ],
         HashMap::new(),
     )
-    .expect("controller dispatch provider config secret should hydrate");
+    .expect("provider config secret should hydrate");
 
     assert_eq!(
         plan.secret_env_names,
@@ -99,7 +78,7 @@ fn lab_secret_env_handoff_plan_defers_provider_credentials_to_runner_references(
 }
 
 #[test]
-fn hydrate_agent_task_secret_env_defers_missing_controller_dispatch_provider_config_secret() {
+fn hydrate_agent_task_secret_env_defers_missing_provider_config_secret() {
     let _secret = RemovedEnvVar::new("HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN");
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut env = HashMap::new();
@@ -108,10 +87,8 @@ fn hydrate_agent_task_secret_env_defers_missing_controller_dispatch_provider_con
             &[
                 "homeboy".to_string(),
                 "agent-task".to_string(),
-                "controller".to_string(),
-                "run-from-spec".to_string(),
-                "@controller-spec.json".to_string(),
-                "--dispatch-provider-config".to_string(),
+                "cook".to_string(),
+                "--provider-config".to_string(),
                 serde_json::json!({
                     "provider": "example",
                     "secret_env": ["HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN"]
@@ -128,42 +105,6 @@ fn hydrate_agent_task_secret_env_defers_missing_controller_dispatch_provider_con
             vec!["HOMEBOY_CONTROLLER_MISSING_PROVIDER_TOKEN".to_string()]
         );
     });
-}
-
-#[test]
-fn declared_agent_task_controller_dispatch_provider_defaults_include_controller_sources() {
-    let provider = fixture_provider_with_example_defaults();
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "controller".to_string(),
-        "run-from-spec".to_string(),
-        "@controller-spec.json".to_string(),
-        "--dispatch-backend".to_string(),
-        "sample-runtime".to_string(),
-        "--dispatch-provider-config".to_string(),
-        serde_json::json!({ "provider": "example-oauth" }).to_string(),
-    ];
-
-    let names = declared_agent_task_controller_secret_env_with_providers(
-        &args,
-        std::slice::from_ref(&provider),
-    )
-    .expect("dispatch provider config should parse");
-    let sources = declared_agent_task_controller_secret_sources_with_providers(
-        &args,
-        1,
-        std::slice::from_ref(&provider),
-    )
-    .expect("dispatch provider config sources should parse");
-
-    assert!(names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()));
-    assert_eq!(
-        sources
-            .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
-            .and_then(|source| source.path.as_deref()),
-        Some("~/.example-provider/auth.json")
-    );
 }
 
 #[test]

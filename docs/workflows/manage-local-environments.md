@@ -97,7 +97,7 @@ homeboy agent-task cook \
   --prompt @task.txt
 ```
 
-Use [Run agent task loops](run-agent-task-loops.md) when those one-shot cooks become a durable multi-step controller workflow.
+Use [`homeboy workflow`](../commands/workflow.md) when those one-shot cooks become a durable multi-step workflow.
 
 ## Reference
 

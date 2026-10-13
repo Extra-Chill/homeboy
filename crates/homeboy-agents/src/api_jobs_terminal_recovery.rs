@@ -18,73 +18,6 @@ use crate::agent_task_service;
 
 struct AgentTaskTerminalRecoveryProviderImpl;
 
-/// Resolve an orphaned guarded command only after both exact process identities
-/// are conclusively gone. Output is deliberately unknown, never inferred as
-/// success: a crash may have occurred after external effects but before commit.
-pub(crate) fn recovered_loop_command_record(
-    loop_id: &str,
-) -> Option<crate::agent_task_loop_controller::AgentTaskLoopControllerRecord> {
-    use crate::agent_task_loop_controller::{
-        self as controller, AgentTaskLoopActionStatus, AgentTaskLoopControllerState,
-    };
-    use homeboy_core::process::ProcessIdentityState;
-    let mut record = controller::load_controller(loop_id).ok()?;
-    let receipt = record.metadata["command_recovery"].clone();
-    if receipt["schema"] != "homeboy/loop-command-ownership/v1" {
-        return None;
-    }
-    let owner = crate::agent_task_service::guarded_command_execution_owner(&receipt)?;
-    if !matches!(
-        owner.inspect(),
-        ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch
-    ) {
-        return None;
-    }
-    let action_id = receipt["action_id"].as_str()?;
-    let action = record
-        .next_actions
-        .iter_mut()
-        .find(|action| action.action_id == action_id)?;
-    if action.status.is_open() {
-        action.status = AgentTaskLoopActionStatus::Failed;
-        action.reason =
-            "command owner exited; command completion is unknown and is not redispatched"
-                .to_string();
-        if record.state != AgentTaskLoopControllerState::Abandoned {
-            record.state = AgentTaskLoopControllerState::Failed;
-        }
-        record.metadata["command_recovery"]["state"] =
-            serde_json::json!("owner_lost_unknown_outcome");
-        record.metadata["work_job"]["recovery_receipt"] = serde_json::json!({
-            "schema": "homeboy/loop-command-terminal-recovery/v1",
-            "job_id": record.metadata["work_job"]["job_id"],
-            "status": "failed", "outcome": "unknown", "ownership": receipt,
-        });
-    }
-    if !matches!(
-        record.state,
-        AgentTaskLoopControllerState::Failed | AgentTaskLoopControllerState::Abandoned
-    ) {
-        return None;
-    }
-    Some(record)
-}
-
-fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminalJob> {
-    // Status only projects terminal evidence. The WorkJob resume path commits
-    // this record after observing exact owner loss; reads never advance it.
-    let record = recovered_loop_command_record(loop_id)?;
-    Some(recovered_terminal_job(
-        JobStatus::Failed,
-        serde_json::json!({
-            "kind": "loop_command_owner_lost", "loop_id": loop_id,
-            "outcome": "unknown", "redispatched": false, "ownership": record.metadata["command_recovery"],
-        }),
-        run_id.to_string(),
-        vec![],
-    ))
-}
-
 impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl {
     fn durable_run_is_cancelled(&self, run_id: &str) -> bool {
         let Ok(store) =
@@ -99,9 +32,6 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
     }
 
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob> {
-        if let Some(loop_id) = run_id.strip_prefix("loop-command:") {
-            return recover_loop_command(loop_id, run_id);
-        }
         let resolved_run_id = crate::agent_task_lifecycle::resolve_run_id(run_id).ok()?;
         let result = agent_task_service::persisted_terminal_run_result(&resolved_run_id).ok()??;
         let status = match result.value.status {
@@ -148,14 +78,6 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
     }
 
     fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
-        if let Some(loop_id) = run_id.strip_prefix("loop-command:") {
-            if self.recovered_terminal_agent_task_job(run_id).is_some() {
-                return Some(DaemonLinkedDurableRunState::Terminal);
-            }
-            return crate::agent_task_loop_controller::load_controller(loop_id)
-                .ok()
-                .map(|_| DaemonLinkedDurableRunState::Active);
-        }
         let lifecycle_store =
             crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
                 .ok()?;
