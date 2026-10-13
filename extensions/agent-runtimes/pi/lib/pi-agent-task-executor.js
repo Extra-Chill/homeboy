@@ -135,7 +135,7 @@ function requestedModel(request = {}, config = {}) {
  */
 function promptArgument(request = {}, config = {}) {
 	// Declared outputs (e.g. review_form) are asked for in the final answer.
-	const instructions = `${request.instructions || ''}${requiredOutputInstructions(request)}`;
+	const instructions = `${request.instructions || ''}${requiredOutputInstructions(request, config)}`;
 	if (Buffer.byteLength(instructions) <= MAX_INLINE_INSTRUCTIONS_BYTES) {
 		return instructions;
 	}

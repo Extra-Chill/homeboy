@@ -11,6 +11,17 @@
  * report which required outputs are missing.
  */
 
+const fs = require('node:fs');
+const path = require('node:path');
+
+/**
+ * Default wording for the declared-outputs request ships as data, not code
+ * (homeboy#15818). Operators override it per executor with
+ * `executor.config.output_instructions_template` (inline text, or `""` to
+ * disable). `{{declarations}}` renders the normalized declarations as JSON.
+ */
+const DEFAULT_OUTPUT_INSTRUCTIONS_TEMPLATE_PATH = path.join(__dirname, 'declared-outputs.prompt.md');
+
 const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
 const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 
@@ -38,13 +49,28 @@ function outputDeclarations(request = {}) {
 		});
 }
 
-/** Prompt suffix asking for declared outputs; empty when nothing is declared. */
-function requiredOutputInstructions(request = {}) {
+function outputInstructionsTemplate(request = {}, config = {}) {
+	const configured = config.output_instructions_template ?? request.executor?.config?.output_instructions_template;
+	if (typeof configured === 'string') {
+		return configured;
+	}
+	return fs.readFileSync(DEFAULT_OUTPUT_INSTRUCTIONS_TEMPLATE_PATH, 'utf8');
+}
+
+/**
+ * Prompt suffix for declared outputs, rendered from the operator template (or
+ * the shipped default data file). Empty when nothing is declared or the
+ * template is empty.
+ */
+function requiredOutputInstructions(request = {}, config = {}) {
 	const declarations = outputDeclarations(request);
 	if (declarations.length === 0) {
 		return '';
 	}
-	return `\n\nReturn one JSON object in your final answer with declared values under \`outputs\`. Include every required declaration and any optional declaration you produced. Output declarations: ${JSON.stringify(declarations)}.`;
+	const rendered = outputInstructionsTemplate(request, config)
+		.replace(/\{\{\s*declarations\s*\}\}/g, () => JSON.stringify(declarations))
+		.trim();
+	return rendered === '' ? '' : `\n\n${rendered}`;
 }
 
 /** The first bounded JSON object in a final answer: fenced blocks first, then the whole text. */
@@ -156,6 +182,7 @@ function structuredOutputsFromTexts(texts, request = {}, identity = {}) {
 }
 
 module.exports = {
+	DEFAULT_OUTPUT_INSTRUCTIONS_TEMPLATE_PATH,
 	MAX_STRUCTURED_ANSWER_BYTES,
 	MAX_STRUCTURED_OUTPUT_BYTES,
 	outputDeclarations,

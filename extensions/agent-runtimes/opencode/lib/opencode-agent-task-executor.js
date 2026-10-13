@@ -1424,7 +1424,7 @@ function opencodeRunArgs(request = {}, config = {}, commandSpec = {}, cwd = '') 
 		// Pass the same canonical directory as the child cwd so it cannot fall
 		// back to an inherited location and prefix a workspace path twice.
 		...(isWorkspaceDirectory(cwd) ? ['--dir', cwd] : []),
-		`${request.instructions}${requiredOutputInstructions(request)}`,
+		`${request.instructions}${requiredOutputInstructions(request, config)}`,
 	];
 }
 

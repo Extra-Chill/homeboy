@@ -35,6 +35,24 @@ assert.deepEqual(structuredOutputsFromTexts(['{"outputs":{"x":1}}'], {}, identit
 
 const request = { output_declarations: [{ name: 'review_form', required: true }, { name: 'notes' }] };
 assert.match(requiredOutputInstructions(request), /^\n\nReturn one JSON object in your final answer with declared values under `outputs`/);
+assert.match(requiredOutputInstructions(request), /"name":"review_form"/);
+
+// Wording is operator-owned data (homeboy#15818): override or disable it.
+assert.equal(
+	requiredOutputInstructions(request, { output_instructions_template: 'Emit {{ declarations }}' }),
+	`\n\nEmit ${JSON.stringify(outputDeclarations(request))}`,
+);
+assert.equal(requiredOutputInstructions(request, { output_instructions_template: '' }), '');
+assert.equal(
+	requiredOutputInstructions({ ...request, executor: { config: { output_instructions_template: 'X' } } }),
+	'\n\nX',
+);
+
+// No prose literal in code: the default wording lives in the data file.
+assert.doesNotMatch(
+	require('node:fs').readFileSync(require.resolve('./declared-outputs'), 'utf8'),
+	/Return one JSON object/,
+);
 
 // Fenced JSON in the final answer.
 {
