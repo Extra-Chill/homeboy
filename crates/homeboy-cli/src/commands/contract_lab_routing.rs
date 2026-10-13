@@ -196,8 +196,7 @@ impl Commands {
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Run(_),
+                command: agent_task::AgentTaskCommand::Run(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:

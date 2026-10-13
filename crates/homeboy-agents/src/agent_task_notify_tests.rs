@@ -798,6 +798,5 @@ fn progress_does_not_reach_an_ambient_default_transport() {
 
 #[test]
 fn batch_emission_is_inert_without_a_configured_transport() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-    });
+    homeboy_core::test_support::with_isolated_home(|_| {});
 }

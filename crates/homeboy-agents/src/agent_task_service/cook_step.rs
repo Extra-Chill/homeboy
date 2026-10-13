@@ -279,26 +279,30 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
 
 /// The record that speaks for a Cook, or why it cannot answer yet.
 ///
-/// The latest attempt the durable recipe declares speaks for the Cook. When
-/// that attempt has no lifecycle record yet (its replay is still materializing
-/// it), the handoff parent answers only once it is terminal: the step exit
-/// observer fails a handoff whose attempt never materialized. With no recipe,
-/// the handoff parent is the only record.
+/// The latest attempt the durable recipe declares speaks for the Cook. The
+/// handoff parent speaks only for a Cook it never redirected to an attempt
+/// (one that failed before materializing, which the step exit observer
+/// records); a redirected parent's own state says nothing about the Cook's
+/// outcome, so an unreadable recipe or attempt then means "not yet".
 fn workflow_cook_record(
     cook_id: &str,
 ) -> std::result::Result<agent_task_lifecycle::AgentTaskRunRecord, WorkflowRunOutcome> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
         .map_err(|_| WorkflowRunOutcome::Pending)?;
-    let parent = || store.read_record(cook_id);
+    let parent = store.read_record(cook_id).ok();
+    let redirected = parent
+        .as_ref()
+        .is_some_and(|parent| parent.metadata["detached_cook_handoff"]["state"] == "redirected");
     let latest = super::load_recipe(cook_id)
         .ok()
         .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
-    match latest {
-        Some(run_id) => store.read_record(&run_id).or_else(|_| match parent() {
-            Ok(parent) if parent.state.is_terminal() => Ok(parent),
-            _ => Err(WorkflowRunOutcome::Pending),
-        }),
-        None => parent().map_err(|_| WorkflowRunOutcome::Unknown),
+    if let Some(attempt) = latest.and_then(|run_id| store.read_record(&run_id).ok()) {
+        return Ok(attempt);
+    }
+    match parent {
+        _ if redirected => Err(WorkflowRunOutcome::Pending),
+        Some(parent) => Ok(parent),
+        None => Err(WorkflowRunOutcome::Unknown),
     }
 }
 

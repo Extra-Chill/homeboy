@@ -35,7 +35,6 @@ use crate::agent_task_service::AgentTaskCookReport;
 /// Generic subject class for every cook lifecycle notification.
 const COOK_SUBJECT_KIND: &str = "agent_task_cook";
 
-
 /// Attribution recorded on the cook-level exactly-once marker.
 const COOK_TERMINAL_DELIVERED_BY: &str = "cook-controller";
 
