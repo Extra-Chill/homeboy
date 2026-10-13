@@ -1191,25 +1191,6 @@ pub struct AgentTaskCookArgs {
     /// Existing pull requests retain their current draft or ready state.
     #[arg(long = "draft-pr", conflicts_with = "no_finalize")]
     pub draft_pr: bool,
-    /// Publish a draft PR, then wait for provider-owned authoritative CI.
-    #[arg(long = "ci-mode", conflicts_with = "no_finalize")]
-    pub ci_mode: bool,
-    /// Agent-task loop controller id whose gate results this Cook awaits for
-    /// provider-owned CI. Required with --ci-mode.
-    #[arg(long = "ci-loop-id", requires = "ci_mode")]
-    pub ci_loop_id: Option<String>,
-    /// Gate bundle id within --ci-loop-id whose check result decides this
-    /// Cook's provider-owned CI outcome. Required with --ci-mode.
-    #[arg(long = "ci-gate-id", requires = "ci_mode")]
-    pub ci_gate_id: Option<String>,
-    /// Check id within --ci-gate-id to watch for a satisfied or failed
-    /// status. Required with --ci-mode.
-    #[arg(long = "ci-check-id", requires = "ci_mode")]
-    pub ci_check_id: Option<String>,
-    /// Environment digest recorded with the provider-owned CI handoff for
-    /// durable provenance. Required with --ci-mode.
-    #[arg(long = "ci-environment-digest", requires = "ci_mode")]
-    pub ci_environment_digest: Option<String>,
     /// Return the complete cook report, including nested promotion and gate evidence.
     #[arg(long)]
     pub full: bool,

@@ -46,7 +46,6 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
-            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Retry projection fixture".to_string(),
@@ -189,7 +188,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
-            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Runtime-compatible retry".to_string(),

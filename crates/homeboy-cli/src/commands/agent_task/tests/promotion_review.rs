@@ -106,7 +106,6 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
-                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Retained gates".to_string(),
@@ -842,7 +841,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
-                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "selected large patch".to_string(),

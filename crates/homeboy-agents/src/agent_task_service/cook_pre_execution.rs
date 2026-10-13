@@ -1224,7 +1224,6 @@ mod tests {
             finalization: CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
-                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Paired-store materialization".to_string(),
