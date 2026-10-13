@@ -870,7 +870,7 @@ fn recovery_inventory(
         for run_id in &run_ids {
             run_active |= observation
                 .get_run(run_id)?
-                .is_some_and(|run| run.status == "running");
+                .is_some_and(|run| matches!(run.status.as_str(), "queued" | "running"));
         }
         let age = now.duration_since(modified).unwrap_or_default();
         let state = if run_active {
