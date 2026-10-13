@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
-    deferred_workload, deploy, extension, file, fuzz, git, harvest, project, refactor, release,
-    review, rig, runner, runs, runtime, schedule, self_cmd, server, source, ssh, status, trace,
-    tunnel, upgrade, worktree,
+    deploy, extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner,
+    runs, runtime, schedule, self_cmd, server, source, ssh, status, trace, tunnel, upgrade,
+    worktree,
 };
 
 mod argument_provenance;
@@ -172,9 +172,6 @@ pub enum Commands {
     /// Run generic agent task plans
     #[command(name = "agent-task")]
     AgentTask(agent_task::AgentTaskArgs),
-    /// Resume portable workloads deferred until a runner is ready
-    #[command(name = "deferred-workload")]
-    DeferredWorkload(deferred_workload::DeferredWorkloadArgs),
     /// Manage project configuration
     Project(project::ProjectArgs),
     /// SSH into a project server or configured server

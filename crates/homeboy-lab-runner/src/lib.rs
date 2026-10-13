@@ -875,6 +875,32 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
     Ok(lab_runner_readiness()?.selected_runner_id)
 }
 
+/// The Lab runner work should wait for when none is ready now: the preferred
+/// runner when one is configured, otherwise the only configured Lab runner.
+/// Readiness is not consulted; this names a runner, it does not admit one.
+pub fn lab_runner_wait_target() -> Result<Option<String>> {
+    let runners: Vec<String> = list()?
+        .into_iter()
+        .filter(|runner| runner.kind == RunnerKind::Ssh)
+        .map(|runner| runner.id)
+        .collect();
+    Ok(lab_runner_wait_target_from(
+        defaults::load_config().lab.preferred_runner.as_deref(),
+        runners,
+    ))
+}
+
+fn lab_runner_wait_target_from(preferred: Option<&str>, runners: Vec<String>) -> Option<String> {
+    if let Some(preferred) = preferred.filter(|preferred| runners.iter().any(|id| id == preferred))
+    {
+        return Some(preferred.to_string());
+    }
+    match runners.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
 /// A generic, live inventory of Lab-capable runners. Consumers use this rather
 /// than reducing runner state to an optional default ID, which loses the reason
 /// a connected runner was not selected.
@@ -2013,6 +2039,25 @@ mod tests {
     use super::*;
     use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
     use homeboy_core::test_support;
+
+    #[test]
+    fn wait_target_is_the_preferred_runner_or_the_only_runner() {
+        let runners = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            lab_runner_wait_target_from(Some("lab-b"), runners(&["lab-a", "lab-b"])),
+            Some("lab-b".to_string())
+        );
+        assert_eq!(
+            lab_runner_wait_target_from(Some("gone"), runners(&["lab-a"])),
+            Some("lab-a".to_string())
+        );
+        assert_eq!(
+            lab_runner_wait_target_from(None, runners(&["lab-a", "lab-b"])),
+            None,
+            "an ambiguous runner set names no wait target"
+        );
+        assert_eq!(lab_runner_wait_target_from(None, Vec::new()), None);
+    }
 
     #[test]
     fn replay_policy_includes_override_and_persist_all_effective_exclusions() {

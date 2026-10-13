@@ -150,6 +150,17 @@ measurement. Coverage, changed-scope, analysis, and source-owned
 baseline modes must be run separately until they have equivalent differential
 measurement contracts.
 
+When a portable `review test` runs with `auto` or `lab-or-local` placement,
+controller resource pressure refuses local execution, and no Lab runner is
+ready, Homeboy queues the command as a daemon `step` job instead of running it.
+The step waits until the preferred Lab runner (or the only configured one)
+accepts jobs, then runs the same command with `--runner <id> --wait` from the
+source workspace. It prints `homeboy/runner-wait-step/v1` with `status:
+"deferred"` and the `job_id`; inspect it with `homeboy daemon jobs show <id>
+--full`. An identical deferral of unchanged workspace content converges on the
+same step. With `--wait` the command fails instead, because a queued step is
+not a test result.
+
 ### `review build`
 
 Runs the build quality gate for one component or all project components.

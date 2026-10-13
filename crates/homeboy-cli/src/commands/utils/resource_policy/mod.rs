@@ -1096,8 +1096,6 @@ mod tests {
                     },
                     deferred_pressure_refusal: deferred_workload == DeferredWorkloadDecision::Defer,
                     runner_admitted: selected_runner_id.is_some(),
-                    runner_incompatible: deferred_workload
-                        == DeferredWorkloadDecision::RunnerIncompatible,
                     auto_local_capacity_fallback: fallback,
                 }
             };

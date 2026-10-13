@@ -1334,18 +1334,6 @@ impl CliRuntime {
         if command_capability == CommandCapability::Mutation && !is_unmaterialized_replay_worker {
             schedule_controller_fallback_reconciliation();
         }
-        // Deferred records outlive their worker. Startup restarts the singleton
-        // so expired claims recover without another deferral request. The
-        // deferred-workload family itself is exempt: the worker would restart
-        // itself, and `reconcile` would spawn the worker it is about to judge.
-        if command_capability == CommandCapability::Mutation
-            && !is_unmaterialized_replay_worker
-            && normalized.get(1).map(String::as_str) != Some("deferred-workload")
-        {
-            if let Ok(config_root) = crate::core::paths::homeboy() {
-                let _ = crate::commands::deferred_workload::restart_worker_if_pending(&config_root);
-            }
-        }
 
         if crate::commands::route::is_agent_task_providers_query(&normalized) {
             if let Some(runner_id) = matches.get_one::<String>("runner") {
@@ -1473,7 +1461,6 @@ impl CliRuntime {
                 },
                 deferred_pressure_refusal: false,
                 runner_admitted: false,
-                runner_incompatible: false,
                 auto_local_capacity_fallback: false,
             };
             let preflight =
@@ -1824,7 +1811,6 @@ impl CliRuntime {
                                 && readiness.available_runner_ids.contains(runner_id)
                         })
                     }),
-                    runner_incompatible: false,
                     auto_local_capacity_fallback: false,
                 },
             ) {
@@ -2018,8 +2004,8 @@ impl CliRuntime {
     }
 }
 
-/// Config inspection must not initialize daemon reconciliation, provider
-/// discovery, or deferred workers. Those are unrelated to a local JSON read.
+/// Config inspection must not initialize daemon reconciliation or provider
+/// discovery. Those are unrelated to a local JSON read.
 fn run_config_read_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
     let cli = Cli::try_parse_from(args).ok()?;
     let Commands::Config(config) = cli.command else {
@@ -3473,17 +3459,18 @@ fn preflight_hot_command_with_input(
                             cli,
                             selected_runner_id.clone(),
                         ),
-                        deferred_pressure_refusal: warning.as_ref().is_some_and(|warning| {
-                            review_test_deferred_workload_eligible(
-                                cli,
-                                warning,
-                                runner_admits_offload,
-                            )
-                        }),
+                        // A selected runner that cannot admit the review test
+                        // is not a reason to wait for it: deferral applies only
+                        // when no runner was selected at all.
+                        deferred_pressure_refusal: selected_runner_id.is_none()
+                            && warning.as_ref().is_some_and(|warning| {
+                                review_test_deferred_workload_eligible(
+                                    cli,
+                                    warning,
+                                    runner_admits_offload,
+                                )
+                            }),
                         runner_admitted: runner_admits_offload,
-                        runner_incompatible: review_test_runner_requirements(cli).is_some()
-                            && selected_runner_id.is_some()
-                            && !runner_admits_offload,
                         auto_local_capacity_fallback,
                     },
                 ) {
@@ -3601,7 +3588,6 @@ pub(crate) fn placement_directive(
             ),
             deferred_pressure_refusal: false,
             runner_admitted: selected_runner_id.is_some(),
-            runner_incompatible: false,
             auto_local_capacity_fallback,
         },
     )
@@ -3635,7 +3621,6 @@ pub(crate) fn capture_preflight_result_for_test(
             generic_route: generic_route_policy_snapshot(cli, None),
             deferred_pressure_refusal: false,
             runner_admitted: false,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         },
     )
@@ -3672,7 +3657,6 @@ pub(crate) fn capture_admitted_runner_preflight_for_test(cli: &Cli, runner_id: &
             generic_route: generic_route_policy_snapshot(cli, selected_runner_id),
             deferred_pressure_refusal: false,
             runner_admitted: true,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         },
     )
@@ -3792,9 +3776,24 @@ fn review_test_config_provenance(
     )
 }
 
-fn review_test_runner_requirements(
-    cli: &Cli,
-) -> Option<homeboy::deferred_workload::DeferredWorkloadRequirements> {
+/// Runtimes and capabilities a runner must offer to admit a portable review test.
+struct ReviewTestRunnerRequirements {
+    required_runtimes: std::collections::BTreeSet<String>,
+    required_capabilities: std::collections::BTreeSet<String>,
+}
+
+impl ReviewTestRunnerRequirements {
+    fn is_satisfied_by(
+        &self,
+        runtime_ids: &std::collections::BTreeSet<String>,
+        capabilities: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        self.required_runtimes.is_subset(runtime_ids)
+            && self.required_capabilities.is_subset(capabilities)
+    }
+}
+
+fn review_test_runner_requirements(cli: &Cli) -> Option<ReviewTestRunnerRequirements> {
     let Commands::Review(review) = &cli.command else {
         return None;
     };
@@ -3802,16 +3801,16 @@ fn review_test_runner_requirements(
         return None;
     };
     let contract = test.lab_contract();
-    contract.is_portable().then(
-        || homeboy::deferred_workload::DeferredWorkloadRequirements {
+    contract
+        .is_portable()
+        .then(|| ReviewTestRunnerRequirements {
             required_runtimes: ["homeboy".to_string()].into(),
             required_capabilities: contract
                 .extra_required_capabilities
                 .iter()
                 .map(|capability| (*capability).to_string())
                 .collect(),
-        },
-    )
+        })
 }
 
 fn review_test_deferred_workload_eligible(
@@ -4464,7 +4463,6 @@ mod tests {
                     generic_route: generic_route_policy_snapshot(&cli, None),
                     deferred_pressure_refusal: false,
                     runner_admitted: false,
-                    runner_incompatible: false,
                     auto_local_capacity_fallback: false,
                 },
             )
@@ -4554,7 +4552,6 @@ mod tests {
                     generic_route: generic_route_policy_snapshot(&cli, None),
                     deferred_pressure_refusal: false,
                     runner_admitted: false,
-                    runner_incompatible: false,
                     auto_local_capacity_fallback: false,
                 },
             )
@@ -5255,7 +5252,6 @@ mod tests {
                 generic_route: generic_route_policy_snapshot(&auto, None),
                 deferred_pressure_refusal: false,
                 runner_admitted: false,
-                runner_incompatible: false,
                 auto_local_capacity_fallback: true,
             },
         )
@@ -5287,7 +5283,6 @@ mod tests {
                 ),
                 deferred_pressure_refusal: false,
                 runner_admitted: false,
-                runner_incompatible: false,
                 auto_local_capacity_fallback: false,
             },
         )
@@ -5844,7 +5839,7 @@ mod tests {
     }
 
     /// Explicit help is rendered before runtime registration, config loading,
-    /// controller consultation, or deferred-worker recovery. Clap still decides
+    /// or controller consultation. Clap still decides
     /// whether the flag is actually help rather than an option value.
     #[test]
     fn explicit_subcommand_help_uses_the_startup_fast_path() {

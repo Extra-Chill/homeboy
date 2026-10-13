@@ -21,8 +21,7 @@
 //!   registry declaration resolves to `read_only()` by default.
 //! - `CommandCapability` is a per-INVOCATION runtime gate that must fail closed,
 //!   because `Mutation` is what authorizes scheduling runner-exec recovery
-//!   children (before a mutating command can evict their source evidence) and
-//!   the deferred-workload worker restart.
+//!   children (before a mutating command can evict their source evidence).
 //!
 //! A per-path lookup cannot express the argument-conditional rows here at all:
 //! `status` is read-only until `--refresh`, and `project`/`rig`/`server` are

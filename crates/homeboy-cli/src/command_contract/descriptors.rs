@@ -26,7 +26,6 @@ macro_rules! builtin_json_command_descriptors {
             (Contract, $crate::commands::contract::run, command_spec_with_output_notes("contract", CommandJsonFamily::Workspace, "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface")),
             (ControlPlane, $crate::commands::control_plane::run, CommandSpec { safety: mutating_safety(), ..command_spec_with_output_notes("control-plane", CommandJsonFamily::Ops, "reconciles authoritative provider-effect recovery evidence through the canonical in-process control-plane service") }),
             (Daemon, $crate::commands::daemon::run, command_spec("daemon", CommandJsonFamily::Ops)),
-            (DeferredWorkload, $crate::commands::deferred_workload::run, command_spec("deferred-workload", CommandJsonFamily::Ops)),
             (Schedule, $crate::commands::schedule::run, command_spec("schedule", CommandJsonFamily::Ops)),
             (Extension, $crate::commands::extension::run, CommandSpec { subcommand_safety: EXTENSION_SUBCOMMAND_SAFETY, ..command_spec_with_representative_argv(&["homeboy", "extension", "refresh", "."], lab_command_spec_with_summary("extension", CommandJsonFamily::Workspace, "Lab runner routing covers runner extension refresh/update/dev-run workflows", EXTENSION_LAB_SUPPORT)) }),
             (Status, $crate::commands::status::run, command_spec("status", CommandJsonFamily::Ops)),

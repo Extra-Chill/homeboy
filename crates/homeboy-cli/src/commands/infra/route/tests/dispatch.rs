@@ -189,7 +189,7 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
         let persisted = agent_task_lifecycle::load_controller_plan(&handoff.run_id)
             .expect("durable replay plan");
         let replay = &persisted.metadata["generic_lab_command_replay"];
-        let expected_args = portable_deferred_args(&args);
+        let expected_args = portable_route_args(&args);
 
         assert_eq!(replay["normalized_args"], serde_json::json!(expected_args));
         assert_eq!(replay["lab_command"], serde_json::json!(command));
@@ -556,8 +556,8 @@ fn credential_profile_is_rejected_without_persisting_plaintext() {
 }
 
 #[test]
-fn deferred_workload_command_is_portable_and_omits_controller_placement() {
-    let portable = portable_deferred_args(&[
+fn portable_route_args_omit_controller_placement() {
+    let portable = portable_route_args(&[
         "homeboy".to_string(),
         "--placement".to_string(),
         "lab-or-local".to_string(),
@@ -569,7 +569,7 @@ fn deferred_workload_command_is_portable_and_omits_controller_placement() {
     assert_eq!(
         portable,
         vec!["homeboy", "review", "test", "fixture"],
-        "the worker supplies its selected runner at replay time"
+        "the replay supplies its selected runner"
     );
 }
 
@@ -1281,109 +1281,7 @@ fn lab_job_overrides_reject_invalid_env_shapes() {
 }
 
 #[test]
-fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintext() {
-    crate::test_support::with_isolated_home(|_| {
-        let input = homeboy::deferred_workload::DeferredWorkloadInput {
-            command_label: "review test".to_string(),
-            args: vec![
-                "homeboy".to_string(),
-                "review".to_string(),
-                "test".to_string(),
-            ],
-            placement: "auto".to_string(),
-            resource_requirement: "eligible_lab_runner".to_string(),
-            portability: "portable_lab_route".to_string(),
-            reason: "fixture".to_string(),
-            ci_alternative: "CI".to_string(),
-            resolved_contract: serde_json::json!({}),
-            resolved_resources: serde_json::json!({}),
-            test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements {
-                required_runtimes: ["homeboy".to_string()].into(),
-                required_capabilities: Default::default(),
-            },
-            source_directory: None,
-            job_overrides: runners::LabJobOverrides {
-                env: [
-                    ("DB_SERVICE_HOST".to_string(), "db.fixture".to_string()),
-                    ("DB_SERVICE_PORT".to_string(), "3306".to_string()),
-                ]
-                .into(),
-                secret_env_names: vec!["DB_SERVICE_PASSWORD".to_string()],
-                workspace_root: None,
-            },
-        };
-        let deferred = homeboy::deferred_workload::defer(input).expect("defer fixture");
-        assert_eq!(deferred.job_overrides.env["DB_SERVICE_HOST"], "db.fixture");
-        assert_eq!(deferred.job_overrides.env["DB_SERVICE_PORT"], "3306");
-        assert!(!deferred
-            .job_overrides
-            .env
-            .contains_key("DB_SERVICE_PASSWORD"));
-        assert_eq!(
-            deferred.job_overrides.secret_env_names,
-            ["DB_SERVICE_PASSWORD"]
-        );
-        let durable_json = serde_json::to_string(&deferred).expect("deferred JSON");
-        let status_json = serde_json::to_string(
-            &crate::commands::deferred_workload::redacted_record(&deferred),
-        )
-        .expect("status JSON");
-        for json in [&durable_json, &status_json] {
-            assert!(!json.contains("fixture-password"));
-            assert!(!json.contains("DB_SERVICE_PASSWORD\":\""));
-            assert!(json.contains("DB_SERVICE_PASSWORD"));
-        }
-    });
-}
-
-#[test]
-fn deferred_status_redacts_all_settings_arguments() {
-    let mut record = homeboy::deferred_workload::DeferredWorkload {
-        id: "deferred-settings".to_string(),
-        fingerprint: "fixture".to_string(),
-        command_label: "review test".to_string(),
-        args: vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "test".to_string(),
-            "--setting".to_string(),
-            "mode=debug".to_string(),
-            "--setting-json=database_service={\"password\":\"fixture-password\"}".to_string(),
-        ],
-        placement: "auto".to_string(),
-        resource_requirement: "eligible_lab_runner".to_string(),
-        portability: "portable_lab_route".to_string(),
-        reason: "fixture".to_string(),
-        ci_alternative: "CI".to_string(),
-        resolved_contract: serde_json::json!({}),
-        resolved_resources: serde_json::json!({}),
-        test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements {
-            required_runtimes: ["homeboy".to_string()].into(),
-            required_capabilities: Default::default(),
-        },
-        source_directory: None,
-        job_overrides: Default::default(),
-        state: homeboy::deferred_workload::DeferredWorkloadState::Deferred,
-        created_at_ms: 0,
-        updated_at_ms: 0,
-        runner_id: None,
-        claim_owner: None,
-        claim_expires_at_ms: None,
-    };
-    record
-        .job_overrides
-        .secret_env_names
-        .push("DB_SERVICE_PASSWORD".to_string());
-
-    let status = crate::commands::deferred_workload::redacted_record(&record).to_string();
-
-    assert!(!status.contains("mode=debug"));
-    assert!(!status.contains("fixture-password"));
-    assert!(status.contains("[REDACTED]"));
-}
-
-#[test]
-fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_identity() {
+fn manifest_resolved_portable_db_service_runner_wait_step_carries_secret_identity_only() {
     crate::test_support::with_isolated_home(|home| {
         let component = tempdir().expect("component directory");
         fs::write(
@@ -1421,74 +1319,25 @@ fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_ident
         let overrides = lab_job_overrides(&cli).expect("manifest-resolved overrides");
         assert_eq!(overrides.env["DB_SERVICE_HOST"], "db.fixture");
         assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
-        assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
-        let normalized = vec![
-            "homeboy".to_string(),
-            "review".to_string(),
-            "test".to_string(),
-        ];
-        let preflight = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
-            normalized.clone(),
-            resource_policy::parsed_command_preflight_input(&cli, &normalized),
-            None,
-            None,
-            homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer,
-            homeboy::core::parsed_command_preflight::FallbackDirective::None,
-            crate::cli_runtime::placement_directive(&cli, None, false),
-            None,
+        assert!(!overrides.env.contains_key("DB_SERVICE_PASSWORD"));
+        let args = runner_wait_step_args(
+            &[
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+            "compatible-runner",
+            &overrides,
         );
-        let deferred = homeboy::deferred_workload::defer(
-            deferred_workload_input(
-                &cli,
-                &normalized,
-                &preflight,
-                review_test_deferred_requirements(&cli).expect("review test requirements"),
-            )
-            .expect("deferred input"),
-        )
-        .expect("warm deferral");
-        let durable = serde_json::to_string(&deferred).expect("durable deferred record");
-        assert!(!durable.contains("fixture-password"));
-
-        let ready = std::cell::Cell::new(false);
-        let ready_after_wait = &ready;
-        crate::commands::deferred_workload::run_worker_with(
-            &homeboy::core::paths::homeboy().expect("config root"),
-            "worker-token",
-            || {
-                Ok(ready.get().then(|| {
-                    crate::commands::deferred_workload::RunnerCapabilityInventory {
-                        runner_id: "compatible-runner".to_string(),
-                        runtime_ids: ["homeboy".to_string()].into(),
-                        capabilities: ["homeboy".to_string()].into(),
-                    }
-                }))
-            },
-            |record, runner_id, _| {
-                assert_eq!(runner_id, "compatible-runner");
-                assert_eq!(record.job_overrides.env["DB_SERVICE_HOST"], "db.fixture");
-                assert_eq!(
-                    record.job_overrides.secret_env_names,
-                    ["DB_SERVICE_PASSWORD"]
-                );
-                assert!(!serde_json::to_string(record)
-                    .expect("record JSON")
-                    .contains("fixture-password"));
-                Ok(true)
-            },
-            || 10,
-            |_| ready_after_wait.set(true),
-        )
-        .expect("compatible runner dispatch");
-        assert_eq!(
-            homeboy::deferred_workload::records().expect("records")[0].state,
-            homeboy::deferred_workload::DeferredWorkloadState::Dispatched
-        );
+        let argv = args.join(" ");
+        assert!(argv.contains("--runner-env DB_SERVICE_HOST=db.fixture"));
+        assert!(argv.contains("--runner-secret-env DB_SERVICE_PASSWORD"));
+        assert!(!argv.contains("fixture-password"));
     });
 }
 
 #[test]
-fn deferred_runner_env_wins_over_later_manifest_ambient_value() {
+fn pinned_runner_env_wins_over_later_manifest_ambient_value() {
     crate::test_support::with_isolated_home(|home| {
         let component = tempdir().expect("component directory");
         fs::write(

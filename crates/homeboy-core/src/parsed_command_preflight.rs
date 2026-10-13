@@ -172,9 +172,8 @@ pub struct LabReadinessSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum DeferredWorkloadDecision {
     NotApplicable,
-    Dispatch,
+    /// Queue the command as a daemon `step` that waits for a Lab runner.
     Defer,
-    RunnerIncompatible,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +208,6 @@ pub struct ParsedCommandPolicySnapshot {
     /// command policy instead of accepting a preassembled result axis.
     pub deferred_pressure_refusal: bool,
     pub runner_admitted: bool,
-    pub runner_incompatible: bool,
     pub auto_local_capacity_fallback: bool,
 }
 
@@ -373,14 +371,6 @@ pub fn resolve_parsed_command_preflight(
             auto_split_placement_requires_lab.then_some(remediation),
         ));
     }
-    if policy.runner_admitted && policy.runner_incompatible {
-        return Err(crate::Error::validation_invalid_argument(
-            "runner_admission",
-            "runner cannot be both admitted and incompatible",
-            None,
-            None,
-        ));
-    }
     if policy.auto_local_capacity_fallback
         && !matches!(
             input.placement,
@@ -447,7 +437,7 @@ pub fn resolve_parsed_command_preflight(
     }
     let deferred_workload = match input.deferred_workload {
         DeferredWorkloadPolicy::Forbidden => {
-            if policy.deferred_pressure_refusal || policy.runner_incompatible {
+            if policy.deferred_pressure_refusal {
                 return Err(crate::Error::validation_invalid_argument(
                     "deferred_workload",
                     "deferred evidence requires an eligible deferred workload policy",
@@ -457,13 +447,9 @@ pub fn resolve_parsed_command_preflight(
             }
             DeferredWorkloadDecision::NotApplicable
         }
-        DeferredWorkloadPolicy::Eligible if selected_runner_admitted => {
-            DeferredWorkloadDecision::Dispatch
-        }
-        DeferredWorkloadPolicy::Eligible if policy.runner_incompatible => {
-            DeferredWorkloadDecision::RunnerIncompatible
-        }
-        DeferredWorkloadPolicy::Eligible if policy.deferred_pressure_refusal => {
+        DeferredWorkloadPolicy::Eligible
+            if !selected_runner_admitted && policy.deferred_pressure_refusal =>
+        {
             DeferredWorkloadDecision::Defer
         }
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
@@ -771,7 +757,6 @@ mod tests {
             },
             deferred_pressure_refusal: false,
             runner_admitted: true,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         };
 
@@ -973,7 +958,6 @@ mod tests {
             },
             deferred_pressure_refusal: false,
             runner_admitted: false,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         };
         assert!(
@@ -993,7 +977,6 @@ mod tests {
             },
             deferred_pressure_refusal: true,
             runner_admitted: false,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         };
         assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_err());
@@ -1034,7 +1017,6 @@ mod tests {
             },
             deferred_pressure_refusal: false,
             runner_admitted: false,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         };
 
@@ -1407,7 +1389,6 @@ mod tests {
             },
             deferred_pressure_refusal: false,
             runner_admitted,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         }
     }
@@ -1453,7 +1434,6 @@ mod tests {
             },
             deferred_pressure_refusal: false,
             runner_admitted,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         }
     }
