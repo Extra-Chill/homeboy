@@ -1,0 +1,204 @@
+{
+  "definition": {
+    "id": "seq",
+    "inputs": {
+      "name": {
+        "required": true
+      }
+    },
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "args": [
+            "-c",
+            "echo {{inputs.name}}"
+          ],
+          "program": "sh"
+        },
+        "id": "a"
+      },
+      {
+        "homeboy": [
+          "status",
+          "{{steps.a.output/value}}"
+        ],
+        "id": "b",
+        "needs": [
+          "a"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "output": {
+          "value": "x"
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/b/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "succeeded",
+  "inputs": {
+    "name": "world"
+  },
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "-c",
+            "echo world"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "sh",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [
+            "status",
+            "x"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/b/1/1",
+          "kind": "homeboy",
+          "step": "b"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "output": {
+          "value": "x"
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/b/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "status": "succeeded"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/b/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "succeeded",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/b/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

@@ -1105,6 +1105,7 @@ mod tests {
                         cancellation_reason: None,
                         execution_claim_id: None,
                         recovery_attempted: false,
+                        parent_job_id: None,
                     },
                 )
                 .unwrap()

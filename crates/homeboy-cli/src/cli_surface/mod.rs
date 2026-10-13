@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
     deploy, extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner,
     runs, runtime, schedule, self_cmd, server, source, ssh, status, trace, tunnel, upgrade,
-    worktree,
+    workflow, worktree,
 };
 
 mod argument_provenance;
@@ -230,6 +230,8 @@ pub enum Commands {
     Source(source::SourceArgs),
     /// Inspect core-owned runtime helper assets
     Runtime(runtime::RuntimeArgs),
+    /// Run declarative multi-step and repeating workflows as daemon jobs
+    Workflow(workflow::WorkflowArgs),
     /// Manage component-backed task worktrees
     Worktree(worktree::WorktreeArgs),
     /// Manage private service tunnel declarations

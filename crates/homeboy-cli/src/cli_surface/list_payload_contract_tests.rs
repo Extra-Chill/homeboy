@@ -24,6 +24,7 @@ const ENTITY_LIST_COMMANDS: &[&str] = &[
     "runner list",
     "server list",
     "tunnel service list",
+    "workflow list",
 ];
 
 /// `list` subcommands deliberately left on their own payload shape.

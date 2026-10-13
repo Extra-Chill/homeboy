@@ -1,0 +1,299 @@
+{
+  "definition": {
+    "id": "timeout",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "args": [
+            "600"
+          ],
+          "program": "sleep"
+        },
+        "id": "a",
+        "retry": {
+          "max": 1,
+          "on": [
+            "timed_out"
+          ]
+        },
+        "timeout": "5m"
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 60000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 300000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 301000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 302000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 603000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/2",
+        "status": "cancelled"
+      },
+      "now_ms": 604000
+    }
+  ],
+  "expect_status": "failed",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "600"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "sleep",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 60000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "cancel_step",
+          "key": "wf-golden/a/1/1",
+          "reason": "step `a` timed out"
+        }
+      ],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 300000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 301000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [
+            "600"
+          ],
+          "attempt": 2,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/2",
+          "kind": "exec",
+          "program": "sleep",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 302000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 2,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/2",
+            "outcome": "timed_out",
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "cancel_step",
+          "key": "wf-golden/a/1/2",
+          "reason": "step `a` timed out"
+        }
+      ],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 603000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 2,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/2",
+            "outcome": "timed_out",
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "reason": "step `a` did not succeed",
+          "status": "failed"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/2",
+        "status": "cancelled"
+      },
+      "now_ms": 604000,
+      "state": {
+        "failing": true,
+        "iteration": 1,
+        "reason": "step `a` did not succeed",
+        "status": "failed",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 2,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/2",
+            "outcome": "timed_out",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

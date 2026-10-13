@@ -672,16 +672,19 @@ fn bind_cook_step_child(
             None,
         )
     })?;
-    let launcher_id =
-        std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV).map_err(|_| {
-            Error::validation_invalid_argument(
-                "cook_id",
-                "a Cook step must carry its launcher generation",
-                Some(cook_id.clone()),
-                None,
-            )
-        })?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let launcher_id = match std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV) {
+        Ok(launcher_id) => launcher_id,
+        // A workflow `cook` step has no launcher process: the step itself
+        // launches the Cook, so it claims the handoff as its own launcher.
+        Err(_) => {
+            agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                &store, &cook_id, job_id,
+            )?;
+            std::env::set_var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV, job_id);
+            job_id.to_string()
+        }
+    };
     let (pid, identity) = own_process_identity()?;
     agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
         &store,

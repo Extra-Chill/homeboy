@@ -48,6 +48,43 @@ const STEP_PROCESS_ENV: &[&str] = &[
     "__CF_USER_TEXT_ENCODING",
 ];
 const HOMEBOY_ENV_PREFIX: &str = "HOMEBOY_";
+/// `HOMEBOY_*` variables that describe the admitting process's own execution
+/// (its run, its runner job and placement, its daemon frame, its step) rather
+/// than Homeboy configuration. A step is a new execution: inheriting these
+/// would make a Cook launched from inside a runner job believe it is that
+/// runner job's hosted attempt.
+const INVOCATION_CONTEXT_ENV: &[&str] = &[
+    "HOMEBOY_RUN_ID",
+    "HOMEBOY_ACTIVE_RUN_ID",
+    "HOMEBOY_BENCH_RUN_ID",
+    "HOMEBOY_COMMAND",
+    "HOMEBOY_DAEMON_STATE_DIR",
+    "HOMEBOY_SETTINGS_JSON",
+    "HOMEBOY_SOURCE_SNAPSHOT_JSON",
+    "HOMEBOY_STEP_OUTPUT",
+];
+const INVOCATION_CONTEXT_ENV_PREFIXES: &[&str] = &[
+    "HOMEBOY_RUNNER_",
+    "HOMEBOY_LAB_EXECUTION_",
+    "HOMEBOY_DAEMON_CHILD_",
+];
+
+/// Whether this process runs inside a runner job. The CLI clears the
+/// placement markers once routing has consumed them; the job's own identity
+/// and Lab execution provenance remain for its lifetime.
+fn admitted_inside_runner_job() -> bool {
+    homeboy_core::resource_policy_context::is_runner_hosted_exec()
+        || homeboy_core::resource_policy_context::has_lab_execution_provenance()
+        || std::env::var_os("HOMEBOY_RUNNER_JOB_ID").is_some()
+}
+
+fn is_invocation_context_env(name: &str) -> bool {
+    name == step_job::STEP_JOB_ID_ENV
+        || INVOCATION_CONTEXT_ENV.contains(&name)
+        || INVOCATION_CONTEXT_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 const CHILD_RESULT_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Capture the environment a detached Cook step runs with, from this
@@ -126,8 +163,15 @@ pub fn admitted_homeboy_step_environment(
         }
     }
     for (name, value) in std::env::vars() {
-        if name.starts_with(HOMEBOY_ENV_PREFIX) && name != step_job::STEP_JOB_ID_ENV {
+        if name.starts_with(HOMEBOY_ENV_PREFIX) && !is_invocation_context_env(&name) {
             public_env.insert(name, value);
+        }
+    }
+    // A runner-hosted exec's temp directory belongs to that job and is removed
+    // when it ends; work admitted from inside it outlives the job.
+    if admitted_inside_runner_job() {
+        for name in ["TMPDIR", "TMP", "TEMP"] {
+            public_env.remove(name);
         }
     }
     public_env.extend(overrides);
@@ -200,6 +244,10 @@ pub fn register_cook_step_hooks() {
                 failure
             })
         }));
+        // A workflow `cook` step's outcome is its Cook's terminal run state.
+        homeboy_core::daemon::workflow_job::register_workflow_run_outcome_resolver(Arc::new(
+            |cook_id: &str| workflow_cook_outcome(cook_id),
+        ));
         step_job::register_step_exit_observer(Arc::new(|exit: &StepExit| {
             if let Err(error) = observe_cook_step_exit(exit) {
                 eprintln!(
@@ -215,13 +263,31 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     let Some(linked) = exit.linked_durable_run_id.as_deref() else {
         return Ok(());
     };
-    if exit.key.starts_with(COOK_LAUNCH_STEP_KEY_PREFIX) {
-        observe_launch_exit(linked, exit)
-    } else if exit.key.starts_with(COOK_RETRY_STEP_KEY_PREFIX) {
+    // Every other linked step runs a Cook that bound its own handoff: a
+    // detached launch, or a workflow `cook` step.
+    if exit.key.starts_with(COOK_RETRY_STEP_KEY_PREFIX) {
         observe_retry_exit(linked, exit)
     } else {
-        Ok(())
+        observe_launch_exit(linked, exit)
     }
+}
+
+/// The terminal run state of a Cook's latest attempt (or of its handoff
+/// parent, when no attempt materialized). `None` until it is terminal.
+fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+    let run_id = store
+        .read_cook_index(cook_id)
+        .map(|index| index.latest_run_id)
+        .unwrap_or_else(|_| cook_id.to_string());
+    let record = store.read_record(&run_id).ok()?;
+    if !record.state.is_terminal() {
+        return None;
+    }
+    serde_json::to_value(record.state)
+        .ok()?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
@@ -503,6 +569,29 @@ mod tests {
                 .public_env
                 .contains_key("HOMEBOY_COOK_STEP_FIXTURE_TOKEN"));
             assert!(plan.secret_refs.is_empty());
+        });
+    }
+
+    #[test]
+    fn admitted_environment_drops_the_admitting_process_execution_context() {
+        with_isolated_home(|_| {
+            let _job = EnvVarGuard::set("HOMEBOY_RUNNER_JOB_ID", "runner-job");
+            let _run = EnvVarGuard::set("HOMEBOY_RUN_ID", "runner-exec-run");
+            let _frame = EnvVarGuard::set("HOMEBOY_DAEMON_STATE_DIR", "/runner/daemon");
+            let _tmp = EnvVarGuard::set("TMPDIR", "/tmp/runner-job.t");
+            let _config = EnvVarGuard::set("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE", "kept");
+            let plan = admitted_cook_environment(Vec::new()).expect("admit environment");
+            for name in [
+                "HOMEBOY_RUNNER_JOB_ID",
+                "HOMEBOY_RUN_ID",
+                "HOMEBOY_DAEMON_STATE_DIR",
+                "TMPDIR",
+            ] {
+                assert!(!plan.public_env.contains_key(name), "{name} leaked");
+            }
+            assert!(plan
+                .public_env
+                .contains_key("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE"));
         });
     }
 

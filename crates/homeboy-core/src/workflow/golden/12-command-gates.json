@@ -1,0 +1,459 @@
+{
+  "definition": {
+    "id": "cmdgate",
+    "iterate": {
+      "max_iterations": 2,
+      "until": {
+        "command": [
+          "homeboy",
+          "review",
+          "lint",
+          "{{iteration}}"
+        ]
+      }
+    },
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "lint",
+        "when": {
+          "any": [
+            {
+              "command": [
+                "homeboy",
+                "review",
+                "lint"
+              ]
+            },
+            {
+              "command": [
+                "test",
+                "-f",
+                "x"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "never",
+        "needs": [
+          "lint"
+        ],
+        "when": {
+          "command": [
+            "false"
+          ]
+        }
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/when-0",
+        "status": "failed"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/when-1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 3000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/never/1/when-0",
+        "status": "failed"
+      },
+      "now_ms": 4000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/~until/1/0",
+        "status": "succeeded"
+      },
+      "now_ms": 5000
+    }
+  ],
+  "expect_status": "succeeded",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "argv": [
+            "homeboy",
+            "review",
+            "lint"
+          ],
+          "attempt": 0,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/lint/1/when-0",
+          "kind": "gate",
+          "step": "lint"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "lint": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0"
+              }
+            },
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "argv": [
+            "test",
+            "-f",
+            "x"
+          ],
+          "attempt": 0,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/lint/1/when-1",
+          "kind": "gate",
+          "step": "lint"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/when-0",
+        "status": "failed"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "lint": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0",
+                "passed": false
+              },
+              "1": {
+                "key": "wf-golden/lint/1/when-1"
+              }
+            },
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/lint/1/1",
+          "kind": "exec",
+          "program": "true",
+          "step": "lint"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/when-1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 3,
+        "steps": {
+          "lint": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0",
+                "passed": false
+              },
+              "1": {
+                "key": "wf-golden/lint/1/when-1",
+                "passed": true
+              }
+            },
+            "key": "wf-golden/lint/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "argv": [
+            "false"
+          ],
+          "attempt": 0,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/never/1/when-0",
+          "kind": "gate",
+          "step": "never"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/lint/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 3000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 4,
+        "steps": {
+          "lint": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0",
+                "passed": false
+              },
+              "1": {
+                "key": "wf-golden/lint/1/when-1",
+                "passed": true
+              }
+            },
+            "key": "wf-golden/lint/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/never/1/when-0"
+              }
+            },
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "argv": [
+            "homeboy",
+            "review",
+            "lint",
+            "1"
+          ],
+          "attempt": 0,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/~until/1/0",
+          "kind": "gate",
+          "step": "~until"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/never/1/when-0",
+        "status": "failed"
+      },
+      "now_ms": 4000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 5,
+        "steps": {
+          "lint": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0",
+                "passed": false
+              },
+              "1": {
+                "key": "wf-golden/lint/1/when-1",
+                "passed": true
+              }
+            },
+            "key": "wf-golden/lint/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/never/1/when-0",
+                "passed": false
+              }
+            },
+            "key": null,
+            "outcome": "skipped",
+            "phase": "done"
+          }
+        },
+        "until": {
+          "0": {
+            "key": "wf-golden/~until/1/0"
+          }
+        }
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "status": "succeeded"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/~until/1/0",
+        "status": "succeeded"
+      },
+      "now_ms": 5000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "succeeded",
+        "step_runs": 5,
+        "steps": {
+          "lint": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/lint/1/when-0",
+                "passed": false
+              },
+              "1": {
+                "key": "wf-golden/lint/1/when-1",
+                "passed": true
+              }
+            },
+            "key": "wf-golden/lint/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "never": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {
+              "0": {
+                "key": "wf-golden/never/1/when-0",
+                "passed": false
+              }
+            },
+            "key": null,
+            "outcome": "skipped",
+            "phase": "done"
+          }
+        },
+        "until": {
+          "0": {
+            "key": "wf-golden/~until/1/0",
+            "passed": true
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1063,6 +1063,9 @@ fn register_startup_providers_after_reconcile(
     // environment its launcher admitted and reconciles its Cook record when
     // the child exits.
     crate::agents::agent_task_service::register_cook_step_hooks();
+    // A workflow instance is a daemon job that submits `step` jobs and
+    // evaluates gates; it never runs work itself.
+    homeboy::core::daemon::workflow_job::register_workflow_job_driver();
     // A locally-placed detached fanout wave is daemon-owned on the same terms:
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
@@ -1566,6 +1569,9 @@ impl CliRuntime {
                     return std::process::ExitCode::from(2);
                 }
             }
+        }
+        if let Commands::Workflow(args) = &mut cli.command {
+            args.absorb_wait(!cli.detach_after_handoff);
         }
         if let Commands::Fuzz(args) = &mut cli.command {
             match args.absorb_planning_runner(cli.runner.take()) {
