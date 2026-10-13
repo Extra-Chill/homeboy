@@ -2431,6 +2431,94 @@ fn no_change_side_effects(
     )
 }
 
+/// #15294: an attempt Homeboy proved changed nothing ends, once the attempt
+/// budget is spent, as a `no_changes` Cook that quotes the provider's final
+/// message. It never finalizes, and the run does not read as a recoverable
+/// candidate.
+#[test]
+fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-15294-unchanged";
+        let run_id = format!("{cook_id}-attempt-1");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.clone();
+        options.finalization.no_finalize = false;
+        options.retry_policy.max_attempts = 1;
+        let task = &mut options.identity.initial_plan.tasks[0];
+        task.policy.write = "patch".to_string();
+        task.policy.apply = "manual".to_string();
+        task.expected_artifacts = vec!["patch".to_string()];
+        persist_initial_recipe(&options).expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+            .expect("submit Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            &run_id,
+        )
+        .expect("record Cook attempt");
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].outputs["review_form"]["summary"] = serde_json::json!(
+            "I read the issue, but the baseline import never ran, so I stopped without a code change."
+        );
+        aggregate.outcomes[0].metadata[crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY] =
+            Value::Bool(true);
+        let task_id = aggregate.outcomes[0].task_id.clone();
+        agent_task_lifecycle::record_run_aggregate(
+            &run_id,
+            &options.identity.initial_plan,
+            &aggregate,
+        )
+        .expect("persist unchanged attempt aggregate");
+
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let finalize_count = Arc::clone(&finalizations);
+        let side_effects = CookSideEffects::for_test(
+            move |lifecycle_store, _, run_id| {
+                let mut report = promotion(run_id);
+                report.status = AgentTaskPromotionStatus::NoChanges;
+                report.source.task_id = task_id.clone();
+                report.changed_files.clear();
+                report.deterministic_gates.clear();
+                report.gate_results.clear();
+                lifecycle_store.record_promotion(
+                    run_id,
+                    serde_json::to_value(&report).expect("serialize promotion"),
+                )?;
+                Ok(report)
+            },
+            |_, _, _| unreachable!("an unchanged attempt cannot enter moving-base recovery"),
+            move |_, _, _, _| {
+                finalize_count.fetch_add(1, Ordering::SeqCst);
+                unreachable!("an unchanged attempt must not finalize")
+            },
+        );
+        let result = run_cook(CookContext {
+            side_effects: Some(side_effects),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .expect("terminal no-change Cook");
+
+        assert_eq!(result.value.status, "no_changes");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(finalizations.load(Ordering::SeqCst), 0);
+        let reason = result.value.stop_reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("produced no change"), "{reason}");
+        assert!(reason.contains("no gates ran"), "{reason}");
+        assert!(
+            reason.contains("provider's final message: I read the issue"),
+            "{reason}"
+        );
+        let observed = cook_observation_in_store(&test_lifecycle_store(), cook_id)
+            .expect("observe terminal Cook");
+        assert_eq!(
+            observed.state,
+            agent_task_lifecycle::AgentTaskRunState::PartialFailure
+        );
+    });
+}
+
 fn run_intentional_no_change_cook(
     evidence_policy: bool,
     verdict: &str,
@@ -18092,6 +18180,78 @@ fn cook_remediation_classifies_gate_failure_without_provider_identity() {
         .expect("remaining attempt is reserved")
         .same_provider_retries,
         1
+    );
+}
+
+/// #15294: a provider that finished without changing anything, with no
+/// terminal executor identity, must retry within the attempt budget rather
+/// than stop as `policy_failure`. Homeboy's checkout proof authenticates the
+/// no-change attempt the way a gate result authenticates a red candidate.
+#[test]
+fn cook_remediation_classifies_verified_unchanged_attempt_without_provider_identity() {
+    let options = compile_options("unchanged-attempt-remediation");
+    let plan = options.identity.initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({});
+    let mut promotion = promotion("unchanged-attempt-remediation-run");
+    promotion.status = AgentTaskPromotionStatus::NoChanges;
+    promotion.source.task_id = aggregate.outcomes[0].task_id.clone();
+    promotion.changed_files.clear();
+    promotion.deterministic_gates.clear();
+    promotion.gate_results.clear();
+
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        None,
+        "an unverified empty result keeps the identity requirement"
+    );
+
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: true,
+    });
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a Homeboy-verified unchanged attempt is a same-provider retry"
+    );
+
+    let form: crate::agent_task_review_dossier::AiFilledReviewForm =
+        serde_json::from_value(serde_json::json!({
+            "pr_title": "Unable to complete the fix",
+            "summary": "I read the issue, but the baseline import never ran, so I stopped without a code change.",
+            "what_changed": ["Made no tracked code changes."],
+            "compatibility": "No implementation changes.",
+            "used_for": "Investigation only."
+        }))
+        .expect("review form");
+    let reason = no_change_stop_reason(&promotion, &aggregate, Some(&form), 3, 3);
+    assert!(
+        reason.starts_with("attempt 3 of 3 produced no change"),
+        "{reason}"
+    );
+    assert!(reason.contains("no gates ran"), "{reason}");
+    assert!(
+        reason.contains(
+            "provider's final message: I read the issue, but the baseline import never ran"
+        ),
+        "{reason}"
+    );
+    let silent = no_change_stop_reason(&promotion, &aggregate, None, 1, 1);
+    assert!(
+        silent.ends_with("the provider returned no final message"),
+        "{silent}"
     );
 }
 

@@ -263,8 +263,27 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                 .and_then(|value| serde_json::from_value(value).ok())
         })
         .flatten();
-    let mut quality =
-        classify_cook_loop_quality(&options.promotion_report, intentional_no_change.is_some());
+    // An attempt that changed nothing is a gap to feed back, exactly like a red
+    // gate, while budget remains (#15364). It is not a terminal outcome for a
+    // task that is expected to produce a change, unless the provider declared
+    // a verified intentional no-change verdict. Once the budget is spent it
+    // stays a no-change outcome: an unchanged tree passing its gates is not a
+    // green candidate (#15294).
+    let no_change_gap = intentional_no_change.is_none()
+        && options.promotion_report.changed_files.is_empty()
+        && matches!(
+            options.promotion_report.status,
+            AgentTaskPromotionStatus::VerifiedNoChanges
+                | AgentTaskPromotionStatus::NoChangesGateFailed
+                | AgentTaskPromotionStatus::NoChanges
+        )
+        && !request_is_review_form_only(&options.source_request)
+        && request_requires_substantive_candidate(&options.source_request);
+    let mut quality = classify_cook_loop_quality(
+        &options.promotion_report,
+        intentional_no_change.is_some(),
+        no_change_gap,
+    );
     let failure_progression = failure_progression(&options, &failed_gates);
     apply_failure_progression_to_quality(&mut quality, &failure_progression);
     // Supervisor termination is not a candidate verdict, even when an older
@@ -325,21 +344,6 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         && options.promotion_report.status == AgentTaskPromotionStatus::Applied;
     let review_form_gap = (options.require_review_form && gates_green_with_changes)
         .then(|| review_form_requirement_gap(&options.review_form));
-
-    // An attempt that changed nothing is a gap to feed back, exactly like a red
-    // gate, while budget remains (#15364). It is not a terminal outcome for a
-    // task that is expected to produce a change, unless the provider declared
-    // a verified intentional no-change verdict.
-    let no_change_gap = intentional_no_change.is_none()
-        && options.promotion_report.changed_files.is_empty()
-        && matches!(
-            options.promotion_report.status,
-            AgentTaskPromotionStatus::VerifiedNoChanges
-                | AgentTaskPromotionStatus::NoChangesGateFailed
-                | AgentTaskPromotionStatus::NoChanges
-        )
-        && !request_is_review_form_only(&options.source_request)
-        && request_requires_substantive_candidate(&options.source_request);
 
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
@@ -415,6 +419,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 fn classify_cook_loop_quality(
     report: &AgentTaskPromotionReport,
     intentional_no_change: bool,
+    no_change_gap: bool,
 ) -> AgentTaskCookLoopQualityReport {
     let changed_file_count = report.changed_files.len();
     if changed_file_count == 0 {
@@ -430,7 +435,7 @@ fn classify_cook_loop_quality(
                 failure_progression: None,
             };
         }
-        if report.status == AgentTaskPromotionStatus::VerifiedNoChanges {
+        if report.status == AgentTaskPromotionStatus::VerifiedNoChanges && !no_change_gap {
             return AgentTaskCookLoopQualityReport {
                 classification: AgentTaskCookLoopQualityClassification::VerifiedNoOp,
                 summary:
@@ -1788,8 +1793,10 @@ mod tests {
                 vec![green_gate()],
                 Vec::new(),
             ),
-            // Budget exhausted: a verified no-op stays terminal. With budget,
-            // a change task retries instead (#15364, see below).
+            // Budget exhausted: a change task that changed nothing stays a
+            // terminal no-change outcome, never a green candidate, even when
+            // its unchanged tree passed the gates. With budget, it retries
+            // instead (#15364, #15294, see below).
             attempt: 1,
             max_attempts: 1,
             source_run_id: Some("run-verified-no-op".to_string()),
@@ -1798,10 +1805,10 @@ mod tests {
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(verified.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert_eq!(verified.status, AgentTaskCookLoopStatus::NoChanges);
         assert_eq!(
             verified.quality.classification,
-            AgentTaskCookLoopQualityClassification::VerifiedNoOp
+            AgentTaskCookLoopQualityClassification::NoChanges
         );
         assert!(verified.follow_up_request.is_none());
 
@@ -1878,6 +1885,42 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    /// #15294: an attempt Homeboy proved unchanged promotes as `NoChanges`
+    /// with no gates. It retries within the attempt budget and, once the
+    /// budget is spent, ends as a no-change outcome rather than green.
+    #[test]
+    fn ungated_no_change_attempt_retries_then_terminates_as_no_changes() {
+        let options = |attempt| AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::NoChanges,
+                Vec::new(),
+                Vec::new(),
+            ),
+            attempt,
+            max_attempts: 3,
+            source_run_id: Some(format!("run-unchanged-{attempt}")),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        };
+
+        let retry = evaluate_cook_loop(options(1));
+        assert_eq!(retry.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = retry.follow_up_request.expect("no-change follow-up");
+        assert_eq!(request.metadata["cook_loop"]["kind"], "no-change-feedback");
+        assert_eq!(retry.retry_budget_remaining, 2);
+
+        let exhausted = evaluate_cook_loop(options(3));
+        assert_eq!(exhausted.status, AgentTaskCookLoopStatus::NoChanges);
+        assert_eq!(
+            exhausted.quality.classification,
+            AgentTaskCookLoopQualityClassification::NoChanges
+        );
+        assert!(exhausted.follow_up_request.is_none());
     }
 
     #[test]

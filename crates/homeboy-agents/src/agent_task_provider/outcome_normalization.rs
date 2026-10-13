@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY;
 use crate::agent_task_cook_loop::AgentTaskIntentionalNoChange;
 
 pub(super) fn normalize_provider_outcome_roles(
@@ -52,7 +53,13 @@ const HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY: &str = "intentional_no_change_
 /// provenance. Those fields are added only after local validation.
 fn strip_reserved_provider_metadata(outcome: &mut AgentTaskOutcome) {
     if let Some(metadata) = outcome.metadata.as_object_mut() {
-        metadata.remove(HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY);
+        for key in [
+            HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY,
+            HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY,
+            HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY,
+        ] {
+            metadata.remove(key);
+        }
     }
     for artifact in &mut outcome.artifacts {
         if let Some(metadata) = artifact.metadata.as_object_mut() {
@@ -153,10 +160,6 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
 /// the outcome was parked for patch-capture review (#7719).
 const HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY: &str = "homeboy_empty_change_with_evidence";
 
-/// Set when Homeboy verified that such an attempt left its checkout exactly at
-/// the attempt base, so nothing could have been lost (#15364).
-pub(crate) const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_verified";
-
 /// Distinguish "the provider changed nothing" from "the patch capture lost the
 /// provider's changes" (#15364).
 ///
@@ -164,9 +167,10 @@ pub(crate) const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attem
 /// `CandidateRecoverable` so a capture failure cannot discard real work
 /// (#7719). When the attempt checkout itself proves nothing changed (HEAD is
 /// still the attempt base and the tree is clean apart from runner metadata),
-/// there is nothing to salvage. The outcome stays `Succeeded` so Cook's normal
-/// no-change promotion and feedback loop can act on it instead of parking it
-/// for an operator.
+/// there is nothing to salvage. The outcome stays `Succeeded` and records
+/// [`HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY`], so promotion reports a no-change
+/// attempt without running gates and Cook's no-change feedback loop acts on it
+/// instead of parking it for an operator (#15294).
 pub(crate) fn accept_verified_unchanged_empty_attempt(
     outcome: &mut AgentTaskOutcome,
     workspace_root: Option<&std::path::Path>,

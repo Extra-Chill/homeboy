@@ -216,6 +216,80 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
     );
 }
 
+/// #15294: an attempt Homeboy proved changed nothing has no candidate. Its
+/// promotion is a no-change outcome that runs no gates, and commits already on
+/// the reused destination branch are not reported as this attempt's change.
+#[test]
+fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "homeboy@example.test"]);
+    git(&repo, &["config", "user.name", "Homeboy Test"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", repo.to_str().expect("repo path")],
+    );
+    // A reused issue branch already carries an earlier wave's commit.
+    git(&repo, &["checkout", "-b", "fix/issue"]);
+    std::fs::write(repo.join("lib.rs"), "earlier wave\n").expect("write prior commit");
+    git(&repo, &["commit", "-am", "earlier wave"]);
+    let revision = git_head(&repo, "HEAD");
+    let (source_path, _) = write_empty_patch_source(&temp);
+    let mut outcome: Value =
+        serde_json::from_str(&std::fs::read_to_string(&source_path).expect("read source"))
+            .expect("parse source");
+    outcome["metadata"] = serde_json::json!({
+        crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: true,
+    });
+    let source = outcome.to_string();
+    std::fs::write(&source_path, &source).expect("write verified unchanged source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionRequest {
+            source,
+            source_run_id: Some("run-unchanged".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: Some("main".to_string()),
+            task_base_sha: Some(revision.clone()),
+            candidate_ref: None,
+            to_worktree: "repo@issue".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["public-check".to_string()],
+                ..Default::default()
+            },
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        },
+        &mut provider,
+    )
+    .expect("unchanged attempt reports no change");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert!(
+        report.changed_files.is_empty(),
+        "{:?}",
+        report.changed_files
+    );
+    assert!(report.deterministic_gates.is_empty());
+    assert!(provider.verify_calls.is_empty(), "no gate may run");
+    assert!(provider.apply_calls.is_empty());
+    assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
+}
+
 #[test]
 fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     let temp = tempfile::tempdir().expect("tempdir");
