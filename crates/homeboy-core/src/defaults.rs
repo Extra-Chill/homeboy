@@ -599,6 +599,17 @@ pub struct AgentTaskConfig {
     /// explicit `--max-concurrency` flag overrides both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_batch_concurrency: Option<usize>,
+    /// Operator-owned prompt templates keyed by purpose (`attempt`,
+    /// `follow_up`, `review_form`), settable via
+    /// `homeboy config set /agent_task/prompt_templates/<purpose> <text>`.
+    ///
+    /// Homeboy authors no agent-facing prose (#15818). The model sees the
+    /// operator's prompt plus, when a template is declared for the purpose,
+    /// that template rendered against the structured Cook facts
+    /// (`{{inputs.homeboy.gates.verify}}`, `{{inputs.cook_loop.failed_gates}}`,
+    /// …). With no template declared, nothing is appended.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub prompt_templates: HashMap<String, String>,
 }
 
 /// Fallback ceiling on concurrent child cooks in a batch fanout when neither

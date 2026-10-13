@@ -203,52 +203,6 @@ impl AgentCommandPolicy {
             remediation: COMMAND_DENIAL_REMEDIATION.to_string(),
         })
     }
-
-    /// Human-facing constraint lines projected into the provider prompt. A
-    /// runtime that does not route its shell tool through Homeboy will not be
-    /// structurally blocked, so the constraint is also stated where the agent
-    /// cannot miss it.
-    pub fn prompt_constraints(&self) -> Option<String> {
-        if self.is_unconstrained() {
-            return None;
-        }
-        let mut lines = vec![
-            "Command policy (declared by the operator and enforced at Homeboy's tool boundary):"
-                .to_string(),
-        ];
-        if !self.deny.is_empty() {
-            let patterns = self
-                .deny
-                .iter()
-                .map(|rule| format!("`{}`", rule.pattern))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.push(format!("- Refused command patterns: {patterns}"));
-        }
-        if !self.allow.is_empty() {
-            let patterns = self
-                .allow
-                .iter()
-                .map(|rule| format!("`{}`", rule.pattern))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let label = match self.mode {
-                AgentCommandPolicyMode::AllowList => "Only these command patterns may run",
-                AgentCommandPolicyMode::DenyList => "Explicitly permitted despite the refusals",
-            };
-            lines.push(format!("- {label}: {patterns}"));
-        }
-        if let Some(reason) = &self.reason {
-            lines.push(format!("- Reason: {reason}"));
-        }
-        for rule in self.deny.iter().chain(self.allow.iter()) {
-            if let Some(reason) = &rule.reason {
-                lines.push(format!("- `{}`: {reason}", rule.pattern));
-            }
-        }
-        lines.push(format!("- {COMMAND_DENIAL_REMEDIATION}"));
-        Some(lines.join("\n"))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,7 +380,6 @@ mod tests {
             AgentCommandDecision::Allowed
         );
         assert!(policy.is_unconstrained());
-        assert!(policy.prompt_constraints().is_none());
     }
 
     /// The exact command that ignored two escalating prompt prohibitions and
@@ -598,21 +551,6 @@ mod tests {
 
         assert!(denial.command.len() <= DENIAL_COMMAND_CAPTURE_LIMIT_BYTES + 4);
         assert!(denial.command.ends_with('…'));
-    }
-
-    #[test]
-    fn prompt_constraints_state_patterns_reason_and_remediation() {
-        let policy = AgentCommandPolicy {
-            deny: vec![AgentCommandRule::new("cargo test")],
-            reason: Some("this host routes builds to CI".to_string()),
-            ..AgentCommandPolicy::default()
-        };
-
-        let constraints = policy.prompt_constraints().expect("constraints");
-
-        assert!(constraints.contains("`cargo test`"));
-        assert!(constraints.contains("this host routes builds to CI"));
-        assert!(constraints.contains(COMMAND_DENIAL_REMEDIATION));
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod orchestration;
 pub mod agent_task_notify;
 mod agent_task_process_containment;
 pub mod agent_task_promotion;
+pub(crate) mod agent_task_prompt_template;
 pub mod agent_task_prompts;
 pub mod agent_task_provider;
 pub(crate) mod agent_task_review_dossier;

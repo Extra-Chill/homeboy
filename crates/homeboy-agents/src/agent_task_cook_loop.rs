@@ -1,3 +1,6 @@
+use crate::agent_task_prompt_template::{
+    apply_prompt_template, merge_homeboy_facts, PromptPurpose, HOMEBOY_CONTEXT_INPUT_KEY,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -498,8 +501,7 @@ fn build_follow_up_request(
         .parent_plan_id
         .clone()
         .or_else(|| options.source_run_id.clone());
-    request.instructions =
-        follow_up_instructions(options, &agent_visible_failed_gates, failure_progression);
+    let homeboy_facts = request.inputs[HOMEBOY_CONTEXT_INPUT_KEY].clone();
     request.inputs = json!({
         "cook_loop": {
             "source_run_id": options.source_run_id,
@@ -520,6 +522,8 @@ fn build_follow_up_request(
             "current_diff": options.current_diff,
         }
     });
+    restore_homeboy_facts(&mut request, homeboy_facts);
+    apply_prompt_template(&mut request, PromptPurpose::FollowUp);
     request.source_refs.push(AgentTaskSourceRef {
         kind: "agent-task-run".to_string(),
         uri: options
@@ -704,7 +708,7 @@ pub(crate) fn request_requires_substantive_candidate(
 fn review_form_requirement_gap(form: &Option<AiFilledReviewForm>) -> Option<String> {
     match form {
         None => Some(format!(
-            "The change passed deterministic gates but no review form was emitted. {}",
+            "no review_form output was emitted. {}",
             AiFilledReviewForm::requirement_feedback()
         )),
         Some(form) => form.validate().err().map(|error| error.message),
@@ -726,9 +730,7 @@ fn build_review_form_follow_up_request(
         .parent_plan_id
         .clone()
         .or_else(|| options.source_run_id.clone());
-    request.instructions = format!(
-        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nThe change is complete and deterministic gates passed. This attempt supplies the reviewer-facing review form that completes the pull request dossier.\n\n{gap_feedback}\n\nPreserve the candidate code and return the complete `review_form` object in your task outputs.",
-    );
+    let homeboy_facts = request.inputs[HOMEBOY_CONTEXT_INPUT_KEY].clone();
     request.inputs = json!({
         "cook_loop": {
             "source_run_id": options.source_run_id,
@@ -746,6 +748,8 @@ fn build_review_form_follow_up_request(
             "current_diff": options.current_diff,
         }
     });
+    restore_homeboy_facts(&mut request, homeboy_facts);
+    apply_prompt_template(&mut request, PromptPurpose::ReviewForm);
     request.source_refs.push(AgentTaskSourceRef {
         kind: "agent-task-run".to_string(),
         uri: options
@@ -943,52 +947,12 @@ fn agent_visible_gate_failure(
     }
 }
 
-fn follow_up_instructions(
-    options: &AgentTaskCookLoopOptions,
-    failed_gates: &[AgentTaskCookLoopGateFailure],
-    failure_progression: &AgentTaskCookLoopFailureProgression,
-) -> String {
-    let gate_list = failed_gates
-        .iter()
-        .map(|failure| {
-            let gate_label = if failure.command.is_empty() {
-                failure.gate_id.as_str()
-            } else {
-                failure.command.as_str()
-            };
-            format!(
-                "- `{}` exited {}: {}",
-                gate_label, failure.exit_code, failure.summary
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let changed_files = if options.promotion_report.changed_files.is_empty() {
-        "none reported".to_string()
-    } else {
-        options.promotion_report.changed_files.join(", ")
-    };
-
-    let priority = match failure_progression.status {
-        AgentTaskCookLoopFailureProgressionStatus::Regressing => format!(
-            "The failure set regressed. Fix these newly introduced failures first: {}.",
-            failure_progression.added.join(", ")
-        ),
-        AgentTaskCookLoopFailureProgressionStatus::Stagnating => format!(
-            "The failure set is unchanged. Focus on shared root causes across: {}.",
-            failure_progression.unchanged.join(", ")
-        ),
-        AgentTaskCookLoopFailureProgressionStatus::Improving => {
-            "The failure set improved. Preserve resolved failures while fixing the remaining shared failures.".to_string()
-        }
-        AgentTaskCookLoopFailureProgressionStatus::Initial => {
-            "Start with the producer-provided diagnostics and suggested actions.".to_string()
-        }
-    };
-
-    format!(
-        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nDeterministic gates failed after Homeboy applied the previous candidate patch. Produce a focused follow-up patch that makes the failed gates pass while preserving the candidate intent. {priority}\n\nFailed gates:\n{gate_list}\n\nChanged files in the candidate patch: {changed_files}\n\nThe structured `inputs.cook_loop` object already contains the gate evidence and current diff. Inspect repository files relative to the current workspace root, then return an updated patch artifact and concise summary of the fix."
-    )
+/// Carry Homeboy's structured Cook facts (gates, publication) from the source
+/// attempt onto a follow-up request whose `inputs` were rebuilt.
+fn restore_homeboy_facts(request: &mut AgentTaskRequest, facts: Value) {
+    if !facts.is_null() {
+        merge_homeboy_facts(request, facts);
+    }
 }
 
 fn report_metadata(
@@ -1222,8 +1186,7 @@ mod tests {
         assert_eq!(report.failed_gates.len(), 1);
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.task_id, "cook-homeboy-gate-fix-2");
-        assert!(request.instructions.contains("Deterministic gates failed"));
-        assert!(request.instructions.contains("opaque-gate"));
+        assert!(request.inputs.to_string().contains("opaque-gate"));
         assert_eq!(
             request.inputs["cook_loop"]["failed_gates"][0]["exit_code"],
             101
@@ -1515,12 +1478,9 @@ mod tests {
 
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.executor, source.executor);
-        assert!(request
-            .instructions
-            .contains("already contains the gate evidence and current diff"));
-        assert!(request
-            .instructions
-            .contains("relative to the current workspace root"));
+        // Without an operator template the follow-up prompt is the operator's
+        // original prompt; gate evidence travels in `inputs.cook_loop`.
+        assert_eq!(request.instructions, source.instructions);
     }
 
     #[test]
@@ -2018,7 +1978,6 @@ mod tests {
         let feedback = request.inputs.to_string();
         assert!(feedback.contains("opaque-gate"));
         assert!(feedback.contains("boom"));
-        assert!(request.instructions.contains("opaque-gate"));
     }
 
     #[test]
@@ -2376,8 +2335,10 @@ mod tests {
             .expect("missing form must nudge a follow-up attempt");
         assert!(request.task_id.contains("review-form"));
         assert_eq!(request.inputs["cook_loop"]["review_form_required"], true);
-        assert!(request.instructions.contains("review_form"));
-        assert!(request.instructions.contains("Preserve the candidate code"));
+        // The gap is data; the prompt carries no Homeboy prose (#15818).
+        assert!(request.inputs["cook_loop"]["review_form_feedback"]
+            .as_str()
+            .is_some_and(|feedback| feedback.contains("review_form")));
         assert_eq!(
             request.executor.required_capabilities,
             vec!["structured_outcome"]
