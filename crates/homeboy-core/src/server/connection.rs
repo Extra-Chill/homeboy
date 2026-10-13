@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::project::{self, Project};
 
 use super::Server;
@@ -83,12 +83,19 @@ fn resolve_internal(args: &SshResolveArgs) -> Result<ResolvedServerContext> {
     // Bare id: try project first, then server
     let id = args.id.as_ref().unwrap(); // Safe: validated above
 
-    if let Ok(project) = project::load(id) {
-        return resolve_project_context(project);
+    // Fall through only on a genuine miss. Any other failure (e.g. a config
+    // file that no longer parses) is the real answer and must surface instead
+    // of collapsing into "No matching project or server".
+    match project::load(id) {
+        Ok(project) => return resolve_project_context(project),
+        Err(err) if err.code == ErrorCode::ProjectNotFound => {}
+        Err(err) => return Err(err),
     }
 
-    if let Ok(server) = super::load(id) {
-        return Ok(("server".to_string(), None, id.clone(), server, None));
+    match super::load(id) {
+        Ok(server) => return Ok(("server".to_string(), None, id.clone(), server, None)),
+        Err(err) if err.code == ErrorCode::ServerNotFound => {}
+        Err(err) => return Err(err),
     }
 
     Err(Error::validation_invalid_argument(
