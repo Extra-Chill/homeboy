@@ -276,15 +276,20 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     }
 }
 
+/// The record that speaks for a Cook: its latest attempt from the durable
+/// recipe, or its handoff parent when no attempt has materialized.
+fn workflow_cook_record(cook_id: &str) -> Option<agent_task_lifecycle::AgentTaskRunRecord> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+    super::resolve_cook_continuation_run_id(cook_id)
+        .ok()
+        .and_then(|run_id| store.read_record(&run_id).ok())
+        .or_else(|| store.read_record(cook_id).ok())
+}
+
 /// The terminal run state of a Cook's latest attempt (or of its handoff
 /// parent, when no attempt materialized). `None` until it is terminal.
 fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
-    let run_id = store
-        .read_cook_index(cook_id)
-        .map(|index| index.latest_run_id)
-        .unwrap_or_else(|_| cook_id.to_string());
-    let record = store.read_record(&run_id).ok()?;
+    let record = workflow_cook_record(cook_id)?;
     if !record.state.is_terminal() {
         return None;
     }
@@ -297,14 +302,9 @@ fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
 /// The live state and phase of a Cook's latest attempt, `None` before its
 /// durable record exists.
 fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
-    let run_id = store
-        .read_cook_index(cook_id)
-        .map(|index| index.latest_run_id)
-        .unwrap_or_else(|_| cook_id.to_string());
-    let record = store.read_record(&run_id).ok()?;
+    let record = workflow_cook_record(cook_id)?;
     Some(json!({
-        "run_id": run_id,
+        "run_id": record.run_id,
         "state": record.state,
         "phase": record
             .metadata

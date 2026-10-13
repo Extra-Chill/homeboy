@@ -251,6 +251,17 @@ pub(crate) fn route_after_parse_with_provenance(
         return Err(required_lab_runner_unavailable_error(lab_readiness));
     }
 
+    // A cook-batch only admits a workflow on this controller's daemon. Its
+    // placement travels to each child Cook, so the batch itself runs here.
+    if matches!(
+        &cli.command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Fanout(_),
+        })
+    ) {
+        return Ok(None);
+    }
+
     // Cooks must resolve provider ownership before the launcher can acknowledge
     // or observe them. Auto without a runner is a local provider placement and
     // needs the same daemon-owned supervision as explicit local execution.
