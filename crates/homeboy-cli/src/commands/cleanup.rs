@@ -1690,6 +1690,10 @@ pub struct CleanupInventoryCategory {
     pub applied_count: usize,
     pub skipped_count: usize,
     pub reconciliation_blocker_count: usize,
+    /// Command that reconciles at least one of this category's blockers. Absent
+    /// when no available reconciliation would make progress on them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation_command: Option<String>,
     /// Provider-declared native contracts this category could not execute.
     /// See [`CleanupInventoryOutput::unsatisfied_native_contract_count`].
     pub unsatisfied_native_contract_count: usize,
@@ -3345,6 +3349,7 @@ fn cleanup_category_timeout_failure(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
@@ -3507,6 +3512,7 @@ fn store_unavailable_category(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
@@ -3556,6 +3562,7 @@ fn cleanup_category_failure(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
@@ -3736,6 +3743,7 @@ fn repo_artifacts_category(
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: output.estimated_bytes,
         reclaimed_bytes: output.reclaimed_bytes,
@@ -4075,6 +4083,7 @@ fn category_from_command<T: Serialize>(
         applied_count: metrics.applied_count,
         skipped_count: metrics.skipped_count,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: metrics.estimated_bytes,
         reclaimed_bytes: metrics.reclaimed_bytes,
@@ -4092,6 +4101,8 @@ fn task_worktrees_category(
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     let reconciliation_blocker_count = output.counts.reconciliation_blockers;
+    let reconciliation_command = super::worktree::inventory_apply_reconciles_skipped(&output)
+        .then(|| super::worktree::INVENTORY_APPLY_COMMAND.to_string());
     let mut category = category_from_output(
         TASK_WORKTREES_METADATA,
         apply,
@@ -4105,6 +4116,7 @@ fn task_worktrees_category(
         output,
     )?;
     category.reconciliation_blocker_count = reconciliation_blocker_count;
+    category.reconciliation_command = reconciliation_command;
     if let Some(continuation) = category.output.get("continuation").and_then(Value::as_str) {
         category.inventory_completeness = "partial".to_string();
         category.continuation_command = continuation.to_string();
@@ -4150,6 +4162,7 @@ fn persisted_artifacts_category(
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
         reconciliation_blocker_count: 0,
+        reconciliation_command: None,
         unsatisfied_native_contract_count: 0,
         estimated_bytes: persisted.totals.planned_size_bytes,
         reclaimed_bytes: persisted.totals.removed_size_bytes,
@@ -4188,6 +4201,7 @@ fn remote_lab_workspace_categories(
                 applied_count: 0,
                 skipped_count: 1,
                 reconciliation_blocker_count: 0,
+                reconciliation_command: None,
                 unsatisfied_native_contract_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
@@ -4359,11 +4373,11 @@ fn cleanup_actionable(
             );
             continue;
         }
-        if category.reconciliation_blocker_count > 0 {
+        if let Some(command) = &category.reconciliation_command {
             actionable.next_actions.push(
                 CommandNextAction::new(
                     format!("reconcile {}", category.category.replace('_', " ")),
-                    "homeboy worktree inventory --apply",
+                    command.clone(),
                 )
                 .with_kind(CommandNextActionKind::Repair),
             );
@@ -6423,6 +6437,7 @@ mod tests {
                 applied_count: 0,
                 skipped_count: 0,
                 reconciliation_blocker_count: 0,
+                reconciliation_command: None,
                 unsatisfied_native_contract_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
@@ -6457,6 +6472,10 @@ mod tests {
         assert_eq!(mixed.candidate_count, 1);
         assert_eq!(mixed.reconciliation_blocker_count, 1);
         assert_eq!(mixed.skipped_count, 1);
+        // No skipped record is reconcilable, so no reconcile action is offered.
+        assert!(mixed.reconciliation_command.is_none());
+        let mut mixed = mixed;
+        mixed.reconciliation_command = Some("homeboy worktree inventory --apply".to_string());
         let mixed_actions = cleanup_actionable(&[mixed], false);
         assert_eq!(
             mixed_actions.next_actions[0].command,
@@ -6487,12 +6506,10 @@ mod tests {
         assert_eq!(blocked.candidate_count, 0);
         assert_eq!(blocked.reconciliation_blocker_count, 4);
         assert_eq!(blocked.skipped_count, 4);
-        let blocked_actions = cleanup_actionable(&[blocked], false);
-        assert_eq!(blocked_actions.next_actions.len(), 1);
-        assert_eq!(
-            blocked_actions.next_actions[0].command,
-            "homeboy worktree inventory --apply"
-        );
+        assert!(blocked.reconciliation_command.is_none());
+        assert!(cleanup_actionable(&[blocked], false)
+            .next_actions
+            .is_empty());
     }
 
     #[test]
