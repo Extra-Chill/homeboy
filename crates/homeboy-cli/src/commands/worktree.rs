@@ -295,186 +295,180 @@ fn cli_reaper_identity() -> String {
     format!("cli-pid:{}", std::process::id())
 }
 
-pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
-    struct AgentTaskAuthority(
-        std::sync::Mutex<
-            std::collections::HashMap<
-                String,
-                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaim,
-            >,
+/// Reconciliation authority for native task worktrees. Records whose owning
+/// run never crossed a runner boundary reconcile under a controller-only claim;
+/// every other record is preserved with its own typed reason.
+#[derive(Default)]
+pub(crate) struct AgentTaskAuthority(
+    std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaim,
         >,
-    );
-    impl worktree::WorktreeReconciliationAuthority for AgentTaskAuthority {
-        fn bounded_inventory_apply_refusal(
-            &self,
-        ) -> Option<worktree::WorktreeInventoryApplyRefusal> {
-            homeboy::agents::agent_task_lifecycle::bounded_inventory_requires_remote_claims()
-                .then_some(worktree::WorktreeInventoryApplyRefusal {
-                    code: "remote_workspace_reconciliation_unsupported",
-                    mutated_records: 0,
-                    mutation_provenance: "none",
-                    required_primitive: "durable remote claim release receipt and retry protocol",
-                    message: "worktree inventory --apply is local-only while remote workspace claim authorities are configured; no reconciliation claims were acquired",
-                })
-        }
+    >,
+);
+impl worktree::WorktreeReconciliationAuthority for AgentTaskAuthority {
+    fn local_refusal(
+        &self,
+        record: &worktree::TaskWorktreeRecord,
+    ) -> Option<worktree::WorktreeAuthorityRefusal> {
+        homeboy::agents::agent_task_lifecycle::local_terminal_workspace_authority(record).err()
+    }
 
-        fn acquire(
-            &self,
-            record: &worktree::TaskWorktreeRecord,
-            deadline: std::time::Instant,
-        ) -> homeboy::core::Result<worktree::WorktreeLivenessAuthority> {
-            const CLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-            let deadline = deadline.min(std::time::Instant::now() + CLAIM_TIMEOUT);
-            if std::time::Instant::now() >= deadline {
-                return Ok(worktree::WorktreeLivenessAuthority::Incomplete {
-                    reason: "worktree inventory apply authority deadline exhausted".to_string(),
-                });
-            }
-            let workspace = match record.effective_workspace_identity() {
-                Ok(workspace) => workspace,
-                Err(error) => {
+    fn acquire(
+        &self,
+        record: &worktree::TaskWorktreeRecord,
+        deadline: std::time::Instant,
+    ) -> homeboy::core::Result<worktree::WorktreeLivenessAuthority> {
+        const CLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+        let deadline = deadline.min(std::time::Instant::now() + CLAIM_TIMEOUT);
+        if std::time::Instant::now() >= deadline {
+            return Ok(worktree::WorktreeLivenessAuthority::Incomplete {
+                reason: "worktree inventory apply authority deadline exhausted".to_string(),
+            });
+        }
+        let proof =
+            match homeboy::agents::agent_task_lifecycle::local_terminal_workspace_authority(record)
+            {
+                Ok(proof) => proof,
+                Err(refusal) => {
                     return Ok(worktree::WorktreeLivenessAuthority::Incomplete {
-                        reason: error.message,
+                        reason: refusal.detail,
                     })
                 }
             };
-            // The terminal proof is local durable evidence. Remote liveness is
-            // established only by the claim calls below, all under `deadline`.
-            let proof =
-                match homeboy::agents::agent_task_lifecycle::cached_terminal_workspace_authority(
-                    record,
+        let workspace = proof.workspace.clone();
+        // Persist before acquiring the fence; the mutation re-checks it exactly.
+        homeboy::core::worktree::persist_terminal_workspace_authority(
+            &record.id,
+            record.lifecycle_revision,
+            *proof,
+        )?;
+        match homeboy::agents::agent_task_lifecycle::acquire_composite_workspace_claim_until(
+            workspace,
+            record.lifecycle_revision,
+            homeboy::agents::agent_task_lifecycle::CompositeClaimAuthorities::ControllerOnly,
+            deadline,
+        ) {
+            Ok(composite) => {
+                let claim = composite.local.clone();
+                self.0
+                    .lock()
+                    .map_err(|_| {
+                        homeboy::core::Error::internal_unexpected(
+                            "workspace claim adapter lock poisoned",
+                        )
+                    })?
+                    .insert(claim.token.clone(), composite);
+                Ok(worktree::WorktreeLivenessAuthority::Terminal {
+                    claim,
+                    provenance: "controller-local terminal run and workspace reconciliation claim"
+                        .to_string(),
+                })
+            }
+            Err(failure) => Ok(worktree::WorktreeLivenessAuthority::Incomplete {
+                reason: format!(
+                    "workspace reconciliation authority refused acquisition: {}{}",
+                    failure.primary.message,
+                    failure
+                        .primary
+                        .details
+                        .get("workspace_claim_composite_cleanup")
+                        .and_then(|status| status.get("status"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(|status| format!("; {status}"))
+                        .unwrap_or_default()
+                ),
+            }),
+        }
+    }
+
+    fn validate(
+        &self,
+        _: &worktree::TaskWorktreeRecord,
+        claim: &homeboy::core::workspace_claim::WorkspaceClaim,
+        deadline: std::time::Instant,
+    ) -> homeboy::core::Result<bool> {
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        let claims = self.0.lock().map_err(|_| {
+            homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
+        })?;
+        claims
+            .get(&claim.token)
+            .map(|claim| {
+                homeboy::agents::agent_task_lifecycle::validate_composite_workspace_claim_until(
+                    claim, deadline,
                 )
-                .map_err(homeboy::core::Error::internal_unexpected)?
-                {
-                    Some(proof) => proof,
-                    None => {
-                        return Ok(worktree::WorktreeLivenessAuthority::Incomplete {
-                            reason: "missing or stale terminal workspace authority proof"
-                                .to_string(),
-                        });
-                    }
-                };
-            // Persist before acquiring the fence. A no-run-id record can only
-            // ever reach this point through a previously exact cached proof.
-            homeboy::core::worktree::persist_terminal_workspace_authority(
-                &record.id,
-                record.lifecycle_revision,
-                *proof,
-            )?;
-            match homeboy::agents::agent_task_lifecycle::acquire_composite_workspace_claim_until(
-                workspace,
-                record.lifecycle_revision,
-                deadline,
-            ) {
-                Ok(composite) => {
-                    let claim = composite.local.clone();
-                    self.0
-                        .lock()
-                        .map_err(|_| {
-                            homeboy::core::Error::internal_unexpected(
-                                "workspace claim adapter lock poisoned",
-                            )
-                        })?
-                        .insert(claim.token.clone(), composite);
-                    Ok(worktree::WorktreeLivenessAuthority::Terminal {
-                        claim,
-                        provenance: "complete local/direct/reverse workspace reconciliation claim"
-                            .to_string(),
-                    })
-                }
-                Err(failure) => Ok(worktree::WorktreeLivenessAuthority::Incomplete {
-                    reason: format!(
-                        "workspace reconciliation authority refused acquisition: {}{}",
-                        failure.primary.message,
-                        failure
-                            .primary
-                            .details
-                            .get("workspace_claim_composite_cleanup")
-                            .and_then(|status| status.get("status"))
-                            .and_then(serde_json::Value::as_str)
-                            .map(|status| format!("; {status}"))
-                            .unwrap_or_default()
-                    ),
-                }),
+            })
+            .transpose()
+            .map(|valid| valid.unwrap_or(false))
+    }
+
+    fn ready_to_commit(&self, claim: &homeboy::core::workspace_claim::WorkspaceClaim) -> bool {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|claims| claims.get(&claim.token).cloned())
+            .is_some_and(|composite| {
+                composite.local == *claim
+                    && homeboy::agents::agent_task_lifecycle::composite_workspace_claim_ready_to_commit(&composite)
+            })
+    }
+
+    fn requires_terminal_workspace_authority_proof(&self) -> bool {
+        true
+    }
+
+    fn release(
+        &self,
+        claim: &homeboy::core::workspace_claim::WorkspaceClaim,
+        _deadline: std::time::Instant,
+    ) -> homeboy::core::Result<()> {
+        let mut claims = self.0.lock().map_err(|_| {
+            homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
+        })?;
+        let Some(mut composite) = claims.remove(&claim.token) else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "workspace_claim",
+                "workspace composite claim token is unavailable for release",
+                Some(claim.token.clone()),
+                None,
+            ));
+        };
+        match homeboy::agents::agent_task_lifecycle::release_composite_workspace_claim_until(
+            &mut composite,
+            _deadline,
+        )? {
+            homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Released => {
+                Ok(())
             }
-        }
-
-        fn validate(
-            &self,
-            _: &worktree::TaskWorktreeRecord,
-            claim: &homeboy::core::workspace_claim::WorkspaceClaim,
-            deadline: std::time::Instant,
-        ) -> homeboy::core::Result<bool> {
-            if std::time::Instant::now() >= deadline {
-                return Ok(false);
-            }
-            let claims = self.0.lock().map_err(|_| {
-                homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
-            })?;
-            claims
-                .get(&claim.token)
-                .map(|claim| {
-                    homeboy::agents::agent_task_lifecycle::validate_composite_workspace_claim_until(
-                        claim, deadline,
-                    )
-                })
-                .transpose()
-                .map(|valid| valid.unwrap_or(false))
-        }
-
-        fn ready_to_commit(&self, claim: &homeboy::core::workspace_claim::WorkspaceClaim) -> bool {
-            self.0
-                .lock()
-                .ok()
-                .and_then(|claims| claims.get(&claim.token).cloned())
-                .is_some_and(|composite| {
-                    composite.local == *claim
-                        && homeboy::agents::agent_task_lifecycle::composite_workspace_claim_ready_to_commit(&composite)
-                })
-        }
-
-        fn requires_terminal_workspace_authority_proof(&self) -> bool {
-            true
-        }
-
-        fn release(
-            &self,
-            claim: &homeboy::core::workspace_claim::WorkspaceClaim,
-            _deadline: std::time::Instant,
-        ) -> homeboy::core::Result<()> {
-            let mut claims = self.0.lock().map_err(|_| {
-                homeboy::core::Error::internal_unexpected("workspace claim adapter lock poisoned")
-            })?;
-            let Some(mut composite) = claims.remove(&claim.token) else {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    "workspace_claim",
-                    "workspace composite claim token is unavailable for release",
-                    Some(claim.token.clone()),
+            homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Partial {
+                failures,
+            } => {
+                let error = homeboy::core::Error::validation_invalid_argument(
+                    "workspace_claim_composite",
+                    "workspace composite release partially failed",
                     None,
-                ));
-            };
-            match homeboy::agents::agent_task_lifecycle::release_composite_workspace_claim_until(&mut composite, _deadline)? {
-                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Released => {
-                    Ok(())
-                }
-                homeboy::agents::agent_task_lifecycle::CompositeWorkspaceClaimRelease::Partial { failures } => {
-                    let error = homeboy::core::Error::validation_invalid_argument(
-                        "workspace_claim_composite",
-                        "workspace composite release partially failed",
-                        None,
-                        Some(failures),
-                    );
-                    let status = homeboy::agents::agent_task_lifecycle::persist_and_retry_composite_workspace_cleanup_until(composite, &error, _deadline);
-                    Err(homeboy::core::Error::validation_invalid_argument(
-                        "workspace_claim_composite",
-                        format!("workspace composite release incomplete: {}", status.public_summary()),
-                        None,
-                        None,
-                    ))
-                }
+                    Some(failures),
+                );
+                let status = homeboy::agents::agent_task_lifecycle::persist_and_retry_composite_workspace_cleanup_until(composite, &error, _deadline);
+                Err(homeboy::core::Error::validation_invalid_argument(
+                    "workspace_claim_composite",
+                    format!(
+                        "workspace composite release incomplete: {}",
+                        status.public_summary()
+                    ),
+                    None,
+                    None,
+                ))
             }
         }
     }
+}
+
+pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
     let exit_code = 0;
     let output = match args.command {
         WorktreeCommand::Create {
@@ -588,7 +582,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 apply,
                 apply_deadline: None,
             },
-            &AgentTaskAuthority(std::sync::Mutex::new(std::collections::HashMap::new())),
+            &AgentTaskAuthority::default(),
         )?),
         WorktreeCommand::Status { id } => WorktreeOutput::Status(worktree::status(&id)?),
         WorktreeCommand::Holder { target } => {
@@ -655,7 +649,11 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             } else {
                 None
             };
-            let actionable = worktree_cleanup_actionable(&worktrees, cleanup_branches);
+            let actionable = worktree_cleanup_actionable(
+                &worktrees,
+                cleanup_branches,
+                inventory_apply_reconciles_skipped(&worktrees),
+            );
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
                 artifact_cleanup,
@@ -693,18 +691,34 @@ fn cleanup_is_dry_run(apply: bool) -> bool {
     !apply
 }
 
+pub(crate) const INVENTORY_APPLY_COMMAND: &str = "homeboy worktree inventory --apply";
+
+/// Whether `worktree inventory --apply` would reconcile at least one record
+/// cleanup skipped as a missing active worktree. Stops at the first one.
+pub(crate) fn inventory_apply_reconciles_skipped(output: &WorktreeCleanupOutput) -> bool {
+    let authority = AgentTaskAuthority::default();
+    output
+        .skipped
+        .iter()
+        .filter(|skipped| {
+            skipped
+                .safety
+                .as_ref()
+                .is_some_and(|safety| safety.worktree_missing)
+        })
+        .any(|skipped| worktree::inventory_apply_would_reconcile(&skipped.record, &authority))
+}
+
 fn worktree_cleanup_actionable(
     output: &WorktreeCleanupOutput,
     cleanup_branches: bool,
+    inventory_apply_reconciles: bool,
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
-    if output.counts.reconciliation_blockers > 0 {
+    if inventory_apply_reconciles {
         actionable.next_actions.push(
-            CommandNextAction::new(
-                "reconcile task worktrees",
-                "homeboy worktree inventory --apply",
-            )
-            .with_kind(CommandNextActionKind::Repair),
+            CommandNextAction::new("reconcile task worktrees", INVENTORY_APPLY_COMMAND)
+                .with_kind(CommandNextActionKind::Repair),
         );
     }
     if output.dry_run || output.counts.candidates > output.counts.removed {
@@ -1005,13 +1019,21 @@ mod tests {
             continuation: None,
         };
 
-        let actions = super::worktree_cleanup_actionable(&output, true);
+        let actions = super::worktree_cleanup_actionable(&output, true, true);
         assert_eq!(
             actions.next_actions[0].command,
             "homeboy worktree inventory --apply"
         );
         assert_eq!(
             actions.next_actions[1].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
+        );
+
+        // Blockers that inventory cannot reconcile never point at it.
+        let actions = super::worktree_cleanup_actionable(&output, true, false);
+        assert_eq!(actions.next_actions.len(), 1);
+        assert_eq!(
+            actions.next_actions[0].command,
             "homeboy worktree cleanup --cleanup-branches --apply"
         );
     }
@@ -1031,12 +1053,12 @@ mod tests {
             continuation: None,
         };
 
-        let without_branches = super::worktree_cleanup_actionable(&output, false);
+        let without_branches = super::worktree_cleanup_actionable(&output, false, false);
         assert_eq!(
             without_branches.next_actions[0].command,
             "homeboy worktree cleanup --apply"
         );
-        let with_branches = super::worktree_cleanup_actionable(&output, true);
+        let with_branches = super::worktree_cleanup_actionable(&output, true, false);
         assert_eq!(
             with_branches.next_actions[0].command,
             "homeboy worktree cleanup --cleanup-branches --apply"
@@ -1094,7 +1116,7 @@ mod tests {
             continuation: None,
         };
 
-        assert!(super::worktree_cleanup_actionable(&output, true)
+        assert!(super::worktree_cleanup_actionable(&output, true, false)
             .next_actions
             .is_empty());
     }

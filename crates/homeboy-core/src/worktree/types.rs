@@ -450,8 +450,6 @@ impl WorktreeListDiagnostic {
 pub struct WorktreeInventoryOutput {
     pub schema: &'static str,
     pub authorization: WorktreeInventoryAuthorization,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub apply_refusal: Option<WorktreeInventoryApplyRefusal>,
     /// Exact bounded retry command when apply authority time is exhausted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_continuation: Option<String>,
@@ -479,16 +477,6 @@ pub struct WorktreeInventoryOutput {
 pub enum WorktreeInventoryAuthorization {
     Preview,
     ExplicitApply,
-    ApplyRefused,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WorktreeInventoryApplyRefusal {
-    pub code: &'static str,
-    pub mutated_records: usize,
-    pub mutation_provenance: &'static str,
-    pub required_primitive: &'static str,
-    pub message: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
@@ -509,10 +497,19 @@ pub struct WorktreeInventoryRecord {
     pub reconciliation: Option<WorktreeReconciliationResult>,
 }
 
+/// A typed, record-scoped reason an authority cannot reconcile one missing
+/// task worktree. Only that record is preserved; the rest of the page proceeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeAuthorityRefusal {
+    pub reason: MissingActiveWorktreeReason,
+    pub detail: String,
+}
+
 pub trait WorktreeReconciliationAuthority {
-    /// Refuse apply before any authority acquisition when this implementation
-    /// cannot complete the bounded reconciliation contract safely.
-    fn bounded_inventory_apply_refusal(&self) -> Option<WorktreeInventoryApplyRefusal> {
+    /// Controller-local, bounded, non-mutating evidence that this authority
+    /// cannot reconcile `record`. Preview reports it and apply never acquires
+    /// a claim for a refused record.
+    fn local_refusal(&self, _record: &TaskWorktreeRecord) -> Option<WorktreeAuthorityRefusal> {
         None
     }
 
@@ -626,6 +623,11 @@ pub enum MissingActiveWorktreeReason {
     BranchEvidenceUnavailable,
     RequiresAuthoritativeLiveness,
     LiveRun,
+    /// A runner may hold a claim on this workspace; reconciling it would
+    /// require a remote claim release that bounded inventory does not perform.
+    RemoteClaimReleaseUnsupported,
+    /// No controller-local evidence proves the owning run terminal.
+    TerminalAuthorityUnavailable,
     AdoptedWorkspace,
 }
 
