@@ -1,0 +1,135 @@
+{
+  "definition": {
+    "id": "template",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "a"
+      },
+      {
+        "homeboy": [
+          "review",
+          "{{steps.a.output/missing}}"
+        ],
+        "id": "b",
+        "needs": [
+          "a"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "output": {
+          "present": 1
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    }
+  ],
+  "expect_status": "failed",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "true",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "reason": "step `b` did not succeed",
+          "status": "failed"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "output": {
+          "present": 1
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": true,
+        "iteration": 1,
+        "reason": "step `b` did not succeed",
+        "status": "failed",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": "failed",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

@@ -200,6 +200,7 @@ pub mod test_support;
 pub mod update_check_cache;
 pub mod validation;
 pub mod validation_progress;
+pub mod workflow;
 pub mod workspace_claim;
 pub mod workspace_snapshot;
 pub mod worktree;

@@ -1,0 +1,143 @@
+{
+  "definition": {
+    "budget": {
+      "deadline": "1h"
+    },
+    "id": "deadline",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "args": [
+            "7200"
+          ],
+          "program": "sleep"
+        },
+        "id": "a"
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1800000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 3600000
+    }
+  ],
+  "expect_status": "budget_exhausted",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "7200"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "sleep",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1800000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "cancel_step",
+          "key": "wf-golden/a/1/1",
+          "reason": "workflow budget exhausted: the workflow deadline passed"
+        },
+        {
+          "command": "complete",
+          "reason": "the workflow deadline passed",
+          "status": "budget_exhausted"
+        }
+      ],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 3600000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": "the workflow deadline passed",
+        "status": "budget_exhausted",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

@@ -187,6 +187,10 @@ pub fn register_cook_step_hooks() {
                 failure
             })
         }));
+        // A workflow `cook` step's outcome is its Cook's terminal run state.
+        homeboy_core::daemon::workflow_job::register_workflow_run_outcome_resolver(Arc::new(
+            |cook_id: &str| workflow_cook_outcome(cook_id),
+        ));
         step_job::register_step_exit_observer(Arc::new(|exit: &StepExit| {
             if let Err(error) = observe_cook_step_exit(exit) {
                 eprintln!(
@@ -202,13 +206,31 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     let Some(linked) = exit.linked_durable_run_id.as_deref() else {
         return Ok(());
     };
-    if exit.key.starts_with(COOK_LAUNCH_STEP_KEY_PREFIX) {
-        observe_launch_exit(linked, exit)
-    } else if exit.key.starts_with(COOK_RETRY_STEP_KEY_PREFIX) {
+    // Every other linked step runs a Cook that bound its own handoff: a
+    // detached launch, or a workflow `cook` step.
+    if exit.key.starts_with(COOK_RETRY_STEP_KEY_PREFIX) {
         observe_retry_exit(linked, exit)
     } else {
-        Ok(())
+        observe_launch_exit(linked, exit)
     }
+}
+
+/// The terminal run state of a Cook's latest attempt (or of its handoff
+/// parent, when no attempt materialized). `None` until it is terminal.
+fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+    let run_id = store
+        .read_cook_index(cook_id)
+        .map(|index| index.latest_run_id)
+        .unwrap_or_else(|_| cook_id.to_string());
+    let record = store.read_record(&run_id).ok()?;
+    if !record.state.is_terminal() {
+        return None;
+    }
+    serde_json::to_value(record.state)
+        .ok()?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {

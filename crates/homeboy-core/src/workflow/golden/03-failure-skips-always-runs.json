@@ -1,0 +1,219 @@
+{
+  "definition": {
+    "id": "fail",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "exec": {
+          "program": "false"
+        },
+        "id": "a"
+      },
+      {
+        "exec": {
+          "program": "true"
+        },
+        "id": "b",
+        "needs": [
+          "a"
+        ]
+      },
+      {
+        "always": true,
+        "homeboy": [
+          "cleanup",
+          "--dry-run"
+        ],
+        "id": "cleanup",
+        "needs": [
+          "a"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "failed"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/cleanup/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "failed",
+  "inputs": {},
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/a/1/1",
+          "kind": "exec",
+          "program": "false",
+          "step": "a"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          },
+          "cleanup": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [
+            "cleanup",
+            "--dry-run"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/cleanup/1/1",
+          "kind": "homeboy",
+          "step": "cleanup"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/a/1/1",
+        "status": "failed"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": true,
+        "iteration": 1,
+        "reason": "step `a` did not succeed",
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "failed",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": "skipped",
+            "phase": "done"
+          },
+          "cleanup": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/cleanup/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "reason": "step `a` did not succeed",
+          "status": "failed"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/cleanup/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": true,
+        "iteration": 1,
+        "reason": "step `a` did not succeed",
+        "status": "failed",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/a/1/1",
+            "outcome": "failed",
+            "phase": "done"
+          },
+          "b": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": "skipped",
+            "phase": "done"
+          },
+          "cleanup": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/cleanup/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

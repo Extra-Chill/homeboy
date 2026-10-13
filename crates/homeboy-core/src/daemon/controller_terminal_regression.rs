@@ -22,6 +22,7 @@ pub(super) fn running_controller(store: &JobStore, job_type: &str) -> Uuid {
                 cancellation_reason: None,
                 execution_claim_id: None,
                 recovery_attempted: false,
+                parent_job_id: None,
             },
         )
         .unwrap();

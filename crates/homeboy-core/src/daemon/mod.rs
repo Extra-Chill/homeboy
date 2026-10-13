@@ -55,6 +55,7 @@ pub mod runner_staging;
 pub(crate) mod runner_watch;
 pub mod step_job;
 mod stop;
+pub mod workflow_job;
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children
 /// from this path rather than from configuration or `PATH`.
@@ -610,6 +611,59 @@ impl LocalControllerJobClient {
                 )
             })?;
         Ok(job)
+    }
+
+    /// `GET /workflows` or `GET /workflows/<instance>`: the daemon's pure
+    /// projection of workflow instances from its job ledger.
+    pub fn workflows(&self, instance: Option<&str>) -> Result<serde_json::Value> {
+        let path = match instance {
+            Some(instance) => format!("/workflows/{instance}"),
+            None => "/workflows".to_string(),
+        };
+        let response = self
+            .client
+            .get(format!("{}{path}", self.endpoint))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
+        self.workflow_payload(response, &path)
+    }
+
+    /// `POST /workflows/<instance>/approvals`.
+    pub fn approve_workflow_step(&self, instance: &str, step: &str) -> Result<serde_json::Value> {
+        let path = format!("/workflows/{instance}/approvals");
+        let response = self
+            .client
+            .post(format!("{}{path}", self.endpoint))
+            .json(&json!({ "step": step }))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
+        self.workflow_payload(response, &path)
+    }
+
+    fn workflow_payload(
+        &self,
+        response: reqwest::blocking::Response,
+        path: &str,
+    ) -> Result<serde_json::Value> {
+        let status = response.status();
+        let value: serde_json::Value = response.json().map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {path}")))
+        })?;
+        if !status.is_success()
+            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+        {
+            let message = ["/error/message", "/data/message", "/message"]
+                .iter()
+                .find_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
+            return Err(Error::validation_invalid_argument(
+                "workflow", message, None, None,
+            ));
+        }
+        Ok(daemon_endpoint_payload(&value)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
@@ -2640,6 +2694,24 @@ where
                 Err(err) => error_response(400, err),
             }
         }
+        ("GET", "/workflows") => {
+            daemon_endpoint_response("workflows.list", workflow_job::workflow_list(job_store))
+        }
+        ("POST", path) if path.starts_with("/workflows/") && path.ends_with("/approvals") => {
+            let instance = path
+                .trim_start_matches("/workflows/")
+                .trim_end_matches("/approvals");
+            match workflow_job::workflow_approve(job_store, instance, body) {
+                Ok(body) => daemon_endpoint_response("workflows.approve", body),
+                Err(err) => error_response(400, err),
+            }
+        }
+        ("GET", path) if path.starts_with("/workflows/") => {
+            match workflow_job::workflow_status(job_store, path.trim_start_matches("/workflows/")) {
+                Ok(body) => daemon_endpoint_response("workflows.status", body),
+                Err(err) => error_response(404, err),
+            }
+        }
         ("POST", "/admissions") => {
             match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
                 Ok(body) => daemon_endpoint_response("admissions.reserve", body),
@@ -4589,6 +4661,35 @@ fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
+    let controller_job = controller_job_state(&request)?;
+    let outcome = job_store.admit_controller_job(
+        format!("controller.{}", request.job_type),
+        request.idempotency_key.clone(),
+        controller_job,
+    )?;
+    let (job, compacted, disposition) = match outcome {
+        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => (
+            job_store.get(job_id)?,
+            false,
+            ControllerJobSubmissionDisposition::Created,
+        ),
+        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
+            let compacted = job_store.get(job.id).is_err();
+            (*job, compacted, ControllerJobSubmissionDisposition::Reused)
+        }
+    };
+    Ok(ControllerJobAdmission {
+        job,
+        disposition,
+        compacted,
+    })
+}
+
+/// Validate a typed controller-job request through its driver and build the
+/// durable state admission persists.
+pub(crate) fn controller_job_state(
+    request: &ControllerJobRequest,
+) -> Result<crate::api_jobs::ControllerJobState> {
     if request.job_type.trim().is_empty() || request.idempotency_key.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "type",
@@ -4628,28 +4729,9 @@ fn admit_controller_job(
         cancellation_reason: None,
         execution_claim_id: None,
         recovery_attempted: false,
+        parent_job_id: None,
     };
-    let outcome = job_store.admit_controller_job(
-        format!("controller.{}", request.job_type),
-        request.idempotency_key.clone(),
-        controller_job,
-    )?;
-    let (job, compacted, disposition) = match outcome {
-        crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) => (
-            job_store.get(job_id)?,
-            false,
-            ControllerJobSubmissionDisposition::Created,
-        ),
-        crate::api_jobs::ControllerJobSubmissionOutcome::Existing(job) => {
-            let compacted = job_store.get(job.id).is_err();
-            (*job, compacted, ControllerJobSubmissionDisposition::Reused)
-        }
-    };
-    Ok(ControllerJobAdmission {
-        job,
-        disposition,
-        compacted,
-    })
+    Ok(controller_job)
 }
 
 fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serde_json::Value {
@@ -4664,7 +4746,7 @@ fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serd
     })
 }
 
-fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
+pub(crate) fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
     let lease_id = job
         .daemon_lease_id
         .as_deref()
@@ -5097,6 +5179,11 @@ pub(crate) fn cancel_controller_job(
     // Resolve the persisted type/version, not a caller-controlled envelope.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
     let job = job_store.request_controller_cancellation(job_id, reason.to_string())?;
+    // The parent's cancellation is durable first, so it admits no new child;
+    // then every child it already submitted is cancelled with it.
+    for child in job_store.active_controller_children(job_id) {
+        let _ = cancel_controller_job(child, reason, job_store);
+    }
     let runtime = controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
@@ -5836,6 +5923,7 @@ mod tests {
                     cancellation_reason: None,
                     execution_claim_id: None,
                     recovery_attempted: false,
+                    parent_job_id: None,
                 },
             )
             .expect("admit staging dispatch");
