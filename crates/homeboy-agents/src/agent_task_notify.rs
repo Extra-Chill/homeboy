@@ -30,14 +30,11 @@ use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDispositio
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
-use crate::agent_task_loop_controller::AgentTaskLoopControllerState;
 use crate::agent_task_service::AgentTaskCookReport;
 
 /// Generic subject class for every cook lifecycle notification.
 const COOK_SUBJECT_KIND: &str = "agent_task_cook";
 
-/// Generic subject class for a durable loop controller.
-const CONTROLLER_SUBJECT_KIND: &str = "agent_task_controller";
 
 /// Attribution recorded on the cook-level exactly-once marker.
 const COOK_TERMINAL_DELIVERED_BY: &str = "cook-controller";
@@ -613,199 +610,6 @@ pub struct BatchPortfolioCounts {
 }
 
 // ---------------------------------------------------------------------------
-// Controller lifecycle (W3-5)
-// ---------------------------------------------------------------------------
-
-/// One open wait, flattened for the notification payload.
-#[derive(Debug, Clone)]
-pub struct ControllerWaitSummary {
-    pub wait_key: String,
-    pub event_type: String,
-    pub external_ref: Option<String>,
-}
-
-fn controller_subject(loop_id: &str, phase: Option<&str>) -> NotifySubject {
-    let mut subject = NotifySubject::new(CONTROLLER_SUBJECT_KIND, loop_id);
-    subject.phase = phase.map(str::to_string).filter(|phase| !phase.is_empty());
-    subject
-}
-
-fn controller_actions(payload: NotifyPayload, loop_id: &str) -> NotifyPayload {
-    payload
-        .with_action(
-            NotifyAction::new(
-                "status",
-                format!("homeboy agent-task controller status {loop_id}"),
-            )
-            .with_kind("show"),
-        )
-        .with_action(
-            NotifyAction::new(
-                "resume",
-                format!("homeboy agent-task controller resume {loop_id}"),
-            )
-            .with_kind("repair"),
-        )
-}
-
-/// Deliver a controller event, resolving its destination from durable state.
-///
-/// A controller is not a run, so it has no thread-local route of its own once
-/// the daemon is the producer. `notification_route::current()` still wins when
-/// an operator drove the transition from their own process.
-fn deliver_controller(event: NotifyEvent, loop_id: &str) {
-    let route = notification_route::current()
-        .or_else(|| crate::agent_task_lifecycle::durable_notification_route(loop_id));
-    if !should_deliver(event.kind, route.is_some()) {
-        return;
-    }
-    let _ = notify_outbox::dispatch_with_outbox(&event.with_route(route.as_ref()), None);
-}
-
-fn controller_state_payload(
-    loop_id: &str,
-    phase: Option<&str>,
-    from: AgentTaskLoopControllerState,
-    to: AgentTaskLoopControllerState,
-    reason: Option<&str>,
-    open_waits: usize,
-) -> NotifyPayload {
-    // A controller that reached a state it cannot leave on its own needs a
-    // human. Everything else is progress.
-    let kind = match to {
-        AgentTaskLoopControllerState::HumanReady
-        | AgentTaskLoopControllerState::Escalated
-        | AgentTaskLoopControllerState::Failed
-        | AgentTaskLoopControllerState::Abandoned => NotifyEventKind::NeedsAttention,
-        AgentTaskLoopControllerState::Completed => NotifyEventKind::Completed,
-        AgentTaskLoopControllerState::Running | AgentTaskLoopControllerState::Waiting => {
-            NotifyEventKind::Progress
-        }
-    };
-    controller_actions(
-        NotifyPayload::new(kind, controller_subject(loop_id, phase))
-            .with_fact("State", controller_state_label(to))
-            .with_fact("Previous state", controller_state_label(from))
-            .with_optional_fact("Reason", reason.map(str::to_string))
-            .with_fact("Open waits", open_waits.to_string()),
-        loop_id,
-    )
-}
-
-/// The controller changed durable state.
-pub fn controller_state_changed(
-    loop_id: &str,
-    phase: Option<&str>,
-    from: AgentTaskLoopControllerState,
-    to: AgentTaskLoopControllerState,
-    reason: Option<&str>,
-    open_waits: usize,
-) {
-    if from == to {
-        return;
-    }
-    let payload = controller_state_payload(loop_id, phase, from, to, reason, open_waits);
-    deliver_controller(
-        NotifyEvent::lifecycle(payload.kind, loop_id, controller_state_label(to))
-            .with_title(format!(
-                "controller {loop_id} — {}",
-                controller_state_label(to)
-            ))
-            .with_payload(payload),
-        loop_id,
-    );
-}
-
-fn controller_waiting_payload(
-    loop_id: &str,
-    phase: Option<&str>,
-    waits: &[ControllerWaitSummary],
-) -> NotifyPayload {
-    let mut payload = NotifyPayload::new(
-        NotifyEventKind::Progress,
-        controller_subject(loop_id, phase),
-    )
-    .with_fact("State", "waiting")
-    .with_fact("Open waits", waits.len().to_string());
-    for wait in waits.iter().take(6) {
-        payload = payload.with_fact(
-            format!("Waiting on {}", wait.wait_key),
-            match &wait.external_ref {
-                Some(reference) => format!("{} ({reference})", wait.event_type),
-                None => wait.event_type.clone(),
-            },
-        );
-    }
-    controller_actions(payload, loop_id)
-}
-
-/// The controller parked in `Waiting` with open waits.
-///
-/// `Waiting` used to emit nothing at all, so an orchestrator had no signal
-/// that its controller had stalled: `resume` returns `idle` and exits, and
-/// nothing polls. This is that signal. It is `Progress`, so an ambient default
-/// transport does not start receiving it — only an explicitly routed
-/// controller gets the full arc.
-pub fn controller_waiting(loop_id: &str, phase: Option<&str>, waits: &[ControllerWaitSummary]) {
-    if waits.is_empty() {
-        return;
-    }
-    let payload = controller_waiting_payload(loop_id, phase, waits);
-    deliver_controller(
-        NotifyEvent::lifecycle(NotifyEventKind::Progress, loop_id, "waiting")
-            .with_title(format!(
-                "controller {loop_id} — waiting on {} event(s)",
-                waits.len()
-            ))
-            .with_payload(payload),
-        loop_id,
-    );
-}
-
-fn controller_action_failed_payload(
-    loop_id: &str,
-    phase: Option<&str>,
-    action_id: &str,
-    action_kind: &str,
-    reason: &str,
-) -> NotifyPayload {
-    controller_actions(
-        NotifyPayload::new(
-            NotifyEventKind::NeedsAttention,
-            controller_subject(loop_id, phase),
-        )
-        .with_fact("Action", action_id)
-        .with_fact("Action kind", action_kind)
-        .with_fact("Reason", reason),
-        loop_id,
-    )
-    .with_action(
-        NotifyAction::new(
-            "diagnose",
-            format!("homeboy agent-task controller diagnose {loop_id}"),
-        )
-        .with_kind("repair"),
-    )
-}
-
-/// A controller action failed and the loop stopped.
-pub fn controller_action_failed(
-    loop_id: &str,
-    phase: Option<&str>,
-    action_id: &str,
-    action_kind: &str,
-    reason: &str,
-) {
-    let payload = controller_action_failed_payload(loop_id, phase, action_id, action_kind, reason);
-    deliver_controller(
-        NotifyEvent::lifecycle(NotifyEventKind::NeedsAttention, loop_id, "action_failed")
-            .with_title(format!("controller {loop_id} — action {action_id} failed"))
-            .with_payload(payload),
-        loop_id,
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Daemon reconcile (W3-10)
 // ---------------------------------------------------------------------------
 
@@ -892,23 +696,6 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
                 run_id,
             );
         }
-    }
-}
-
-/// Stable snake_case labels for the controller state vocabulary.
-///
-/// The enum's `Debug` rendering is not a contract; these labels are what a
-/// destination reads, so they are written once here rather than derived from
-/// formatting at each emission site.
-fn controller_state_label(state: AgentTaskLoopControllerState) -> &'static str {
-    match state {
-        AgentTaskLoopControllerState::Running => "running",
-        AgentTaskLoopControllerState::Waiting => "waiting",
-        AgentTaskLoopControllerState::HumanReady => "human_ready",
-        AgentTaskLoopControllerState::Completed => "completed",
-        AgentTaskLoopControllerState::Abandoned => "abandoned",
-        AgentTaskLoopControllerState::Escalated => "escalated",
-        AgentTaskLoopControllerState::Failed => "failed",
     }
 }
 

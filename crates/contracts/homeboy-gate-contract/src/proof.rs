@@ -5,16 +5,13 @@
 //! explicit coverage gaps.
 //!
 //! These are pure serde data types plus their builders and pure classification
-//! helpers. The proof *validation* behavior (`validate_proof_value`) and the
-//! `loop_spec_validation` provider live in `homeboy-core`, because validation
-//! reaches into core's `artifact_address`/observation layer.
+//! helpers.
 
 use serde::{Deserialize, Serialize};
 
 use crate::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const HOMEBOY_PROOF_SCHEMA: &str = "homeboy/proof/v1";
-pub const HOMEBOY_PROOF_VALIDATION_SCHEMA: &str = "homeboy/proof-validation/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HomeboyProof {
@@ -131,32 +128,6 @@ pub enum HomeboyProofEnvironmentDisposition {
 pub struct HomeboyProofGap {
     pub kind: HomeboyProofGapKind,
     pub summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyProofValidationReport {
-    #[serde(default = "proof_validation_schema")]
-    pub schema: String,
-    #[serde(default = "default_proof_validation_status")]
-    pub status: HomeboyProofValidationStatus,
-    pub valid: bool,
-    pub diagnostics: Vec<HomeboyProofValidationDiagnostic>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum HomeboyProofValidationStatus {
-    Passed,
-    Incomplete,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyProofValidationDiagnostic {
-    pub code: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -288,16 +259,8 @@ fn default_required_proof_artifact() -> bool {
     true
 }
 
-fn default_proof_validation_status() -> HomeboyProofValidationStatus {
-    HomeboyProofValidationStatus::Passed
-}
-
 fn proof_schema() -> String {
     HOMEBOY_PROOF_SCHEMA.to_string()
-}
-
-fn proof_validation_schema() -> String {
-    HOMEBOY_PROOF_VALIDATION_SCHEMA.to_string()
 }
 
 /// Classify a proof's coverage scope from its recorded gates.

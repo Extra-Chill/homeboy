@@ -12,10 +12,6 @@
 //! depend on one another they share a single crate. They are behavior-free
 //! (serde + clap `ValueEnum` derives + pure classification helpers), so this is
 //! a leaf crate other crates can depend on without pulling in core.
-//!
-//! The proof *validation* behavior (`validate_proof_value`) and the
-//! `loop_spec_validation` provider stay in `homeboy-core`, because validation
-//! reaches into core's `artifact_address` / observation layer.
 
 pub mod gate;
 pub mod plan;

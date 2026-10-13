@@ -832,7 +832,7 @@ fn declared_agent_task_controller_secret_env_with_providers(
         if let Some(name) = arg.strip_prefix("--secret-env=") {
             names.push(name.to_string());
         }
-        if arg == "--provider-config" || arg == "--dispatch-provider-config" {
+        if arg == "--provider-config" {
             if let Some(spec) = args.get(index + 1) {
                 names.extend(declared_provider_config_secret_env(spec)?);
             }
@@ -840,9 +840,6 @@ fn declared_agent_task_controller_secret_env_with_providers(
             continue;
         }
         if let Some(spec) = arg.strip_prefix("--provider-config=") {
-            names.extend(declared_provider_config_secret_env(spec)?);
-        }
-        if let Some(spec) = arg.strip_prefix("--dispatch-provider-config=") {
             names.extend(declared_provider_config_secret_env(spec)?);
         }
         index += 1;
@@ -962,19 +959,12 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option
     let Some(command) = args.get(agent_task_index + 1).map(String::as_str) else {
         return Ok(None);
     };
-    if !matches!(command, "cook" | "dispatch" | "loop" | "controller") {
+    if !matches!(command, "cook" | "dispatch") {
         return Ok(None);
     }
 
-    let (backend_flag, selector_flag, model_flag, provider_config_flag) = match command {
-        "controller" | "loop" => (
-            "--dispatch-backend",
-            "--dispatch-selector",
-            "--dispatch-model",
-            "--dispatch-provider-config",
-        ),
-        _ => ("--backend", "--selector", "--model", "--provider-config"),
-    };
+    let (backend_flag, selector_flag, model_flag, provider_config_flag) =
+        ("--backend", "--selector", "--model", "--provider-config");
 
     let Some(backend) = option_arg_after(args, agent_task_index + 2, backend_flag) else {
         return Ok(None);

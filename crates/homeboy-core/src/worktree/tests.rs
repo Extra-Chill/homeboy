@@ -299,25 +299,64 @@ impl WorktreeReconciliationAuthority for FailingReleaseAuthority {
     }
 }
 
-struct RefusingAuthority;
+/// A remote claim authority is configured: records it names hold a remote
+/// claim and must be preserved without acquisition; every other record is
+/// locally provable and reconciles under a controller-local claim.
+struct RemoteClaimAuthority {
+    remote_claimed: Vec<String>,
+    acquired: std::sync::Mutex<Vec<String>>,
+}
 
-impl WorktreeReconciliationAuthority for RefusingAuthority {
-    fn bounded_inventory_apply_refusal(&self) -> Option<WorktreeInventoryApplyRefusal> {
-        Some(WorktreeInventoryApplyRefusal {
-            code: "remote_workspace_reconciliation_unsupported",
-            mutated_records: 0,
-            mutation_provenance: "none",
-            required_primitive: "durable remote claim release receipt and retry protocol",
-            message: "remote reconciliation is not available",
-        })
+impl RemoteClaimAuthority {
+    fn new(remote_claimed: &[&str]) -> Self {
+        Self {
+            remote_claimed: remote_claimed.iter().map(|id| id.to_string()).collect(),
+            acquired: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl WorktreeReconciliationAuthority for RemoteClaimAuthority {
+    fn local_refusal(&self, record: &TaskWorktreeRecord) -> Option<WorktreeAuthorityRefusal> {
+        self.remote_claimed
+            .contains(&record.id)
+            .then(|| WorktreeAuthorityRefusal {
+                reason: MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported,
+                detail: "owning run was dispatched to a runner that may hold a workspace claim"
+                    .to_string(),
+            })
     }
 
     fn acquire(
         &self,
-        _: &TaskWorktreeRecord,
+        record: &TaskWorktreeRecord,
         _: std::time::Instant,
     ) -> Result<WorktreeLivenessAuthority> {
-        panic!("refused inventory must not acquire an authority claim")
+        assert!(
+            !self.remote_claimed.contains(&record.id),
+            "a remote-claimed record must never acquire a reconciliation claim"
+        );
+        self.acquired.lock().unwrap().push(record.id.clone());
+        let mut claim = terminal_claim();
+        claim.workspace = record.effective_workspace_identity().unwrap();
+        Ok(WorktreeLivenessAuthority::Terminal {
+            claim,
+            provenance: "controller-local terminal run and workspace reconciliation claim"
+                .to_string(),
+        })
+    }
+
+    fn validate(
+        &self,
+        _: &TaskWorktreeRecord,
+        _: &crate::workspace_claim::WorkspaceClaim,
+        _: std::time::Instant,
+    ) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn ready_to_commit(&self, _: &crate::workspace_claim::WorkspaceClaim) -> bool {
+        true
     }
 }
 
@@ -2363,14 +2402,26 @@ fn inventory_apply_deadline_returns_a_retry_without_mutating_the_missing_record(
     );
 }
 
+fn mixed_remote_claim_page(store: &Path, source: &Path) -> Vec<TaskWorktreeRecord> {
+    run_git(source, &["branch", "task"]);
+    ["fixture@local-a", "fixture@remote", "fixture@local-b"]
+        .iter()
+        .map(|id| {
+            let mut record = fixture_record(source, &sibling_worktree_path(source, id));
+            record.id = id.to_string();
+            write_record(store, &record).unwrap();
+            record
+        })
+        .collect()
+}
+
 #[test]
-fn inventory_apply_refusal_preserves_local_missing_diagnostics_without_acquiring() {
+fn inventory_apply_reconciles_locally_provable_records_and_preserves_remote_claims() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
-    run_git(source.path(), &["branch", "task"]);
-    let record = fixture_record(source.path(), &sibling_worktree_path(source.path(), "gone"));
-    write_record(&store, &record).unwrap();
+    mixed_remote_claim_page(&store, source.path());
+    let authority = RemoteClaimAuthority::new(&["fixture@remote"]);
 
     let output = inventory_with_store_and_authority(
         WorktreeInventoryOptions {
@@ -2380,31 +2431,125 @@ fn inventory_apply_refusal_preserves_local_missing_diagnostics_without_acquiring
         },
         &store,
         &dir.path().join("adopted"),
-        &RefusingAuthority,
+        &authority,
     )
     .unwrap();
 
     assert_eq!(
         output.authorization,
-        WorktreeInventoryAuthorization::ApplyRefused
+        WorktreeInventoryAuthorization::ExplicitApply
     );
     assert_eq!(
-        output.apply_refusal.as_ref().map(|refusal| refusal.code),
-        Some("remote_workspace_reconciliation_unsupported")
+        *authority.acquired.lock().unwrap(),
+        vec!["fixture@local-a".to_string(), "fixture@local-b".to_string()]
     );
-    assert_eq!(output.records.len(), 1);
+    for local in ["fixture@local-a", "fixture@local-b"] {
+        let item = output
+            .records
+            .iter()
+            .find(|item| item.record.id == local)
+            .unwrap();
+        assert_eq!(
+            item.reconciliation.as_ref().unwrap().action,
+            WorktreeReconciliationAction::Reconciled
+        );
+        assert!(item.missing_active.is_none());
+        assert_eq!(
+            read_record(&store, local).unwrap().state,
+            TaskWorktreeState::Removed
+        );
+    }
+    let remote = output
+        .records
+        .iter()
+        .find(|item| item.record.id == "fixture@remote")
+        .unwrap();
+    assert!(remote.reconciliation.is_none());
     assert_eq!(
-        output.records[0]
+        remote
             .missing_active
             .as_ref()
             .map(|missing| &missing.reason),
-        Some(&MissingActiveWorktreeReason::RequiresAuthoritativeLiveness)
+        Some(&MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported)
     );
-    assert!(output.records[0].reconciliation.is_none());
+    assert!(remote
+        .missing_active
+        .as_ref()
+        .unwrap()
+        .continuation
+        .contains("may hold a workspace claim"));
     assert_eq!(
-        read_record(&store, &record.id).unwrap().state,
+        read_record(&store, "fixture@remote").unwrap().state,
         TaskWorktreeState::Active
     );
+    assert_eq!(output.cross_tab.active_path_missing, 1);
+    assert_eq!(output.cross_tab.removed_path_missing, 2);
+}
+
+#[test]
+fn inventory_preview_reports_per_record_remote_claim_reasons() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+    let records = mixed_remote_claim_page(&store, source.path());
+    let authority = RemoteClaimAuthority::new(&["fixture@remote"]);
+
+    let output = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &authority,
+    )
+    .unwrap();
+
+    assert_eq!(
+        output.authorization,
+        WorktreeInventoryAuthorization::Preview
+    );
+    assert!(authority.acquired.lock().unwrap().is_empty());
+    let reasons = output
+        .records
+        .iter()
+        .map(|item| {
+            (
+                item.record.id.as_str(),
+                item.missing_active.as_ref().unwrap().reason.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasons,
+        vec![
+            (
+                "fixture@local-a",
+                MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+            ),
+            (
+                "fixture@local-b",
+                MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+            ),
+            (
+                "fixture@remote",
+                MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported
+            ),
+        ]
+    );
+    // Cleanup's next action uses the same per-record classification.
+    let reconcilable = records
+        .iter()
+        .filter(|record| inventory_apply_would_reconcile(record, &authority))
+        .map(|record| record.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(reconcilable, vec!["fixture@local-a", "fixture@local-b"]);
+    for record in &records {
+        assert_eq!(
+            read_record(&store, &record.id).unwrap().state,
+            TaskWorktreeState::Active
+        );
+    }
 }
 
 #[test]

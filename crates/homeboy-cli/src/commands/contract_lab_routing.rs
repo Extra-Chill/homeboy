@@ -6,8 +6,7 @@ use crate::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::agents::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::cli_surface::Commands;
 use crate::command_contract::{
-    AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
-    AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
+    AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
     AGENT_TASK_PROMOTE_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL,
     AGENT_TASK_STATUS_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL,
 };
@@ -101,7 +100,6 @@ impl Commands {
         if let Some(mut contract) = route.lab_contract() {
             if let Commands::AgentTask(args) = self {
                 if matches!(args.command, agent_task::AgentTaskCommand::Promote(_))
-                    || agent_task_controller_materializes_worktree(&args.command)
                     || agent_task_provider_requires_cwd_git_checkout(&args.command)
                 {
                     contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
@@ -199,31 +197,7 @@ impl Commands {
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
-                    agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-                        command:
-                            agent_task::AgentTaskControllerCommand::FromSpec(
-                                agent_task::AgentTaskControllerFromSpecArgs {
-                                    resume: true, ..
-                                },
-                            )
-                            | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
-                            | agent_task::AgentTaskControllerCommand::Materialize(_),
-                    }),
-            }) => LabCommandContract::portable(
-                AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,
-                None,
-                false,
-                LAB_NO_EXTRA_CAPABILITIES,
-            )
-            .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-                        command: agent_task::AgentTaskControllerCommand::Resume(_),
-                    }),
-            }) => LabCommandContract::runner_resident(AGENT_TASK_CONTROLLER_RESUME_LAB_LABEL),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Run(_),
+                    agent_task::AgentTaskCommand::Run(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
@@ -339,20 +313,6 @@ pub(crate) fn agent_task_promotion_source_is_controller_owned(source: &str) -> b
         || std::path::Path::new(source).is_file()
 }
 
-pub(crate) fn agent_task_controller_materializes_worktree(
-    command: &agent_task::AgentTaskCommand,
-) -> bool {
-    matches!(
-        command,
-        agent_task::AgentTaskCommand::Controller(agent_task::AgentTaskControllerArgs {
-            command: agent_task::AgentTaskControllerCommand::FromSpec(
-                agent_task::AgentTaskControllerFromSpecArgs { resume: true, .. },
-            ) | agent_task::AgentTaskControllerCommand::RunFromSpec(_)
-                | agent_task::AgentTaskControllerCommand::Materialize(_),
-        })
-    )
-}
-
 pub(crate) fn agent_task_provider_requires_cwd_git_checkout(
     command: &agent_task::AgentTaskCommand,
 ) -> bool {
@@ -376,23 +336,6 @@ pub(crate) fn agent_task_provider_requires_cwd_git_checkout_with(
                 default_backend,
                 provider_requires_cwd_git_checkout,
             )
-        }
-        agent_task::AgentTaskCommand::Controller(controller) => {
-            let dispatch = match &controller.command {
-                agent_task::AgentTaskControllerCommand::FromSpec(args) if args.resume => {
-                    Some(&args.dispatch)
-                }
-                agent_task::AgentTaskControllerCommand::RunFromSpec(args) => Some(&args.dispatch),
-                _ => None,
-            };
-            dispatch.is_some_and(|dispatch| {
-                provider_requires_cwd_git_checkout_for_dispatch(
-                    dispatch.dispatch_backend.as_deref(),
-                    dispatch.dispatch_selector.as_deref(),
-                    default_backend,
-                    provider_requires_cwd_git_checkout,
-                )
-            })
         }
         _ => false,
     }

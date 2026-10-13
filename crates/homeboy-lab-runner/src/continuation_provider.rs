@@ -28,10 +28,6 @@ impl RunnerContinuationProvider for RunnerContinuation {
         true
     }
 
-    fn supports_terminal_workspace_authority(&self) -> bool {
-        true
-    }
-
     fn workspace_claim_runner_ids(&self) -> Result<Vec<String>> {
         Ok(super::list()?
             .into_iter()

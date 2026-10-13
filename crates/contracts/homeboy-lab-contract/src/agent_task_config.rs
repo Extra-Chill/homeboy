@@ -610,7 +610,7 @@ pub enum ResolvedAgentTaskRuntimeFreshness {
 
 /// One rotation target: executor selector overrides and/or nested provider
 /// config/model, mirroring the dispatch config layer shapes
-/// (`--dispatch-selector` / `--dispatch-provider-config`). Unset fields
+/// (`--selector` / `--provider-config`). Unset fields
 /// inherit the values from the failing attempt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderRotationEntry {
@@ -621,7 +621,7 @@ pub struct AgentTaskProviderRotationEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// JSON object merged over the executor's provider config (same shape
-    /// as `--dispatch-provider-config` / `--provider-config`).
+    /// as `--provider-config`).
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provider_config: Value,
     /// Explicitly opt a later provider into continuing one verified patch

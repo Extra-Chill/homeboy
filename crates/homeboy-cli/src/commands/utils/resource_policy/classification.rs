@@ -13,7 +13,7 @@
 //! per-resolved-path `resource_behavior`, alongside the Lab help-visibility
 //! table (converted) and `command_capability` (see that module's note).
 //!
-//! It does not fit. `CommandPathSafetySpec` keys on a command PATH; seven rows
+//! It does not fit. `CommandPathSafetySpec` keys on a command PATH; five rows
 //! here key on parsed ARGUMENT VALUES at a single path, and flip classification
 //! across the admission boundary when they do:
 //!
@@ -21,9 +21,6 @@
 //! - `retry --run` — `AdmittedWorkload`, otherwise `LocalControl`
 //! - `active --reconcile` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
 //! - `reconcile --apply` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
-//! - `loop define --resume` — `AdmittedWorkload`, otherwise `LocalControl`
-//! - `controller from-spec --resume` — `AdmittedWorkload`, otherwise
-//!   `LocalControl`
 //! - `fanout cook-batch --dry-run` — `is_plan_only_command` below
 //!
 //! `path_safety` resolves one entry per path, so each of these pairs would
@@ -68,7 +65,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Rearm(_)
         | agent_task::AgentTaskCommand::Prompts(_)
         | agent_task::AgentTaskCommand::Contract(_)
-        | agent_task::AgentTaskCommand::CompileLoop(_)
         | agent_task::AgentTaskCommand::Auth(_)
         | agent_task::AgentTaskCommand::Accept(_)
         | agent_task::AgentTaskCommand::RecordReplacementGateProof(_) => AgentTaskResourceBehavior::LocalControl,
@@ -148,46 +144,6 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Fanout(_) | agent_task::AgentTaskCommand::BatchPrepare(_) => {
             AgentTaskResourceBehavior::LocalControl
         }
-        agent_task::AgentTaskCommand::Loop(loop_args) => match &loop_args.command {
-            agent_task::AgentTaskLoopCommand::Status(_) => {
-                AgentTaskResourceBehavior::BoundedMetadataRead
-            }
-            agent_task::AgentTaskLoopCommand::Define(args) if args.resume => {
-                AgentTaskResourceBehavior::AdmittedWorkload
-            }
-            agent_task::AgentTaskLoopCommand::Resume(_) => {
-                AgentTaskResourceBehavior::AdmittedWorkload
-            }
-            agent_task::AgentTaskLoopCommand::Define(_)
-            | agent_task::AgentTaskLoopCommand::Stop(_) => AgentTaskResourceBehavior::LocalControl,
-        },
-        agent_task::AgentTaskCommand::Controller(controller) => match &controller.command {
-            agent_task::AgentTaskControllerCommand::Status(_)
-            | agent_task::AgentTaskControllerCommand::Diagnose(_)
-            | agent_task::AgentTaskControllerCommand::List => {
-                AgentTaskResourceBehavior::BoundedMetadataRead
-            }
-            agent_task::AgentTaskControllerCommand::FromSpec(args) if args.resume => {
-                AgentTaskResourceBehavior::AdmittedWorkload
-            }
-            agent_task::AgentTaskControllerCommand::RunFromSpec(_)
-            | agent_task::AgentTaskControllerCommand::Materialize(_)
-            | agent_task::AgentTaskControllerCommand::RunNext(_)
-            | agent_task::AgentTaskControllerCommand::Run(_)
-            | agent_task::AgentTaskControllerCommand::Resume(_)
-            | agent_task::AgentTaskControllerCommand::Proof(_) => {
-                AgentTaskResourceBehavior::AdmittedWorkload
-            }
-            agent_task::AgentTaskControllerCommand::Init(_)
-            | agent_task::AgentTaskControllerCommand::FromSpec(_)
-            | agent_task::AgentTaskControllerCommand::ValidateProof(_)
-            | agent_task::AgentTaskControllerCommand::Plan(_)
-            | agent_task::AgentTaskControllerCommand::Events(_)
-            | agent_task::AgentTaskControllerCommand::ApplyEvent(_)
-            | agent_task::AgentTaskControllerCommand::MarkHumanReady(_) => {
-                AgentTaskResourceBehavior::LocalControl
-            }
-        },
     })
 }
 

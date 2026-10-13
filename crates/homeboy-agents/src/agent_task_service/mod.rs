@@ -20,8 +20,6 @@ mod cook_step;
 mod cook_supervision;
 mod discovery;
 mod execution;
-/// Shared-work supervision for a detached loop coordinator.
-mod loop_job;
 /// Read-only process-tree activity sampling for a running Cook.
 ///
 /// Lived in `homeboy-core` as a top-level module even though `cook_activity`
@@ -57,8 +55,6 @@ pub use cook_step::*;
 pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
 pub use discovery::*;
 pub use execution::*;
-pub(crate) use loop_job::guarded_command_execution_owner;
-pub use loop_job::*;
 pub use promotion_service::*;
 pub use reconcile::*;
 pub use status_support::*;

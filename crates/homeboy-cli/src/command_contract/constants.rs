@@ -1,15 +1,10 @@
 use serde::Serialize;
 
 use crate::agents::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
-use crate::agents::agent_task_contract::AGENT_TASK_LOOP_ACTION_SCHEMA;
 use crate::agents::agent_task_executor_evidence::{
     EXECUTOR_INPUT_EVIDENCE_KIND, EXECUTOR_INPUT_FILE, EXECUTOR_RESULT_EVIDENCE_KIND,
     EXECUTOR_RESULT_FILE,
 };
-use crate::agents::agent_task_loop_controller::{
-    AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
-};
-use crate::agents::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::command_contract::{
     registered_contract, RUNNER_ARTIFACT_MANIFEST_FILE, RUNNER_ARTIFACT_MANIFEST_REF_NAME,
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
@@ -65,7 +60,6 @@ pub enum ContractConstants {
     ArtifactManifest(ArtifactManifestConstants),
     ArtifactPaths(ArtifactPathsConstants),
     ArtifactPostprocess(ArtifactPostprocessConstants),
-    Loop(LoopConstants),
     SecretEnvPlan(SecretEnvPlanConstants),
     EnvMaterializationPlan(EnvMaterializationPlanConstants),
     ResourceLifecycleIndex(ResourceLifecycleIndexConstants),
@@ -85,7 +79,6 @@ pub struct AllContractConstants {
     pub artifact_manifest: ArtifactManifestConstants,
     pub artifact_paths: ArtifactPathsConstants,
     pub artifact_postprocess: ArtifactPostprocessConstants,
-    pub loop_contracts: LoopConstants,
     pub secret_env_plan: SecretEnvPlanConstants,
     pub env_materialization_plan: EnvMaterializationPlanConstants,
     pub resource_lifecycle_index: ResourceLifecycleIndexConstants,
@@ -120,14 +113,6 @@ pub struct ArtifactPathsConstants {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ArtifactPostprocessConstants {
     pub schema_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct LoopConstants {
-    pub controller_schema_id: String,
-    pub controller_status_schema_id: String,
-    pub definition_schema_id: String,
-    pub action_schema_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -240,7 +225,6 @@ pub(crate) fn contract_constants(contract_id: &str) -> Option<ContractConstantsO
             artifact_manifest: artifact_manifest_constants(),
             artifact_paths: artifact_paths_constants(),
             artifact_postprocess: artifact_postprocess_constants(),
-            loop_contracts: loop_constants(),
             secret_env_plan: secret_env_plan_constants(),
             env_materialization_plan: env_materialization_plan_constants(),
             resource_lifecycle_index: resource_lifecycle_index_constants(),
@@ -259,7 +243,6 @@ pub(crate) fn contract_constants(contract_id: &str) -> Option<ContractConstantsO
         "artifact-postprocess" => {
             ContractConstants::ArtifactPostprocess(artifact_postprocess_constants())
         }
-        "loop" | "loop-contracts" => ContractConstants::Loop(loop_constants()),
         "secret-env-plan" => ContractConstants::SecretEnvPlan(secret_env_plan_constants()),
         "env-materialization-plan" => {
             ContractConstants::EnvMaterializationPlan(env_materialization_plan_constants())
@@ -322,15 +305,6 @@ pub(crate) fn artifact_paths_constants() -> ArtifactPathsConstants {
 pub(crate) fn artifact_postprocess_constants() -> ArtifactPostprocessConstants {
     ArtifactPostprocessConstants {
         schema_id: registry_schema_id("artifact-postprocess"),
-    }
-}
-
-pub(crate) fn loop_constants() -> LoopConstants {
-    LoopConstants {
-        controller_schema_id: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
-        controller_status_schema_id: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
-        definition_schema_id: AGENT_TASK_LOOP_DEFINITION_SCHEMA.to_string(),
-        action_schema_id: AGENT_TASK_LOOP_ACTION_SCHEMA.to_string(),
     }
 }
 

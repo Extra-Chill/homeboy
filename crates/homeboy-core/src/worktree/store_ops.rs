@@ -1451,11 +1451,7 @@ pub(super) fn inventory_with_store_and_authority(
 ) -> Result<WorktreeInventoryOutput> {
     const APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
     let limit = options.limit.max(1);
-    let apply_refusal = options
-        .apply
-        .then(|| authority.bounded_inventory_apply_refusal())
-        .flatten();
-    let apply = options.apply && apply_refusal.is_none();
+    let apply = options.apply;
     let apply_deadline = apply.then(|| {
         options
             .apply_deadline
@@ -1544,7 +1540,7 @@ pub(super) fn inventory_with_store_and_authority(
         }
         let mut path_exists = Path::new(&record.worktree_path).exists();
         let mut missing_active = if record.state == TaskWorktreeState::Active && !path_exists {
-            Some(missing_active_worktree(&record, apply_deadline))
+            Some(missing_active_worktree(&record, apply_deadline, authority))
         } else {
             None
         };
@@ -1674,7 +1670,7 @@ pub(super) fn inventory_with_store_and_authority(
             record = reread;
             path_exists = reread_path_exists;
             missing_active = (record.state == TaskWorktreeState::Active && !path_exists)
-                .then(|| missing_active_worktree(&record, apply_deadline));
+                .then(|| missing_active_worktree(&record, apply_deadline, authority));
             Some(result)
         } else {
             None
@@ -1735,12 +1731,9 @@ pub(super) fn inventory_with_store_and_authority(
         schema: "homeboy/worktree-inventory/v1",
         authorization: if apply {
             WorktreeInventoryAuthorization::ExplicitApply
-        } else if options.apply {
-            WorktreeInventoryAuthorization::ApplyRefused
         } else {
             WorktreeInventoryAuthorization::Preview
         },
-        apply_refusal,
         apply_continuation,
         cursor: options.cursor,
         next_cursor,
@@ -1768,9 +1761,26 @@ fn inventory_apply_continuation(limit: usize, cursor: Option<&str>) -> String {
     format!("homeboy worktree inventory --apply --limit {limit}{cursor}")
 }
 
+/// Whether `worktree inventory --apply` would attempt to reconcile `record`
+/// under `authority`: the same classification inventory itself applies.
+pub fn inventory_apply_would_reconcile(
+    record: &TaskWorktreeRecord,
+    authority: &dyn WorktreeReconciliationAuthority,
+) -> bool {
+    // The policy and authority checks are cheap prefilters of the same
+    // classification; local git evidence runs only for records that pass them.
+    record.state == TaskWorktreeState::Active
+        && !Path::new(&record.worktree_path).exists()
+        && record.cleanup_policy != CleanupPolicy::PreserveOnFailure
+        && authority.local_refusal(record).is_none()
+        && missing_active_worktree(record, None, authority).reason
+            == MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+}
+
 fn missing_active_worktree(
     record: &TaskWorktreeRecord,
     deadline: Option<std::time::Instant>,
+    authority: &dyn WorktreeReconciliationAuthority,
 ) -> MissingActiveWorktree {
     if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
         return MissingActiveWorktree {
@@ -1794,16 +1804,30 @@ fn missing_active_worktree(
         MissingActiveWorktreeReason::UnpushedBranch
     } else if evidence.unavailable_reason.is_some() {
         MissingActiveWorktreeReason::BranchEvidenceUnavailable
+    } else if let Some(refusal) = authority.local_refusal(record) {
+        return MissingActiveWorktree {
+            reason: refusal.reason,
+            local_evidence: evidence,
+            continuation: format!("Preserve `{}`: {}.", record.id, refusal.detail),
+        };
     } else {
         MissingActiveWorktreeReason::RequiresAuthoritativeLiveness
+    };
+    let continuation = if reason == MissingActiveWorktreeReason::RequiresAuthoritativeLiveness {
+        format!(
+            "`homeboy worktree inventory --apply` reconciles `{}` under a leased workspace reconciliation claim.",
+            record.id
+        )
+    } else {
+        format!(
+            "Preserve `{}` until its local source and task-branch evidence is clean.",
+            record.id
+        )
     };
     MissingActiveWorktree {
         reason,
         local_evidence: evidence,
-        continuation: format!(
-            "Preserve `{}`. `worktree inventory --apply` is refused until Homeboy has a leased local-and-offloaded liveness and workspace-evidence primitive.",
-            record.id
-        ),
+        continuation,
     }
 }
 
@@ -1877,6 +1901,19 @@ fn reconcile_missing_record_with_store(
                     reason: Some(
                         "local dirty or task-branch evidence is not safely terminal".to_string(),
                     ),
+                },
+            ));
+        }
+        // Revalidate the record-scoped authority evidence at mutation time: a
+        // handoff or remote claim recorded since preflight preserves the record.
+        if let Some(refusal) = authority.local_refusal(&record) {
+            return Ok((
+                record,
+                false,
+                WorktreeReconciliationResult {
+                    action: WorktreeReconciliationAction::Preserved,
+                    provenance: "leased manifest re-read plus local authority evidence".to_string(),
+                    reason: Some(refusal.detail),
                 },
             ));
         }

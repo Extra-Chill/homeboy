@@ -16,7 +16,7 @@ fn positive_discovery_limit(value: &str) -> std::result::Result<usize, String> {
 
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;
-use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
+use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
@@ -30,14 +30,6 @@ pub use super::super::auth::{
     AgentTaskAuthCommand, AgentTaskAuthMapEnvArgs, AgentTaskAuthMapKeychainBundleArgs,
     AgentTaskAuthRemoveArgs, AgentTaskAuthSetConfigArgs, AgentTaskAuthSetKeychainArgs,
     AgentTaskAuthSetKeychainBundleArgs, AgentTaskAuthStatusArgs,
-};
-pub use super::super::controller::{
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerCommand, AgentTaskControllerDispatchArgs,
-    AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
-    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerPlanArgs, AgentTaskControllerProofArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs,
 };
 
 #[derive(Args, Debug)]
@@ -93,12 +85,6 @@ pub enum AgentTaskCommand {
     CookContinue(CookContinueArgs),
     /// Attach candidate-bound review findings to an existing Cook.
     CookFeedback(CookFeedbackArgs),
-    /// Operate durable defined multi-agent loops: define, inspect, resume, and stop.
-    ///
-    /// A loop is not a one-shot PR cook. It persists controller state, tracks
-    /// whether it is on or off, counts revolutions, and records its continuation
-    /// policy. Use `agent-task cook` for single-PR work.
-    Loop(AgentTaskLoopArgs),
     /// Run an `AgentTaskPlan` through extension-declared executor providers.
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable run.
@@ -241,13 +227,8 @@ pub enum AgentTaskCommand {
     Prompts(AgentTaskPromptsArgs),
     /// Export Homeboy's machine-readable agent-task core contract metadata.
     Contract(ContractArgs),
-    /// Compile a declarative loop definition into an agent-task plan without
-    /// submitting or running it.
-    CompileLoop(CompileLoopArgs),
     /// Configure and inspect provider authentication secrets.
     Auth(AgentTaskAuthArgs),
-    /// Create, inspect, and resume durable multi-agent loop controller state.
-    Controller(AgentTaskControllerArgs),
     #[command(hide = true)]
     Tool(AgentTaskToolArgs),
 }
@@ -623,11 +604,6 @@ pub struct AgentTaskAuthArgs {
     #[command(subcommand)]
     pub command: AgentTaskAuthCommand,
 }
-#[derive(Args, Debug)]
-pub struct AgentTaskControllerArgs {
-    #[command(subcommand)]
-    pub command: AgentTaskControllerCommand,
-}
 
 #[derive(Args, Debug)]
 pub struct RetainedArtifactsArgs {
@@ -771,12 +747,6 @@ pub struct ContractArgs {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ContractFormat {
     Json,
-}
-#[derive(Args, Debug)]
-pub struct CompileLoopArgs {
-    /// Declarative loop definition to compile into an agent-task plan.
-    #[arg(long, value_name = "SPEC")]
-    pub definition: String,
 }
 
 #[cfg(test)]

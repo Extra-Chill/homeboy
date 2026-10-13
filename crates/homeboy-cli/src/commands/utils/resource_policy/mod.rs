@@ -1529,17 +1529,6 @@ mod tests {
             .as_slice(),
             ["homeboy", "agent-task", "fanout", "status", "batch-123"].as_slice(),
             ["homeboy", "agent-task", "fanout", "artifacts", "batch-123"].as_slice(),
-            ["homeboy", "agent-task", "loop", "status", "loop-123"].as_slice(),
-            ["homeboy", "agent-task", "controller", "status", "loop-123"].as_slice(),
-            [
-                "homeboy",
-                "agent-task",
-                "controller",
-                "diagnose",
-                "loop-123",
-            ]
-            .as_slice(),
-            ["homeboy", "agent-task", "controller", "list"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             for readiness in &runner_states {

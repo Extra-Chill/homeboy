@@ -38,10 +38,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "schema-versioned discovery report; `runs` shared with active and latest",
     ),
     (
-        "agent-task controller list",
-        "schema-versioned; controller records already carry an `entities` map",
-    ),
-    (
         "agent-task prompts list",
         "schema-versioned prompt-store report with prompt_dir",
     ),

@@ -7,7 +7,7 @@
 
 use super::path_remap::try_rewrite_flag_value_args;
 
-const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config", "--dispatch-provider-config"];
+const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionEnvelope {
@@ -206,9 +206,6 @@ mod tests {
             "@config.json".to_string(),
             "--provider-config={\"provider\":\"example-oauth\"}".to_string(),
             "--provider-config=-".to_string(),
-            "--dispatch-provider-config".to_string(),
-            "@dispatch.json".to_string(),
-            "--dispatch-provider-config={\"provider\":\"controller\"}".to_string(),
             "--".to_string(),
             "--provider-config".to_string(),
             "ignored".to_string(),
@@ -216,7 +213,7 @@ mod tests {
 
         let envelope = ExecutionEnvelope::from_args(&args);
 
-        assert_eq!(envelope.inputs.provider_configs.len(), 5);
+        assert_eq!(envelope.inputs.provider_configs.len(), 3);
         assert_eq!(
             envelope.inputs.provider_configs[0].flag,
             "--provider-config"
@@ -230,18 +227,6 @@ mod tests {
             ArgValue::InlineText("{\"provider\":\"example-oauth\"}".to_string())
         );
         assert_eq!(envelope.inputs.provider_configs[2].value, ArgValue::Stdin);
-        assert_eq!(
-            envelope.inputs.provider_configs[3].flag,
-            "--dispatch-provider-config"
-        );
-        assert_eq!(
-            envelope.inputs.provider_configs[3].value,
-            ArgValue::PathRef("dispatch.json".to_string())
-        );
-        assert_eq!(
-            envelope.inputs.provider_configs[4].value,
-            ArgValue::InlineText("{\"provider\":\"controller\"}".to_string())
-        );
     }
 
     #[test]

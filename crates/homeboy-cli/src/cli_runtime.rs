@@ -1034,7 +1034,6 @@ fn register_startup_providers_after_reconcile(
     // A workflow instance is a daemon job that submits `step` jobs and
     // evaluates gates; it never runs work itself.
     homeboy::core::daemon::workflow_job::register_workflow_job_driver();
-    crate::agents::agent_task_service::register_loop_work_job_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
@@ -1053,8 +1052,8 @@ fn register_startup_providers_after_reconcile(
     // Register the runner-upgrade provider so the core upgrade flow can
     // refresh configured runners without depending on runner behavior.
     crate::runner::register_runner_upgrade();
-    // Register the runner-availability provider so the controller action loop
-    // can gate execution on a runner's live status.
+    // Register the runner-eligibility check so a `step` that waits for a
+    // runner spawns only once that runner accepts jobs.
     crate::runner::register_runner_availability_provider();
     // Register the Lab-offload provider so core's lab_routing can execute an
     // offload without depending on runner behavior.
@@ -1073,10 +1072,6 @@ fn register_startup_providers_after_reconcile(
     // records without core depending on the agent-task subsystem. (This is
     // the seam that lets agent-task become its own crate.)
     crate::agents::agent_task_lifecycle::controller_pin_reference_provider::register();
-    // Register the loop-spec validation provider so core's proof validator
-    // can validate a materialized agent-task loop-spec artifact without
-    // depending on the agent-task subsystem.
-    crate::agents::agent_task_controller_service::loop_spec_validation_provider::register();
     // Register the gate-feedback candidate-baseline provider so core's
     // worktree-safety logic can accept a dirty worktree that is a verified
     // agent-task gate-feedback candidate without depending on the agent-task
@@ -5993,7 +5988,7 @@ mod tests {
         crate::test_support::with_isolated_home(|home| {
             entity_suggest::reset_entity_suggestion_cache_for_test();
             // A component whose id exactly matches the unrecognized token.
-            // If a nested unrecognized subcommand (e.g. `agent-task loop
+            // If a nested unrecognized subcommand (e.g. `agent-task auth
             // list`) ran the expensive entity-suggestion scan the way a
             // bare top-level typo does, this registration would produce a
             // "did you mean component 'list'" hint and force full
@@ -6010,12 +6005,12 @@ mod tests {
             .expect("register component");
 
             let err = Cli::command_with_scoped_lab_args()
-                .try_get_matches_from(["homeboy", "agent-task", "loop", "list"])
-                .expect_err("`list` is not a valid `agent-task loop` subcommand");
+                .try_get_matches_from(["homeboy", "agent-task", "auth", "list"])
+                .expect_err("`list` is not a valid `agent-task auth` subcommand");
 
             let output = try_augment_clap_error(
                 &err,
-                &argv(&["homeboy", "agent-task", "loop", "list"]),
+                &argv(&["homeboy", "agent-task", "auth", "list"]),
                 &ExtensionCliHealth::default(),
             );
 
@@ -6200,13 +6195,12 @@ mod tests {
                 "--runner",
                 "homeboy-lab",
                 "agent-task",
-                "controller",
-                "run-from-spec",
-                "loop.json",
-                "--max-actions",
-                "1",
+                "fanout",
+                "run-plan",
+                "--input",
+                "{}",
                 "--output",
-                "/tmp/controller-result.json",
+                "/tmp/run-plan-result.json",
             ])
             .expect("parse wrapper-style lab offload command");
 
@@ -6216,7 +6210,7 @@ mod tests {
                 .expect("output arg")
                 .map(|path| path.to_string_lossy().to_string())
                 .as_deref(),
-            Some("/tmp/controller-result.json")
+            Some("/tmp/run-plan-result.json")
         );
 
         let (cli, _) = Cli::from_registered_arg_matches(&matches).expect("typed cli");

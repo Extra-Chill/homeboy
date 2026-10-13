@@ -55,7 +55,7 @@ homeboy runner connect <runner-id>
 
 After this, `<runner-id>` is both the server ID and the runner ID.
 
-Commands that are both resource-policy hot and portable for Lab offload (`agent-task controller from-spec --resume`, `agent-task controller run-from-spec`, `agent-task controller materialize`, full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
+Commands that are both resource-policy hot and portable for Lab offload (full `lint`, `test`, `bench run`, `fuzz run`, and `trace`) auto-select a default runner when `--runner` is omitted. Selection is conservative:
 
 - `--runner <id>` always wins.
 - `--placement local` keeps a portable hot command local even when a default Lab runner is available, unless a command-specific host policy denies local execution. For benchmarks, `homeboy config set /bench/local_execution '"denied"'` makes local `homeboy bench` execution fail closed until the global config is changed back.
@@ -87,8 +87,6 @@ Lab offload support is intentionally command-specific:
 | Command | Auto offload | Explicit `--runner` | Decision |
 |---|---:|---:|---|
 | `agent-task cook` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
-| `agent-task controller from-spec --resume` / `agent-task controller run-from-spec` / `agent-task controller materialize` | Yes | Yes | Portable controller spec materialization defaults to Lab when a default runner exists. |
-| `agent-task controller resume` | No | Yes | Runner-resident controller lifecycle work. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
 | `agent-task run` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |

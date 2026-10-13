@@ -789,123 +789,15 @@ fn the_terminal_event_is_claimed_once_per_cook_not_once_per_attempt() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn a_waiting_controller_says_what_it_is_waiting_on() {
-    // `Waiting` emitted nothing at all, so an orchestrator had no signal
-    // its controller had stalled.
-    let payload = controller_waiting_payload(
-        "loop-1",
-        Some("review"),
-        &[ControllerWaitSummary {
-            wait_key: "controller:child:terminal".to_string(),
-            event_type: "controller.terminal".to_string(),
-            external_ref: Some("child-loop".to_string()),
-        }],
-    );
-    assert_eq!(payload.kind, NotifyEventKind::Progress);
-    let body = payload.render_body();
-    assert!(body.contains("controller.terminal (child-loop)"), "{body}");
-    assert!(
-        body.contains("homeboy agent-task controller resume loop-1"),
-        "{body}"
-    );
-}
-
-#[test]
-fn a_controller_reaching_a_state_it_cannot_leave_needs_attention() {
-    let escalated = controller_state_payload(
-        "loop-1",
-        None,
-        AgentTaskLoopControllerState::Waiting,
-        AgentTaskLoopControllerState::Escalated,
-        Some("wait timed out"),
-        0,
-    );
-    assert_eq!(escalated.kind, NotifyEventKind::NeedsAttention);
-    assert!(escalated.render_body().contains("wait timed out"));
-
-    let resumed = controller_state_payload(
-        "loop-1",
-        None,
-        AgentTaskLoopControllerState::Waiting,
-        AgentTaskLoopControllerState::Running,
-        None,
-        0,
-    );
-    assert_eq!(resumed.kind, NotifyEventKind::Progress);
-
-    let done = controller_state_payload(
-        "loop-1",
-        None,
-        AgentTaskLoopControllerState::Running,
-        AgentTaskLoopControllerState::Completed,
-        None,
-        0,
-    );
-    assert_eq!(done.kind, NotifyEventKind::Completed);
-}
-
-#[test]
-fn a_controller_state_change_to_the_same_state_emits_nothing() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        // A transport that always fails, so a delivered event is visible as
-        // a queued outbox entry and a suppressed one is visible as silence.
-        install_transport("test.noop", vec!["false"]);
-        set_default_transport("test.noop");
-
-        controller_state_changed(
-            "loop-noop",
-            None,
-            AgentTaskLoopControllerState::Waiting,
-            AgentTaskLoopControllerState::Waiting,
-            None,
-            1,
-        );
-        assert!(
-            homeboy_core::notify_outbox::pending_entries().is_empty(),
-            "a no-op transition must not emit",
-        );
-
-        // A real transition to a state the controller cannot leave does.
-        controller_state_changed(
-            "loop-noop",
-            None,
-            AgentTaskLoopControllerState::Waiting,
-            AgentTaskLoopControllerState::Escalated,
-            Some("wait timed out"),
-            0,
-        );
-        assert_eq!(homeboy_core::notify_outbox::pending_entries().len(), 1);
-    });
-}
-
-#[test]
-fn controller_progress_does_not_reach_an_ambient_default_transport() {
-    // Same noise contract as cook: an operator who configured a default
-    // transport asked for outcomes, not per-wait progress.
+fn progress_does_not_reach_an_ambient_default_transport() {
+    // An operator who configured a default transport asked for outcomes, not
+    // per-attempt progress.
     assert!(!should_deliver(NotifyEventKind::Progress, false));
     assert!(should_deliver(NotifyEventKind::NeedsAttention, false));
 }
 
 #[test]
-fn controller_emission_is_inert_without_a_configured_transport() {
+fn batch_emission_is_inert_without_a_configured_transport() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        controller_state_changed(
-            "loop-1",
-            Some("review"),
-            AgentTaskLoopControllerState::Running,
-            AgentTaskLoopControllerState::Escalated,
-            Some("stalled"),
-            2,
-        );
-        controller_waiting(
-            "loop-1",
-            None,
-            &[ControllerWaitSummary {
-                wait_key: "w".to_string(),
-                event_type: "controller.terminal".to_string(),
-                external_ref: None,
-            }],
-        );
-        controller_action_failed("loop-1", None, "action-1", "run_gates", "gate failed");
     });
 }

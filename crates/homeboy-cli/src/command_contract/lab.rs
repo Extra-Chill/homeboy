@@ -209,10 +209,6 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     // each child Cook, so the placement arguments must stay discoverable.
     &["agent-task", "fanout", "cook-batch"],
     &["agent-task", "auth", "status"],
-    &["agent-task", "controller", "from-spec"],
-    &["agent-task", "controller", "run-from-spec"],
-    &["agent-task", "controller", "materialize"],
-    &["agent-task", "controller", "resume"],
     &["bench"],
     &["bench", "matrix"],
     &["fuzz"],

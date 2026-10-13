@@ -2,7 +2,7 @@
 //!
 //! This module is a thin dispatcher. The CLI contract (arg/subcommand types)
 //! lives in [`args`], and each command family is handled by a focused sibling
-//! module: [`auth`], [`controller`], [`run`], [`status`], and [`review`].
+//! module: [`auth`], [`run`], [`status`], and [`review`].
 
 use serde::Serialize;
 use serde_json::Value;
@@ -15,13 +15,11 @@ pub mod auth;
 pub(crate) mod candidate;
 pub mod capacity;
 pub mod contract;
-pub mod controller;
 pub mod cook_batch;
 pub(crate) mod default_branch;
 pub mod doctor;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
-pub mod loop_definition;
 pub mod prompts;
 pub(crate) mod provider_evidence;
 pub mod retained_artifacts;
@@ -32,19 +30,12 @@ pub mod tool;
 
 pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
-    AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand,
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs, AgentTaskControllerCommand,
-    AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
-    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
-    AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
+    AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
-    AgentTaskLoopArgs, AgentTaskLoopCommand, AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs,
-    AgentTaskLoopStatusArgs, CancelArgs, CompileLoopArgs, ContractArgs, ContractFormat,
-    CookContinueArgs, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
-    GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs,
-    PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    CancelArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs, DiagnoseArgs,
+    EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
+    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
+    RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
     RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
@@ -322,7 +313,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         }
         AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
-        AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
@@ -517,9 +507,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Capacity(capacity_args) => capacity::capacity(capacity_args),
         AgentTaskCommand::Prompts(prompts_args) => prompts::prompts(prompts_args),
         AgentTaskCommand::Contract(contract_args) => contract::contract(contract_args),
-        AgentTaskCommand::CompileLoop(compile_args) => loop_definition::compile_loop(compile_args),
         AgentTaskCommand::Auth(auth_args) => auth::auth(auth_args),
-        AgentTaskCommand::Controller(controller_args) => controller::controller(controller_args),
         AgentTaskCommand::Tool(tool_args) => match tool_args.command {
             tool::AgentTaskToolCommand::Dispatch(_) => {
                 Err(homeboy::core::Error::validation_invalid_argument(
