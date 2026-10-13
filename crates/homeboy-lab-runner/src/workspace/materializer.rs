@@ -24,6 +24,11 @@ pub(super) enum WorkspaceMaterializationOperation {
         borrow_cache: bool,
         retain: Vec<String>,
     },
+    /// Copy the closure of a commit the object cache already records into a
+    /// fresh repository, with no transfer.
+    CloneObjectCacheToTemp {
+        head: String,
+    },
     SetGitOrigin(String),
     CheckoutGitRef {
         head: String,
@@ -184,6 +189,11 @@ impl WorkspaceMaterializationOperation {
                     "git clone --reference-if-able \"$cache\" \"$bundle\" \"$tmp\" && if [ -f \"$tmp/.git/objects/info/alternates\" ]; then true{pins} && git -C \"$tmp\" repack -a -d -q && rm -f \"$tmp/.git/objects/info/alternates\" && git -C \"$tmp\" rev-list --objects --all >/dev/null && {{ git -C \"$tmp\" for-each-ref --format='%(refname)' refs/homeboy-retain/ | while IFS= read -r ref; do git -C \"$tmp\" update-ref -d \"$ref\"; done; }}; fi"
                 )
             }
+            Self::CloneObjectCacheToTemp { head } => format!(
+                "rm -rf \"$tmp\" && git init -q \"$tmp\" && git -C \"$tmp\" remote add origin \"$cache\" && git -C \"$tmp\" fetch -q --no-tags origin {refspec} && git -C \"$tmp\" rev-list --objects {head} >/dev/null",
+                refspec = shell::quote_arg(&format!("refs/homeboy/{head}")),
+                head = shell::quote_arg(head),
+            ),
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
                 remote_url = shell::quote_arg(remote_url)

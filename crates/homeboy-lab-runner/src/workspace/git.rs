@@ -172,20 +172,28 @@ pub(super) fn materialize_git_bundle_controlled(
     // `HEAD` preserves the complete selected ancestry in a bundle. The exact
     // resolved SHA is recorded separately in provenance and verified on Lab.
     let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
+    let object_cache = git_object_cache_path(request.remote_path, request.remote_url);
+    let cached = cached_commits(runner, &object_cache, control)?;
+
+    // The runner already holds this exact commit (a sibling of the same batch,
+    // or the batch's prepared bundle, transferred it): install from the cache
+    // and transfer nothing. A cache that cannot serve it falls through to a
+    // transfer, which never depends on runner state.
+    if refs.len() == 1 && cached.iter().any(|commit| commit == request.head) {
+        match install_from_object_cache(runner, &request, &object_cache, control) {
+            Ok(()) => return Ok(object_cache_provenance(&request, refs)),
+            Err(error) if control.checkpoint().is_err() => return Err(error),
+            Err(_) => {}
+        }
+    }
     hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control)?;
 
     // Commits the runner's object cache already holds need not cross the wire.
     // A thin transfer that cannot be installed (the cache lost objects between
     // the query and the install) falls back to the complete closure, which
     // never depends on runner state.
-    let object_cache = git_object_cache_path(request.remote_path, request.remote_url);
-    let prerequisites = bundle_prerequisites(
-        runner,
-        request.local_path,
-        request.head,
-        &object_cache,
-        control,
-    )?;
+    let prerequisites =
+        bundle_prerequisites(request.local_path, request.head, &cached, control)?;
     if !prerequisites.is_empty() {
         match transfer_git_bundle(
             runner,
@@ -223,6 +231,45 @@ pub(super) fn materialize_git_bundle_controlled(
         Vec::new(),
         sha256,
     ))
+}
+
+/// Materialize the exact commit from the runner's object cache, with no
+/// transfer from the controller.
+fn install_from_object_cache(
+    runner: &Runner,
+    request: &ControllerGitBundleMaterializationRequest<'_>,
+    object_cache: &str,
+    control: &WorkspaceControl,
+) -> Result<()> {
+    let command = git_object_cache_install_command(
+        request.remote_path,
+        request.head,
+        request.branch,
+        request.remote_url,
+        request.changed_since_base,
+        request.allow_dirty_lab_workspace,
+        object_cache,
+    );
+    control.shell(
+        &super::util::shell_command_for_runner(runner, &command)?,
+        "materialize git workspace from the runner object cache",
+    )
+}
+
+fn object_cache_provenance(
+    request: &ControllerGitBundleMaterializationRequest<'_>,
+    refs: Vec<String>,
+) -> ControllerGitBundleProvenance {
+    ControllerGitBundleProvenance {
+        provenance: "runner_object_cache",
+        source_sha: request.head.to_string(),
+        source_refs: refs,
+        prerequisites: Vec::new(),
+        // Nothing crossed the wire, so there is no transferred bundle digest.
+        sha256: String::new(),
+        cleanup_owner: "runner",
+        cleanup_ttl: "PT0S",
+    }
 }
 
 fn controller_bundle_provenance(
@@ -268,30 +315,15 @@ const GIT_OBJECT_CACHE_REF_LIMIT: usize = 64;
 /// prerequisites the cache is known to hold. An unreachable or empty cache
 /// yields no exclusions and a complete transfer.
 fn bundle_prerequisites(
-    runner: &Runner,
     local_path: &Path,
     head: &str,
-    object_cache: &str,
+    cached: &[String],
     control: &WorkspaceControl,
 ) -> Result<Vec<String>> {
-    let list = format!(
-        "git -C {cache} for-each-ref --sort=-committerdate --count={GIT_OBJECT_CACHE_REF_LIMIT} --format='%(objectname)' refs/homeboy/ 2>/dev/null || true",
-        cache = shell::quote_arg(object_cache),
-    );
-    let output = control.output(
-        Command::new("sh").args(["-c", &super::util::shell_command_for_runner(runner, &list)?]),
-        "list runner git object cache",
-    )?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
     let mut prerequisites = Vec::new();
-    for commit in String::from_utf8_lossy(&output.stdout).lines() {
-        let commit = commit.trim();
-        if commit.len() < 40
-            || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || prerequisites.iter().any(|known| known == commit)
-        {
+    for commit in cached {
+        let commit = commit.as_str();
+        if prerequisites.iter().any(|known| known == commit) {
             continue;
         }
         let present = control.output(
@@ -315,6 +347,32 @@ fn bundle_prerequisites(
         }
     }
     Ok(prerequisites)
+}
+
+/// The commits the runner's object cache records, newest first. An
+/// unreachable or empty cache yields none.
+fn cached_commits(
+    runner: &Runner,
+    object_cache: &str,
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
+    let list = format!(
+        "git -C {cache} for-each-ref --sort=-committerdate --count={GIT_OBJECT_CACHE_REF_LIMIT} --format='%(objectname)' refs/homeboy/ 2>/dev/null || true",
+        cache = shell::quote_arg(object_cache),
+    );
+    let output = control.output(
+        Command::new("sh").args(["-c", &super::util::shell_command_for_runner(runner, &list)?]),
+        "list runner git object cache",
+    )?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|commit| commit.len() >= 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .collect())
 }
 
 /// Commits named by the bundle's non-`HEAD` refs, which the runner workspace
@@ -1060,6 +1118,50 @@ pub(crate) fn git_bundle_install_command(
         .op(WorkspaceMaterializationOperation::CloneBundleToTemp {
             borrow_cache: !transfer.prerequisites.is_empty(),
             retain: transfer.retain.to_vec(),
+        })
+        .op(WorkspaceMaterializationOperation::SetGitOrigin(
+            remote_url.to_string(),
+        ))
+        .op(WorkspaceMaterializationOperation::CheckoutGitRef {
+            head: head.to_string(),
+            branch: branch.map(str::to_string),
+        })
+        .op(WorkspaceMaterializationOperation::ResetAndCleanGit {
+            head: head.to_string(),
+        })
+        .op(WorkspaceMaterializationOperation::GuardCleanGitWorkspace {
+            allow_dirty: allow_dirty_lab_workspace,
+        })
+        .op(WorkspaceMaterializationOperation::AtomicReplaceTemp)
+        .op(WorkspaceMaterializationOperation::VerifyGitBaseline {
+            remote_url: remote_url.to_string(),
+            head: head.to_string(),
+            changed_since_base: changed_since_base.map(str::to_string),
+        })
+        .restore_owner()
+        .command()
+}
+
+/// Install `head` into a fresh workspace straight from the runner's object
+/// cache. The workspace copies the closure, so it never depends on the cache.
+pub(crate) fn git_object_cache_install_command(
+    remote_path: &str,
+    head: &str,
+    branch: Option<&str>,
+    remote_url: &str,
+    changed_since_base: Option<&str>,
+    allow_dirty_lab_workspace: bool,
+    object_cache: &str,
+) -> String {
+    WorkspaceMaterializer::new(remote_path)
+        .with_bundle_file(object_cache)
+        .capture_owner()
+        .op(WorkspaceMaterializationOperation::EnsureParent)
+        .op(WorkspaceMaterializationOperation::CleanupOnExit(vec![
+            "\"$tmp\"".to_string(),
+        ]))
+        .op(WorkspaceMaterializationOperation::CloneObjectCacheToTemp {
+            head: head.to_string(),
         })
         .op(WorkspaceMaterializationOperation::SetGitOrigin(
             remote_url.to_string(),

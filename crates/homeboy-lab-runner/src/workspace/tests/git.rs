@@ -693,13 +693,25 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
         assert!(!warm_path.join(".git/objects/info/alternates").exists());
         git(warm_path, &["fsck", "--connectivity-only"]);
 
-        // Re-staging a head the cache already contains still transfers it.
+        // Re-staging a head the cache already contains (a sibling of the same
+        // batch, or its prepared bundle) transfers nothing: the workspace is
+        // installed from the runner cache and owns its own objects.
         let again = materialize(&workspace("again"), &second);
-        assert_eq!(again.prerequisites, vec![first.clone()]);
+        assert_eq!(again.provenance, "runner_object_cache");
+        assert!(again.prerequisites.is_empty() && again.sha256.is_empty());
+        let again_workspace = workspace("again");
+        let again_path = Path::new(&again_workspace);
+        assert_eq!(git_output(again_path, &["rev-parse", "HEAD"]).unwrap(), second);
         assert_eq!(
-            git_output(Path::new(&workspace("again")), &["rev-parse", "HEAD"]).unwrap(),
-            second
+            git_output(again_path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(),
+            "main"
         );
+        assert_eq!(
+            git_output(again_path, &["config", "--get", "remote.origin.url"]).unwrap(),
+            "https://github.com/Extra-Chill/homeboy.git"
+        );
+        assert!(!again_path.join(".git/objects/info/alternates").exists());
+        git(again_path, &["fsck", "--connectivity-only"]);
 
         // A pinned commit that only the cache holds is copied into the
         // workspace, although the thin bundle carries no ref for it.
@@ -751,6 +763,14 @@ fn controller_git_bundle_transfers_only_commits_missing_from_runner_cache() {
         git(
             &cache,
             &["update-ref", &format!("refs/homeboy/{second}"), &second],
+        );
+        // The cache advertises `second` but cannot serve its closure: the
+        // reuse fails closed and the commit is transferred instead.
+        let unserved = materialize(&workspace("unserved"), &second);
+        assert_eq!(unserved.provenance, "controller_git_bundle");
+        assert_eq!(
+            git_output(Path::new(&workspace("unserved")), &["rev-parse", "HEAD"]).unwrap(),
+            second
         );
         let fallback = materialize(&workspace("lost"), &third);
         assert!(fallback.prerequisites.is_empty());
