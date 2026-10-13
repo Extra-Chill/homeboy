@@ -126,9 +126,21 @@ impl WorkflowJobRequest {
     }
 }
 
-/// Resolves a Cook step's durable outcome (its run state) once its run is
-/// terminal. Registered by the agent-task layer.
-pub type WorkflowRunOutcomeResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// What a Cook step's durable run says about its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowRunOutcome {
+    /// No durable record exists: the step job's own status is the outcome.
+    Unknown,
+    /// The Cook has not settled: its run, or the terminal continuation that
+    /// promotes and finalizes it, is still in progress.
+    Pending,
+    /// The Cook settled with this run state.
+    Settled(String),
+}
+
+/// Resolves a Cook step's durable outcome from its run record. Registered by
+/// the agent-task layer.
+pub type WorkflowRunOutcomeResolver = Arc<dyn Fn(&str) -> WorkflowRunOutcome + Send + Sync>;
 
 fn run_outcome_resolver() -> &'static RwLock<Option<WorkflowRunOutcomeResolver>> {
     static RESOLVER: OnceLock<RwLock<Option<WorkflowRunOutcomeResolver>>> = OnceLock::new();
@@ -438,13 +450,20 @@ fn step_result(
     let output_path = output_path(&request.instance, key).ok();
     let (outcome, output) = match kind {
         Some(crate::workflow::definition::StepKind::Cook(_)) => {
-            let outcome = run_id.as_deref().and_then(|run_id| {
+            let resolved = run_id.as_deref().and_then(|run_id| {
                 run_outcome_resolver()
                     .read()
                     .expect("workflow run outcome resolver lock")
                     .as_ref()
-                    .and_then(|resolve| resolve(run_id))
+                    .map(|resolve| resolve(run_id))
             });
+            // The Cook process ending is only a wake-up: the Cook settles when
+            // its run (and its terminal continuation) does.
+            let outcome = match resolved {
+                Some(WorkflowRunOutcome::Pending) => return None,
+                Some(WorkflowRunOutcome::Settled(outcome)) => Some(outcome),
+                Some(WorkflowRunOutcome::Unknown) | None => None,
+            };
             (
                 outcome,
                 output_path.and_then(|path| read_envelope_data(&path)),

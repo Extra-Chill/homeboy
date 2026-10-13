@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use homeboy_core::daemon::step_job::{self, StepExit, StepJobRequest};
+use homeboy_core::daemon::workflow_job::WorkflowRunOutcome;
 use homeboy_core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use homeboy_core::{Error, ErrorCode, Result};
 use serde_json::{json, Value};
@@ -286,17 +287,32 @@ fn workflow_cook_record(cook_id: &str) -> Option<agent_task_lifecycle::AgentTask
         .or_else(|| store.read_record(cook_id).ok())
 }
 
-/// The terminal run state of a Cook's latest attempt (or of its handoff
-/// parent, when no attempt materialized). `None` until it is terminal.
-fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
-    let record = workflow_cook_record(cook_id)?;
+/// The settled run state of a Cook's latest attempt (or of its handoff parent,
+/// when no attempt materialized). A terminal attempt whose terminal
+/// continuation (promotion and PR finalization) is still queued or running has
+/// not settled: the continuation decides its final state.
+fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
+    let Some(record) = workflow_cook_record(cook_id) else {
+        return WorkflowRunOutcome::Unknown;
+    };
     if !record.state.is_terminal() {
-        return None;
+        return WorkflowRunOutcome::Pending;
     }
-    serde_json::to_value(record.state)
-        .ok()?
-        .as_str()
-        .map(str::to_string)
+    let continuation = super::CookRecipeStore::from_current_data_root()
+        .and_then(|store| super::continuation_state_in_store(&store, cook_id, &record.run_id));
+    if matches!(
+        continuation,
+        Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed)
+    ) {
+        return WorkflowRunOutcome::Pending;
+    }
+    match serde_json::to_value(record.state)
+        .ok()
+        .and_then(|state| state.as_str().map(str::to_string))
+    {
+        Some(state) => WorkflowRunOutcome::Settled(state),
+        None => WorkflowRunOutcome::Unknown,
+    }
 }
 
 /// The live state and phase of a Cook's latest attempt, `None` before its
