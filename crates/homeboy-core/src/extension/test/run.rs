@@ -1,7 +1,7 @@
 use crate::extension;
 use crate::extension::invoke::{tail_lines, RunnerOutput, WRITE_TEST_RESULTS_ENV};
 use crate::extension::test::analyze::{analyze, TestAnalysisInput};
-use crate::extension::test::baseline::{self, TestCounts};
+use crate::extension::test::baseline::{TestAdapter, TestCounts};
 use crate::extension::test::durations::{
     build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestPolicy,
     TestDurations,
@@ -21,6 +21,9 @@ use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::local_files;
 use homeboy_engine_primitives::measurement::{Measurement, Verdict};
 use homeboy_engine_primitives::output_parse::ParseSpec;
+use homeboy_engine_primitives::workload_compare::{
+    apply_baseline_flags, BaselineGate, BaselineSlot,
+};
 pub use homeboy_extension_contract::test_results::{
     TestInventoryOutput, TestInventoryRejection, TestRunWorkflowResult, TestRuntimeEvidence,
     TestRuntimeIdentity,
@@ -1987,39 +1990,17 @@ fn run_main_test_workflow_inner(
         None
     };
 
-    if args.baseline_flags.baseline && !no_tests_applicable {
-        if let Some(ref counts) = test_counts {
-            let _ = baseline::save_baseline(source_path, &args.component_id, counts)?;
-        }
-    }
-
-    let mut baseline_comparison = None;
-    let mut baseline_exit_override = None;
-
-    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline && !no_tests_applicable
-    {
-        if let Some(ref counts) = test_counts {
-            let resolved_baseline = baseline::load_baseline(source_path).or_else(|| {
-                args.changed_since.as_ref().and_then(|git_ref| {
-                    baseline::load_baseline_from_ref(&source_path.to_string_lossy(), git_ref)
-                })
-            });
-
-            if let Some(existing_baseline) = resolved_baseline {
-                let comparison = baseline::compare(counts, &existing_baseline);
-
-                if comparison.regression {
-                    baseline_exit_override = Some(1);
-                } else if (comparison.passed_delta > 0 || comparison.failed_delta < 0)
-                    && args.baseline_flags.ratchet
-                {
-                    let _ = baseline::save_baseline(source_path, &args.component_id, counts);
-                }
-
-                baseline_comparison = Some(comparison);
-            }
-        }
-    }
+    let BaselineGate {
+        comparison: baseline_comparison,
+        exit_override: baseline_exit_override,
+    } = apply_baseline_flags::<TestAdapter>(
+        &BaselineSlot::new(source_path, None).with_fallback_ref(args.changed_since.as_deref()),
+        &args.component_id,
+        &args.baseline_flags,
+        test_counts.as_ref().filter(|_| !no_tests_applicable),
+        true,
+        &(),
+    )?;
 
     let mut hints = Vec::new();
 

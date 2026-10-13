@@ -7,15 +7,29 @@ use serde_json::Value;
 use homeboy::core::observation::{ObservationStore, RunListFilter};
 use homeboy::core::Error;
 
+use crate::commands::fuzz::{compare_fuzz_runs, FuzzCompareHotspotPolicy};
 use crate::commands::{escape_markdown_table_cell, CmdResult};
 
 use super::{bench_numeric_metrics, run_contains_scenario, run_summary, RunSummary, RunsOutput};
 
+/// History compare: selected metrics across the newest runs of a kind.
+/// Run-to-run compare (`--from-run` + `--to-run`): one kind's adapter on the
+/// shared compare engine diffs two exact runs.
 #[derive(Args, Clone)]
 pub struct RunsCompareArgs {
-    /// Run kind: bench, rig, trace, etc.
+    /// Run kind: bench, rig, trace, etc. Run-to-run compare supports bench and fuzz.
     #[arg(long, default_value = "bench")]
     pub kind: String,
+    /// Baseline run id. Compares exactly two runs; requires `--to-run`.
+    #[arg(long = "from-run", value_name = "RUN_ID", requires = "to_run")]
+    pub from_run: Option<String>,
+    /// Candidate run id. Compares exactly two runs; requires `--from-run`.
+    #[arg(long = "to-run", value_name = "RUN_ID", requires = "from_run")]
+    pub to_run: Option<String>,
+    /// Fuzz run-to-run compare: how relative hotspot regressions affect the
+    /// blocking compare status.
+    #[arg(long = "hotspot-policy", value_enum, default_value_t = FuzzCompareHotspotPolicy::Advisory)]
+    pub hotspot_policy: FuzzCompareHotspotPolicy,
     /// Component ID
     #[arg(long = "component")]
     pub component_id: Option<String>,
@@ -28,13 +42,15 @@ pub struct RunsCompareArgs {
     /// Run status
     #[arg(long)]
     pub status: Option<String>,
-    /// Metric to include. Repeat to compare multiple metrics.
-    #[arg(long = "metric", default_value = "total_elapsed_ms")]
+    /// Metric to include. Repeat to compare multiple metrics. History compare
+    /// defaults to `total_elapsed_ms`; bench run-to-run compare to every
+    /// metric either run recorded.
+    #[arg(long = "metric")]
     pub metrics: Vec<String>,
     /// Maximum runs to inspect
     #[arg(long, default_value_t = super::DEFAULT_LIMIT)]
     pub limit: i64,
-    /// Output format
+    /// History output format. Run-to-run compare always emits JSON.
     #[arg(long, value_enum, default_value_t = RunsCompareFormat::Table)]
     pub format: RunsCompareFormat,
 }
@@ -66,7 +82,7 @@ pub struct RunsCompareRow {
 }
 
 pub(crate) fn is_table_mode(args: &RunsCompareArgs) -> bool {
-    args.format == RunsCompareFormat::Table
+    args.format == RunsCompareFormat::Table && args.from_run.is_none()
 }
 
 pub(crate) fn run_markdown(store: &ObservationStore, args: RunsCompareArgs) -> CmdResult<String> {
@@ -84,8 +100,14 @@ pub(crate) fn run_markdown(store: &ObservationStore, args: RunsCompareArgs) -> C
 
 pub(super) fn compare_runs(
     store: &ObservationStore,
-    args: RunsCompareArgs,
+    mut args: RunsCompareArgs,
 ) -> CmdResult<RunsOutput> {
+    if let (Some(from_run), Some(to_run)) = (&args.from_run, &args.to_run) {
+        return compare_two_runs(store, &args, from_run, to_run);
+    }
+    if args.metrics.is_empty() {
+        args.metrics.push("total_elapsed_ms".to_string());
+    }
     let limit = args.limit.clamp(1, 1000);
     let runs = store.list_runs(RunListFilter {
         kind: Some(args.kind.clone()),
@@ -145,6 +167,29 @@ pub(super) fn compare_runs(
         }),
         0,
     ))
+}
+
+/// Run-to-run compare, keyed by kind to that kind's compare adapter.
+fn compare_two_runs(
+    store: &ObservationStore,
+    args: &RunsCompareArgs,
+    from_run: &str,
+    to_run: &str,
+) -> CmdResult<RunsOutput> {
+    match args.kind.as_str() {
+        "bench" => super::bench::bench_compare(store, from_run, to_run, &args.metrics),
+        "fuzz" => compare_fuzz_runs(store, from_run, to_run, args.hotspot_policy, "runs.compare")
+            .map(|output| (RunsOutput::FuzzCompare(output), 0)),
+        kind => Err(Error::validation_invalid_argument(
+            "kind",
+            format!("run-to-run compare is not available for kind '{kind}'"),
+            Some(kind.to_string()),
+            Some(vec![
+                "Run-to-run compare supports `--kind bench` and `--kind fuzz`.".to_string(),
+                "Drop --from-run/--to-run to compare metrics across the run history.".to_string(),
+            ]),
+        )),
+    }
 }
 
 fn compare_scenarios_for_run(
@@ -285,6 +330,160 @@ mod tests {
     use homeboy::test_support::with_isolated_home;
 
     use crate::commands::runs::test_support::sample_run;
+
+    fn history_args(kind: &str) -> RunsCompareArgs {
+        RunsCompareArgs {
+            kind: kind.to_string(),
+            from_run: None,
+            to_run: None,
+            hotspot_policy: FuzzCompareHotspotPolicy::Advisory,
+            component_id: Some("studio".to_string()),
+            rig: Some("studio-bfb".to_string()),
+            scenario_id: Some("site-build".to_string()),
+            status: None,
+            metrics: Vec::new(),
+            limit: 20,
+            format: RunsCompareFormat::Json,
+        }
+    }
+
+    fn two_runs(kind: &str, from_run: &str, to_run: &str) -> RunsCompareArgs {
+        RunsCompareArgs {
+            from_run: Some(from_run.to_string()),
+            to_run: Some(to_run.to_string()),
+            component_id: None,
+            rig: None,
+            scenario_id: None,
+            ..history_args(kind)
+        }
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        compare: RunsCompareArgs,
+    }
+
+    #[test]
+    fn run_to_run_flags_parse_together_and_skip_table_mode() {
+        use clap::Parser;
+        let parsed = Cli::try_parse_from([
+            "compare",
+            "--kind",
+            "fuzz",
+            "--from-run",
+            "a",
+            "--to-run",
+            "b",
+            "--hotspot-policy",
+            "blocking",
+        ])
+        .expect("run-to-run args parse")
+        .compare;
+        assert_eq!(parsed.from_run.as_deref(), Some("a"));
+        assert_eq!(parsed.to_run.as_deref(), Some("b"));
+        assert_eq!(parsed.hotspot_policy, FuzzCompareHotspotPolicy::Blocking);
+        assert!(!is_table_mode(&parsed));
+
+        assert!(Cli::try_parse_from(["compare", "--from-run", "a"]).is_err());
+        assert!(Cli::try_parse_from(["compare", "--to-run", "b"]).is_err());
+        assert!(is_table_mode(
+            &Cli::try_parse_from(["compare"]).unwrap().compare
+        ));
+    }
+
+    #[test]
+    fn history_compare_defaults_to_total_elapsed_metric() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let (output, _) = compare_runs(&test_store(), history_args("bench")).expect("compare");
+            let RunsOutput::Compare(output) = output else {
+                panic!("expected history compare output");
+            };
+            assert_eq!(output.metrics, vec!["total_elapsed_ms".to_string()]);
+        });
+    }
+
+    #[test]
+    fn run_to_run_compare_rejects_kinds_without_an_adapter() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let err = compare_runs(&test_store(), two_runs("trace", "a", "b"))
+                .err()
+                .expect("trace has no run-to-run adapter");
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("kind 'trace'"));
+        });
+    }
+
+    fn fuzz_run() -> homeboy::core::observation::NewRunRecord {
+        homeboy::core::observation::NewRunRecord::builder("fuzz")
+            .component_id("homeboy")
+            .command("homeboy fuzz run homeboy")
+            .cwd_path(std::path::Path::new("/tmp/homeboy-fixture"))
+            .homeboy_version("test-version")
+            .metadata(serde_json::json!({}))
+            .build()
+    }
+
+    fn fuzz_envelope(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "homeboy/fuzz-result-envelope/v1",
+            "version": 1,
+            "id": id,
+            "status": "passed",
+            "request": {
+                "schema": "homeboy/fuzz-execution-request/v1",
+                "version": 1,
+                "id": format!("{id}-request"),
+                "component": "homeboy"
+            }
+        })
+    }
+
+    /// Moved from the deleted `runs fuzz-compare` subcommand: the same exact
+    /// run-id comparison, now reached through `runs compare --kind fuzz`.
+    #[test]
+    fn fuzz_compare_resolves_envelopes_from_run_artifacts() {
+        with_isolated_home(|home| {
+            homeboy::core::set_artifact_root_override(Some(home.path().join("artifacts")));
+            let store = ObservationStore::open_initialized().expect("store");
+            let baseline = store.start_run(fuzz_run()).expect("baseline run");
+            store
+                .finish_run(&baseline.id, RunStatus::Pass, None)
+                .expect("finish baseline");
+            let candidate = store.start_run(fuzz_run()).expect("candidate run");
+            store
+                .finish_run(&candidate.id, RunStatus::Pass, None)
+                .expect("finish candidate");
+
+            for (run, id) in [(&baseline, "baseline"), (&candidate, "candidate")] {
+                let path = home.path().join(format!("{id}-envelope.json"));
+                std::fs::write(&path, fuzz_envelope(id).to_string()).expect("envelope");
+                store
+                    .record_artifact(&run.id, "fuzz_result_envelope", &path)
+                    .expect("envelope artifact");
+            }
+
+            let (output, exit_code) =
+                compare_runs(&test_store(), two_runs("fuzz", &baseline.id, &candidate.id))
+                    .expect("fuzz compare");
+
+            assert_eq!(exit_code, 0);
+            let RunsOutput::FuzzCompare(output) = output else {
+                panic!("expected fuzz compare output");
+            };
+            assert_eq!(output.schema, "homeboy/fuzz-compare/v1");
+            assert_eq!(output.command, "runs.compare");
+            assert_eq!(output.baseline.envelope_id, "baseline");
+            assert_eq!(output.candidate.envelope_id, "candidate");
+            assert!(output
+                .baseline_file
+                .starts_with(&format!("homeboy://run/{}/artifact/", baseline.id)));
+            homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
     #[test]
     fn runs_compare_filters_history_and_reports_selected_metrics() {
         with_isolated_home(|_home| {
@@ -334,14 +533,8 @@ mod tests {
             let (output, _) = compare_runs(
                 &test_store(),
                 RunsCompareArgs {
-                    kind: "bench".to_string(),
-                    component_id: Some("studio".to_string()),
-                    rig: Some("studio-bfb".to_string()),
-                    scenario_id: Some("site-build".to_string()),
-                    status: None,
                     metrics: vec!["total_elapsed_ms".to_string(), "p95_ms".to_string()],
-                    limit: 20,
-                    format: RunsCompareFormat::Json,
+                    ..history_args("bench")
                 },
             )
             .expect("compare");

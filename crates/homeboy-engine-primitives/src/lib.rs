@@ -31,6 +31,7 @@ pub mod test_execution;
 pub mod test_path;
 pub mod text;
 pub mod validation;
+pub mod workload_compare;
 
 // Re-exported so the `provider_registry!` / `provider_registry_arc!` expansions
 // can reach `inventory` as `$crate::inventory` from any crate in the workspace

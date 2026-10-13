@@ -658,7 +658,7 @@ pub struct FuzzGateEvaluation {
     pub expected: f64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct FuzzCoverageCompletenessOutput {
     pub has_summary: bool,
     pub declared_targets: u64,

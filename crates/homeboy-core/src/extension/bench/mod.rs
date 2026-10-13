@@ -3,11 +3,11 @@
 //!
 //! Bench is a sibling of `lint` / `test` / `build` under `ExtensionCapability`.
 //! It shares the runner contract (env-var-driven, JSON-output-file), the
-//! manifest shape (`bench: { extension_script: "..." }`), and the baseline
-//! ratchet primitive (`engine::baseline`). What makes bench distinct is the
-//! **threshold-based regression check on numeric metrics** — see
-//! [`baseline::compare`] for the logic and [`baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT`]
-//! for the legacy p95 default.
+//! manifest shape (`bench: { extension_script: "..." }`), and the shared
+//! baseline / compare / gate engine (`workload_compare`). What makes bench
+//! distinct is its adapter's **threshold-based regression check on numeric
+//! metrics** — see [`baseline::BenchAdapter`] and
+//! [`baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT`] for the p95 default.
 //!
 //! Contract with extension scripts:
 //! - `$HOMEBOY_BENCH_RESULTS_FILE` — path to write the JSON envelope to.
@@ -52,11 +52,7 @@ pub use artifact_persistence::{
     apply_recorded_bench_artifact_links, record_bench_observation_artifacts, record_if_exists,
     record_memory_timeline_artifacts,
 };
-pub use baseline::{
-    compare as compare_baseline, load_baseline, save_baseline, BenchBaseline,
-    BenchBaselineComparison, BenchBaselineMetadata, BenchScenarioSnapshot, ScenarioDelta,
-    DEFAULT_REGRESSION_THRESHOLD_PERCENT,
-};
+pub use baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT;
 pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
 pub use gate::{evaluate_gates, normalized_gate_results, BenchGate, BenchGateOp, BenchGateResult};

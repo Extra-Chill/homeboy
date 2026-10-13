@@ -24,7 +24,6 @@ mod distribution;
 mod dossier;
 mod evidence;
 mod findings;
-mod fuzz_compare;
 mod gh_actions;
 mod gh_actions_cache;
 mod handlers;

@@ -233,7 +233,7 @@ fn resolve_trace_baseline_root_with_rig_uses_rig_state_dir_and_skips_component_p
 
 #[test]
 fn rig_save_baseline_does_not_write_component_homeboy_json() {
-    use crate::extension::trace::baseline;
+    use crate::extension::trace::baseline::TraceAdapter;
     use crate::extension::trace::parsing::{
         TraceResults, TraceSpanResult, TraceSpanStatus, TraceStatus,
     };
@@ -280,8 +280,14 @@ fn rig_save_baseline_does_not_write_component_homeboy_json() {
         preview: None,
     };
 
-    let written = baseline::save_baseline(&baseline_root, "studio", &results, Some(&rig_id))
-        .expect("rig baseline saves into rig state dir");
+    let slot = homeboy_engine_primitives::workload_compare::BaselineSlot::new(
+        &baseline_root,
+        Some(&rig_id),
+    );
+    let written = homeboy_engine_primitives::workload_compare::save_baseline::<TraceAdapter>(
+        &slot, "studio", &results,
+    )
+    .expect("rig baseline saves into rig state dir");
 
     assert!(
         written.starts_with(&baseline_root),
@@ -293,7 +299,7 @@ fn rig_save_baseline_does_not_write_component_homeboy_json() {
         "rig baseline save must not write homeboy.json into the component checkout"
     );
 
-    let loaded = baseline::load_baseline(&baseline_root, Some(&rig_id))
+    let loaded = homeboy_engine_primitives::workload_compare::load_baseline::<TraceAdapter>(&slot)
         .expect("rig baseline loads from rig state dir");
     assert_eq!(loaded.metadata.spans[0].id, "submit_to_cli");
 

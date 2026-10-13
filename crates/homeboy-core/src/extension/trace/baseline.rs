@@ -1,41 +1,25 @@
-//! Trace span baseline and ratchet support.
-
-use std::collections::HashMap;
-use std::path::Path;
+//! Trace baseline adapter: span durations and assertion outcomes (#15840).
+//!
+//! Trace plugs into the shared baseline / compare / gate engine
+//! ([`homeboy_engine_primitives::workload_compare`]). A snapshot is every
+//! timed span plus every assertion (status and metric); a span regresses when
+//! it slows by more than both the percent threshold and the minimum delta, an
+//! assertion when it stops passing or its metric grows.
 
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::error::Result;
-use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
+use homeboy_engine_primitives::baseline as generic;
+use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter, Verdict};
 
 use super::parsing::{TraceAssertion, TraceAssertionStatus, TraceResults};
 
-const BASELINE_KEY: &str = "trace";
 pub const DEFAULT_REGRESSION_THRESHOLD_PERCENT: f64 = 5.0;
 pub const DEFAULT_REGRESSION_MIN_DELTA_MS: u64 = 50;
-
-fn baseline_key_for(rig_id: Option<&str>) -> String {
-    rig_id.map_or_else(|| BASELINE_KEY.to_string(), |id| format!("trace.rig.{id}"))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceSpanSnapshot {
     pub id: String,
     pub duration_ms: u64,
-}
-
-impl generic::Fingerprintable for TraceSpanSnapshot {
-    fn fingerprint(&self) -> String {
-        format!("trace-span:{}", self.id)
-    }
-
-    fn description(&self) -> String {
-        format!("{}ms", self.duration_ms)
-    }
-
-    fn context_label(&self) -> String {
-        format!("trace span {}", self.id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,23 +28,6 @@ pub struct TraceAssertionSnapshot {
     pub status: TraceAssertionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<f64>,
-}
-
-impl generic::Fingerprintable for TraceAssertionSnapshot {
-    fn fingerprint(&self) -> String {
-        format!("trace-assertion:{}", self.id)
-    }
-
-    fn description(&self) -> String {
-        match self.metric {
-            Some(metric) => format!("{:?} ({metric:.2})", self.status),
-            None => format!("{:?}", self.status),
-        }
-    }
-
-    fn context_label(&self) -> String {
-        format!("trace assertion {}", self.id)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -78,6 +45,7 @@ pub struct TraceAssertionDelta {
     pub improvement: bool,
 }
 
+/// Trace snapshot; exactly what `homeboy.json` stores as the baseline metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceBaselineMetadata {
     #[serde(default)]
@@ -119,205 +87,168 @@ pub struct TraceBaselineComparison {
     pub reasons: Vec<String>,
 }
 
-pub fn save_baseline(
-    source_path: &Path,
-    component_id: &str,
-    results: &TraceResults,
-    rig_id: Option<&str>,
-) -> Result<std::path::PathBuf> {
-    let snapshots = snapshots_from_results(results);
-    let assertion_snapshots = assertion_snapshots_from_results(results);
-    let mut items = Vec::with_capacity(snapshots.len() + assertion_snapshots.len());
-    items.extend(snapshots.iter().map(TraceBaselineItem::Span));
-    items.extend(assertion_snapshots.iter().map(TraceBaselineItem::Assertion));
-    let metadata = TraceBaselineMetadata {
-        spans: snapshots.clone(),
-        assertions: assertion_snapshots.clone(),
-    };
-    let key = baseline_key_for(rig_id);
-    let config = BaselineConfig::new(source_path, key);
-    generic::save(&config, component_id, &items, metadata)
+/// Span regression thresholds: a span regresses only when it slows by more
+/// than `min_delta_ms` *and* by more than `threshold_percent`.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceThresholds {
+    pub threshold_percent: f64,
+    pub min_delta_ms: u64,
 }
 
-pub fn load_baseline(source_path: &Path, rig_id: Option<&str>) -> Option<TraceBaseline> {
-    let key = baseline_key_for(rig_id);
-    let config = BaselineConfig::new(source_path, key);
-    generic::load::<TraceBaselineMetadata>(&config).unwrap_or_default()
-}
+/// The trace [`KindAdapter`].
+pub struct TraceAdapter;
 
-pub fn compare(
-    current: &TraceResults,
-    baseline: &TraceBaseline,
-    threshold_percent: f64,
-    min_delta_ms: u64,
-) -> TraceBaselineComparison {
-    let current_snapshots = snapshots_from_results(current);
-    let baseline_by_id: HashMap<&str, &TraceSpanSnapshot> = baseline
-        .metadata
-        .spans
-        .iter()
-        .map(|span| (span.id.as_str(), span))
-        .collect();
-    let current_by_id: HashMap<&str, &TraceSpanSnapshot> = current_snapshots
-        .iter()
-        .map(|span| (span.id.as_str(), span))
-        .collect();
-    let current_assertion_snapshots = assertion_snapshots_from_results(current);
-    let baseline_assertions_by_id: HashMap<&str, &TraceAssertionSnapshot> = baseline
-        .metadata
-        .assertions
-        .iter()
-        .map(|assertion| (assertion.id.as_str(), assertion))
-        .collect();
-    let current_assertions_by_id: HashMap<&str, &TraceAssertionSnapshot> =
-        current_assertion_snapshots
+impl KindAdapter for TraceAdapter {
+    const KIND: &'static str = "trace";
+    type Source = TraceResults;
+    type Snapshot = TraceBaselineMetadata;
+    type Options = TraceThresholds;
+    type Delta = TraceBaselineComparison;
+
+    fn snapshot(results: &TraceResults) -> TraceBaselineMetadata {
+        TraceBaselineMetadata {
+            spans: results
+                .span_results
+                .iter()
+                .filter_map(|span| {
+                    Some(TraceSpanSnapshot {
+                        id: span.id.clone(),
+                        duration_ms: span.duration_ms?,
+                    })
+                })
+                .collect(),
+            assertions: results
+                .assertions
+                .iter()
+                .map(|assertion| TraceAssertionSnapshot {
+                    id: assertion.id.clone(),
+                    status: assertion.status.clone(),
+                    metric: assertion_metric(assertion),
+                })
+                .collect(),
+        }
+    }
+
+    fn fingerprints(snapshot: &TraceBaselineMetadata) -> Vec<String> {
+        let spans = snapshot
+            .spans
             .iter()
-            .map(|assertion| (assertion.id.as_str(), assertion))
+            .map(|s| format!("trace-span:{}", s.id));
+        let assertions = snapshot
+            .assertions
+            .iter()
+            .map(|a| format!("trace-assertion:{}", a.id));
+        spans.chain(assertions).collect()
+    }
+
+    fn delta(
+        baseline: &TraceBaselineMetadata,
+        current: &TraceBaselineMetadata,
+        thresholds: &TraceThresholds,
+    ) -> TraceBaselineComparison {
+        let TraceThresholds {
+            threshold_percent,
+            min_delta_ms,
+        } = *thresholds;
+        let mut reasons = Vec::new();
+
+        let span_pairs = pair_by_key(&baseline.spans, &current.spans, |span| span.id.as_str());
+        let spans: Vec<TraceSpanDelta> = span_pairs
+            .matched
+            .into_iter()
+            .map(|(prior, span)| {
+                let delta_ms = span.duration_ms as i64 - prior.duration_ms as i64;
+                let delta_pct = (prior.duration_ms != 0)
+                    .then(|| (delta_ms as f64 / prior.duration_ms as f64) * 100.0);
+                let regression = delta_ms > min_delta_ms as i64
+                    && delta_pct.is_some_and(|pct| pct > threshold_percent);
+                if regression {
+                    reasons.push(format!(
+                        "{} regressed by {}ms ({:.2}%)",
+                        span.id,
+                        delta_ms,
+                        delta_pct.unwrap_or_default()
+                    ));
+                }
+                TraceSpanDelta {
+                    id: span.id.clone(),
+                    baseline_duration_ms: prior.duration_ms,
+                    current_duration_ms: span.duration_ms,
+                    delta_ms,
+                    delta_pct,
+                    regression,
+                    improvement: delta_ms < 0,
+                }
+            })
             .collect();
 
-    let mut spans = Vec::new();
-    let mut assertions = Vec::new();
-    let mut new_span_ids = Vec::new();
-    let mut new_assertion_ids = Vec::new();
-    let mut reasons = Vec::new();
-    let mut regression = false;
-    let mut has_improvements = false;
-
-    for current_span in &current_snapshots {
-        let Some(prior) = baseline_by_id.get(current_span.id.as_str()) else {
-            new_span_ids.push(current_span.id.clone());
-            continue;
-        };
-        let delta_ms = current_span.duration_ms as i64 - prior.duration_ms as i64;
-        let delta_pct = if prior.duration_ms == 0 {
-            None
-        } else {
-            Some((delta_ms as f64 / prior.duration_ms as f64) * 100.0)
-        };
-        let span_regression =
-            delta_ms > min_delta_ms as i64 && delta_pct.is_some_and(|pct| pct > threshold_percent);
-        let span_improvement = delta_ms < 0;
-        if span_regression {
-            regression = true;
-            reasons.push(format!(
-                "{} regressed by {}ms ({:.2}%)",
-                current_span.id,
-                delta_ms,
-                delta_pct.unwrap_or_default()
-            ));
-        }
-        if span_improvement {
-            has_improvements = true;
-        }
-        spans.push(TraceSpanDelta {
-            id: current_span.id.clone(),
-            baseline_duration_ms: prior.duration_ms,
-            current_duration_ms: current_span.duration_ms,
-            delta_ms,
-            delta_pct,
-            regression: span_regression,
-            improvement: span_improvement,
-        });
-    }
-
-    for current_assertion in &current_assertion_snapshots {
-        let Some(prior) = baseline_assertions_by_id.get(current_assertion.id.as_str()) else {
-            new_assertion_ids.push(current_assertion.id.clone());
-            continue;
-        };
-        let metric_delta = current_assertion
-            .metric
-            .zip(prior.metric)
-            .map(|(current, baseline)| current - baseline);
-        let status_regression = prior.status == TraceAssertionStatus::Pass
-            && current_assertion.status != TraceAssertionStatus::Pass;
-        let metric_regression = metric_delta.is_some_and(|delta| delta > 0.0);
-        let assertion_regression = status_regression || metric_regression;
-        let assertion_improvement = (prior.status != TraceAssertionStatus::Pass
-            && current_assertion.status == TraceAssertionStatus::Pass)
-            || metric_delta.is_some_and(|delta| delta < 0.0);
-        if assertion_regression {
-            regression = true;
-            if status_regression {
-                reasons.push(format!(
-                    "{} assertion regressed from {:?} to {:?}",
-                    current_assertion.id, prior.status, current_assertion.status
-                ));
-            } else if let Some(delta) = metric_delta {
-                reasons.push(format!(
-                    "{} assertion metric regressed by {:.2}",
-                    current_assertion.id, delta
-                ));
-            }
-        }
-        if assertion_improvement {
-            has_improvements = true;
-        }
-        assertions.push(TraceAssertionDelta {
-            id: current_assertion.id.clone(),
-            baseline_status: prior.status.clone(),
-            current_status: current_assertion.status.clone(),
-            baseline_metric: prior.metric,
-            current_metric: current_assertion.metric,
-            metric_delta,
-            regression: assertion_regression,
-            improvement: assertion_improvement,
-        });
-    }
-
-    let removed_span_ids = baseline
-        .metadata
-        .spans
-        .iter()
-        .filter(|span| !current_by_id.contains_key(span.id.as_str()))
-        .map(|span| span.id.clone())
-        .collect();
-    let removed_assertion_ids = baseline
-        .metadata
-        .assertions
-        .iter()
-        .filter(|assertion| !current_assertions_by_id.contains_key(assertion.id.as_str()))
-        .map(|assertion| assertion.id.clone())
-        .collect();
-
-    TraceBaselineComparison {
-        threshold_percent,
-        min_delta_ms,
-        spans,
-        assertions,
-        new_span_ids,
-        removed_span_ids,
-        new_assertion_ids,
-        removed_assertion_ids,
-        regression,
-        has_improvements,
-        reasons,
-    }
-}
-
-fn snapshots_from_results(results: &TraceResults) -> Vec<TraceSpanSnapshot> {
-    results
-        .span_results
-        .iter()
-        .filter_map(|span| {
-            span.duration_ms.map(|duration_ms| TraceSpanSnapshot {
-                id: span.id.clone(),
-                duration_ms,
+        let assertion_pairs =
+            pair_by_key(&baseline.assertions, &current.assertions, |a| a.id.as_str());
+        let assertions: Vec<TraceAssertionDelta> = assertion_pairs
+            .matched
+            .into_iter()
+            .map(|(prior, assertion)| {
+                let pass = TraceAssertionStatus::Pass;
+                let metric_delta = assertion
+                    .metric
+                    .zip(prior.metric)
+                    .map(|(current, baseline)| current - baseline);
+                let status_regression = prior.status == pass && assertion.status != pass;
+                let metric_regression = metric_delta.is_some_and(|delta| delta > 0.0);
+                if status_regression {
+                    reasons.push(format!(
+                        "{} assertion regressed from {:?} to {:?}",
+                        assertion.id, prior.status, assertion.status
+                    ));
+                } else if let Some(delta) = metric_delta.filter(|_| metric_regression) {
+                    reasons.push(format!(
+                        "{} assertion metric regressed by {:.2}",
+                        assertion.id, delta
+                    ));
+                }
+                TraceAssertionDelta {
+                    id: assertion.id.clone(),
+                    baseline_status: prior.status.clone(),
+                    current_status: assertion.status.clone(),
+                    baseline_metric: prior.metric,
+                    current_metric: assertion.metric,
+                    metric_delta,
+                    regression: status_regression || metric_regression,
+                    improvement: (prior.status != pass && assertion.status == pass)
+                        || metric_delta.is_some_and(|delta| delta < 0.0),
+                }
             })
-        })
-        .collect()
-}
+            .collect();
 
-fn assertion_snapshots_from_results(results: &TraceResults) -> Vec<TraceAssertionSnapshot> {
-    results
-        .assertions
-        .iter()
-        .map(|assertion| TraceAssertionSnapshot {
-            id: assertion.id.clone(),
-            status: assertion.status.clone(),
-            metric: assertion_metric(assertion),
-        })
-        .collect()
+        TraceBaselineComparison {
+            threshold_percent,
+            min_delta_ms,
+            regression: spans.iter().any(|s| s.regression)
+                || assertions.iter().any(|a| a.regression),
+            has_improvements: spans.iter().any(|s| s.improvement)
+                || assertions.iter().any(|a| a.improvement),
+            spans,
+            assertions,
+            new_span_ids: span_pairs.added,
+            removed_span_ids: span_pairs.removed,
+            new_assertion_ids: assertion_pairs.added,
+            removed_assertion_ids: assertion_pairs.removed,
+            reasons,
+        }
+    }
+
+    fn gate(comparison: &TraceBaselineComparison) -> Verdict {
+        let improved_spans = comparison.spans.iter().filter(|s| s.improvement);
+        let improved_assertions = comparison.assertions.iter().filter(|a| a.improvement);
+        Verdict {
+            regressions: comparison.reasons.clone(),
+            advisories: Vec::new(),
+            improvements: improved_spans
+                .map(|s| s.id.clone())
+                .chain(improved_assertions.map(|a| a.id.clone()))
+                .collect(),
+        }
+    }
 }
 
 fn assertion_metric(assertion: &TraceAssertion) -> Option<f64> {
@@ -336,40 +267,50 @@ fn assertion_metric(assertion: &TraceAssertion) -> Option<f64> {
     }
 }
 
-enum TraceBaselineItem<'a> {
-    Span(&'a TraceSpanSnapshot),
-    Assertion(&'a TraceAssertionSnapshot),
-}
-
-impl generic::Fingerprintable for TraceBaselineItem<'_> {
-    fn fingerprint(&self) -> String {
-        match self {
-            TraceBaselineItem::Span(span) => span.fingerprint(),
-            TraceBaselineItem::Assertion(assertion) => assertion.fingerprint(),
-        }
-    }
-
-    fn description(&self) -> String {
-        match self {
-            TraceBaselineItem::Span(span) => span.description(),
-            TraceBaselineItem::Assertion(assertion) => assertion.description(),
-        }
-    }
-
-    fn context_label(&self) -> String {
-        match self {
-            TraceBaselineItem::Span(span) => span.context_label(),
-            TraceBaselineItem::Assertion(assertion) => assertion.context_label(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::extension::trace::parsing::{
         TraceAssertion, TraceSpanResult, TraceSpanStatus, TraceStatus,
     };
+    use homeboy_engine_primitives::workload_compare::{self as engine, BaselineSlot};
+    use std::path::{Path, PathBuf};
+
+    // Storage and the compare entry point now belong to the shared engine.
+    // These keep every test below pinned to the same observable behaviour
+    // (stored baseline, comparison payload) it covered before.
+    fn save_baseline(
+        root: &Path,
+        component_id: &str,
+        results: &TraceResults,
+        rig_id: Option<&str>,
+    ) -> homeboy_core::Result<PathBuf> {
+        engine::save_baseline::<TraceAdapter>(
+            &BaselineSlot::new(root, rig_id),
+            component_id,
+            results,
+        )
+    }
+
+    fn load_baseline(root: &Path, rig_id: Option<&str>) -> Option<TraceBaseline> {
+        engine::load_baseline::<TraceAdapter>(&BaselineSlot::new(root, rig_id))
+    }
+
+    fn compare(
+        current: &TraceResults,
+        baseline: &TraceBaseline,
+        threshold_percent: f64,
+        min_delta_ms: u64,
+    ) -> TraceBaselineComparison {
+        TraceAdapter::delta(
+            &baseline.metadata,
+            &TraceAdapter::snapshot(current),
+            &TraceThresholds {
+                threshold_percent,
+                min_delta_ms,
+            },
+        )
+    }
 
     fn results(duration_ms: u64) -> TraceResults {
         TraceResults {
