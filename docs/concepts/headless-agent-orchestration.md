@@ -88,6 +88,6 @@ Reviewer-facing output should include:
 
 - [Review a branch](../workflows/review-a-branch.md)
 - [Capture evidence](../workflows/capture-evidence.md)
-- [Run agent task loops](../workflows/run-agent-task-loops.md)
+- [Run multi-step workflows](../commands/workflow.md)
 - [Set up Lab runners](../workflows/set-up-lab-runners.md)
 - [Set up extensions](../workflows/set-up-extensions.md)

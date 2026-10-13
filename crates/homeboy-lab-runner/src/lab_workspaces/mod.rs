@@ -1544,7 +1544,7 @@ pub(super) fn preflight_provider_config_source_cli_dependencies(
 }
 
 fn provider_config_specs(args: &[String]) -> Vec<String> {
-    const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config", "--dispatch-provider-config"];
+    const PROVIDER_CONFIG_FLAGS: &[&str] = &["--provider-config"];
 
     let mut specs = Vec::new();
     let mut iter = args.iter().peekable();

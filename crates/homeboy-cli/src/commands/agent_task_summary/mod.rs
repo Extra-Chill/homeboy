@@ -3,12 +3,8 @@ use serde_json::Value;
 use super::agent_task::candidate::{
     changed_files_for_artifact, classify_candidates, CandidateState,
 };
-use super::agent_task::{
-    AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand, AgentTaskFanoutCommand,
-};
+use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutCommand};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
-
-mod controller;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTaskSummaryKind {
@@ -16,7 +12,6 @@ pub(crate) enum AgentTaskSummaryKind {
     Status,
     Logs,
     Review,
-    Controller,
     Providers,
     Capacity,
     FanoutCookBatch,
@@ -36,17 +31,6 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
             AgentTaskFanoutCommand::Status(_) => Some(AgentTaskSummaryKind::FanoutStatus),
             _ => None,
         },
-        AgentTaskCommand::Controller(controller_args) => match &controller_args.command {
-            AgentTaskControllerCommand::Status(_)
-            | AgentTaskControllerCommand::Diagnose(_)
-            | AgentTaskControllerCommand::RunNext(_)
-            | AgentTaskControllerCommand::Run(_)
-            | AgentTaskControllerCommand::Resume(_) => Some(AgentTaskSummaryKind::Controller),
-            AgentTaskControllerCommand::FromSpec(args) if args.resume => {
-                Some(AgentTaskSummaryKind::Controller)
-            }
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -60,7 +44,6 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Status => render_status_summary(payload),
         AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
-        AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
         AgentTaskSummaryKind::Capacity => render_capacity_summary(payload),
         AgentTaskSummaryKind::FanoutCookBatch => render_fanout_cook_batch_summary(payload),
@@ -2704,150 +2687,6 @@ mod tests {
         .is_none());
     }
 
-    #[test]
-    fn controller_status_summary_surfaces_operator_resume_context() {
-        let payload = json!({
-            "schema": "homeboy/agent-task-loop-controller-status/v1",
-            "controller": {
-                "loop_id": "loop-123",
-                "phase": "triage",
-                "state": "running",
-                "entities": {
-                    "entity-1": {
-                        "human_ready": true,
-                        "run_refs": [{ "run_id": "agent-task-1" }],
-                        "artifact_refs": [{
-                            "uri": "artifact://agent-task-1/report.json",
-                            "kind": "report",
-                            "label": "summary report"
-                        }]
-                    },
-                    "entity-2": { "human_ready": false }
-                },
-                "task_lineage": [{
-                    "run_id": "agent-task-1",
-                    "artifact_refs": [{ "uri": "artifact://agent-task-1/log.txt", "kind": "log" }]
-                }],
-                "next_actions": [
-                    { "action_id": "action-1", "action": { "action": "spawn_task" }, "status": "completed" },
-                    { "action_id": "action-2", "action": { "action": "spawn_task" }, "status": "pending" }
-                ]
-            },
-            "diagnostics": {
-                "pending_actions": [{
-                    "action_id": "action-2",
-                    "recovery_commands": ["homeboy agent-task controller run loop-123 --action-id action-2"]
-                }]
-            }
-        });
-
-        let summary =
-            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
-
-        assert!(summary.starts_with(
-            "Agent task controller\nLoop: loop-123\nState: running\nCurrent step: triage / action-2\n"
-        ));
-        assert!(
-            summary.contains("Actions: 1 pending / 0 running / 1 completed / 0 failed / 2 total\n")
-        );
-        assert!(summary.contains("Entities: 2 total / 1 human-ready\n"));
-        assert!(summary.contains("Runs: 1\n"));
-        assert!(summary.contains("Artifacts: 2\n"));
-        assert!(summary.contains("Artifact: summary report: artifact://agent-task-1/report.json\n"));
-        assert!(summary
-            .contains("Next: homeboy agent-task controller run loop-123 --action-id action-2\n"));
-        assert!(!summary.contains("schema"));
-    }
-
-    #[test]
-    fn controller_status_summary_prefers_failed_child_root_cause() {
-        let payload = json!({
-            "schema": "homeboy/agent-task-loop-controller-status/v1",
-            "controller": {
-                "loop_id": "loop-123",
-                "phase": "triage",
-                "state": "running",
-                "entities": {},
-                "task_lineage": [],
-                "next_actions": [{
-                    "action_id": "action-1",
-                    "action": { "action": "spawn_task" },
-                    "status": "failed",
-                    "diagnostics": [{ "message": "child run failed" }]
-                }]
-            },
-            "diagnostics": {
-                "failed_child_actions": [{
-                    "action_id": "action-1",
-                    "child_run_id": "agent-task-child-1",
-                    "child_run_status": "failed",
-                    "top_diagnostic": "Agent runtime did not produce required typed artifacts: concept_packet, design_packet.",
-                    "hydrated_root_cause": "Provider runtime import failed: module not found",
-                    "owner_surface": "agent_runtime",
-                    "next_command": "homeboy agent-task status agent-task-child-1"
-                }]
-            }
-        });
-
-        let summary =
-            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
-
-        assert!(summary.contains(
-            "Last failure: action-1 (agent-task-child-1): Provider runtime import failed: module not found\n"
-        ));
-        assert!(summary.contains("Next: homeboy agent-task status agent-task-child-1\n"));
-    }
-
-    #[test]
-    fn controller_status_summary_surfaces_blocked_state_and_selected_executor() {
-        let payload = json!({
-            "schema": "homeboy/agent-task-loop-controller-status/v1",
-            "controller": {
-                "loop_id": "loop-123",
-                "phase": "triage",
-                "state": "running",
-                "entities": {},
-                "task_lineage": [],
-                "next_actions": [{
-                    "action_id": "action-1",
-                    "action": { "action": "spawn_task" },
-                    "status": "failed"
-                }]
-            },
-            "diagnostics": {
-                "controller_state": {
-                    "state": "running_blocked_failed_action",
-                    "label": "running but blocked on failed action",
-                    "actionable": true,
-                    "reason": "controller is marked running, but a failed or blocked action must be resolved before ordinary progress is safe"
-                },
-                "relevant_action": {
-                    "action_id": "action-1",
-                    "action": "spawn_task",
-                    "status": "failed",
-                    "selected_executor": {
-                        "backend": "old-backend",
-                        "selector": "old-selector",
-                        "model": "old-model"
-                    }
-                },
-                "next_commands": ["homeboy agent-task controller diagnose loop-123  # inspect failed action evidence"]
-            }
-        });
-
-        let summary =
-            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
-
-        assert!(summary.contains("State: running\n"));
-        assert!(summary.contains("Controller state: running but blocked on failed action"));
-        assert!(summary.contains(
-            "Selected executor: backend=old-backend / selector=old-selector / model=old-model\n"
-        ));
-        assert!(summary.contains(
-            "Next: homeboy agent-task controller diagnose loop-123  # inspect failed action evidence\n"
-        ));
-    }
-
     /// #13702: a failed batch's status read still renders a human summary —
     /// the read succeeded, and the summary is how the envelope populates
     /// `presentation.stdout` for terminal subject states including failures.
@@ -2966,49 +2805,6 @@ mod tests {
             "  issue-220 (running): runner lab-runner-1, workspace /srv/homeboy/_lab_workspaces/data-liberation-issue-220"
         ));
         assert!(summary.contains("  issue-221 (queued): runner lab-runner-1, workspace pending"));
-    }
-
-    #[test]
-    fn controller_resume_summary_surfaces_last_failure_and_generic_resume_command() {
-        let payload = json!({
-            "schema": "homeboy/agent-task-loop-controller-resume-result/v1",
-            "loop_id": "loop-456",
-            "claimed": true,
-            "results": [
-                { "action_id": "action-1", "status": "completed" },
-                {
-                    "action_id": "action-2",
-                    "status": "failed",
-                    "failure_summary": {
-                        "action_id": "action-2",
-                        "run_id": "agent-task-2",
-                        "diagnostic": "executor returned exit code 1"
-                    }
-                }
-            ],
-            "controller": {
-                "loop_id": "loop-456",
-                "phase": "verify",
-                "state": "running",
-                "entities": {},
-                "task_lineage": [],
-                "next_actions": [
-                    { "action_id": "action-1", "action": { "action": "spawn_task" }, "status": "completed" },
-                    { "action_id": "action-2", "action": { "action": "spawn_task" }, "status": "failed" },
-                    { "action_id": "action-3", "action": { "action": "wait" }, "status": "pending" }
-                ]
-            }
-        });
-
-        let summary =
-            render_agent_task_summary(AgentTaskSummaryKind::Controller, &payload).unwrap();
-
-        assert!(summary.contains("Current step: verify / action-3\n"));
-        assert!(
-            summary.contains("Actions: 1 pending / 0 running / 1 completed / 1 failed / 3 total\n")
-        );
-        assert!(summary.contains("Last failure: action-2: executor returned exit code 1\n"));
-        assert!(summary.contains("Next: homeboy agent-task controller resume loop-456\n"));
     }
 
     #[test]

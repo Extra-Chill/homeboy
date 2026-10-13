@@ -428,7 +428,7 @@ fn scheduler_reports_provider_selector_mismatch() {
         .contains("matched selector"));
     assert_eq!(
         aggregate.outcomes[0].diagnostics[0].data["hint"],
-        "'codex' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend 'synthetic-runtime'; pass runtime/provider configuration through --dispatch-provider-config instead."
+        "'codex' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --selector selects the Homeboy executor provider id for backend 'synthetic-runtime'; pass runtime/provider configuration through --provider-config instead."
     );
 }
 
