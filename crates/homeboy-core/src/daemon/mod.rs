@@ -683,7 +683,15 @@ impl LocalControllerJobClient {
         let mut endpoints = vec![self.endpoint.clone()];
         if !generation_store::bypassed() {
             for generation in generation_store::generations().unwrap_or_default() {
-                let endpoint = format!("http://{}", generation.address);
+                // A generation replaced in place serves at the address its
+                // own lease file records, which the registry may predate.
+                let address =
+                    validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
+                        .ok()
+                        .and_then(|validation| validation.state)
+                        .map(|state| state.address)
+                        .unwrap_or(generation.address);
+                let endpoint = format!("http://{address}");
                 if !endpoints.contains(&endpoint) {
                     endpoints.push(endpoint);
                 }
