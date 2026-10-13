@@ -109,6 +109,15 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub toolchain_readiness: Vec<ToolchainReadinessProbe>,
 
+    /// HOME-relative directories this extension owns at runtime (for example
+    /// a managed tool install under `.cache/...`). When an isolated gate
+    /// exposes this extension, these directories are linked from the
+    /// executing host into the isolated HOME so the extension resolves the
+    /// same runtime it does outside the gate. Nothing else under HOME is
+    /// exposed. Paths must be relative, without `..`, and non-empty. (#15836)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub isolated_home_paths: Vec<String>,
+
     // Standalone capabilities (already self-contained structs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliConfig>,
@@ -234,8 +243,30 @@ pub struct CompositionConfig {
     pub includes: Vec<String>,
 }
 
+/// Validate declared HOME-relative runtime directories: relative, made only
+/// of normal path components, and not HOME itself.
+pub fn validate_isolated_home_paths(paths: &[String]) -> homeboy_error::Result<()> {
+    for path in paths {
+        let valid = !path.trim().is_empty()
+            && !path.contains('\\')
+            && std::path::Path::new(path)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)));
+        if !valid {
+            return Err(homeboy_error::Error::validation_invalid_argument(
+                "isolated_home_paths",
+                "must be non-empty HOME-relative paths without traversal",
+                Some(path.clone()),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ExtensionManifest {
     pub fn validate_notification_transports(&self) -> homeboy_error::Result<()> {
+        validate_isolated_home_paths(&self.isolated_home_paths)?;
         if let Some(test) = &self.test {
             test.portable_env.validate()?;
             crate::manifest_toolchain_config::validate_test_secret_env_references(
@@ -580,5 +611,25 @@ mod composition_tests {
         }))
         .expect("manifest without composition deserializes");
         assert!(manifest.composition.is_none());
+    }
+}
+
+#[cfg(test)]
+mod isolated_home_paths_tests {
+    use super::validate_isolated_home_paths;
+
+    #[test]
+    fn accepts_home_relative_paths() {
+        assert!(validate_isolated_home_paths(&[".cache/homeboy/wp-codebox".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_traversal_absolute_and_empty_paths() {
+        for bad in ["", " ", "../x", ".cache/../../etc", "/abs", "./x", "a\\b"] {
+            assert!(
+                validate_isolated_home_paths(&[bad.to_string()]).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 }
