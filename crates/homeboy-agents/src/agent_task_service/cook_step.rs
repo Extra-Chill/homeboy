@@ -306,8 +306,8 @@ fn workflow_cook_record(
     }
 }
 
-/// The settled run state of a Cook's latest attempt (or of its handoff parent,
-/// when no attempt materialized). A terminal attempt whose terminal
+/// The settled canonical state of a Cook's latest attempt (or of its handoff
+/// parent, when no attempt materialized). A terminal attempt whose terminal
 /// continuation (promotion and PR finalization) is still queued or running has
 /// not settled: the continuation decides its final state.
 fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
@@ -320,13 +320,27 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
     }
     let continuation = super::CookRecipeStore::from_current_data_root()
         .and_then(|store| super::continuation_state_in_store(&store, cook_id, &record.run_id));
-    if matches!(
-        continuation,
-        Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed)
-    ) {
+    match continuation {
+        Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed) => {
+            return WorkflowRunOutcome::Pending;
+        }
+        // Promotion or finalization failed: the Cook holds a recoverable
+        // candidate (`agent-task cook-continue` resumes it), not a result.
+        Ok(super::CookContinuationState::Failed) => {
+            return WorkflowRunOutcome::Settled("candidate_recoverable".to_string());
+        }
+        _ => {}
+    }
+    // The canonical run projection is the Cook's outcome: the attempt record
+    // alone reports the provider attempt, not the gates and promotion that
+    // decide whether the Cook produced a result (`agent-task status`).
+    let Ok(run) = crate::orchestration::run_exact_from_current_environment(&record.run_id) else {
+        return WorkflowRunOutcome::Pending;
+    };
+    if !run.state.is_terminal() {
         return WorkflowRunOutcome::Pending;
     }
-    match serde_json::to_value(record.state)
+    match serde_json::to_value(run.state)
         .ok()
         .and_then(|state| state.as_str().map(str::to_string))
     {
