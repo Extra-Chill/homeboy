@@ -1121,6 +1121,64 @@ mod run_plan_remap_tests {
         );
     }
 
+    /// Lab relocates projected provider evidence, so the prompt must name the
+    /// same runner path the provider policy allows. Leaving the controller
+    /// path in prose made providers read an undeclared path and be denied
+    /// (#12564).
+    #[test]
+    fn remap_agent_task_run_plan_rewrites_evidence_paths_in_instructions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = "/Users/user/.local/share/homeboy/provider-evidence/trees/ad8b";
+        let remote =
+            "/home/user/Developer/_lab_workspaces/ws-homeboy-artifacts/provider-evidence/trees/ad8b";
+        let mappings = vec![
+            LabPathRemap {
+                local: "/Users/user/Developer/repo".to_string(),
+                remote: "/home/user/Developer/_lab_workspaces/ws".to_string(),
+            },
+            LabPathRemap {
+                local: local.to_string(),
+                remote: remote.to_string(),
+            },
+        ];
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "plan-12564",
+            "tasks": [{
+                "task_id": "cook",
+                "executor": { "backend": "opencode", "config": {
+                    "evidence_inputs": [{ "id": "capture", "path": local, "read_only": true }]
+                } },
+                "instructions": format!(
+                    "Capture: `{local}` (projected). Its `website/` is in {local}/website, not {local}2."
+                )
+            }]
+        });
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            plan.to_string(),
+        ];
+
+        let out = remap_agent_task_plan_in_args(&args, &mappings, temp.path()).expect("remap plan");
+        let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
+        let remapped: serde_json::Value =
+            serde_json::from_str(&out[plan_idx]).expect("inline plan");
+        let task = &remapped["tasks"][0];
+        assert_eq!(
+            task["executor"]["config"]["evidence_inputs"][0]["path"],
+            remote
+        );
+        assert_eq!(
+            task["instructions"],
+            format!(
+                "Capture: `{remote}` (projected). Its `website/` is in {remote}/website, not {local}2."
+            )
+        );
+    }
+
     /// A run-plan's resolved runtime identity must name the runner's synced
     /// copy of the runtime, even when the controller reaches the runtime
     /// through a symlinked parent (#15259: `~/.config/homeboy/agent-runtimes`

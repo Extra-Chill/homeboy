@@ -231,16 +231,45 @@ fn remap_remote_path_references(value: &mut Value, mappings: &[&LabPathRemap]) {
 }
 
 fn remap_remote_path_references_in_text(text: &str, mappings: &[&LabPathRemap]) -> String {
+    replace_path_references(
+        text,
+        mappings
+            .iter()
+            .map(|mapping| (mapping.remote.as_str(), mapping.local.as_str())),
+    )
+}
+
+/// Translate controller path references embedded in free text (for example a
+/// task prompt) to their runner equivalents. `mappings` must already be ordered
+/// most-specific-first by [`order_mappings_by_specificity`].
+pub(super) fn remap_local_path_references_in_text(
+    text: &str,
+    mappings: &[&LabPathRemap],
+) -> String {
+    replace_path_references(
+        text,
+        mappings
+            .iter()
+            .map(|mapping| (mapping.local.as_str(), mapping.remote.as_str())),
+    )
+}
+
+/// Replace whole-path occurrences of each `from` prefix with `to`, so `/a/b`
+/// rewrites `/a/b` and `/a/b/c` but not `/a/bc` or `/x/a/b`.
+fn replace_path_references<'a>(
+    text: &str,
+    replacements: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
     let mut remapped = text.to_string();
-    for mapping in mappings {
-        let remote = mapping.remote.trim_end_matches('/');
-        if remote.is_empty() {
+    for (from, to) in replacements {
+        let from = from.trim_end_matches('/');
+        if from.is_empty() {
             continue;
         }
         let mut cursor = 0;
-        while let Some(relative_start) = remapped[cursor..].find(remote) {
+        while let Some(relative_start) = remapped[cursor..].find(from) {
             let start = cursor + relative_start;
-            let end = start + remote.len();
+            let end = start + from.len();
             let preceding_boundary = start == 0
                 || !remapped[..start]
                     .chars()
@@ -253,8 +282,8 @@ fn remap_remote_path_references_in_text(text: &str, mappings: &[&LabPathRemap]) 
                     .next()
                     .is_some_and(is_path_character);
             if preceding_boundary && following_boundary {
-                remapped.replace_range(start..end, &mapping.local);
-                cursor = start + mapping.local.len();
+                remapped.replace_range(start..end, to);
+                cursor = start + to.len();
             } else {
                 cursor = end;
             }
