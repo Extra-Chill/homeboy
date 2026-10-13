@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.419.0] - 2026-10-13
+
+### Added
+- workflow driver, homeboy/workflow/v1, and the workflow verbs
+
+### Changed
+- run detached Cook as a daemon step with an admitted environment
+
+### Fixed
+- Homeboy authors no agent-facing prompt prose
+
 ## [0.418.16] - 2026-10-13
 
 ### Changed
