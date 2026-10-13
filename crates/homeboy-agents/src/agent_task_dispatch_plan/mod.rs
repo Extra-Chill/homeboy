@@ -395,13 +395,20 @@ pub fn build_dispatch_plan_with_provider_requirements(
         });
     // A submitted controller policy is authoritative, including an explicitly
     // absent rotation. Per-task `metadata.provider_rotation` still overrides it.
+    // An acknowledged explicit model pins the route: the plan carries no
+    // rotation, so neither readiness routing nor a usage-cap skip can
+    // substitute a configured entry for it (#15837).
     let rotation: Option<AgentTaskProviderRotationPolicy> =
-        match &request.core.resolved_provider_policy {
-            Some(_) => resolved_rotation,
-            None => defaults::load_config()
-                .agent_task
-                .rotation
-                .and_then(|rotation| serde_json::from_value(rotation).ok()),
+        if explicit_model_pins_route(&request.core, request.model.as_deref()) {
+            None
+        } else {
+            match &request.core.resolved_provider_policy {
+                Some(_) => resolved_rotation,
+                None => defaults::load_config()
+                    .agent_task
+                    .rotation
+                    .and_then(|rotation| serde_json::from_value(rotation).ok()),
+            }
         };
     // The budget must be resolved AFTER the rotation policy, not before it.
     // Building it from CLI flags alone left the configured chain loaded,
@@ -461,9 +468,7 @@ pub fn resolve_execution_budget(
     rotation: Option<&AgentTaskProviderRotationPolicy>,
     model: Option<&str>,
 ) -> Result<AgentTaskExecutionBudget> {
-    let pinned_model =
-        model.is_some_and(|model| !model.trim().is_empty()) && core.acknowledge_model_override;
-    let (derived_executions, derived_rotations) = if pinned_model {
+    let (derived_executions, derived_rotations) = if explicit_model_pins_route(core, model) {
         (1, 0)
     } else {
         rotation.map_or((1, 0), derived_rotation_budget)
@@ -488,6 +493,11 @@ pub fn resolve_execution_budget(
         max_same_provider_retries: same_provider_retries,
         max_provider_rotations: derived_rotations,
     })
+}
+
+/// An acknowledged, non-empty explicit model is the only route a Cook runs.
+fn explicit_model_pins_route(core: &DispatchCoreInputs, model: Option<&str>) -> bool {
+    model.is_some_and(|model| !model.trim().is_empty()) && core.acknowledge_model_override
 }
 
 /// Executions and rotations a rotation policy needs in order to be reachable.
@@ -1347,6 +1357,46 @@ mod tests {
             assert_eq!(plan.options.execution_budget.max_provider_rotations, 2);
             // Rotations are not same-provider retries and must never fund them.
             assert_eq!(plan.options.execution_budget.max_same_provider_retries, 0);
+        });
+    }
+
+    /// An acknowledged explicit `--model` pins the route. The compiled plan
+    /// must carry no rotation, or readiness routing binds a configured entry
+    /// in its place while the plan still reports the pinned model
+    /// (#15837, #15409, #15018).
+    #[test]
+    fn acknowledged_explicit_model_compiles_a_plan_without_rotation() {
+        with_isolated_home(|_| {
+            let mut config = defaults::load_config();
+            config.agent_task.rotation = serde_json::to_value(rotation_policy_with(2)).ok();
+            defaults::save_config(&config).expect("save config");
+            let pinned = || {
+                dispatch_request(DispatchRequestOverrides {
+                    prompt: Some("Cook with a pinned model.".to_string()),
+                    model: Some("pinned-model".to_string()),
+                    core: DispatchCoreInputs {
+                        acknowledge_model_override: true,
+                        ..DispatchCoreInputs::default()
+                    },
+                    ..DispatchRequestOverrides::default()
+                })
+            };
+
+            let global = build_dispatch_plan(&pinned()).expect("global-rotation plan");
+            let mut controller_request = pinned();
+            let controller = crate::agent_task_dispatch_service::build_controller_dispatch_plan(
+                &mut controller_request,
+            )
+            .expect("controller-policy plan");
+
+            for plan in [global, controller] {
+                assert!(
+                    plan.options.rotation.is_none(),
+                    "a pinned model must not carry a fallback rotation"
+                );
+                assert_eq!(plan.tasks[0].executor.model(), Some("pinned-model"));
+                assert_eq!(plan.options.execution_budget.max_provider_rotations, 0);
+            }
         });
     }
 

@@ -1526,6 +1526,12 @@ fn selected_plan_provider_dispatchability_with_providers(
                     "provider_rotations_used": 0,
                     "next_rotation_index": next_rotation_index,
                 });
+                // The bound fallback is the model this task runs; keep the
+                // recorded selection in agreement with the executor.
+                if selected.metadata["model_selection"].is_object() {
+                    selected.metadata["model_selection"]["selected"] =
+                        serde_json::json!(selected.executor.model());
+                }
             }
             admitted.tasks[task_index] = selected;
             continue;
@@ -2416,6 +2422,54 @@ mod tests {
         .expect("readiness transition consumes no dispatch attempt");
 
         assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+    }
+
+    /// An unpinned rotation may bind a fallback during readiness; the bound
+    /// task must then record that fallback as its selected model so the plan,
+    /// the executor, and the recorded provider model agree.
+    #[test]
+    fn readiness_fallback_records_the_bound_model_as_selected() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let probes = root.path().join("probes");
+        let script = root.path().join("readiness.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;const ready=model==='fallback';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'',reason:ready?'':'authentication_rejected',cache_key:model,identity:{model}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &probes));
+        let mut task = request("primary");
+        task.metadata = json!({
+            "model_selection": {
+                "requested": null,
+                "selected": "primary",
+                "reason": "policy-rotation"
+            }
+        });
+        let mut plan = AgentTaskPlan::new("rotatable-readiness", vec![task]);
+        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+            entries: vec![AgentTaskProviderRotationEntry {
+                model: Some("fallback".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        plan.options.execution_budget.max_provider_rotations = 1;
+
+        let admitted = admit_plan_provider_dispatchability_with_providers(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect("rotatable plan binds the ready fallback");
+
+        let task = &admitted.tasks[0];
+        assert_eq!(task.executor.model(), Some("fallback"));
+        assert_eq!(task.metadata["model_selection"]["selected"], "fallback");
+        assert_eq!(
+            task.metadata["provider_readiness_routing"]["skipped"][0]["model"],
+            "primary"
+        );
     }
 
     #[test]
