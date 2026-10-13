@@ -120,7 +120,7 @@ A step runs with `env_clear()` plus its admitted environment:
 - **Where it lives.** Registrations are stored in `workflow-cadences.sqlite` beside the daemon generation registry, so they survive daemon restarts and build rotations. A daemon that is not running admits nothing: run the always-on cadences on a resident daemon (`homeboy daemon start`, or a runner's service daemon).
 - **Observe and stop.** `workflow list --registered` shows every cadence with its next due time, fire and skip counts, last instance, and last admission error. `workflow cancel <workflow-id>` stops a cadence; its instances are ordinary instances you can cancel separately.
 
-**Built-in `homeboy.retention`.** Homeboy ships one workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
+**Built-in `homeboy.retention`.** Homeboy ships one workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts, first due one hour later, unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
 
 ### Daemon restarts
 

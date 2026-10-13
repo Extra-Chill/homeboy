@@ -102,7 +102,7 @@ pub(crate) fn selector_runtime_provider_hint(
     }
 
     Some(format!(
-        "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --dispatch-provider-config instead."
+        "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --provider-config instead."
     ))
 }
 
@@ -118,7 +118,7 @@ fn selector_runtime_provider_hint_from_providers(
         .any(|hint| hint == selector);
     reserved.then(|| {
         format!(
-            "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --dispatch-selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --dispatch-provider-config instead."
+            "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --provider-config instead."
         )
     })
 }

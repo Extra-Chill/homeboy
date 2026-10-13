@@ -15,10 +15,6 @@ use crate::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
 use crate::agent_task_cook_loop::AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA;
 use crate::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA;
 use crate::agent_task_lifecycle::AgentTaskRunState;
-use crate::agent_task_loop_controller::{
-    AGENT_TASK_LOOP_CONTROLLER_SCHEMA, AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA,
-};
-use crate::agent_task_loop_definition::AGENT_TASK_LOOP_DEFINITION_SCHEMA;
 use crate::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA;
 use crate::agent_task_provider::{
     provider_capability_contract, ProviderSchemaContract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
@@ -38,7 +34,6 @@ pub const AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA: &str =
     "homeboy/agent-task-artifact-declaration/v1";
 pub const AGENT_TASK_ARTIFACT_HANDOFF_SCHEMA: &str = "homeboy/agent-task-artifact-handoff/v1";
 pub const AGENT_TASK_EVIDENCE_REF_SCHEMA: &str = "homeboy/agent-task-evidence-ref/v1";
-pub const AGENT_TASK_LOOP_ACTION_SCHEMA: &str = "homeboy/agent-task-loop-action/v1";
 pub const AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-outcome-contract/v1";
 pub const AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA: &str = "homeboy/agent-task-diagnostic-ranking/v1";
@@ -82,7 +77,6 @@ pub struct AgentTaskCoreContractSchemas {
     pub artifact_declaration: String,
     pub artifact_handoff: String,
     pub evidence_ref: String,
-    pub loop_action: String,
     pub provider_outcome_contract: String,
     pub diagnostic_ranking: String,
     pub workflow: String,
@@ -105,9 +99,6 @@ pub struct AgentTaskCoreContractSchemas {
     pub gate_report: String,
     pub promotion_report: String,
     pub cook_feedback_report: String,
-    pub loop_controller: String,
-    pub loop_controller_status: String,
-    pub loop_definition: String,
     pub secret_env_plan: String,
     pub secret_env_requirement: String,
     pub command_invocation: String,
@@ -195,7 +186,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             artifact_declaration: AGENT_TASK_ARTIFACT_DECLARATION_SCHEMA.to_string(),
             artifact_handoff: AGENT_TASK_ARTIFACT_HANDOFF_SCHEMA.to_string(),
             evidence_ref: AGENT_TASK_EVIDENCE_REF_SCHEMA.to_string(),
-            loop_action: AGENT_TASK_LOOP_ACTION_SCHEMA.to_string(),
             provider_outcome_contract: AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA.to_string(),
             diagnostic_ranking: AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA.to_string(),
             workflow: AGENT_TASK_WORKFLOW_SCHEMA.to_string(),
@@ -218,9 +208,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             gate_report: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
             promotion_report: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             cook_feedback_report: AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA.to_string(),
-            loop_controller: AGENT_TASK_LOOP_CONTROLLER_SCHEMA.to_string(),
-            loop_controller_status: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
-            loop_definition: AGENT_TASK_LOOP_DEFINITION_SCHEMA.to_string(),
             secret_env_plan: SECRET_ENV_PLAN_SCHEMA.to_string(),
             secret_env_requirement: SECRET_ENV_REQUIREMENT_SCHEMA.to_string(),
             command_invocation: COMMAND_INVOCATION_SCHEMA.to_string(),

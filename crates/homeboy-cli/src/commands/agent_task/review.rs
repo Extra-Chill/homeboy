@@ -3084,7 +3084,7 @@ fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Val
 /// extension-provider selector apart from the nested AI runtime provider config
 /// without reading runtime internals (#6122).
 ///
-/// The confusion this prevents: `--dispatch-selector codex` fails when `codex`
+/// The confusion this prevents: `--selector codex` fails when `codex`
 /// is a nested runtime/provider config value, not a Homeboy executor provider id.
 fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
     let selectable_ids: Vec<String> = providers
@@ -3110,27 +3110,27 @@ fn dispatch_config_layers(providers: &[AgentTaskExecutorProvider]) -> Value {
         .unwrap_or_else(|| "example".to_string());
 
     serde_json::json!({
-        "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which runtime/model that executor drives. Pass an executor provider id to --dispatch-selector, and pass runtime-specific provider configuration inside --dispatch-provider-config — never the other way around.",
+        "summary": "Dispatch configuration has two independent layers that are easy to confuse: the extension-provider selector picks which Homeboy executor runs the task, while the nested provider config picks which runtime/model that executor drives. Pass an executor provider id to --selector, and pass runtime-specific provider configuration inside --provider-config — never the other way around.",
         "layers": [
             {
                 "layer": "extension_provider_selector",
-                "flags": ["--dispatch-selector", "--dispatch-provider-id", "--selector", "--provider-id"],
+                "flags": ["--selector", "--provider-id"],
                 "selects": "Which Homeboy extension executor provider handles the task.",
                 "value_is": "A registered executor provider id (see the `providers[].id` values below), NOT a model or AI provider family.",
                 "registered_provider_ids": selectable_ids,
             },
             {
                 "layer": "agent_model_provider_config",
-                "flags": ["--dispatch-provider-config", "--provider-config", "--dispatch-model", "--model"],
+                "flags": ["--provider-config", "--model"],
                 "selects": "Which runtime/provider/model the selected executor uses.",
                 "value_is": "Nested provider config JSON (and/or a model override), passed to the executor.",
             }
         ],
-        "common_mistake": format!("Passing runtime-specific provider configuration such as `{example_ai_provider}` to --dispatch-selector. That selects the executor, not the model/provider, so it fails with 'no extension agent-task provider ... matched selector'. Put runtime-specific values in --dispatch-provider-config instead."),
+        "common_mistake": format!("Passing runtime-specific provider configuration such as `{example_ai_provider}` to --selector. That selects the executor, not the model/provider, so it fails with 'no extension agent-task provider ... matched selector'. Put runtime-specific values in --provider-config instead."),
         "example": {
             "description": "Run a task with a selected executor provider driving a nested AI runtime/provider config.",
             "command": format!(
-                "homeboy agent-task cook --dispatch-selector {example_selector_id} --dispatch-provider-config '{{\"provider\":\"{example_ai_provider}\"}}' --prompt @task.md"
+                "homeboy agent-task cook --selector {example_selector_id} --provider-config '{{\"provider\":\"{example_ai_provider}\"}}' --prompt @task.md"
             ),
         }
     })
@@ -4922,8 +4922,8 @@ mod tests {
         let command = layers["example"]["command"]
             .as_str()
             .expect("example command");
-        assert!(command.contains("--dispatch-selector sample.executor-provider"));
-        assert!(command.contains("--dispatch-provider-config"));
+        assert!(command.contains("--selector sample.executor-provider"));
+        assert!(command.contains("--provider-config"));
         assert!(command.contains("codex"));
 
         // The common-mistake note calls out the codex-as-selector trap.
@@ -4970,7 +4970,7 @@ mod tests {
         let command = layers["example"]["command"]
             .as_str()
             .expect("example command");
-        assert!(command.contains("--dispatch-selector sample.executor-provider"));
+        assert!(command.contains("--selector sample.executor-provider"));
         assert_eq!(
             layers["layers"][0]["registered_provider_ids"],
             serde_json::json!([])

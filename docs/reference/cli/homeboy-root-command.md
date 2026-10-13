@@ -36,8 +36,8 @@ to hot commands such as `bench`, `rig up`, full-workspace
 runs when `homeboy self doctor` sees a warm or hot machine. Non-interactive
 hot commands fail fast unless the work is routed through Lab/runner-hosted
 execution or the caller explicitly accepts local pressure. For portable hot
-commands with a default Lab runner, including controller spec materialization
-commands, Homeboy auto-selects the default runner when `--runner` is omitted.
+commands with a default Lab runner, Homeboy auto-selects the default runner
+when `--runner` is omitted.
 Use `--placement local` only when controller-machine execution is intentional;
 use `--placement lab` when local fallback is unacceptable. Removed placement
 flags are rejected with a migration error; Homeboy provides no legacy support.

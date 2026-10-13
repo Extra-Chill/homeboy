@@ -302,7 +302,13 @@ pub fn register(
                 registered_at_ms: now_ms,
                 anchor_ms,
                 interval_ms,
-                next_due_ms: first_due(anchor_ms, interval_ms, now_ms),
+                // An operator's cadence fires on its first slot. A built-in is
+                // installed by a starting daemon and waits one interval, so
+                // daemon start never doubles as a maintenance run.
+                next_due_ms: match first_due(anchor_ms, interval_ms, now_ms) {
+                    due if builtin && due <= now_ms => due + interval_ms,
+                    due => due,
+                },
                 cancelled_at_ms: None,
                 last_instance: None,
                 last_instance_store: None,

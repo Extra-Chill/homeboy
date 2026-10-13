@@ -115,7 +115,7 @@ pub fn submit_prepared_plan(
     prepared: PreparedAgentTaskSubmission,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskSubmissionOutcome> {
-    submit_prepared_plan_inner(request, prepared, Some(executor), None, |_| Ok(()))
+    submit_prepared_plan_inner(request, prepared, Some(executor), None)
 }
 
 pub fn queue_prepared_plan(
@@ -130,7 +130,7 @@ pub fn queue_prepared_plan(
             None,
         ));
     }
-    submit_prepared_plan_inner(request, prepared, None, None, |_| Ok(()))
+    submit_prepared_plan_inner(request, prepared, None, None)
 }
 
 pub(crate) fn submit_prepared_plan_with_cook_baseline(
@@ -139,44 +139,7 @@ pub(crate) fn submit_prepared_plan_with_cook_baseline(
     executor: SharedAgentTaskExecutor,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
 ) -> Result<AgentTaskSubmissionOutcome> {
-    submit_prepared_plan_inner(
-        request,
-        prepared,
-        Some(executor),
-        derived_cook_baseline,
-        |_| Ok(()),
-    )
-}
-
-pub(crate) fn submit_prepared_plan_with_observer<F>(
-    request: &ControlPlaneSubmissionRequest,
-    prepared: PreparedAgentTaskSubmission,
-    executor: SharedAgentTaskExecutor,
-    on_submitted: F,
-) -> Result<AgentTaskSubmissionOutcome>
-where
-    F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
-{
-    submit_prepared_plan_inner(request, prepared, Some(executor), None, on_submitted)
-}
-
-pub(crate) fn queue_prepared_plan_with_observer<F>(
-    request: &ControlPlaneSubmissionRequest,
-    prepared: PreparedAgentTaskSubmission,
-    on_submitted: F,
-) -> Result<AgentTaskSubmissionOutcome>
-where
-    F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
-{
-    if !request.queue_only {
-        return Err(Error::validation_invalid_argument(
-            "queue_only",
-            "queue submission requires queue_only=true",
-            None,
-            None,
-        ));
-    }
-    submit_prepared_plan_inner(request, prepared, None, None, on_submitted)
+    submit_prepared_plan_inner(request, prepared, Some(executor), derived_cook_baseline)
 }
 
 pub(crate) fn execute_claimed_plan(
@@ -391,16 +354,12 @@ pub(crate) fn reject_prepared_plan(
     })
 }
 
-fn submit_prepared_plan_inner<F>(
+fn submit_prepared_plan_inner(
     request: &ControlPlaneSubmissionRequest,
     mut prepared: PreparedAgentTaskSubmission,
     executor: Option<SharedAgentTaskExecutor>,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-    on_submitted: F,
-) -> Result<AgentTaskSubmissionOutcome>
-where
-    F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
-{
+) -> Result<AgentTaskSubmissionOutcome> {
     validate_submission_request(request)?;
     let lifecycle_store = prepared
         .lifecycle_store
@@ -409,26 +368,16 @@ where
         .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
     prepared.lifecycle_store = Some(lifecycle_store.clone());
     with_submission_lock(&lifecycle_store, request.run.as_str(), || {
-        submit_prepared_plan_locked(
-            request,
-            prepared,
-            executor,
-            derived_cook_baseline,
-            on_submitted,
-        )
+        submit_prepared_plan_locked(request, prepared, executor, derived_cook_baseline)
     })
 }
 
-fn submit_prepared_plan_locked<F>(
+fn submit_prepared_plan_locked(
     request: &ControlPlaneSubmissionRequest,
     mut prepared: PreparedAgentTaskSubmission,
     executor: Option<SharedAgentTaskExecutor>,
     derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
-    on_submitted: F,
-) -> Result<AgentTaskSubmissionOutcome>
-where
-    F: FnOnce(&AgentTaskRunRecord) -> Result<()>,
-{
+) -> Result<AgentTaskSubmissionOutcome> {
     let requested_run_id = request.run.as_str();
     let lifecycle_store = prepared
         .lifecycle_store
@@ -446,7 +395,6 @@ where
     if let Some(existing) = existing {
         if let Some(outcome) = terminal_reuse_outcome(&identity, lifecycle_store, existing.clone())?
         {
-            on_submitted(&existing)?;
             return Ok(outcome);
         }
         // A `Running` record only blocks resubmission while its owner is
@@ -476,7 +424,6 @@ where
         requested_run_id,
         submission_metadata(request, &prepared.plan, &identity),
     )?;
-    on_submitted(&submitted)?;
     if request.queue_only {
         return acknowledgement_outcome(
             &identity,
@@ -1078,36 +1025,6 @@ mod tests {
                     .state,
                 AgentTaskRunState::Running
             );
-        });
-    }
-
-    #[test]
-    fn submission_observer_runs_after_persistence_and_before_execution() {
-        with_isolated_home(|_| {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let observed = Arc::new(AtomicBool::new(false));
-            let executor = Arc::new(CountingExecutor {
-                calls: Arc::clone(&calls),
-                submitted_observed: Some(Arc::clone(&observed)),
-            });
-            let request =
-                prepared_submission_request(Some("submission-observer-order"), false, "controller")
-                    .expect("request");
-
-            submit_prepared_plan_with_observer(
-                &request,
-                PreparedAgentTaskSubmission::new(test_plan("observer-plan")),
-                executor,
-                |submitted| {
-                    assert_eq!(submitted.state, AgentTaskRunState::Queued);
-                    assert!(agent_task_lifecycle::run_record_exists(&submitted.run_id)?);
-                    observed.store(true, Ordering::SeqCst);
-                    Ok(())
-                },
-            )
-            .expect("observed submission");
-
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
         });
     }
 

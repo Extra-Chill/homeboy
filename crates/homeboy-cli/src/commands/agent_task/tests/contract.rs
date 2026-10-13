@@ -165,10 +165,6 @@ fn contract_output_exports_core_agent_task_metadata() {
         "homeboy/agent-task-evidence-ref/v1"
     );
     assert_eq!(
-        value["schemas"]["loop_action"],
-        "homeboy/agent-task-loop-action/v1"
-    );
-    assert_eq!(
         value["schemas"]["provider_outcome_contract"],
         "homeboy/agent-task-provider-outcome-contract/v1"
     );
@@ -179,10 +175,6 @@ fn contract_output_exports_core_agent_task_metadata() {
     assert_eq!(
         value["schemas"]["secret_env_requirement"],
         "homeboy/secret-env-requirement/v1"
-    );
-    assert_eq!(
-        value["schemas"]["loop_definition"],
-        "homeboy/agent-task-loop-definition/v1"
     );
     assert_eq!(
         value["schemas"]["provider"],

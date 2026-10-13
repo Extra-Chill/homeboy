@@ -8,19 +8,9 @@ pub(crate) use std::process::Command;
 pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskControllerApplyEventArgs, AgentTaskControllerDispatchArgs,
-    AgentTaskControllerFromSpecArgs, AgentTaskControllerMaterializeArgs,
-    AgentTaskControllerProofArgs, AgentTaskControllerRunFromSpecArgs,
-};
-pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, CompileLoopArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
+    AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
     ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs,
     ValidatePlanArgs,
-};
-pub(in crate::commands::agent_task) use super::super::controller::{
-    apply_controller_event, controller_from_spec, controller_materialize,
-    controller_proof_with_test_executor, controller_run_action_with_executor,
-    controller_run_from_spec_with_test_executor, controller_run_next_with_executor,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
@@ -34,13 +24,6 @@ pub(in crate::commands::agent_task) use super::super::status::{
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
 };
-pub(crate) use homeboy::agents::agent_tasks::controller_service::{
-    apply_spec_dispatch_defaults as apply_from_spec_dispatch_defaults,
-    apply_spec_dispatch_defaults_with_cwd as apply_from_spec_dispatch_defaults_with_cwd,
-};
-pub(crate) use homeboy::agents::agent_tasks::controller_service::{
-    AgentTaskRepoLoopSpec, ControllerFromSpecRequest,
-};
 pub(crate) use homeboy::agents::agent_tasks::provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
@@ -50,10 +33,6 @@ pub(crate) use homeboy::agents::agent_tasks::scheduler::{
 };
 
 pub(crate) use crate::test_support::{controller_runtime_test_executable, with_isolated_home};
-pub(crate) use homeboy::agents::agent_task_loop_controller::{
-    self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopPolicyAction,
-};
-pub(crate) use homeboy::agents::agent_tasks::controller_service as agent_task_controller_service;
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
     AgentTaskRunState,
@@ -71,7 +50,6 @@ pub(crate) use serde_json::{json, Value};
 pub(crate) use std::sync::{Arc, Mutex};
 
 pub(in crate::commands::agent_task) use super::super::contract;
-pub(in crate::commands::agent_task) use super::super::loop_definition;
 pub(in crate::commands::agent_task) use super::super::{ContractArgs, ContractFormat};
 
 /// Create a committed, clean git checkout at `path` so dispatch-time runtime
@@ -360,12 +338,4 @@ pub(crate) fn test_plan() -> AgentTaskPlan {
             metadata: Value::Null,
         }],
     )
-}
-
-pub(crate) fn agent_task_request_json(task_id: &str) -> Value {
-    let mut plan = test_plan();
-    let mut request = plan.tasks.pop().expect("test task");
-    request.task_id = task_id.to_string();
-    request.instructions = format!("run {task_id}");
-    serde_json::to_value(request).expect("request json")
 }

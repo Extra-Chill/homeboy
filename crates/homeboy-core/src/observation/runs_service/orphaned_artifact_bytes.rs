@@ -22,7 +22,7 @@
 //!    projection.** At least ten subsystems own top-level subtrees under it
 //!    that are never registered as artifact rows at those paths — `runner/`,
 //!    `runner-attach/`, `runner-exec-attach/`, `agent-task/`,
-//!    `agent-task-loop-controller/`, `controller-scratch-recovery/`,
+//!    `workflows/`, `controller-scratch-recovery/`,
 //!    `recovered-runner-artifacts/`, `executor-finalized/`,
 //!    `preview-consumer/`, and `_scratch/`. A row-join reaper would classify
 //!    all of them as orphans and delete live state.

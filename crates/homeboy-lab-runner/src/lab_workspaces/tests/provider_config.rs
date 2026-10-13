@@ -345,10 +345,8 @@ fn dispatch_provider_config_file_path_syncs_containing_checkout() {
     let args = vec![
         "homeboy".to_string(),
         "agent-task".to_string(),
-        "controller".to_string(),
-        "run-from-spec".to_string(),
-        "loop.json".to_string(),
-        "--dispatch-provider-config".to_string(),
+        "cook".to_string(),
+        "--provider-config".to_string(),
         serde_json::json!({
             "provider_plugin_paths": [provider.join("provider-plugin")],
             "component_contracts": [{ "path": contract }],

@@ -62,23 +62,10 @@ pub trait RunnerContinuationProvider: Send + Sync {
         false
     }
 
-    /// Explicit capability gate for terminal historical inspection. Older
-    /// providers fail closed rather than turning an unavailable probe into
-    /// absent-job evidence.
-    fn supports_terminal_workspace_authority(&self) -> bool {
-        false
-    }
-
     /// Configured remote authorities which must participate in a workspace
     /// claim. The default keeps older providers compatible for local-only runs.
     fn workspace_claim_runner_ids(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
-    }
-
-    /// Every configured direct or reverse runner authority which must attest a
-    /// terminal workspace. Implementations may use a stricter set than claims.
-    fn terminal_workspace_authority_runner_ids(&self) -> Result<Vec<String>> {
-        self.workspace_claim_runner_ids()
     }
 
     fn acquire_workspace_claim(

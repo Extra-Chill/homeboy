@@ -914,18 +914,18 @@ mod tests {
     #[test]
     fn generic_output_file_keeps_complete_large_payload_with_compact_presentation() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("controller-result.json");
+        let path = dir.path().join("large-result.json");
         let large = "x".repeat(2 * 1024 * 1024);
         let run = CommandRun::from_stdout_result(
             Ok(json!({
-                "schema": "homeboy/agent-task-loop-controller-run-from-spec-result/v1",
-                "loop_id": "large-loop",
+                "schema": "homeboy/example-large-result/v1",
+                "id": "large-result",
                 "results": [{ "payload": large }]
             })),
             0,
         )
         .with_presentation(CommandPresentation {
-            stdout: Some("{\"success\":true,\"data\":{\"loop_id\":\"large-loop\"}}\n".to_string()),
+            stdout: Some("{\"success\":true,\"data\":{\"id\":\"large-result\"}}\n".to_string()),
             stderr: None,
         });
 
@@ -940,7 +940,7 @@ mod tests {
         let written = std::fs::read_to_string(path).expect("artifact written");
         let json: Value = serde_json::from_str(&written).expect("valid json");
         assert_eq!(json["success"], true);
-        assert_eq!(json["data"]["loop_id"], "large-loop");
+        assert_eq!(json["data"]["id"], "large-result");
         assert_eq!(
             json["data"]["results"][0]["payload"]
                 .as_str()

@@ -5,8 +5,9 @@ use super::*;
 use homeboy_core::engine::local_files::{remove_file_durably, write_json_file_owner_only};
 use homeboy_core::workspace_claim::{WorkspaceClaimStore, MAX_WORKSPACE_CLAIM_TTL_MS};
 use homeboy_core::worktree::{
-    authority_set_fingerprint, TaskWorktreeRecord, TerminalWorkspaceAuthorityObservation,
-    TerminalWorkspaceAuthorityProof, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
+    authority_set_fingerprint, MissingActiveWorktreeReason, TaskWorktreeRecord,
+    TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof,
+    WorktreeAuthorityRefusal, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
     TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 use homeboy_runner_contract::{
@@ -29,100 +30,65 @@ fn commit_budget_ms(now_ms: u64, claims: impl Iterator<Item = u64>) -> u64 {
         .saturating_sub(COMMIT_SAFETY_MARGIN_MS)
 }
 
-/// A refusal retains the reason and any earlier observations, allowing callers
-/// to present durable evidence without treating an uncertain probe as terminal.
-#[derive(Debug, Clone)]
-pub enum TerminalWorkspaceAuthorityResolution {
-    Proven(Box<TerminalWorkspaceAuthorityProof>),
-    Refused {
-        reason: String,
-        observations: Vec<TerminalWorkspaceAuthorityObservation>,
-    },
-}
-
-/// Resolve historical authority outside the task-worktree registry lease. The
-/// manifest is the request binding; controller state and runner snapshots are
-/// evidence, never a wall-clock mutation fence.
-pub fn resolve_terminal_workspace_authority(
-    record: &TaskWorktreeRecord,
-) -> Result<TerminalWorkspaceAuthorityResolution> {
-    resolve_terminal_workspace_authority_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        record,
-    )
-}
-
-/// The store-rooted counterpart of [`resolve_terminal_workspace_authority`].
+/// Resolve controller-local terminal authority for reconciling one task
+/// worktree. Every read is controller-local and bounded; no claim or manifest
+/// is mutated.
 ///
-/// This is a permission gate over destroying a retained workspace, and it used
-/// to consult two independently resolved data roots: the durable controller run
-/// came from the ambient lifecycle store, the owner lease from a claim store
-/// built out of a second `paths::homeboy_data()` read. When those two disagree
-/// the lease lookup finds no file, `validate_owner` answers `Ok(false)`, and the
-/// gate concludes "no live local workspace owner" for a workspace that is still
-/// owned — a fail-open on the exact check that is supposed to fail closed
-/// (#7505). One store now roots both reads.
-pub fn resolve_terminal_workspace_authority_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
+/// A runner can hold a claim or owner lease on a workspace identity only
+/// through (a) a dispatch of the owning run, which the controller records as a
+/// handoff, runner binding, or submission intent before crossing the runner
+/// boundary, or (b) a composite claim acquisition, whose write-ahead intent or
+/// cleanup receipt the controller keeps until every component is released. When
+/// neither exists the controller-local claim alone fences the workspace: any
+/// later dispatch must first register a local owner, which that claim refuses.
+/// Otherwise the record needs a remote claim release that bounded inventory
+/// does not perform, and only that record is preserved.
+pub fn local_terminal_workspace_authority(
     record: &TaskWorktreeRecord,
-) -> Result<TerminalWorkspaceAuthorityResolution> {
-    let workspace = record.effective_workspace_identity()?;
-    let authority_set = match configured_terminal_authorities() {
-        Ok(authorities) => authorities,
-        Err(reason) => {
-            return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-                reason,
-                observations: Vec::new(),
-            })
-        }
+) -> std::result::Result<Box<TerminalWorkspaceAuthorityProof>, WorktreeAuthorityRefusal> {
+    let refuse = |reason, detail: &str| WorktreeAuthorityRefusal {
+        reason,
+        detail: detail.to_string(),
     };
-    if let Some(proof) = &record.terminal_workspace_authority {
-        if proof.exact_for(record, record.run_id.as_deref())
-            && proof.authority_set == authority_set
-            && proof.authority_set_fingerprint == authority_set_fingerprint(&authority_set)
-        {
-            return Ok(TerminalWorkspaceAuthorityResolution::Proven(Box::new(
-                proof.clone(),
-            )));
-        }
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason:
-                "cached terminal authority receipt is malformed or binds another manifest revision"
-                    .into(),
-            observations: Vec::new(),
-        });
+    let unavailable = MissingActiveWorktreeReason::TerminalAuthorityUnavailable;
+    let remote = MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported;
+    let workspace = record
+        .effective_workspace_identity()
+        .map_err(|error| refuse(unavailable.clone(), &error.message))?;
+    if composite_claim_receipt_outstanding(&workspace) {
+        return Err(refuse(
+            remote,
+            "workspace has an unreleased composite claim intent or cleanup receipt",
+        ));
     }
     let Some(run_id) = record.run_id.as_deref() else {
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason: "no-run-id task worktree requires an existing exact terminal authority receipt"
-                .into(),
-            observations: Vec::new(),
-        });
+        return Err(refuse(
+            unavailable,
+            "task worktree has no owning run to attest terminality",
+        ));
     };
-    let controller = match lifecycle_store.read_record(run_id) {
-        Ok(record) => record,
-        Err(_) => {
-            return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-                reason: "durable controller run is missing".into(),
-                observations: Vec::new(),
-            })
-        }
-    };
-    if !controller.state.is_terminal() || !controller.run_state_projections_agree() {
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason: "durable controller run is active or has conflicting state projection".into(),
-            observations: Vec::new(),
-        });
-    }
-    if controller
-        .lab_handoff
-        .as_ref()
-        .is_some_and(|handoff| handoff.state == AgentTaskLabHandoffState::Pending)
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()
+        .map_err(|error| refuse(unavailable.clone(), &error.message))?;
+    let controller = lifecycle_store
+        .read_record(run_id)
+        .map_err(|_| refuse(unavailable.clone(), "durable controller run is missing"))?;
+    if controller.lab_handoff.is_some()
+        || controller.is_runner_backed()
+        || controller
+            .metadata
+            .get("runner_submission_intent")
+            .is_some()
     {
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason: "controller handoff remains pending".into(),
-            observations: Vec::new(),
-        });
+        return Err(refuse(
+            remote,
+            "owning run was dispatched to a runner that may hold a workspace claim",
+        ));
+    }
+    if !controller.state.is_terminal() || !controller.run_state_projections_agree() {
+        return Err(refuse(
+            MissingActiveWorktreeReason::LiveRun,
+            "durable controller run is active or has conflicting state projection",
+        ));
     }
     if controller
         .workspace_owner_lease
@@ -132,222 +98,52 @@ pub fn resolve_terminal_workspace_authority_in_store(
                 .unwrap_or(true)
         })
     {
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason: "controller still has a live local workspace owner lease".into(),
-            observations: Vec::new(),
-        });
+        return Err(refuse(
+            MissingActiveWorktreeReason::LiveRun,
+            "controller still has a live local workspace owner lease",
+        ));
     }
-    let mut observations = vec![TerminalWorkspaceAuthorityObservation {
-        authority: "controller".into(),
+    let authority_set = vec!["controller".to_string()];
+    let proof = TerminalWorkspaceAuthorityProof {
+        schema: TERMINAL_WORKSPACE_AUTHORITY_SCHEMA.into(),
         capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
         capability_version: 1,
-        status: "terminal".into(),
-        evidence: format!(
-            "{:?}@{}",
-            controller.state, controller.workspace_lifecycle_revision
-        ),
+        workspace,
+        task_worktree_id: record.id.clone(),
+        manifest_revision: record.lifecycle_revision,
         run_id: Some(run_id.into()),
-        runner_job_id: None,
-    }];
-    let accepted = controller
-        .lab_handoff
-        .as_ref()
-        .filter(|handoff| handoff.state == AgentTaskLabHandoffState::Accepted);
-    if let Some(handoff) = accepted {
-        let Some(job_id) = handoff
-            .runner_job_id
-            .as_deref()
-            .filter(|id| !id.trim().is_empty())
-        else {
-            return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-                reason: "accepted handoff has no exact runner job identity".into(),
-                observations,
-            });
-        };
-        if !with_runner_continuation(|provider| provider.supports_terminal_workspace_authority())
-            || !with_runner_continuation(|provider| {
-                provider
-                    .runner_authority(&handoff.runner_id)
-                    .is_configured()
-            })
-            || !with_runner_continuation(|provider| {
-                provider.is_runner_connected(&handoff.runner_id)
-            })
-        {
-            return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-                reason: "accepted runner is old, missing, or unreachable".into(),
-                observations,
-            });
-        }
-        match with_runner_continuation(|provider| {
-            provider.reconcile_runner_job(&handoff.runner_id, job_id)
-        }) {
-            RunnerJobReconciliation::Snapshot(snapshot) if snapshot.job.status.is_terminal() => {
-                observations.push(TerminalWorkspaceAuthorityObservation {
-                    authority: handoff.runner_id.clone(),
-                    capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
-                    capability_version: 1,
-                    status: "terminal".into(),
-                    evidence: format!("{}:{:?}", job_id, snapshot.job.status),
-                    run_id: Some(run_id.into()),
-                    runner_job_id: Some(job_id.into()),
-                })
-            }
-            RunnerJobReconciliation::ConfirmedAbsent {
-                checked_generations,
-            } if checked_generations > 0 => {
-                observations.push(TerminalWorkspaceAuthorityObservation {
-                    authority: handoff.runner_id.clone(),
-                    capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
-                    capability_version: 1,
-                    status: "absent_terminal".into(),
-                    evidence: format!(
-                        "{} absent across {} generations",
-                        job_id, checked_generations
-                    ),
-                    run_id: Some(run_id.into()),
-                    runner_job_id: Some(job_id.into()),
-                })
-            }
-            _ => return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-                reason:
-                    "accepted runner job is active, unknown, or has incomplete terminal evidence"
-                        .into(),
-                observations,
-            }),
-        }
-    }
-    // This protocol has one durable accepted-handoff binding. A configured
-    // authority with no such binding cannot truthfully attest terminality, so
-    // refuse rather than manufacture an "absent" receipt.
-    if authority_set.iter().any(|authority| {
-        authority != "controller"
-            && !observations
-                .iter()
-                .any(|observation| observation.authority == *authority)
-    }) {
-        return Ok(TerminalWorkspaceAuthorityResolution::Refused {
-            reason: "configured terminal authority has no accepted exact runner job binding".into(),
-            observations,
-        });
-    }
-    Ok(TerminalWorkspaceAuthorityResolution::Proven(Box::new(
-        TerminalWorkspaceAuthorityProof {
-            schema: TERMINAL_WORKSPACE_AUTHORITY_SCHEMA.into(),
+        controller_state: format!("{:?}", controller.state),
+        controller_version: controller.workspace_lifecycle_revision,
+        accepted_runner_id: None,
+        accepted_runner_job_id: None,
+        authority_set_fingerprint: authority_set_fingerprint(&authority_set),
+        authority_set,
+        observations: vec![TerminalWorkspaceAuthorityObservation {
+            authority: "controller".into(),
             capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
             capability_version: 1,
-            workspace,
-            task_worktree_id: record.id.clone(),
-            manifest_revision: record.lifecycle_revision,
+            status: "terminal".into(),
+            evidence: format!(
+                "{:?}@{}",
+                controller.state, controller.workspace_lifecycle_revision
+            ),
             run_id: Some(run_id.into()),
-            controller_state: format!("{:?}", controller.state),
-            controller_version: controller.workspace_lifecycle_revision,
-            accepted_runner_id: accepted.map(|handoff| handoff.runner_id.clone()),
-            accepted_runner_job_id: accepted.and_then(|handoff| handoff.runner_job_id.clone()),
-            authority_set_fingerprint: authority_set_fingerprint(&authority_set),
-            authority_set,
-            observations,
-            issued_evidence: vec![format!("controller-run:{run_id}")],
-        },
-    )))
-}
-
-fn configured_terminal_authorities() -> std::result::Result<Vec<String>, String> {
-    let runner_ids = with_runner_continuation(|provider| {
-        let ids = provider.terminal_workspace_authority_runner_ids()?;
-        if !ids.is_empty() && !provider.supports_terminal_workspace_authority() {
-            return Err(Error::validation_invalid_argument(
-                "terminal_workspace_authority",
-                "configured runner does not support terminal workspace authority",
-                None,
-                None,
-            ));
-        }
-        for runner_id in &ids {
-            if runner_id.trim().is_empty()
-                || runner_id == "controller"
-                || !provider.runner_authority(runner_id).is_configured()
-                || !provider.is_runner_connected(runner_id)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "terminal_workspace_authority",
-                    "configured terminal workspace authority is missing or unreachable",
-                    Some(runner_id.clone()),
-                    None,
-                ));
-            }
-        }
-        Ok(ids)
-    })
-    .map_err(|error| error.message)?;
-    let mut authorities = vec!["controller".to_string()];
-    authorities.extend(runner_ids);
-    authorities.sort();
-    if authorities.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err("configured terminal workspace authorities are not unique".into());
-    }
-    Ok(authorities)
-}
-
-/// Validate only durable/configured authority identity. This deliberately avoids
-/// live runner probes; bounded claim acquisition supplies that liveness fence.
-pub fn cached_terminal_workspace_authority(
-    record: &TaskWorktreeRecord,
-) -> std::result::Result<Option<Box<TerminalWorkspaceAuthorityProof>>, String> {
-    let Some(proof) = record.terminal_workspace_authority.as_ref() else {
-        return Ok(None);
+            runner_job_id: None,
+        }],
+        issued_evidence: vec![format!("controller-run:{run_id}")],
     };
-    let runner_ids = with_runner_continuation(|provider| {
-        let ids = provider.terminal_workspace_authority_runner_ids()?;
-        if !ids.is_empty() && !provider.supports_terminal_workspace_authority() {
-            return Err(Error::validation_invalid_argument(
-                "terminal_workspace_authority",
-                "configured runner does not support terminal workspace authority",
-                None,
-                None,
-            ));
-        }
-        if ids.iter().any(|id| {
-            id.trim().is_empty()
-                || id == "controller"
-                || !provider.runner_authority(id).is_configured()
-        }) {
-            return Err(Error::validation_invalid_argument(
-                "terminal_workspace_authority",
-                "configured terminal workspace authority is missing",
-                None,
-                None,
-            ));
-        }
-        Ok(ids)
-    })
-    .map_err(|error| error.message)?;
-    let mut authority_set = vec!["controller".to_string()];
-    authority_set.extend(runner_ids);
-    authority_set.sort();
-    // A cached remote receipt cannot establish that its accepted runner job is
-    // still terminal without the same bounded reconciliation used at issuance.
-    // Keep local-only proofs usable; fail closed for remote authority until a
-    // deadline-aware refresh protocol exists.
-    if authority_set.len() != 1 {
-        return Ok(None);
+    // A manifest receipt is immutable; one binding other evidence is stale.
+    if record
+        .terminal_workspace_authority
+        .as_ref()
+        .is_some_and(|cached| *cached != proof)
+    {
+        return Err(refuse(
+            unavailable,
+            "cached terminal authority receipt binds other controller evidence",
+        ));
     }
-    Ok((proof.exact_for(record, record.run_id.as_deref())
-        && proof.authority_set == authority_set
-        && proof.authority_set_fingerprint == authority_set_fingerprint(&authority_set))
-    .then(|| Box::new(proof.clone())))
-}
-
-/// Bounded worktree inventory currently supports controller-local evidence
-/// only. A remote authority needs a durable release receipt that survives the
-/// page deadline before it can participate in destructive reconciliation.
-pub fn bounded_inventory_requires_remote_claims() -> bool {
-    with_runner_continuation(|provider| {
-        let claims = provider.workspace_claim_runner_ids()?;
-        let terminal = provider.terminal_workspace_authority_runner_ids()?;
-        Ok::<bool, Error>(!claims.is_empty() || !terminal.is_empty())
-    })
-    .unwrap_or(true)
+    Ok(Box::new(proof))
 }
 
 /// The complete authority set for a workspace mutation. Each remote component
@@ -606,8 +402,19 @@ pub fn acquire_composite_workspace_claim(
     acquire_composite_workspace_claim_until(
         workspace,
         generation,
+        CompositeClaimAuthorities::ConfiguredRunners,
         std::time::Instant::now() + std::time::Duration::from_secs(30),
     )
+}
+
+/// Which authorities a composite claim fences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositeClaimAuthorities {
+    /// Every configured runner authority contributes a component claim.
+    ConfiguredRunners,
+    /// Controller-local evidence proved no runner can hold this workspace
+    /// (see [`local_terminal_workspace_authority`]).
+    ControllerOnly,
 }
 
 #[expect(
@@ -617,6 +424,7 @@ pub fn acquire_composite_workspace_claim(
 pub fn acquire_composite_workspace_claim_until(
     workspace: WorkspaceIdentity,
     generation: u64,
+    authorities: CompositeClaimAuthorities,
     deadline: std::time::Instant,
 ) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
     if std::time::Instant::now() >= deadline {
@@ -661,7 +469,12 @@ pub fn acquire_composite_workspace_claim_until(
     }) {
         return Err(CompositeWorkspaceClaimAcquisitionFailure::from(error));
     }
-    match acquire_composite_workspace_claim_unrecovered(workspace, generation, deadline) {
+    match acquire_composite_workspace_claim_unrecovered(
+        workspace,
+        generation,
+        authorities,
+        deadline,
+    ) {
         Ok(claim) => {
             let mut active = intent;
             active.state = "active".into();
@@ -711,17 +524,22 @@ pub fn acquire_composite_workspace_claim_until(
 fn acquire_composite_workspace_claim_unrecovered(
     workspace: WorkspaceIdentity,
     generation: u64,
+    authorities: CompositeClaimAuthorities,
     deadline: std::time::Instant,
 ) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
     workspace.verify()?;
     let local = acquire_local_workspace_claim(workspace.clone(), generation)?;
     let mut guard =
         CompositeWorkspaceClaimAcquisitionGuard::new(workspace.clone(), generation, local);
-    let runner_ids =
-        match with_runner_continuation(|provider| provider.workspace_claim_runner_ids()) {
-            Ok(runner_ids) => runner_ids,
-            Err(error) => return Err(guard.fail(error, deadline)),
-        };
+    let runner_ids = match authorities {
+        CompositeClaimAuthorities::ControllerOnly => Vec::new(),
+        CompositeClaimAuthorities::ConfiguredRunners => {
+            match with_runner_continuation(|provider| provider.workspace_claim_runner_ids()) {
+                Ok(runner_ids) => runner_ids,
+                Err(error) => return Err(guard.fail(error, deadline)),
+            }
+        }
+    };
     let mut unique_runner_ids = std::collections::BTreeSet::new();
     for runner_id in &runner_ids {
         if runner_id.trim().is_empty() || runner_id != runner_id.trim() || runner_id == "controller"
@@ -1130,6 +948,41 @@ fn write_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Re
 fn remove_composite_acquisition_intent(workspace: &WorkspaceIdentity) -> Result<()> {
     let path = composite_acquisition_intent_path(workspace)?;
     remove_file_durably(&path, &path.display().to_string())
+}
+
+/// Read-only: whether any composite claim intent or cleanup receipt may still
+/// cover `workspace`. An unreadable receipt cannot prove absence.
+fn composite_claim_receipt_outstanding(workspace: &WorkspaceIdentity) -> bool {
+    let intent_present = composite_acquisition_intent_path(workspace)
+        .map(|path| path.exists())
+        .unwrap_or(true);
+    let receipt_present = || {
+        let Ok(directory) = pending_composite_cleanup_dir() else {
+            return true;
+        };
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return directory.exists();
+        };
+        entries.into_iter().any(|entry| {
+            let Ok(path) = entry.map(|entry| entry.path()) else {
+                return true;
+            };
+            path.extension().and_then(|extension| extension.to_str()) == Some("json")
+                && fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .ok()?
+                            .get("workspace")
+                            .cloned()
+                            .and_then(|value| {
+                                serde_json::from_value::<WorkspaceIdentity>(value).ok()
+                            })
+                    })
+                    .is_none_or(|recorded| recorded == *workspace)
+        })
+    };
+    intent_present || receipt_present()
 }
 
 fn composite_acquisition_intent_for_workspace(
@@ -1711,46 +1564,144 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cached_terminal_authority_refuses_a_stale_authority_set_fingerprint() {
-        let workspace = workspace();
-        let record = TaskWorktreeRecord {
-            id: "fixture@task".into(),
+    fn task_worktree(id: &str, run_id: Option<&str>) -> TaskWorktreeRecord {
+        TaskWorktreeRecord {
+            id: format!("fixture@{id}"),
             component_id: "fixture".into(),
             source_checkout: "/tmp/source".into(),
-            worktree_path: "/tmp/worktree".into(),
-            branch: "task".into(),
+            worktree_path: format!("/tmp/missing-{id}"),
+            branch: id.into(),
             base_ref: "HEAD".into(),
-            workspace_identity: Some(workspace.clone()),
+            workspace_identity: None,
             task_url: None,
-            run_id: None,
+            run_id: run_id.map(str::to_string),
             cleanup_policy: homeboy_core::worktree::CleanupPolicy::RemoveWhenSafe,
             terminal_disposition: Some("succeeded".into()),
             branch_cleanup_intent: homeboy_core::worktree::BranchCleanupIntent::DeleteWhenMerged,
             created_at: "2026-01-01T00:00:00Z".into(),
             state: homeboy_core::worktree::TaskWorktreeState::Active,
-            lifecycle_revision: 0,
-            terminal_workspace_authority: Some(TerminalWorkspaceAuthorityProof {
-                schema: TERMINAL_WORKSPACE_AUTHORITY_SCHEMA.into(),
-                capability: TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY.into(),
-                capability_version: 1,
-                workspace,
-                task_worktree_id: "fixture@task".into(),
-                manifest_revision: 0,
-                run_id: None,
-                controller_state: "Succeeded".into(),
-                controller_version: 0,
-                accepted_runner_id: None,
-                accepted_runner_job_id: None,
-                authority_set: vec!["retired-runner".into()],
-                authority_set_fingerprint: authority_set_fingerprint(&["retired-runner".into()]),
-                observations: Vec::new(),
-                issued_evidence: Vec::new(),
-            }),
+            lifecycle_revision: 1,
+            terminal_workspace_authority: None,
+        }
+    }
+
+    fn controller_run(
+        store: &AgentTaskLifecycleStore,
+        run_id: &str,
+        state: AgentTaskRunState,
+        metadata: serde_json::Value,
+    ) -> AgentTaskRunRecord {
+        use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
+        let record = AgentTaskRunRecord {
+            schema: super::super::records::schemas::RUN.to_string(),
+            run_id: run_id.to_string(),
+            plan_id: "plan".to_string(),
+            state,
+            revision: 0,
+            submitted_at: "2026-08-13T00:00:00Z".to_string(),
+            updated_at: None,
+            plan_path: store.controller_plan_path(run_id).display().to_string(),
+            aggregate_path: None,
+            totals: None,
+            tasks: Vec::new(),
+            artifact_refs: Vec::new(),
+            provider_handles: Vec::new(),
+            latest_executor_evidence: None,
+            lifecycle: RunLifecycleRecord::with_execution_state(state.into()),
+            lab_handoff: None,
+            candidate_adoption: None,
+            adoption_run_id: None,
+            acceptance: None,
+            workspace_identity: None,
+            workspace_lifecycle_revision: 0,
+            workspace_owner_lease: None,
+            workspace_claim: None,
+            metadata,
         };
-        assert!(cached_terminal_workspace_authority(&record)
-            .expect("local current-authority validation")
-            .is_none());
+        store.write_record(&record).expect("controller run");
+        record
+    }
+
+    #[test]
+    fn local_terminal_authority_is_per_record_under_a_remote_claim_authority() {
+        with_isolated_home(|_| {
+            // A Lab-style remote claim authority is configured on this controller.
+            let (provider, live) = provider(Ok(vec!["runner-a".into()]));
+            let _provider = install_claim_provider(provider);
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let succeeded = AgentTaskRunState::Succeeded;
+            controller_run(&store, "local-run", succeeded, serde_json::json!({}));
+            let mut handed_off =
+                controller_run(&store, "handed-off-run", succeeded, serde_json::json!({}));
+            handed_off.lab_handoff = Some(
+                AgentTaskLabHandoff::pending("runner-a", now_timestamp(), now_timestamp())
+                    .accepted("job-a", now_timestamp()),
+            );
+            store.write_record(&handed_off).expect("handed-off run");
+            controller_run(
+                &store,
+                "legacy-runner-run",
+                succeeded,
+                serde_json::json!({ "runner_id": "runner-a" }),
+            );
+            controller_run(
+                &store,
+                "submitted-run",
+                succeeded,
+                serde_json::json!({ "runner_submission_intent": { "state": "preparing" } }),
+            );
+            controller_run(
+                &store,
+                "running-run",
+                AgentTaskRunState::Running,
+                serde_json::json!({}),
+            );
+
+            let local = task_worktree("local", Some("local-run"));
+            let proof = local_terminal_workspace_authority(&local).expect("locally provable");
+            assert_eq!(proof.authority_set, vec!["controller".to_string()]);
+            assert!(proof.exact_for(&local, Some("local-run")));
+
+            let reason = |id: &str, run_id: Option<&str>| {
+                local_terminal_workspace_authority(&task_worktree(id, run_id))
+                    .expect_err("record must be preserved")
+                    .reason
+            };
+            let remote = MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported;
+            assert_eq!(reason("handed-off", Some("handed-off-run")), remote);
+            assert_eq!(reason("legacy", Some("legacy-runner-run")), remote);
+            assert_eq!(reason("submitted", Some("submitted-run")), remote);
+            assert_eq!(
+                reason("running", Some("running-run")),
+                MissingActiveWorktreeReason::LiveRun
+            );
+            let unavailable = MissingActiveWorktreeReason::TerminalAuthorityUnavailable;
+            assert_eq!(reason("no-run", None), unavailable);
+            assert_eq!(reason("missing-run", Some("absent-run")), unavailable);
+
+            // A controller-only claim never contacts the configured runner.
+            let mut claim = acquire_composite_workspace_claim_until(
+                proof.workspace.clone(),
+                1,
+                CompositeClaimAuthorities::ControllerOnly,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .expect("controller-only claim");
+            assert!(claim.runners.is_empty());
+            assert!(live.lock().expect("live claims").is_empty());
+            // While its acquisition intent is outstanding the record is preserved.
+            assert_eq!(
+                local_terminal_workspace_authority(&local)
+                    .expect_err("intent covers the workspace")
+                    .reason,
+                remote
+            );
+            assert!(matches!(
+                release_composite_workspace_claim(&mut claim).expect("release"),
+                CompositeWorkspaceClaimRelease::Released
+            ));
+            assert!(local_terminal_workspace_authority(&local).is_ok());
+        });
     }
 
     #[test]

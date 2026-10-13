@@ -319,28 +319,18 @@ impl ControlPlaneActionRequest {
         };
         let resume_legacy_empty = self.action == ControlPlaneAction::Resume
             && self.parameters.schema == CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA;
-        let resume_domain_parameters = self.action == ControlPlaneAction::Resume
-            && self
-                .parameters
-                .schema
-                .eq("homeboy/agent-task-loop-resume-parameters/v1");
-        if self.parameters.schema != expected_schema
-            && !resume_legacy_empty
-            && !resume_domain_parameters
-        {
+        if self.parameters.schema != expected_schema && !resume_legacy_empty {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
                 "{name} requires parameters schema {expected_schema}"
             )));
         }
         if self.action == ControlPlaneAction::Resume
             && !resume_legacy_empty
-            && !resume_domain_parameters
+            && !self.parameters.data.is_object()
         {
-            if !self.parameters.data.is_object() {
-                return Err(crate::ControlPlaneError::invalid_argument(
-                    "resume parameters must be an object",
-                ));
-            }
+            return Err(crate::ControlPlaneError::invalid_argument(
+                "resume parameters must be an object",
+            ));
         }
         if self.action == ControlPlaneAction::Cancel {
             let parameters: ControlPlaneCancelParameters =

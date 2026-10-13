@@ -51,7 +51,7 @@ in-process cleanup branch, which SIGKILL and OOM skip:
 
 It is deliberately **not** a generic "filesystem path with no database row"
 reaper. The artifact root is a shared namespace: `runner/`, `runner-attach/`,
-`runner-exec-attach/`, `agent-task/`, `agent-task-loop-controller/`,
+`runner-exec-attach/`, `agent-task/`, `workflows/`,
 `controller-scratch-recovery/`, `recovered-runner-artifacts/`,
 `executor-finalized/`, `preview-consumer/`, and `_scratch/` are all owned by
 other subsystems and carry no artifact row at those paths. Artifact bytes are

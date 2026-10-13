@@ -4,7 +4,6 @@
 //! import surface for command handlers.
 
 mod auth;
-mod controller;
 mod definitions;
 
 pub use definitions::*;

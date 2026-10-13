@@ -2181,9 +2181,8 @@ const ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS: u64 = 60;
 
 /// Setting the tick interval to zero disables daemon-driven orchestration
 /// recovery, for operators who would rather drive
-/// `homeboy agent-task active --reconcile --apply` and
-/// `homeboy agent-task controller resume` themselves. Workflow cadences are
-/// admitted by this tick too, so zero also stops them.
+/// `homeboy agent-task active --reconcile --apply` themselves. Workflow
+/// cadences are admitted by this tick too, so zero also stops them.
 fn orchestration_tick_interval() -> Option<std::time::Duration> {
     parse_orchestration_tick_interval(
         std::env::var(ORCHESTRATION_TICK_INTERVAL_ENV)

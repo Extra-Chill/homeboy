@@ -142,6 +142,16 @@ fn a_slot_names_a_deterministic_instance() {
 }
 
 #[test]
+fn a_builtin_first_fires_one_interval_after_the_daemon_installs_it() {
+    with_isolated_home(|home| {
+        let hourly = template(json!({"interval": "1h"}), "true", home.path());
+        let (installed, disposition) = register(hourly, true, 1_000).unwrap();
+        assert_eq!(disposition, "registered");
+        assert_eq!(installed.next_due_ms, 1_000 + HOUR);
+    });
+}
+
+#[test]
 fn registration_keeps_its_grid_and_a_builtin_never_overrides_the_operator() {
     with_isolated_home(|home| {
         let hourly = template(json!({"interval": "1h"}), "true", home.path());

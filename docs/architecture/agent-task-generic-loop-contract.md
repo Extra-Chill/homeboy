@@ -1,10 +1,9 @@
 # Agent Task Generic Loop Contract
 
-Homeboy owns the generic loop, action, artifact, evidence, provider-outcome, and diagnostic-ranking contracts. Runtime providers own their runtime-package execution details and report them through the generic outcome and evidence fields.
+Homeboy owns the generic artifact, evidence, provider-outcome, and diagnostic-ranking contracts. Runtime providers own their runtime-package execution details and report them through the generic outcome and evidence fields.
 
 Versioned schema identifiers are exported by `homeboy agent-task contract`:
 
-- `homeboy/agent-task-loop-action/v1`
 - `homeboy/agent-task-artifact-declaration/v1`
 - `homeboy/agent-task-artifact-handoff/v1`
 - `homeboy/agent-task-provider-outcome-contract/v1`

@@ -25,7 +25,6 @@ Task-oriented guides for using Homeboy:
 - [Use runners](workflows/use-runners.md)
 - [Set up Lab runners](workflows/set-up-lab-runners.md)
 - [Set up extensions](workflows/set-up-extensions.md)
-- [Run agent task loops](workflows/run-agent-task-loops.md)
 - [Manage local environments](workflows/manage-local-environments.md)
 - [Hold a PR fleet](workflows/hold-a-pr-fleet.md)
 - [Release a component](workflows/release-a-component.md)
