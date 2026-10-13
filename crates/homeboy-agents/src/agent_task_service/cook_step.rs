@@ -68,6 +68,15 @@ const INVOCATION_CONTEXT_ENV_PREFIXES: &[&str] = &[
     "HOMEBOY_DAEMON_CHILD_",
 ];
 
+/// Whether this process runs inside a runner job. The CLI clears the
+/// placement markers once routing has consumed them; the job's own identity
+/// and Lab execution provenance remain for its lifetime.
+fn admitted_inside_runner_job() -> bool {
+    homeboy_core::resource_policy_context::is_runner_hosted_exec()
+        || homeboy_core::resource_policy_context::has_lab_execution_provenance()
+        || std::env::var_os("HOMEBOY_RUNNER_JOB_ID").is_some()
+}
+
 fn is_invocation_context_env(name: &str) -> bool {
     name == step_job::STEP_JOB_ID_ENV
         || INVOCATION_CONTEXT_ENV.contains(&name)
@@ -143,6 +152,13 @@ pub fn admitted_cook_environment(
     for (name, value) in std::env::vars() {
         if name.starts_with(HOMEBOY_ENV_PREFIX) && !is_invocation_context_env(&name) {
             public_env.insert(name, value);
+        }
+    }
+    // A runner-hosted exec's temp directory belongs to that job and is removed
+    // when it ends; work admitted from inside it outlives the job.
+    if admitted_inside_runner_job() {
+        for name in ["TMPDIR", "TMP", "TEMP"] {
+            public_env.remove(name);
         }
     }
     public_env.extend(overrides);
@@ -546,17 +562,17 @@ mod tests {
     #[test]
     fn admitted_environment_drops_the_admitting_process_execution_context() {
         with_isolated_home(|_| {
-            let _hosted = EnvVarGuard::set("HOMEBOY_RUNNER_HOSTED_EXEC", "1");
             let _job = EnvVarGuard::set("HOMEBOY_RUNNER_JOB_ID", "runner-job");
             let _run = EnvVarGuard::set("HOMEBOY_RUN_ID", "runner-exec-run");
             let _frame = EnvVarGuard::set("HOMEBOY_DAEMON_STATE_DIR", "/runner/daemon");
+            let _tmp = EnvVarGuard::set("TMPDIR", "/tmp/runner-job.t");
             let _config = EnvVarGuard::set("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE", "kept");
             let plan = admitted_cook_environment(Vec::new()).expect("admit environment");
             for name in [
-                "HOMEBOY_RUNNER_HOSTED_EXEC",
                 "HOMEBOY_RUNNER_JOB_ID",
                 "HOMEBOY_RUN_ID",
                 "HOMEBOY_DAEMON_STATE_DIR",
+                "TMPDIR",
             ] {
                 assert!(!plan.public_env.contains_key(name), "{name} leaked");
             }
