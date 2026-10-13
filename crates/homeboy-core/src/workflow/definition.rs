@@ -88,6 +88,16 @@ pub struct StepDefinition {
     pub when: Option<Gate>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub always: bool,
+    /// Fan-out: one step job per item. A JSON array, or a template that
+    /// resolves to one (`"{{steps.prepare.output/children}}"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreach: Option<Value>,
+    /// The most items of a `foreach` step running at once (default: all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<u32>,
+    /// The fan-in gate of a `foreach` step (default `all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<Join>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<Retry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +110,58 @@ pub struct StepDefinition {
     pub exec: Option<ExecStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalStep>,
+}
+
+/// When a `foreach` step succeeds, decided once every item has settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Value", into = "Value")]
+pub enum Join {
+    /// Every item succeeded.
+    All,
+    /// At least one item succeeded.
+    Any,
+    /// At least this many items succeeded.
+    MinSucceeded(u32),
+}
+
+impl Join {
+    /// Whether `succeeded` of `total` items pass this join.
+    pub fn passes(self, succeeded: usize, total: usize) -> bool {
+        match self {
+            Join::All => succeeded == total,
+            Join::Any => succeeded >= 1,
+            Join::MinSucceeded(min) => succeeded >= min as usize,
+        }
+    }
+}
+
+impl TryFrom<Value> for Join {
+    type Error = String;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match &value {
+            Value::String(text) if text == "all" => Ok(Join::All),
+            Value::String(text) if text == "any" => Ok(Join::Any),
+            Value::Object(object) if object.len() == 1 => object
+                .get("min_succeeded")
+                .and_then(Value::as_u64)
+                .and_then(|min| u32::try_from(min).ok())
+                .filter(|min| *min >= 1)
+                .map(Join::MinSucceeded)
+                .ok_or_else(|| "`join.min_succeeded` must be a positive integer".to_string()),
+            _ => Err(r#"`join` is "all", "any", or {"min_succeeded": N}"#.to_string()),
+        }
+    }
+}
+
+impl From<Join> for Value {
+    fn from(join: Join) -> Self {
+        match join {
+            Join::All => Value::String("all".to_string()),
+            Join::Any => Value::String("any".to_string()),
+            Join::MinSucceeded(min) => serde_json::json!({ "min_succeeded": min }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -188,12 +250,16 @@ impl StepDefinition {
             }
             StepKind::Approval(approval) => strings.push(&approval.prompt),
         }
-        if let Some(gate) = &self.when {
-            for argv in gate.command_gates() {
-                strings.extend(argv.iter().map(String::as_str));
-            }
-        }
         strings
+    }
+
+    /// The templated argv strings of the step's `when` command gates.
+    fn when_strings(&self) -> Vec<&str> {
+        self.when
+            .iter()
+            .flat_map(Gate::command_gates)
+            .flat_map(|argv| argv.iter().map(String::as_str))
+            .collect()
     }
 }
 
@@ -211,11 +277,6 @@ fn collect_strings<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
 
 /// Features of the workflow format that a later Homeboy release implements.
 const LATER_TOP_LEVEL: &[(&str, &str)] = &[("every", "`every` cadence"), ("notify", "`notify`")];
-const LATER_STEP: &[(&str, &str)] = &[
-    ("foreach", "`foreach` fan-out"),
-    ("max_parallel", "`max_parallel`"),
-    ("join", "`join`"),
-];
 
 impl WorkflowDefinition {
     /// Parse a definition without validating it.
@@ -230,15 +291,6 @@ impl WorkflowDefinition {
         for (field, label) in LATER_TOP_LEVEL {
             if raw.get(field).is_some() {
                 return Err(not_yet(label));
-            }
-        }
-        if let Some(steps) = raw.get("steps").and_then(Value::as_array) {
-            for step in steps {
-                for (field, label) in LATER_STEP {
-                    if step.get(field).is_some() {
-                        return Err(not_yet(label));
-                    }
-                }
             }
         }
         serde_path_to_error::deserialize(raw)
@@ -330,6 +382,44 @@ impl WorkflowDefinition {
             if let Some(timeout) = &step.timeout {
                 crate::duration::parse_duration(&format!("{field}.timeout"), timeout)?;
             }
+            match &step.foreach {
+                None if step.max_parallel.is_some() || step.join.is_some() => {
+                    return Err(invalid(
+                        &field,
+                        "`max_parallel` and `join` apply only to a `foreach` step",
+                    ));
+                }
+                None => {}
+                Some(_) if step.approval.is_some() => {
+                    return Err(invalid(&field, "an `approval` step cannot fan out"));
+                }
+                Some(Value::Array(items)) => {
+                    if let Some(Join::MinSucceeded(min)) = step.join {
+                        if min as usize > items.len() {
+                            return Err(invalid(
+                                &format!("{field}.join"),
+                                format!(
+                                    "`min_succeeded` {min} exceeds the {} declared items",
+                                    items.len()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Some(Value::String(text)) if text.contains("{{") => {}
+                Some(_) => {
+                    return Err(invalid(
+                        &format!("{field}.foreach"),
+                        "`foreach` is a JSON array or a template that resolves to one",
+                    ));
+                }
+            }
+            if step.max_parallel == Some(0) {
+                return Err(invalid(
+                    &format!("{field}.max_parallel"),
+                    "must be at least 1",
+                ));
+            }
             if let Some(retry) = &step.retry {
                 for outcome in &retry.on {
                     if !RETRYABLE_OUTCOMES.contains(&outcome.as_str()) {
@@ -386,8 +476,27 @@ impl WorkflowDefinition {
         for step in &self.steps {
             let field = format!("steps.{}", step.id);
             let upstream = self.upstream(&step.id);
+            let fans_out = step.foreach.is_some();
             for text in step.templated_strings() {
                 for reference in template::references(text).map_err(|e| invalid(&field, e))? {
+                    if matches!(reference, Reference::Item(_)) && !fans_out {
+                        return Err(invalid(
+                            &field,
+                            "`{{item}}` is only available in a `foreach` step",
+                        ));
+                    }
+                    self.check_reference(&reference, &upstream, &field)?;
+                }
+            }
+            for text in step.when_strings() {
+                let field = format!("{field}.when");
+                for reference in template::references(text).map_err(|e| invalid(&field, e))? {
+                    self.check_reference(&reference, &upstream, &field)?;
+                }
+            }
+            if let Some(Value::String(foreach)) = &step.foreach {
+                let field = format!("{field}.foreach");
+                for reference in template::references(foreach).map_err(|e| invalid(&field, e))? {
                     self.check_reference(&reference, &upstream, &field)?;
                 }
             }
@@ -442,6 +551,16 @@ impl WorkflowDefinition {
                 field,
                 format!("template reads undeclared input `{name}`"),
             )),
+            Reference::Item(_)
+                if field.ends_with(".foreach")
+                    || field.ends_with(".when")
+                    || field == "iterate.until" =>
+            {
+                Err(invalid(
+                    field,
+                    "`{{item}}` is only available in the work a `foreach` step runs",
+                ))
+            }
             Reference::StepOutput { step, .. } | Reference::StepRunId(step)
                 if !upstream.contains(step) =>
             {
@@ -693,8 +812,45 @@ mod tests {
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
             (|v| v["every"] = json!({"interval": "24h"}), "not supported"),
             (
-                |v| v["steps"][0]["foreach"] = json!("{{inputs.url}}"),
-                "not supported",
+                |v| v["steps"][0]["max_parallel"] = json!(2),
+                "apply only to a `foreach` step",
+            ),
+            (
+                |v| v["steps"][0]["exec"]["args"] = json!(["{{item}}"]),
+                "only available in a `foreach` step",
+            ),
+            (
+                |v| v["steps"][1]["foreach"] = json!("{{item.x}}"),
+                "only available in the work",
+            ),
+            (
+                |v| v["steps"][1]["foreach"] = json!("{{steps.fix.output/x}}"),
+                "not upstream",
+            ),
+            (
+                |v| v["steps"][1]["foreach"] = json!(42),
+                "JSON array or a template",
+            ),
+            (
+                |v| {
+                    v["steps"][1]["foreach"] = json!(["a"]);
+                    v["steps"][1]["join"] = json!({"min_succeeded": 2});
+                },
+                "exceeds the 1 declared items",
+            ),
+            (
+                |v| {
+                    v["steps"][1]["foreach"] = json!(["a"]);
+                    v["steps"][1]["join"] = json!({"min_succeeded": 0});
+                },
+                "positive integer",
+            ),
+            (
+                |v| {
+                    v["steps"][1]["foreach"] = json!(["a"]);
+                    v["steps"][1]["max_parallel"] = json!(0);
+                },
+                "at least 1",
             ),
             (
                 |v| v["env"] = json!({"public": ["GITHUB_TOKEN"]}),
@@ -718,6 +874,30 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn foreach_steps_validate_and_round_trip_their_join() {
+        let mut value = base();
+        value["steps"][1]["foreach"] = json!("{{steps.evaluate.output/children}}");
+        value["steps"][1]["max_parallel"] = json!(2);
+        value["steps"][1]["join"] = json!({"min_succeeded": 2});
+        value["steps"][1]["cook"]["prompt"] = json!("fix {{item.issue_url}} on {{item}}");
+        let parsed = definition(value.clone()).unwrap();
+        assert_eq!(parsed.steps[1].join, Some(Join::MinSucceeded(2)));
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialized["steps"][1]["join"], json!({"min_succeeded": 2}));
+        for join in ["all", "any"] {
+            value["steps"][1]["join"] = json!(join);
+            assert_eq!(
+                serde_json::to_value(definition(value.clone()).unwrap()).unwrap()["steps"][1]
+                    ["join"],
+                json!(join)
+            );
+        }
+        assert!(Join::All.passes(3, 3) && !Join::All.passes(2, 3));
+        assert!(Join::Any.passes(1, 3) && !Join::Any.passes(0, 3));
+        assert!(Join::MinSucceeded(2).passes(2, 3) && !Join::MinSucceeded(2).passes(1, 3));
     }
 
     #[test]

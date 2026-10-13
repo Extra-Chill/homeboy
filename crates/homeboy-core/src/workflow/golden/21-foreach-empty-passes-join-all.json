@@ -1,0 +1,270 @@
+{
+  "definition": {
+    "id": "fan",
+    "inputs": {
+      "issues": {
+        "required": true
+      }
+    },
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "homeboy": [
+          "agent-task",
+          "batch-prepare",
+          "--issue",
+          "{{inputs.issues}}"
+        ],
+        "id": "prepare"
+      },
+      {
+        "cook": {
+          "prompt": "Fix {{item.issue_url}} on {{item.branch}}",
+          "repo": "scratch",
+          "task-url": "{{item.issue_url}}",
+          "verify": [
+            "true"
+          ]
+        },
+        "foreach": [],
+        "id": "cook",
+        "max_parallel": 2,
+        "needs": [
+          "prepare"
+        ]
+      },
+      {
+        "always": true,
+        "exec": {
+          "program": "true"
+        },
+        "id": "report",
+        "needs": [
+          "cook"
+        ]
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/prepare/1/1",
+        "output": {
+          "base_sha": "abc123",
+          "children": [
+            {
+              "branch": "fix/issue-1",
+              "issue_url": "https://example.test/issues/1"
+            },
+            {
+              "branch": "fix/issue-2",
+              "issue_url": "https://example.test/issues/2"
+            },
+            {
+              "branch": "fix/issue-3",
+              "issue_url": "https://example.test/issues/3"
+            }
+          ]
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/report/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000
+    }
+  ],
+  "expect_status": "succeeded",
+  "inputs": {
+    "issues": "1 2 3"
+  },
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "agent-task",
+            "batch-prepare",
+            "--issue",
+            "1 2 3"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/prepare/1/1",
+          "kind": "homeboy",
+          "step": "prepare"
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "cook": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          },
+          "prepare": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/prepare/1/1",
+            "outcome": null,
+            "phase": "running"
+          },
+          "report": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "args": [],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/report/1/1",
+          "kind": "exec",
+          "program": "true",
+          "step": "report"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/prepare/1/1",
+        "output": {
+          "base_sha": "abc123",
+          "children": [
+            {
+              "branch": "fix/issue-1",
+              "issue_url": "https://example.test/issues/1"
+            },
+            {
+              "branch": "fix/issue-2",
+              "issue_url": "https://example.test/issues/2"
+            },
+            {
+              "branch": "fix/issue-3",
+              "issue_url": "https://example.test/issues/3"
+            }
+          ]
+        },
+        "status": "succeeded"
+      },
+      "now_ms": 1000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "cook": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "prepare": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/prepare/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "report": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/report/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        },
+        "until": {}
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "status": "succeeded"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/report/1/1",
+        "status": "succeeded"
+      },
+      "now_ms": 2000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "succeeded",
+        "step_runs": 2,
+        "steps": {
+          "cook": {
+            "attempt": 0,
+            "carried": false,
+            "gates": {},
+            "key": null,
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "prepare": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/prepare/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "report": {
+            "attempt": 1,
+            "carried": false,
+            "gates": {},
+            "key": "wf-golden/report/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          }
+        },
+        "until": {}
+      }
+    }
+  ]
+}

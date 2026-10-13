@@ -248,6 +248,10 @@ pub fn register_cook_step_hooks() {
         homeboy_core::daemon::workflow_job::register_workflow_run_outcome_resolver(Arc::new(
             |cook_id: &str| workflow_cook_outcome(cook_id),
         ));
+        // Per-child progress of a running Cook step (#15689).
+        homeboy_core::daemon::workflow_job::register_workflow_run_progress_resolver(Arc::new(
+            |cook_id: &str| workflow_cook_progress(cook_id),
+        ));
         step_job::register_step_exit_observer(Arc::new(|exit: &StepExit| {
             if let Err(error) = observe_cook_step_exit(exit) {
                 eprintln!(
@@ -288,6 +292,29 @@ fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
         .ok()?
         .as_str()
         .map(str::to_string)
+}
+
+/// The live state and phase of a Cook's latest attempt, `None` before its
+/// durable record exists.
+fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+    let run_id = store
+        .read_cook_index(cook_id)
+        .map(|index| index.latest_run_id)
+        .unwrap_or_else(|_| cook_id.to_string());
+    let record = store.read_record(&run_id).ok()?;
+    Some(json!({
+        "run_id": run_id,
+        "state": record.state,
+        "phase": record
+            .metadata
+            .get("phase")
+            .or_else(|| record.metadata.get("current_phase"))
+            .cloned()
+            .unwrap_or_else(|| json!(record.state)),
+        "updated_at": record.updated_at,
+        "provider": record.provider_handles.last().map(|handle| &handle.backend),
+    }))
 }
 
 fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {

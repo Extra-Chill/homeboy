@@ -479,3 +479,117 @@ fn cancelling_the_instance_cancels_its_running_step() {
         );
     });
 }
+
+fn fan_out(join: Value, item_script: &str) -> Value {
+    json!({
+        "schema": "homeboy/workflow/v1",
+        "id": "fan",
+        "steps": [
+            {"id": "prepare", "exec": sh(
+                "printf '{\"children\":[{\"n\":1},{\"n\":2},{\"n\":3}]}' > \"$HOMEBOY_STEP_OUTPUT\"")},
+            {"id": "work", "needs": ["prepare"],
+             "foreach": "{{steps.prepare.output/children}}", "max_parallel": 2, "join": join,
+             "exec": {"program": "sh", "args": ["-c", item_script, "item", "{{item.n}}"]}},
+            {"id": "report", "needs": ["work"], "always": true, "exec": sh("true")}
+        ]
+    })
+}
+
+/// Three items, two at a time, item 2 fails: `join: all` fails the instance
+/// and `min_succeeded: 2` passes it. No more than two items ever run at once,
+/// and the always-on report runs either way.
+#[test]
+fn fan_out_runs_items_two_at_a_time_and_joins() {
+    for (join, expected) in [
+        (json!("all"), JobStatus::Failed),
+        (json!({"min_succeeded": 2}), JobStatus::Succeeded),
+    ] {
+        with_isolated_home(|home| {
+            let log = home.path().join("items.log");
+            let script = format!(
+                "echo start-$1 >> {log}; \
+                 running=$(( $(grep -c start {log}) - $(grep -c end {log}) )); \
+                 echo running-$running >> {log}; sleep 0.3; echo end-$1 >> {log}; \
+                 [ \"$1\" != 2 ]",
+                log = log.display()
+            );
+            let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
+                .unwrap()
+                .with_daemon_lease("workflow-test".to_string());
+            let request = request(fan_out(join.clone(), &script), home.path());
+            let job_id = admit(&store, &request);
+            crate::daemon::start_controller_job(job_id, &store).unwrap();
+            assert_eq!(wait_terminal(&store, job_id, 60).status, expected, "{join}");
+            let status = workflow_status(&store, &request.instance).unwrap();
+            let items = status["steps"]["work"]["items"].as_array().unwrap();
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|item| item["outcome"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec!["succeeded", "failed", "succeeded"]
+            );
+            assert_eq!(status["steps"]["report"]["outcome"], "succeeded");
+            let log = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(log.matches("start-").count(), 3, "{log}");
+            assert!(!log.contains("running-3"), "more than two items ran: {log}");
+            for index in 0..3 {
+                let key = format!("{}/work/1/item-{index}/1", request.instance);
+                let child = store.controller_job_for_key(&key).unwrap();
+                assert_eq!(
+                    store.controller_job_state(child.id).unwrap().parent_job_id,
+                    Some(job_id)
+                );
+            }
+        });
+    }
+}
+
+/// Cancelling mid-wave stops every running item and admits no further one.
+#[test]
+fn cancelling_mid_wave_stops_every_running_item() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
+            .unwrap()
+            .with_daemon_lease("workflow-test".to_string());
+        let request = request(
+            fan_out(json!("all"), "sleep 60"),
+            home.path(),
+        );
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        let key = |index: usize| format!("{}/work/1/item-{index}/1", request.instance);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let running = loop {
+            let running = (0..2)
+                .filter_map(|index| store.controller_job_for_key(&key(index)))
+                .filter(|child| child.status == JobStatus::Running)
+                .collect::<Vec<_>>();
+            if running.len() == 2 {
+                break running;
+            }
+            assert!(Instant::now() < deadline, "the first wave never started");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        crate::daemon::cancel_controller_job(job_id, "operator cancel", &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, job_id, 20).status,
+            JobStatus::Cancelled
+        );
+        for child in running {
+            assert_eq!(
+                wait_terminal(&store, child.id, 20).status,
+                JobStatus::Cancelled
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            store.controller_job_for_key(&key(2)).is_none(),
+            "a cancelled fan-out admitted another item"
+        );
+        assert_eq!(
+            workflow_status(&store, &request.instance).unwrap()["status"],
+            "cancelled"
+        );
+    });
+}

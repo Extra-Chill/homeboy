@@ -46,14 +46,26 @@ fn projection(state: &InstanceState) -> Value {
         "failing": state.failing,
         "reason": state.reason,
         "steps": state.steps.iter().map(|(id, step)| {
-            (id.clone(), json!({
+            let mut projected = json!({
                 "phase": step.phase,
                 "attempt": step.attempt,
                 "outcome": step.outcome,
                 "carried": step.carried,
                 "key": step.key,
                 "gates": step.gates,
-            }))
+            });
+            if !step.items.is_empty() {
+                projected["items"] = step.items.iter().map(|item| json!({
+                    "phase": item.phase,
+                    "attempt": item.attempt,
+                    "outcome": item.outcome,
+                    "key": item.key,
+                })).collect();
+            }
+            if let Some(error) = &step.error {
+                projected["error"] = json!(error);
+            }
+            (id.clone(), projected)
         }).collect::<BTreeMap<_, _>>(),
         "until": state.until,
     })
@@ -98,7 +110,7 @@ fn golden_transcripts_match() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .collect::<Vec<_>>();
     files.sort();
-    assert!(files.len() >= 10, "golden fixtures are missing");
+    assert!(files.len() >= 21, "golden fixtures are missing");
     let mut covered = BTreeSet::new();
     for path in files {
         let mut fixture: Value =
@@ -118,6 +130,11 @@ fn golden_transcripts_match() {
                 covered.insert(format!("phase:{}", step["phase"].as_str().unwrap()));
                 if let Some(outcome) = step["outcome"].as_str() {
                     covered.insert(format!("outcome:{outcome}"));
+                }
+                for item in step["items"].as_array().into_iter().flatten() {
+                    if let Some(outcome) = item["outcome"].as_str() {
+                        covered.insert(format!("item:{outcome}"));
+                    }
                 }
             }
         }
@@ -143,7 +160,7 @@ fn golden_transcripts_match() {
             );
         }
     }
-    // Every transition the S3 machine owns appears in at least one fixture.
+    // Every transition the machine owns appears in at least one fixture.
     for expected in [
         "submit_step",
         "cancel_step",
@@ -151,6 +168,11 @@ fn golden_transcripts_match() {
         "complete:succeeded",
         "complete:failed",
         "complete:budget_exhausted",
+        "complete:cancelled",
+        "outcome:partial_failure",
+        "item:succeeded",
+        "item:failed",
+        "item:timed_out",
         "submit:exec",
         "submit:homeboy",
         "submit:cook",
@@ -253,14 +275,81 @@ enum Crash {
     AfterCommit,
 }
 
-/// Drive the definition to completion. `crash` names the transaction (by its
+/// One scripted scenario: a definition, its inputs, and what its step jobs do.
+struct Scenario {
+    definition: WorkflowDefinition,
+    inputs: BTreeMap<String, Value>,
+    world: fn(&StepSubmission) -> StepResult,
+}
+
+fn proof_scenario() -> Scenario {
+    Scenario {
+        definition: proof_definition(),
+        inputs: BTreeMap::from([("url".to_string(), json!("https://example.test"))]),
+        world,
+    }
+}
+
+/// A cook-batch shaped fan-out: prepare emits three children, the Cook
+/// fan-out runs two at a time and needs two successes, the always-on report
+/// follows. Child 1 fails its first attempt and is retried once.
+fn fan_out_scenario() -> Scenario {
+    fn fan_world(submission: &StepSubmission) -> StepResult {
+        let output = (submission.step == "prepare").then(|| {
+            json!({"children": [
+                {"issue_url": "https://example.test/issues/1"},
+                {"issue_url": "https://example.test/issues/2"},
+                {"issue_url": "https://example.test/issues/3"},
+            ]})
+        });
+        let failed = submission.key.contains("/item-1/1") || submission.key.contains("/item-2/");
+        let run_id = match &submission.kind {
+            SubmissionKind::Cook { cook_id, .. } => Some(cook_id.clone()),
+            _ => None,
+        };
+        StepResult {
+            key: submission.key.clone(),
+            status: if failed {
+                FinishedStatus::Failed
+            } else {
+                FinishedStatus::Succeeded
+            },
+            outcome: run_id
+                .as_ref()
+                .map(|_| if failed { "failed" } else { "succeeded" }.to_string()),
+            output,
+            run_id,
+        }
+    }
+    Scenario {
+        definition: parse_definition(&json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "batch",
+            "inputs": {"issues": {"required": true}},
+            "steps": [
+                {"id": "prepare", "homeboy": ["agent-task", "batch-prepare", "{{inputs.issues}}"]},
+                {"id": "cook", "needs": ["prepare"],
+                 "foreach": "{{steps.prepare.output/children}}", "max_parallel": 2,
+                 "join": {"min_succeeded": 2}, "retry": {"max": 1, "on": ["failed"]},
+                 "cook": {"repo": "scratch", "task-url": "{{item.issue_url}}", "verify": ["true"]}},
+                {"id": "report", "needs": ["cook"], "always": true, "exec": {"program": "true"}}
+            ]
+        })),
+        inputs: BTreeMap::from([("issues".to_string(), json!("1 2 3"))]),
+        world: fan_world,
+    }
+}
+
+/// Drive the scenario to completion. `crash` names the transaction (by its
 /// 1-based order) at which the driver dies once.
-fn drive(definition: &WorkflowDefinition, crash: Option<(usize, Crash)>) -> Ledger {
+fn drive(scenario: &Scenario, crash: Option<(usize, Crash)>) -> Ledger {
+    let definition = &scenario.definition;
+    let world = scenario.world;
+    let inputs = scenario.inputs.clone();
     let mut ledger = Ledger::default();
     let mut transaction = 0;
     let mut crash = crash;
     let mut now_ms = 0;
-    let inputs = BTreeMap::from([("url".to_string(), json!("https://example.test"))]);
     for _ in 0..500 {
         now_ms += 1_000;
         // Recovery: the driver restarts from the committed checkpoint and
@@ -373,8 +462,8 @@ fn drive(definition: &WorkflowDefinition, crash: Option<(usize, Crash)>) -> Ledg
 
 #[test]
 fn crash_at_every_command_boundary_converges_without_running_a_step_twice() {
-    let definition = proof_definition();
-    let baseline = drive(&definition, None);
+    let scenario = proof_scenario();
+    let baseline = drive(&scenario, None);
     let final_state = baseline.checkpoint.clone().unwrap();
     assert_eq!(final_state.status, InstanceStatus::Succeeded);
     assert_eq!(final_state.iteration, 2);
@@ -398,14 +487,57 @@ fn crash_at_every_command_boundary_converges_without_running_a_step_twice() {
             "wf-golden/fix/1/when-0",
         ]
     );
-    let boundaries = count_transactions(&definition);
+    assert_crash_recovery_converges(&scenario, &baseline);
+}
+
+#[test]
+fn fan_out_crash_at_every_command_boundary_converges_without_running_an_item_twice() {
+    let scenario = fan_out_scenario();
+    let baseline = drive(&scenario, None);
+    let final_state = baseline.checkpoint.clone().unwrap();
+    assert_eq!(final_state.status, InstanceStatus::Succeeded);
+    let cook = &final_state.steps["cook"];
+    assert_eq!(cook.outcome.as_deref(), Some("succeeded"));
+    assert_eq!(cook.output.as_ref().unwrap()["succeeded"], 2);
+    assert_eq!(
+        cook.items
+            .iter()
+            .map(|item| (item.outcome.as_deref(), item.attempt))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("succeeded"), 1),
+            (Some("succeeded"), 2),
+            (Some("failed"), 2)
+        ]
+    );
+    assert_eq!(
+        baseline.inserts.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "wf-golden/cook/1/item-0/1",
+            "wf-golden/cook/1/item-1/1",
+            "wf-golden/cook/1/item-1/2",
+            "wf-golden/cook/1/item-2/1",
+            "wf-golden/cook/1/item-2/2",
+            "wf-golden/prepare/1/1",
+            "wf-golden/report/1/1",
+        ]
+    );
+    assert_crash_recovery_converges(&scenario, &baseline);
+}
+
+/// Crash before and after every commit of an uninterrupted run: recovery
+/// converges on the same final state, inserts every step key exactly once,
+/// and runs each step job's work exactly once.
+fn assert_crash_recovery_converges(scenario: &Scenario, baseline: &Ledger) {
+    let final_state = baseline.checkpoint.clone().unwrap();
+    let boundaries = count_transactions(scenario);
     assert!(
-        boundaries > 8,
+        boundaries > 5,
         "expected many commit boundaries, got {boundaries}"
     );
     for at in 1..=boundaries {
         for kind in [Crash::BeforeCommit, Crash::AfterCommit] {
-            let ledger = drive(&definition, Some((at, kind)));
+            let ledger = drive(scenario, Some((at, kind)));
             let state = ledger.checkpoint.clone().unwrap();
             assert_eq!(
                 projection(&state),
@@ -432,12 +564,10 @@ fn crash_at_every_command_boundary_converges_without_running_a_step_twice() {
 }
 
 /// The number of committed transactions in an uninterrupted run.
-fn count_transactions(definition: &WorkflowDefinition) -> usize {
-    let mut state = InstanceState::new(
-        definition,
-        INSTANCE,
-        BTreeMap::from([("url".to_string(), json!("https://example.test"))]),
-    );
+fn count_transactions(scenario: &Scenario) -> usize {
+    let definition = &scenario.definition;
+    let world = scenario.world;
+    let mut state = InstanceState::new(definition, INSTANCE, scenario.inputs.clone());
     let mut rows: BTreeMap<String, (StepSubmission, Option<StepResult>)> = BTreeMap::new();
     let mut transactions = 0;
     let mut now_ms = 0;
@@ -488,8 +618,9 @@ fn count_transactions(definition: &WorkflowDefinition) -> usize {
 
 #[test]
 fn terminal_instances_ignore_every_event() {
-    let definition = proof_definition();
-    let mut state = drive(&definition, None).checkpoint.unwrap();
+    let scenario = proof_scenario();
+    let definition = &scenario.definition;
+    let mut state = drive(&scenario, None).checkpoint.unwrap();
     state.status = InstanceStatus::Cancelled;
     for event in [
         Event::Start,
@@ -505,8 +636,9 @@ fn terminal_instances_ignore_every_event() {
             output: None,
             run_id: None,
         }),
+        Event::Cancel { reason: None },
     ] {
-        let (next, commands) = advance(&definition, &state, &event, 99_999);
+        let (next, commands) = advance(definition, &state, &event, 99_999);
         assert_eq!(next, state);
         assert!(commands.is_empty());
     }

@@ -141,6 +141,33 @@ pub fn register_workflow_run_outcome_resolver(resolver: WorkflowRunOutcomeResolv
         .expect("workflow run outcome resolver lock") = Some(resolver);
 }
 
+/// Reports a Cook step's live progress (its latest attempt's state and phase)
+/// for status projections. Registered by the agent-task layer.
+pub type WorkflowRunProgressResolver = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
+
+fn run_progress_resolver() -> &'static RwLock<Option<WorkflowRunProgressResolver>> {
+    static RESOLVER: OnceLock<RwLock<Option<WorkflowRunProgressResolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| RwLock::new(None))
+}
+
+pub fn register_workflow_run_progress_resolver(resolver: WorkflowRunProgressResolver) {
+    *run_progress_resolver()
+        .write()
+        .expect("workflow run progress resolver lock") = Some(resolver);
+}
+
+fn run_progress(run_id: Option<&str>) -> Value {
+    run_id
+        .and_then(|run_id| {
+            run_progress_resolver()
+                .read()
+                .expect("workflow run progress resolver lock")
+                .as_ref()
+                .and_then(|resolve| resolve(run_id))
+        })
+        .unwrap_or(Value::Null)
+}
+
 /// Register the `workflow` controller-job driver. Idempotent.
 pub fn register_workflow_job_driver() {
     static REGISTERED: OnceLock<()> = OnceLock::new();
@@ -251,7 +278,7 @@ fn run_instance(
     job.progress(projection(&state, Some(store)))?;
     loop {
         if job.is_cancelled() {
-            return Ok(json!({ "instance": request.instance, "status": "cancelled" }));
+            return Ok(cancelled(request, &state, store));
         }
         if state.status.is_terminal() {
             return finish(request, &state, store);
@@ -265,7 +292,7 @@ fn run_instance(
             match commit(request, job_id, &next, &commands, store) {
                 Ok(()) => {}
                 Err(_) if job.is_cancelled() => {
-                    return Ok(json!({ "instance": request.instance, "status": "cancelled" }));
+                    return Ok(cancelled(request, &state, store));
                 }
                 Err(error) => return Err(error),
             }
@@ -288,6 +315,27 @@ fn run_instance(
             std::thread::sleep(POLL);
         }
     }
+}
+
+/// The instance was cancelled: stop every step job it still awaits (the
+/// daemon's cascade usually got there first) and report the final state.
+fn cancelled(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Value {
+    let (next, commands) = advance(
+        &request.definition,
+        state,
+        &Event::Cancel { reason: None },
+        now_ms(),
+    );
+    for command in commands {
+        if let Command::CancelStep { key, reason } = command {
+            if let Some(child) = store.controller_job_for_key(&key) {
+                if !child.status.is_terminal() {
+                    let _ = crate::daemon::cancel_controller_job(child.id, &reason, store);
+                }
+            }
+        }
+    }
+    projection(&next, Some(store))
 }
 
 fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
@@ -370,20 +418,23 @@ fn step_result(
         JobStatus::Cancelled => FinishedStatus::Cancelled,
         JobStatus::Queued | JobStatus::Running => return None,
     };
-    let step = state
-        .steps
-        .iter()
-        .find(|(_, step)| step.key.as_deref() == Some(key));
-    let kind = step.map(|(id, _)| {
+    let owner = state.owner_of(key);
+    let kind = owner.map(|(id, _)| {
         request
             .definition
             .steps
             .iter()
-            .find(|definition| &definition.id == id)
+            .find(|definition| definition.id == id)
             .map(|definition| definition.kind())
             .expect("state steps match the pinned definition")
     });
-    let run_id = step.and_then(|(_, step)| step.run_id.clone());
+    let run_id = owner.and_then(|(id, index)| {
+        let step = &state.steps[id];
+        match index {
+            Some(index) => step.items[index].run_id.clone(),
+            None => step.run_id.clone(),
+        }
+    });
     let output_path = output_path(&request.instance, key).ok();
     let (outcome, output) = match kind {
         Some(crate::workflow::definition::StepKind::Cook(_)) => {
@@ -634,6 +685,19 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "key": step.key,
                 "job": step.key.as_deref().map(job_of).unwrap_or(Value::Null),
                 "run_id": step.run_id,
+                "run": if step.phase == StepPhase::Running { run_progress(step.run_id.as_deref()) } else { Value::Null },
+                "items": step.items.iter().enumerate().map(|(index, item)| json!({
+                    "index": index,
+                    "item": item.item,
+                    "phase": item.phase,
+                    "attempt": item.attempt,
+                    "outcome": item.outcome,
+                    "key": item.key,
+                    "job": item.key.as_deref().map(job_of).unwrap_or(Value::Null),
+                    "run_id": item.run_id,
+                    "run": if item.phase == StepPhase::Running { run_progress(item.run_id.as_deref()) } else { Value::Null },
+                    "error": item.error,
+                })).collect::<Vec<_>>(),
                 "prompt": step.prompt,
                 "error": step.error,
                 "gates": step.gates.values().map(|gate| json!({
