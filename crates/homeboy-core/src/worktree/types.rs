@@ -328,6 +328,8 @@ pub enum WorktreeCreateAction {
     Created,
     Existing,
     Restored,
+    /// A removed record held the handle; creation allocated it afresh.
+    Superseded,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -649,7 +651,10 @@ pub struct WorktreeListOptions {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorktreeStatusOutput {
     pub record: TaskWorktreeRecord,
-    pub safety: WorktreeSafetyReport,
+    /// Removal safety for the checkout an active record owns. A removed record
+    /// owns no checkout, so it is reported without inspecting its old path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<WorktreeSafetyReport>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
