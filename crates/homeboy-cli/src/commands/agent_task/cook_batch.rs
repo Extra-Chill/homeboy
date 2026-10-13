@@ -173,6 +173,9 @@ fn compile(
             set(key, json!(value));
         }
     }
+    if let Some(max_attempts) = args.max_attempts {
+        set("max-attempts", json!(max_attempts));
+    }
     if args.acknowledge_model_override {
         set("acknowledge-model-override", json!(true));
     }

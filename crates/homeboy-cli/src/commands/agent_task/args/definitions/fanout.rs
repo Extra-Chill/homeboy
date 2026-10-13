@@ -114,6 +114,13 @@ pub struct AgentTaskFanoutCookBatchArgs {
         value_name = "N"
     )]
     pub max_concurrency: Option<u32>,
+    /// Maximum Cook attempts for every child (each child's own `--max-attempts`).
+    #[arg(
+        long = "max-attempts",
+        value_parser = clap::value_parser!(u32).range(1..),
+        value_name = "N"
+    )]
+    pub max_attempts: Option<u32>,
     /// Wall-clock budget, in seconds, for the whole batch. On expiry the
     /// workflow ends `budget_exhausted` and cancels every running child.
     #[arg(
