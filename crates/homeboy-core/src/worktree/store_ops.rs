@@ -1333,7 +1333,7 @@ pub(super) fn retire_residue_unlocked(store_dir: &Path) -> Result<Vec<String>> {
     Ok(retired)
 }
 
-fn scan_registry(
+pub(super) fn scan_registry(
     store_dir: &Path,
 ) -> Result<(Vec<TaskWorktreeRecord>, Vec<WorktreeListDiagnostic>)> {
     let mut worktrees = Vec::new();

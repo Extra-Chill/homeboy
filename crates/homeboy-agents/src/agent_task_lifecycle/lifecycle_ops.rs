@@ -270,7 +270,7 @@ impl LabHandoffLock {
         lifecycle_store: &AgentTaskLifecycleStore,
         run_id: &str,
     ) -> Result<Self> {
-        let lock_path = lifecycle_store.run_dir(run_id).join("lab-handoff.lock");
+        let lock_path = lifecycle_store.lab_handoff_lock_path(run_id);
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| Error::internal_io(error.to_string(), None))?;
