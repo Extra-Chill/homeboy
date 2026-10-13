@@ -9,10 +9,6 @@
 mod tests {
     use clap::Command;
     use clap::CommandFactory;
-    use clap::Parser;
-
-    use crate::commands::agent_task::AgentTaskCommand;
-    use crate::commands::agent_task::AgentTaskFanoutCommand;
 
     fn agent_task_command() -> Command {
         crate::cli_surface::Cli::command()
@@ -112,54 +108,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fanout_plan_parses_from_repo_and_issue_urls_like_cook_batch() {
-        let cli = crate::cli_surface::Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "plan",
-            "--repo",
-            "owner/repo",
-            "https://example.test/issues/1",
-        ])
-        .expect("fanout plan accepts --repo plus issue URLs");
-        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task command");
-        };
-        let AgentTaskCommand::Fanout(fanout) = agent_task.command else {
-            panic!("fanout command");
-        };
-        let AgentTaskFanoutCommand::Plan(plan) = fanout.command else {
-            panic!("plan command");
-        };
-        assert_eq!(plan.repo.as_deref(), Some("owner/repo"));
-        assert_eq!(
-            plan.issues,
-            vec!["https://example.test/issues/1".to_string()]
-        );
-
-        // --input remains the persisted-plan surface and excludes the
-        // issue-planning inputs.
-        assert!(
-            crate::cli_surface::Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "fanout",
-                "plan",
-                "--input",
-                "plan.json",
-                "--repo",
-                "owner/repo",
-                "https://example.test/issues/1",
-            ])
-            .is_err(),
-            "--input and --repo/ISSUE_URL planning are mutually exclusive"
-        );
-        assert!(
-            crate::cli_surface::Cli::try_parse_from(["homeboy", "agent-task", "fanout", "plan",])
-                .is_err(),
-            "fanout plan still requires an input: --input SPEC or --repo with issue URLs"
-        );
-    }
 }

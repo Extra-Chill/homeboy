@@ -331,7 +331,7 @@ fn cook_review_form_timeout_disclosure(plan: &AgentTaskPlan) -> String {
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
 /// path) without hand-digging the nested outcome JSON (#3806). The full nested
 /// payload is preserved unchanged; this only ADDS the surfaced summary.
-fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
+pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
     let aggregate = homeboy::agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate);
     let mut value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
     let failure_reasons = super::status::failure_reasons_from_aggregate(&aggregate);

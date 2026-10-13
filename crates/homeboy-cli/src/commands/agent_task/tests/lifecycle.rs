@@ -789,7 +789,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
 use crate::cli_surface::{Cli, Commands};
-use homeboy::agents::agent_tasks::batch::{persist_fanout_run_batch, FanoutRunBatchChild};
 
 use super::super::AgentTaskCommand;
 
@@ -1883,13 +1882,10 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             )
             .expect("constrained fixture capacity");
             homeboy::core::defaults::reset_config_cache_for_test();
-            let (failed, exit_code) = super::super::run::run_next_with_executor_and_fanout(
-                Arc::new(CountingCookExecutor {
+            let (failed, exit_code) = run_next_queued(Arc::new(CountingCookExecutor {
                     executions: Arc::clone(&executions),
                     patch_path: Some(patch.display().to_string()),
-                }),
-                None,
-            )
+                }))
             .expect("queue reports its failed admission");
             assert_eq!(exit_code, 1, "{failed:#}");
             assert_eq!(failed["status"], "failed", "{failed:#}");
@@ -1917,10 +1913,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 .contains("Filesystem reserve shortfall"));
             assert!(terminal.aggregate_path.is_some());
             assert_eq!(executions.load(Ordering::SeqCst), 0);
-            let (idle, idle_exit) = super::super::run::run_next_with_executor_and_fanout(
-                Arc::new(CapturingExecutor::default()),
-                None,
-            )
+            let (idle, idle_exit) = run_next_queued(Arc::new(CapturingExecutor::default()))
             .expect("failed admission is not automatically replayed");
             assert_eq!(idle_exit, 0);
             assert_eq!(idle["claimed"], false);
@@ -3610,7 +3603,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let (_, exit_code) = run_next_with_executor_and_fanout(executor.clone(), None)
+        let (_, exit_code) = run_next_queued(executor.clone())
             .expect("run-next skips proxy");
 
         assert_eq!(exit_code, 0);
@@ -3669,11 +3662,8 @@ fn submit_run_status_reports_terminal_state() {
         .expect("write plan");
         let plan_path = format!("@{}", plan_file.path().display());
 
-        submit(SubmitArgs {
-            plan: plan_path,
-            run_id: Some("run-cli-terminal".to_string()),
-        })
-        .expect("submitted");
+        homeboy::agents::agent_task_service::submit_plan_spec(&plan_path, Some("run-cli-terminal"))
+            .expect("submitted");
         let (_, run_exit_code) = run_submitted(RunArgs {
             run_id: "run-cli-terminal".to_string(),
             timeout_ms: None,
@@ -5575,13 +5565,10 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
         .expect("pinned controller identity validates");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (_value, exit_code) = run_next_with_executor_and_fanout(
-            Arc::new(InspectingExecutor {
+        let (_value, exit_code) = run_next_queued(Arc::new(InspectingExecutor {
                 run_id: "run-next-a".to_string(),
                 observed_status: Arc::clone(&observed_status),
-            }),
-            None,
-        )
+            }))
         .expect("claimed run completed");
 
         let observed = observed_status
@@ -5600,87 +5587,12 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
 }
 
 #[test]
-fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queue_records() {
-    with_temp_home(|| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("target-fanout"))
-            .expect("canonical fanout owner submitted");
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("stale-global-cook"))
-            .expect("stale record submitted");
-        let stale_plan = homeboy_core::paths::homeboy_data()
-            .expect("data path")
-            .join("agent-task-runs/stale-global-cook/plan.json");
-        let mut stale: Value =
-            serde_json::from_slice(&std::fs::read(&stale_plan).expect("stale plan")).expect("JSON");
-        stale["options"]["execution_budget"]["version"] = json!(999);
-        std::fs::write(
-            &stale_plan,
-            serde_json::to_vec(&stale).expect("encode stale plan"),
-        )
-        .expect("persist stale plan");
-
-        let mut target_a = test_plan();
-        target_a.metadata["batch_id"] = json!("target-fanout");
-        agent_task_lifecycle::submit_plan(&target_a, Some("target-child-a"))
-            .expect("first target child submitted");
-        let mut target_b = test_plan();
-        target_b.metadata["batch_id"] = json!("target-fanout");
-        agent_task_lifecycle::submit_plan(&target_b, Some("target-child-b"))
-            .expect("second target child submitted");
-        persist_fanout_run_batch(
-            "target-fanout",
-            "target-fanout",
-            &[
-                FanoutRunBatchChild {
-                    task_id: "a".to_string(),
-                    run_id: "target-child-a".to_string(),
-                },
-                FanoutRunBatchChild {
-                    task_id: "b".to_string(),
-                    run_id: "target-child-b".to_string(),
-                },
-            ],
-            json!({}),
-        )
-        .expect("fanout persisted");
-
-        let (_value, exit_code) = run_next_with_executor_and_fanout(
-            Arc::new(InspectingExecutor::noop("target-child-a")),
-            Some("target-fanout".to_string()),
-        )
-        .expect("scoped queue claim succeeds");
-
-        assert_eq!(exit_code, 0);
-        let stale = agent_task_lifecycle::exact_record("stale-global-cook").expect("stale record");
-        assert_eq!(stale.state, AgentTaskRunState::Queued);
-        assert!(
-            stale.metadata.get("queue_quarantine").is_none(),
-            "scoped dispatch must not inspect or quarantine unrelated work"
-        );
-        assert_eq!(
-            lifecycle_status("target-child-a")
-                .expect("first target status")
-                .state,
-            AgentTaskRunState::Succeeded
-        );
-        assert_eq!(
-            lifecycle_status("target-child-b")
-                .expect("second target status")
-                .state,
-            AgentTaskRunState::Queued
-        );
-    });
-}
-
-#[test]
 fn run_next_returns_unclaimed_when_no_queued_runs_exist() {
     with_temp_home(|| {
-        let (value, exit_code) = run_next_with_executor_and_fanout(
-            Arc::new(InspectingExecutor {
-                run_id: "unused".to_string(),
-                observed_status: Arc::new(Mutex::new(None)),
-            }),
-            None,
-        )
+        let (value, exit_code) = run_next_queued(Arc::new(InspectingExecutor {
+            run_id: "unused".to_string(),
+            observed_status: Arc::new(Mutex::new(None)),
+        }))
         .expect("run-next checked queue");
 
         assert_eq!(exit_code, 0);

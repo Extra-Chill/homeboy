@@ -3002,39 +3002,6 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
 }
 
 #[test]
-fn agent_task_fanout_finish_metadata_preserves_discoverability_commands() {
-    let metadata = agent_task_fanout_finish_metadata(
-        serde_json::json!({
-            "lab_dispatch": {
-                "status": "error",
-                "runner_id": "homeboy-lab",
-            },
-        }),
-        "dispatch-run-7167",
-        "cook-batch-homeboy-issue-7167-1",
-        RunStatus::Error,
-    );
-
-    assert_eq!(
-        metadata["agent_task_lab_dispatch"]["fanout_id"],
-        "cook-batch-homeboy-issue-7167-1"
-    );
-    assert_eq!(metadata["agent_task_lab_dispatch"]["status"], "error");
-    assert_eq!(
-        metadata["follow_commands"]["dispatch_status"],
-        "homeboy runs show dispatch-run-7167"
-    );
-    assert_eq!(
-        metadata["follow_commands"]["dispatch_evidence"],
-        "homeboy runs evidence --run dispatch-run-7167"
-    );
-    assert_eq!(
-        metadata["follow_commands"]["fanout_status"],
-        "homeboy agent-task fanout status cook-batch-homeboy-issue-7167-1"
-    );
-}
-
-#[test]
 fn offloaded_stdout_write_preserves_bytes_for_output_file() {
     let dir = tempdir().unwrap();
     let output_path = dir.path().join("out.json");

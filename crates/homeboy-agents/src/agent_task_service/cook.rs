@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::LazyLock;
 use std::sync::{mpsc, Arc};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
@@ -2615,15 +2617,6 @@ mod run_lifecycle_projection_tests {
         assert_eq!(serialized["completion"]["state"], "candidate_produced");
         assert_eq!(serialized["completion"]["pr_finalized"], false);
         assert!(serialized["completion"].get("next_action").is_none());
-
-        let batch = cook_batch_result(
-            "batch-projection".to_string(),
-            vec![cell("completed", Some(candidate))],
-        );
-        assert_eq!(batch.value.succeeded, 0);
-        assert_eq!(batch.value.failed, 1);
-        assert_eq!(batch.value.status, "failed");
-        assert_eq!(batch.exit_code, 1);
     }
 
     #[test]

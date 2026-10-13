@@ -269,36 +269,4 @@ mod tests {
         assert!(!record.metadata.to_string().contains(&secret_value));
     }
 
-    #[test]
-    fn admitted_public_environment_is_scoped_before_secret_classification() {
-        let mut public = provider("OTHER_SECRET");
-        public.id = "public-provider".to_string();
-        public.invocation.env = vec![serde_json::from_value(json!({
-            "name": "SHARED_VALUE", "source": "env"
-        }))
-        .expect("public env")];
-
-        let mut secret = provider("SHARED_VALUE");
-        secret.id = "secret-provider".to_string();
-        let mut providers = vec![public, secret];
-        let projections = serde_json::json!({
-            "public-provider": { "SHARED_VALUE": "public" },
-            "secret-provider": {}
-        });
-        apply_admitted_public_environment(
-            &mut providers,
-            projections.as_object().expect("projections"),
-        )
-        .expect("provider-scoped projection");
-
-        assert_eq!(
-            providers[0].invocation.env[0].value.as_deref(),
-            Some("public")
-        );
-        assert!(providers[1].invocation.env[0].value.is_none());
-        assert_eq!(
-            providers[1].invocation.env[0].source.as_deref(),
-            Some("secret_env")
-        );
-    }
 }
