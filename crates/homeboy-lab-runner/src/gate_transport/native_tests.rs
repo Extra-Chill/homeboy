@@ -241,7 +241,14 @@ fn full_native_transport() {
     save(&evidence, "executed-red.json", &red);
     assert_eq!(red.status, AgentTaskGateStatus::Failed);
     assert_eq!(red.exit_code, 23);
-    let deferred = gate(&candidate, "printf '%s' '{\"schema\":\"homeboy/deferred-workload-result/v1\",\"status\":\"deferred\"}'", &policy, &supervision, false).unwrap();
+    let deferred = gate(
+        &candidate,
+        "printf '%s' '{\"schema\":\"homeboy/runner-wait-step/v1\",\"status\":\"deferred\"}'",
+        &policy,
+        &supervision,
+        false,
+    )
+    .unwrap();
     assert_eq!(deferred.status, AgentTaskGateStatus::Deferred);
     save(&evidence, "deferred.json", &deferred);
     let large = gate(

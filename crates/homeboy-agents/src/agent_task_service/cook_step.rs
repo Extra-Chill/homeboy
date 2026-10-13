@@ -37,9 +37,10 @@ pub const COOK_LAUNCH_STEP_KEY_PREFIX: &str = "agent-task-cook-launch:";
 /// Idempotency-key prefix of the step that runs one local Cook retry.
 pub const COOK_RETRY_STEP_KEY_PREFIX: &str = "agent-task-cook-retry:";
 
-/// Process mechanics a Cook needs beyond the provider base list: Git transport
-/// to the operator's agent, and locale/timezone for tools it runs.
-const COOK_PROCESS_ENV: &[&str] = &[
+/// Process mechanics a Homeboy step needs beyond the provider base list: Git
+/// and SSH transport to the operator's agent, and locale/timezone for tools it
+/// runs.
+const STEP_PROCESS_ENV: &[&str] = &[
     "SSH_AUTH_SOCK",
     "LC_CTYPE",
     "LC_MESSAGES",
@@ -95,11 +96,7 @@ pub fn admitted_cook_environment(
     overrides: impl IntoIterator<Item = (String, String)>,
 ) -> Result<EnvMaterializationPlan> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    let mut names = crate::agent_task_provider::BASE_INHERITED_ENV
-        .iter()
-        .chain(COOK_PROCESS_ENV)
-        .map(|name| name.to_string())
-        .collect::<Vec<_>>();
+    let mut names = Vec::new();
     let mut ambient_only_secrets = Vec::new();
     for provider in &catalog.providers {
         let secret_names = crate::agent_task_provider::provider_secret_env_plan(
@@ -141,7 +138,23 @@ pub fn admitted_cook_environment(
         error.details["ambient_only_secret_env"] = json!(ambient_only_secrets);
         return Err(error);
     }
+    Ok(admitted_homeboy_step_environment(names, overrides))
+}
 
+/// Capture the environment a daemon step running this Homeboy binary needs,
+/// from the caller's process environment: process mechanics, Homeboy's own
+/// `HOMEBOY_*` configuration, the `extra_names` the caller declares, and its
+/// explicit `overrides`. Credential-named variables are never admitted as
+/// public values.
+pub fn admitted_homeboy_step_environment(
+    extra_names: impl IntoIterator<Item = String>,
+    overrides: impl IntoIterator<Item = (String, String)>,
+) -> EnvMaterializationPlan {
+    let names = crate::agent_task_provider::BASE_INHERITED_ENV
+        .iter()
+        .chain(STEP_PROCESS_ENV)
+        .map(|name| name.to_string())
+        .chain(extra_names);
     let policy = homeboy_core::redaction::RedactionPolicy::default();
     let mut public_env = BTreeMap::new();
     for name in names {
@@ -169,7 +182,7 @@ pub fn admitted_cook_environment(
         ..EnvMaterializationPlan::default()
     };
     plan.normalize();
-    Ok(plan)
+    plan
 }
 
 /// The step that runs an initial detached Cook for one launcher generation.

@@ -1086,7 +1086,7 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
             AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
             AgentTaskGateStatus::Skipped => HomeboyGateStatus::Skipped,
             // `Blocked` already names "could not execute under the resolved
-            // environment" for a lab-capability preflight; a deferred workload
+            // environment" for a lab-capability preflight; a deferred command
             // is the same shape of evidence gap, so it reuses the variant
             // rather than adding a new one to the shared contract (#14731).
             AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable => {
@@ -1344,22 +1344,22 @@ impl AgentTaskGateReport {
         })
     }
 
-    /// Detect the exact durable marker a portable-Lab-route command emits when
-    /// it could not run against the resolved placement (`homeboy
-    /// deferred-workload defer`, schema `homeboy/deferred-workload-result/v1`).
+    /// Detect the exact marker a portable-Lab-route command emits when it
+    /// could not run against the resolved placement and was queued as a daemon
+    /// step waiting for a runner (schema `homeboy/runner-wait-step/v1`).
     ///
     /// This intentionally checks stdout content rather than exit code: the
-    /// deferred-workload contract exits `0` on defer (it is not itself an
+    /// deferral exits `0` (it is not itself an
     /// error), which the exit-code-only classification this replaces
     /// misread as a passing gate. A gate whose declared command produces this
     /// exact shape never executed, so it can neither pass nor fail — it is a
     /// distinct `Deferred` outcome (#14731).
-    fn gate_stdout_reports_deferred_workload(stdout: &str) -> bool {
+    fn gate_stdout_reports_runner_wait(stdout: &str) -> bool {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
             return false;
         };
         value.get("schema").and_then(serde_json::Value::as_str)
-            == Some("homeboy/deferred-workload-result/v1")
+            == Some("homeboy/runner-wait-step/v1")
             && value.get("status").and_then(serde_json::Value::as_str) == Some("deferred")
     }
     #[expect(
@@ -1380,7 +1380,7 @@ impl AgentTaskGateReport {
         let id = id.into();
         let stdout = stdout.into();
         let invocation = recorded_legacy_gate_invocation(&command);
-        let status = if Self::gate_stdout_reports_deferred_workload(&stdout) {
+        let status = if Self::gate_stdout_reports_runner_wait(&stdout) {
             AgentTaskGateStatus::Deferred
         } else if exit_code == 0 {
             AgentTaskGateStatus::Succeeded
@@ -5187,13 +5187,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// #14731: `homeboy review test` and equivalent portable-Lab-route
-    /// commands exit `0` and print the deferred-workload marker when they
+    /// commands exit `0` and print the runner-wait marker when they
     /// could not execute under the resolved placement. Reading exit code
     /// alone misread this as a passing gate; this pins the marker-based
     /// classification as `Deferred`, distinct from both `Succeeded` and
     /// `Failed`.
     #[test]
-    fn a_deferred_workload_marker_on_stdout_classifies_as_deferred_regardless_of_exit_code() {
+    fn a_runner_wait_marker_on_stdout_classifies_as_deferred_regardless_of_exit_code() {
         for exit_code in [0, 1] {
             let report = AgentTaskGateReport::new(
                 "gate-1",
@@ -5203,7 +5203,7 @@ mod tests {
                     "homeboy review test homeboy".to_string(),
                 ],
                 exit_code,
-                r#"{"schema":"homeboy/deferred-workload-result/v1","status":"deferred","deferred_workload_id":"deferred-fixture","command":"review test"}"#,
+                r#"{"schema":"homeboy/runner-wait-step/v1","status":"deferred","job_id":"step-fixture","command":"review test"}"#,
                 String::new(),
                 None,
                 AgentTaskGateVisibility::Visible,
@@ -5218,7 +5218,7 @@ mod tests {
         }
     }
 
-    /// A gate whose stdout is not the deferred-workload marker keeps the
+    /// A gate whose stdout is not the runner-wait marker keeps the
     /// ordinary exit-code classification.
     #[test]
     fn ordinary_stdout_is_not_misclassified_as_deferred() {

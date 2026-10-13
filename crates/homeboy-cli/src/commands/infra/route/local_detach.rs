@@ -718,7 +718,7 @@ fn step_program_and_cwd() -> homeboy::core::Result<(PathBuf, PathBuf)> {
 
 /// Submit and start one step, returning its job id. The key makes a replayed
 /// submission converge on the same step instead of spawning a second child.
-fn submit_step(
+pub(super) fn submit_step(
     client: &homeboy::core::daemon::LocalControllerJobClient,
     request: &step_job::StepJobRequest,
 ) -> homeboy::core::Result<String> {
@@ -900,7 +900,9 @@ fn detached_cook_child_args(
 /// runtime already validated this exact pair before routing, so a failure here
 /// is unreachable; and notification routing is observability, which must never
 /// take a cook down with it.
-fn detached_route(cli: &Cli) -> Option<homeboy::core::notification_route::NotificationRoute> {
+pub(super) fn detached_route(
+    cli: &Cli,
+) -> Option<homeboy::core::notification_route::NotificationRoute> {
     homeboy::core::notification_route::from_cli_or_env(
         cli.notification_transport.as_deref(),
         cli.notification_route.as_deref(),

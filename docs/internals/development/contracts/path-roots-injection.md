@@ -159,13 +159,12 @@ trivially hold, a root**:
 | depth | meaning | example | verdict |
 |---|---|---|---|
 | 0 | a carrier struct already threads through the callee | `ReleaseExecutionContext`, `ReleaseWorkspace` | ready |
-| 1 | the wrapper's caller is a command or process entry | `crates/homeboy-cli/src/commands/deferred_workload.rs` | ready |
+| 1 | the wrapper's caller is a command or process entry | a command module whose wrappers are called only from its `run()` | ready |
 | many | intermediate functions with no other reason to know about paths | `crates/homeboy-cli/src/commands/agent_task/fanout.rs`, below | **not ready** |
 
-`crates/homeboy-cli/src/commands/deferred_workload.rs` was depth 1: five wrappers,
-one caller each, and
-those callers were `run()` (a command entry), `cli_runtime.rs` (the process
-boundary itself), and one sibling command. All five collapsed in one pass.
+A depth-1 module typically has a few wrappers with one caller each, and those
+callers are `run()` (a command entry), `cli_runtime.rs` (the process boundary
+itself), or a sibling command. Such wrappers collapse in one pass.
 
 ### The counter-example: agent_task/fanout.rs
 

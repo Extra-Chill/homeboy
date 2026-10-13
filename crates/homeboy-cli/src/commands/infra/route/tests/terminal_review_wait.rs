@@ -51,7 +51,6 @@ fn review_preflight(wait: bool, ready: bool, path: &Path) -> (Cli, ParsedCommand
             },
             deferred_pressure_refusal: !ready,
             runner_admitted: ready,
-            runner_incompatible: false,
             auto_local_capacity_fallback: false,
         },
     )
@@ -59,99 +58,91 @@ fn review_preflight(wait: bool, ready: bool, path: &Path) -> (Cli, ParsedCommand
     (cli, result)
 }
 
-fn portable_component(home: &Path) -> std::path::PathBuf {
-    let component = home.join("component");
-    fs::create_dir_all(&component).unwrap();
-    fs::write(
-        component.join("homeboy.json"),
-        r#"{"id":"wait-fixture","extensions":{"portable-db-service":{}}}"#,
-    )
-    .unwrap();
-    let extension = home.join(".config/homeboy/extensions/portable-db-service");
-    fs::create_dir_all(&extension).unwrap();
-    fs::write(
-        extension.join("portable-db-service.json"),
-        include_str!(
-            "../../../../../../../tests/fixtures/extension_manifests/portable-db-service.json"
-        ),
-    )
-    .unwrap();
-    component
-}
-
 #[test]
-fn unavailable_wait_fails_before_workload_persistence_or_worker_start() {
+fn unavailable_wait_fails_before_any_step_is_queued() {
     crate::test_support::with_isolated_home(|home| {
-        // Diagnostic fixture isolation for #15328; not a production root fix.
-        let root = home.path().join(".config/homeboy");
-        let _env = EnvGuard::set("HOMEBOY_CONFIG_ROOT", root.to_str().unwrap());
         let (cli, preflight) = review_preflight(true, false, home.path());
         assert_eq!(preflight.deferred_workload, DeferredWorkloadDecision::Defer);
-        let error = deferred_review_result(&cli, &preflight.normalized_args, &preflight, |_| {
-            panic!("terminal observer must not start an asynchronous worker")
-        })
-        .expect_err("unexecuted tests cannot be successful terminal verification");
+        // The rejection precedes runner resolution and daemon submission, so
+        // no daemon is needed for this to fail closed.
+        let error = defer_until_runner_eligible(&cli, &preflight.normalized_args, &preflight)
+            .expect_err("unexecuted tests cannot be successful terminal verification");
         assert!(error.message.contains("no tests executed"));
-        assert!(error.message.contains("no deferred workload was enqueued"));
+        assert!(error.message.contains("nothing was queued"));
         assert_eq!(error.details["lab_readiness"], "not_configured");
         assert_eq!(error.details["resource_admission"]["kind"], "rejected");
-        assert!(homeboy::deferred_workload::records().unwrap().is_empty());
     });
 }
 
 #[test]
-fn unavailable_nonwait_retains_durable_async_acknowledgment() {
-    crate::test_support::with_isolated_home(|home| {
-        let root = home.path().join(".config/homeboy");
-        let _env = EnvGuard::set("HOMEBOY_CONFIG_ROOT", root.to_str().unwrap());
-        let component = portable_component(home.path());
-        let (cli, preflight) = review_preflight(false, false, &component);
-        let result =
-            deferred_review_result(&cli, &preflight.normalized_args, &preflight, |resolved| {
-                assert_eq!(resolved, root);
-                assert_eq!(homeboy::deferred_workload::records().unwrap().len(), 1);
-                Ok(())
-            })
-            .expect("durable handoff");
-        assert_eq!(result["status"], "deferred");
-        let records = homeboy::deferred_workload::records().unwrap();
-        assert_eq!(result["deferred_workload_id"], records[0].id);
-        assert_eq!(
-            records[0].state,
-            homeboy::deferred_workload::DeferredWorkloadState::Deferred
-        );
-        assert!(result.get("test_results").is_none());
+fn runner_wait_step_pins_runner_wait_and_resolved_runner_environment() {
+    let overrides = runners::LabJobOverrides {
+        env: [("DB_SERVICE_HOST".to_string(), "db.fixture".to_string())].into(),
+        secret_env_names: vec!["DB_SERVICE_PASSWORD".to_string()],
+        workspace_root: None,
+    };
+    let portable = portable_route_args(&[
+        "homeboy".to_string(),
+        "--placement".to_string(),
+        "auto".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "--skip-lint".to_string(),
+    ]);
+    let args = runner_wait_step_args(&portable, "lab-a", &overrides);
+    assert_eq!(
+        args,
+        [
+            "--runner",
+            "lab-a",
+            "--wait",
+            "--runner-env",
+            "DB_SERVICE_HOST=db.fixture",
+            "--runner-secret-env",
+            "DB_SERVICE_PASSWORD",
+            "review",
+            "test",
+            "--skip-lint",
+        ]
+    );
+    let key = runner_wait_step_key(&args, Path::new("/src"), "lab-a", "content-a").unwrap();
+    assert_eq!(
+        key,
+        runner_wait_step_key(&args, Path::new("/src"), "lab-a", "content-a").unwrap(),
+        "an identical deferral converges on one step"
+    );
+    assert_ne!(
+        key,
+        runner_wait_step_key(&args, Path::new("/src"), "lab-a", "content-b").unwrap(),
+        "changed workspace content is a new step"
+    );
+    let request = homeboy::core::daemon::step_job::StepJobRequest::new(
+        key,
+        "/bin/homeboy",
+        args,
+        "/src",
+        homeboy::core::env_materialization_plan::EnvMaterializationPlan::default(),
+    )
+    .with_wait(homeboy::core::daemon::step_job::StepWait {
+        not_before: None,
+        runner_eligible: Some("lab-a".to_string()),
     });
+    let submission = request.submission().expect("valid runner-wait step");
+    assert_eq!(submission["type"], "step");
+    assert_eq!(
+        submission["request"]["wait"]["runner_eligible"],
+        serde_json::json!("lab-a")
+    );
 }
 
 #[test]
-fn unavailable_nonwait_worker_failure_is_not_a_success_acknowledgment() {
-    crate::test_support::with_isolated_home(|home| {
-        let root = home.path().join(".config/homeboy");
-        let _env = EnvGuard::set("HOMEBOY_CONFIG_ROOT", root.to_str().unwrap());
-        let component = portable_component(home.path());
-        let (cli, preflight) = review_preflight(false, false, &component);
-        let error = deferred_review_result(&cli, &preflight.normalized_args, &preflight, |_| {
-            Err(Error::internal_unexpected("fixture worker failed"))
-        })
-        .expect_err("failed startup cannot acknowledge ownership");
-        assert_eq!(error.message, "fixture worker failed");
-        assert_eq!(
-            homeboy::deferred_workload::records().unwrap().len(),
-            1,
-            "retained asynchronous work remains recoverable"
-        );
-    });
-}
-
-#[test]
-fn ready_route_uses_existing_dispatch_independently_of_wait_policy() {
+fn ready_route_dispatches_without_deferral_independently_of_wait_policy() {
     for wait in [false, true] {
         let (cli, preflight) = review_preflight(wait, true, Path::new("."));
         assert_eq!(cli.detach_after_handoff, !wait);
         assert_eq!(
             preflight.deferred_workload,
-            DeferredWorkloadDecision::Dispatch
+            DeferredWorkloadDecision::NotApplicable
         );
         assert_eq!(
             preflight.generic_route_runner_id.as_deref(),

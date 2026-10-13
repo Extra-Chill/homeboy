@@ -240,26 +240,9 @@ pub(crate) fn route_after_parse_with_provenance(
         .map(Some);
     }
     if preflight.deferred_workload
-        == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::RunnerIncompatible
-        && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_some()
-    {
-        return Ok(Some(75));
-    }
-
-    if preflight.deferred_workload
         == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer
-        && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_none()
     {
-        // A live deferred worker only proves durable asynchronous ownership.
-        // It can wait indefinitely for a runner and has no terminal execution
-        // result for this caller. Reject a terminal observer before persisting
-        // work, rather than acknowledge unexecuted tests as a successful gate.
-        let result = deferred_review_result(
-            cli,
-            &normalized_args,
-            &preflight,
-            crate::commands::deferred_workload::ensure_worker,
-        )?;
+        let result = defer_until_runner_eligible(cli, &normalized_args, &preflight)?;
         println!("{result}");
         return Ok(Some(0));
     }
@@ -361,27 +344,6 @@ pub(crate) fn route_after_parse_with_provenance(
         })
         .unwrap_or(&normalized_args);
     let normalized_args = normalized_args.to_vec();
-    let deferred_claim = inferred_runner_id
-        .as_deref()
-        .filter(|_| {
-            preflight.deferred_workload
-                == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Dispatch
-        })
-        .map(|runner_id| {
-            homeboy::deferred_workload::claim(
-                &deferred_workload_input(
-                    cli,
-                    &portable_deferred_args(&normalized_args),
-                    &preflight,
-                    review_test_deferred_requirements(cli)
-                        .expect("preflight only dispatches portable review tests"),
-                )?,
-                runner_id,
-                &format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()),
-            )
-        })
-        .transpose()?
-        .flatten();
     // A controller-owned `run` becomes a portable `run-plan`. Route according
     // to that materialized command so Lab stages its workspace and rewrites the
     // structured plan instead of taking the original runner-resident path.
@@ -576,9 +538,6 @@ pub(crate) fn route_after_parse_with_provenance(
 
     match outcome {
         LabRouteOutcome::RunLocal => {
-            if let Some(record) = deferred_claim.as_ref() {
-                homeboy::deferred_workload::terminalize(&record.id, false)?;
-            }
             if destructive_fuzz_requires_lab(&cli.command) {
                 return Err(destructive_fuzz_local_execution_error());
             }
@@ -588,9 +547,6 @@ pub(crate) fn route_after_parse_with_provenance(
             Ok(None)
         }
         LabRouteOutcome::InFlight(output) | LabRouteOutcome::Offloaded(output) => {
-            if let Some(record) = deferred_claim.as_ref() {
-                homeboy::deferred_workload::terminalize(&record.id, output.exit_code == 0)?;
-            }
             if !output.stderr.is_empty() {
                 eprint!("{}", output.stderr);
             }
@@ -2388,7 +2344,7 @@ fn auto_cook_unavailable_lab_replay_error(
 }
 
 fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
-    let mut replay = portable_deferred_args(args);
+    let mut replay = portable_route_args(args);
     if replay.is_empty() {
         replay.push("homeboy".to_string());
     }
@@ -2500,7 +2456,7 @@ fn reject_deferred_terminal_wait(
     hints.push("Omit --wait only to request durable asynchronous deferral; that acknowledgment is not terminal test verification.".to_string());
     let mut error = Error::validation_invalid_argument(
         "wait",
-        format!("review test --wait cannot obtain terminal execution evidence: controller resource admission refused execution and no eligible ready runner was admitted (readiness: {state}); no tests executed and no deferred workload was enqueued"),
+        format!("review test --wait cannot obtain terminal execution evidence: controller resource admission refused execution and no eligible ready runner was admitted (readiness: {state}); no tests executed and nothing was queued"),
         Some("true".to_string()),
         Some(hints),
     );
@@ -2510,34 +2466,133 @@ fn reject_deferred_terminal_wait(
     Err(error)
 }
 
-fn deferred_review_result(
+/// Schema of the acknowledgment printed when a command is queued as a step
+/// that waits for a Lab runner. Gates read it to classify the command as
+/// deferred rather than passed.
+pub(crate) const RUNNER_WAIT_STEP_SCHEMA: &str = "homeboy/runner-wait-step/v1";
+const RUNNER_WAIT_STEP_KEY_PREFIX: &str = "runner-wait:";
+
+/// Queue a portable review test as one daemon `step` that waits until a Lab
+/// runner accepts jobs, then runs the command against that runner.
+///
+/// The step job row is the only durable record: the daemon evaluates the
+/// `runner_eligible` wait, spawns `homeboy --runner <id> --wait ...` from the
+/// source workspace with the admitted environment, and records the exit. A
+/// terminal observer is rejected before anything is queued, because waiting
+/// for a runner yields no execution result for this caller.
+fn defer_until_runner_eligible(
     cli: &Cli,
     normalized_args: &[String],
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-    ensure_worker: impl FnOnce(&Path) -> homeboy::core::Result<()>,
 ) -> homeboy::core::Result<serde_json::Value> {
     reject_deferred_terminal_wait(cli, preflight)?;
-    let deferred = homeboy::deferred_workload::defer(deferred_workload_input(
-        cli,
-        &portable_deferred_args(normalized_args),
-        preflight,
-        review_test_deferred_requirements(cli)
-            .expect("preflight only defers portable review tests"),
-    )?)?;
-    ensure_worker(&homeboy::core::paths::homeboy()?)?;
+    let runner_id = homeboy::runner::lab_runner_wait_target()?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "review test cannot wait for a Lab runner: no preferred Lab runner is configured and the configured Lab runners are not exactly one",
+            None,
+            Some(vec![
+                "Set lab.preferred_runner, pass --runner <id> to a ready runner, or run the command in CI.".to_string(),
+            ]),
+        )
+    })?;
+    let program = std::env::current_exe().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable for a runner-wait step".to_string()),
+        )
+    })?;
+    let portable_args = portable_route_args(normalized_args);
+    let source = authoritative_lab_source_path(&portable_args)?;
+    let cwd = source.canonicalize().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    let args = runner_wait_step_args(&portable_args, &runner_id, &lab_job_overrides(cli)?);
+    let content_identity =
+        homeboy::runner::generic_lab_replay_artifact_identity_for_runner(&runner_id, &cwd)?;
+    let key = runner_wait_step_key(&args, &cwd, &runner_id, &content_identity)?;
+    let environment = homeboy::agents::agent_task_service::admitted_homeboy_step_environment(
+        Vec::new(),
+        homeboy::core::notification_route::child_env(local_detach::detached_route(cli).as_ref())
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value)),
+    );
+    let request = homeboy::core::daemon::step_job::StepJobRequest::new(
+        key,
+        program.display().to_string(),
+        args,
+        cwd.display().to_string(),
+        environment,
+    )
+    .with_wait(homeboy::core::daemon::step_job::StepWait {
+        not_before: None,
+        runner_eligible: Some(runner_id.clone()),
+    });
+    let client =
+        homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle()?;
+    let job_id = local_detach::submit_step(&client, &request)?;
+    let job = client.status(&job_id)?;
     Ok(serde_json::json!({
-        "schema": "homeboy/deferred-workload-result/v1",
+        "schema": RUNNER_WAIT_STEP_SCHEMA,
         "status": "deferred",
-        "deferred_workload_id": deferred.id,
-        "command": deferred.command_label,
+        "command": "review test",
+        "job_id": job_id,
+        "job_status": job.status,
+        "wait": { "runner_eligible": runner_id },
         "diagnostics": {
-            "worker_command": "homeboy deferred-workload worker",
-            "status_command": "homeboy deferred-workload status",
-            "ci_alternative": deferred.ci_alternative,
-            "resolved_portability": deferred.portability,
-            "reason": deferred.reason,
+            "reason": "no eligible Lab runner is ready and controller resource admission refused local execution",
+            "status_command": format!("homeboy daemon jobs show {job_id} --full"),
+            "watch_command": format!("homeboy daemon jobs watch {job_id}"),
+            "ci_alternative": "Run the same command in CI or configure a ready Homeboy runner.",
         },
     }))
+}
+
+/// The step argv (after the program): the portable command pinned to the
+/// runner it waits for, with terminal observation and the controller-resolved
+/// runner environment, so the step child never re-derives either from an
+/// environment it does not have.
+fn runner_wait_step_args(
+    portable_args: &[String],
+    runner_id: &str,
+    overrides: &runners::LabJobOverrides,
+) -> Vec<String> {
+    let mut args = vec!["--runner".to_string(), runner_id.to_string()];
+    if !crate::command_capability::homeboy_owned_args(portable_args)
+        .iter()
+        .any(|arg| arg == "--wait")
+    {
+        args.push("--wait".to_string());
+    }
+    for (name, value) in &overrides.env {
+        args.extend(["--runner-env".to_string(), format!("{name}={value}")]);
+    }
+    for name in &overrides.secret_env_names {
+        args.extend(["--runner-secret-env".to_string(), name.clone()]);
+    }
+    args.extend(portable_args.iter().skip(1).cloned());
+    args
+}
+
+/// One deferral per command, workspace content, and runner: repeating an
+/// identical deferral converges on the same step instead of queueing another.
+fn runner_wait_step_key(
+    args: &[String],
+    cwd: &Path,
+    runner_id: &str,
+    content_identity: &str,
+) -> homeboy::core::Result<String> {
+    let identity = serde_json::to_vec(&serde_json::json!({
+        "args": args,
+        "cwd": cwd,
+        "runner": runner_id,
+        "content_identity": content_identity,
+    }))
+    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(format!(
+        "{RUNNER_WAIT_STEP_KEY_PREFIX}{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(&identity)
+    ))
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
@@ -3634,73 +3689,9 @@ fn credential_shaped_key(key: &str) -> bool {
     .any(|needle| key.contains(needle))
 }
 
-fn deferred_workload_input(
-    cli: &Cli,
-    args: &[String],
-    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-    test_requirements: homeboy::deferred_workload::DeferredWorkloadRequirements,
-) -> homeboy::core::Result<homeboy::deferred_workload::DeferredWorkloadInput> {
-    Ok(homeboy::deferred_workload::DeferredWorkloadInput {
-        command_label: "review test".to_string(),
-        args: args.to_vec(),
-        placement: match cli.placement {
-            homeboy::cli_surface::Placement::Auto => "auto",
-            homeboy::cli_surface::Placement::LabOrLocal => "lab-or-local",
-            homeboy::cli_surface::Placement::Lab => "lab",
-            homeboy::cli_surface::Placement::Local => "local",
-        }
-        .to_string(),
-        resource_requirement: "eligible_lab_runner".to_string(),
-        portability: "portable_lab_route".to_string(),
-        reason: "no eligible Lab runner is currently ready".to_string(),
-        ci_alternative: "Run the same command in CI or configure a ready Homeboy runner."
-            .to_string(),
-        resolved_contract: serde_json::json!({
-            "label": "review test",
-            "portability": "portable_lab_route",
-            "required_runtimes": test_requirements.required_runtimes,
-            "required_capabilities": test_requirements.required_capabilities,
-        }),
-        resolved_resources: preflight
-            .resource_policy
-            .as_ref()
-            .and_then(|context| serde_json::to_value(context).ok())
-            .unwrap_or_else(|| serde_json::json!({ "severity": "unknown" })),
-        test_requirements,
-        // The singleton worker replays this record from a stable root, long
-        // after this process is gone. The worktree the workload belongs to has
-        // to travel with the record rather than being inherited from whatever
-        // directory the replay happens to start in (#12081).
-        source_directory: Some(authoritative_lab_source_path(args)?.display().to_string()),
-        job_overrides: lab_job_overrides(cli)?,
-    })
-}
-
-fn review_test_deferred_requirements(
-    cli: &Cli,
-) -> Option<homeboy::deferred_workload::DeferredWorkloadRequirements> {
-    let Commands::Review(review) = &cli.command else {
-        return None;
-    };
-    let crate::commands::review::ReviewCommand::Test(test) = review.command.as_ref()? else {
-        return None;
-    };
-    let contract = test.lab_contract();
-    contract.is_portable().then(
-        || homeboy::deferred_workload::DeferredWorkloadRequirements {
-            required_runtimes: ["homeboy".to_string()].into(),
-            required_capabilities: contract
-                .extra_required_capabilities
-                .iter()
-                .map(|capability| (*capability).to_string())
-                .collect(),
-        },
-    )
-}
-
 /// Preserve a command which can be replayed with an explicit runner. Placement
 /// is controller selection state, not portable workload intent.
-fn portable_deferred_args(args: &[String]) -> Vec<String> {
+fn portable_route_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::with_capacity(args.len());
     let mut skip_next = false;
     for arg in args {
@@ -3827,7 +3818,7 @@ fn materialize_generic_detached_lab_handoff(
     let repository_remote =
         homeboy::core::git::release_download::detect_remote_url(&canonical_root);
     let revision = homeboy::core::git::head_sha(&canonical_root);
-    let portable_args = portable_deferred_args(args);
+    let portable_args = portable_route_args(args);
     let replay = serde_json::json!({
         "schema": GENERIC_LAB_COMMAND_REPLAY_SCHEMA,
         "normalized_args": portable_args,

@@ -309,22 +309,22 @@ fn snapshot_diff_names_the_added_paths_from_the_10621_regression() {
     let before = Snapshot::new();
     let mut after = Snapshot::new();
     after.insert(
-        PathBuf::from(".config/homeboy/deferred-workloads.json"),
+        PathBuf::from(".config/homeboy/fixture-store.json"),
         b"{}".to_vec(),
     );
     after.insert(
-        PathBuf::from(".config/homeboy/deferred-workloads.lock"),
+        PathBuf::from(".config/homeboy/fixture-store.lock"),
         Vec::new(),
     );
 
     let diff = describe_snapshot_diff(&before, &after);
 
     assert!(
-        diff.contains(".config/homeboy/deferred-workloads.json"),
+        diff.contains(".config/homeboy/fixture-store.json"),
         "diff must name the added JSON record: {diff}"
     );
     assert!(
-        diff.contains(".config/homeboy/deferred-workloads.lock"),
+        diff.contains(".config/homeboy/fixture-store.lock"),
         "diff must name the added lock: {diff}"
     );
     assert!(

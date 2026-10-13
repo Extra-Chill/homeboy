@@ -2760,7 +2760,7 @@ mod tests {
 
     /// A gate whose declared command emitted the exact durable marker a
     /// portable-Lab-route command produces when it defers rather than
-    /// executing (exit code `0`, `homeboy/deferred-workload-result/v1`).
+    /// executing (exit code `0`, `homeboy/runner-wait-step/v1`).
     fn deferred_gate() -> AgentTaskGateReport {
         AgentTaskGateReport::new(
             "gate-1",
@@ -2770,7 +2770,7 @@ mod tests {
                 "homeboy review test homeboy".to_string(),
             ],
             0,
-            r#"{"schema":"homeboy/deferred-workload-result/v1","status":"deferred","deferred_workload_id":"deferred-fixture"}"#,
+            r#"{"schema":"homeboy/runner-wait-step/v1","status":"deferred","job_id":"step-fixture"}"#,
             String::new(),
             None,
             AgentTaskGateVisibility::Visible,
