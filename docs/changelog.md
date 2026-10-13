@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.15] - 2026-10-13
+
+### Fixed
+- expose admitted component's linked extensions in isolated gate HOME
+
 ## [0.418.14] - 2026-10-12
 
 ### Changed
