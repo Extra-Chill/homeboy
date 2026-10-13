@@ -107,6 +107,17 @@ A step runs with `env_clear()` plus its admitted environment:
 - `env.secrets` are agent-task secret references, resolved when each step spawns. The daemon's own environment is never a source.
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
 
+### Daemon restarts
+
+An instance lives in the daemon generation that admitted it, and its checkpoint is that generation's job store. `workflow status`, `approve`, and `list` look in every registered generation, so an instance stays reachable after the admitting daemon is rotated to a new build.
+
+When the daemon that owns an instance dies, a daemon started in that generation's own directory resumes the instance from its checkpoint. A step whose child was still running when the daemon died is protected until the child exits; its result is then read from the job ledger (and, for a `cook` step, from the Cook's run record), so no step runs twice. Recover the dead generation in its own frame once its workload has exited:
+
+```sh
+homeboy daemon plan    # names the dead generation and its state_dir
+HOMEBOY_DAEMON_ROUTER_BYPASS=1 HOMEBOY_DAEMON_STATE_DIR=<state_dir> homeboy daemon recover --yes
+```
+
 ## Commands
 
 - **`workflow validate`** parses and validates a definition and prints its digest and step graph.
