@@ -372,9 +372,12 @@ fn run_on_runner(
     if let Some(remote) = envelope
         .as_ref()
         .filter(|envelope| envelope["command"] == "runner")
-        .and_then(|envelope| envelope.pointer("/data/presentation/stdout"))
-        .and_then(Value::as_str)
-        .and_then(first_json)
+        .and_then(|envelope| {
+            ["/data/stdout", "/data/presentation/stdout"]
+                .iter()
+                .filter_map(|pointer| envelope.pointer(pointer).and_then(Value::as_str))
+                .find_map(first_json)
+        })
     {
         envelope = Some(remote);
     }

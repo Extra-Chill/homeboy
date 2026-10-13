@@ -47,6 +47,34 @@ const COOK_PROCESS_ENV: &[&str] = &[
     "__CF_USER_TEXT_ENCODING",
 ];
 const HOMEBOY_ENV_PREFIX: &str = "HOMEBOY_";
+/// `HOMEBOY_*` variables that describe the admitting process's own execution
+/// (its run, its runner job and placement, its daemon frame, its step) rather
+/// than Homeboy configuration. A step is a new execution: inheriting these
+/// would make a Cook launched from inside a runner job believe it is that
+/// runner job's hosted attempt.
+const INVOCATION_CONTEXT_ENV: &[&str] = &[
+    "HOMEBOY_RUN_ID",
+    "HOMEBOY_ACTIVE_RUN_ID",
+    "HOMEBOY_BENCH_RUN_ID",
+    "HOMEBOY_COMMAND",
+    "HOMEBOY_DAEMON_STATE_DIR",
+    "HOMEBOY_SETTINGS_JSON",
+    "HOMEBOY_SOURCE_SNAPSHOT_JSON",
+    "HOMEBOY_STEP_OUTPUT",
+];
+const INVOCATION_CONTEXT_ENV_PREFIXES: &[&str] = &[
+    "HOMEBOY_RUNNER_",
+    "HOMEBOY_LAB_EXECUTION_",
+    "HOMEBOY_DAEMON_CHILD_",
+];
+
+fn is_invocation_context_env(name: &str) -> bool {
+    name == step_job::STEP_JOB_ID_ENV
+        || INVOCATION_CONTEXT_ENV.contains(&name)
+        || INVOCATION_CONTEXT_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
 const CHILD_RESULT_TAIL_BYTES: u64 = 64 * 1024;
 
 /// Capture the environment a detached Cook step runs with, from this
@@ -113,7 +141,7 @@ pub fn admitted_cook_environment(
         }
     }
     for (name, value) in std::env::vars() {
-        if name.starts_with(HOMEBOY_ENV_PREFIX) && name != step_job::STEP_JOB_ID_ENV {
+        if name.starts_with(HOMEBOY_ENV_PREFIX) && !is_invocation_context_env(&name) {
             public_env.insert(name, value);
         }
     }
@@ -512,6 +540,29 @@ mod tests {
                 .public_env
                 .contains_key("HOMEBOY_COOK_STEP_FIXTURE_TOKEN"));
             assert!(plan.secret_refs.is_empty());
+        });
+    }
+
+    #[test]
+    fn admitted_environment_drops_the_admitting_process_execution_context() {
+        with_isolated_home(|_| {
+            let _hosted = EnvVarGuard::set("HOMEBOY_RUNNER_HOSTED_EXEC", "1");
+            let _job = EnvVarGuard::set("HOMEBOY_RUNNER_JOB_ID", "runner-job");
+            let _run = EnvVarGuard::set("HOMEBOY_RUN_ID", "runner-exec-run");
+            let _frame = EnvVarGuard::set("HOMEBOY_DAEMON_STATE_DIR", "/runner/daemon");
+            let _config = EnvVarGuard::set("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE", "kept");
+            let plan = admitted_cook_environment(Vec::new()).expect("admit environment");
+            for name in [
+                "HOMEBOY_RUNNER_HOSTED_EXEC",
+                "HOMEBOY_RUNNER_JOB_ID",
+                "HOMEBOY_RUN_ID",
+                "HOMEBOY_DAEMON_STATE_DIR",
+            ] {
+                assert!(!plan.public_env.contains_key(name), "{name} leaked");
+            }
+            assert!(plan
+                .public_env
+                .contains_key("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE"));
         });
     }
 
