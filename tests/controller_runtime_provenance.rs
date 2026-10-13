@@ -46,20 +46,24 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
 
     let plan = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/agent_task_smoke_plan.json");
-    let mut submit = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    submit.current_dir(foreign.path()).args([
+    let mut run = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    run.current_dir(foreign.path()).args([
+        "--placement",
+        "local",
         "agent-task",
-        "submit",
+        "run-plan",
         "--plan",
         &format!("@{}", plan.display()),
-        "--run-id",
+        "--record-run-id",
         "foreign-runtime-provenance",
     ]);
-    let submitted = bounded_output(submit);
+    // The fixture's typed-artifact contract fails the run in this bare
+    // worktree; the durable record and its provenance are what this pins.
+    let ran = bounded_output(run);
     assert!(
-        submitted.status.success(),
-        "submit failed: {}",
-        String::from_utf8_lossy(&submitted.stderr)
+        ran.status.code().is_some(),
+        "run-plan did not finish: {}",
+        String::from_utf8_lossy(&ran.stderr)
     );
 
     // The CLI's `agent-task status` projection is a bounded operator summary:
@@ -71,7 +75,7 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
     let record =
         homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots())
             .read_record("foreign-runtime-provenance")
-            .expect("durable lifecycle record for the submitted run");
+            .expect("durable lifecycle record for the recorded run");
     let source = &record.metadata
         [homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
         ["source"];

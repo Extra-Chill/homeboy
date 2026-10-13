@@ -164,9 +164,12 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
         "homeboy",
         "agent-task",
         "fanout",
-        "run-plan",
-        "--input",
-        "fanout.json",
+        "cook-batch",
+        "--repo",
+        "homeboy",
+        "--verify",
+        "cargo test --lib",
+        "https://github.com/Extra-Chill/homeboy/issues/1",
     ]);
     let coordinator_contract = coordinator.lab_contract().expect("fanout contract");
     assert_eq!(

@@ -176,7 +176,6 @@ mod migrated_legacy_lab_arg_tests {
         let input = args(&[
             "homeboy",
             "agent-task",
-            "fanout",
             "run-plan",
             "plan.json",
             "--output",
@@ -192,7 +191,6 @@ mod migrated_legacy_lab_arg_tests {
             args(&[
                 "homeboy",
                 "agent-task",
-                "fanout",
                 "run-plan",
                 "plan.json",
                 "--output",

@@ -4888,144 +4888,114 @@ fn dispatch_claimed_controller_job(
     // Register ownership before allowing a fast driver to terminalize itself.
     let (start_tx, start_rx) = mpsc::channel();
     let supervisor_runtime_key = runtime_key.clone();
-    // Detached: nothing joins this handle, so it is not retained.
-    std::thread::spawn(move || {
-        let _ = start_rx.recv();
-        let job = job_store.handle(job_id);
-        if job.is_cancelled() {
-            let checkpoint = if recovery {
-                state.checkpoint.clone()
-            } else {
-                driver.recovery_checkpoint(&state.request).ok().flatten()
-            };
-            if let Some(checkpoint) = checkpoint {
-                match driver.cancel(&checkpoint) {
-                    Ok(()) => persist_controller_cancellation(&job),
-                    Err(error) => {
-                        let public = driver.public_error(&error);
-                        persist_controller_cancellation_failure(&job, public.message, public.data);
-                    }
-                }
-            } else if matches!(
-                driver.execution_owner(&state.request, None),
-                Ok(None)
-                    | Ok(Some(
-                        controller_job_driver::ControllerJobExecutionOwner::None
-                    ))
-            ) {
-                // A claimless in-process driver can prove it admitted no external
-                // work. Missing ownership evidence must remain active/ambiguous.
-                persist_controller_cancellation(&job);
-            }
-            controller_job_runtimes()
-                .lock()
-                .expect("controller runtimes lock")
-                .remove(&supervisor_runtime_key);
-            return;
-        }
-        let prepared = if recovery {
-            state
-                .checkpoint
-                .clone()
-                .expect("claimed recovery has checkpoint")
-        } else {
-            match driver.prepare(state.request.clone()) {
-                Ok(prepared) => {
-                    if job.record_controller_prepared(prepared.clone()).is_err() {
-                        persist_controller_failure(
-                            &job,
-                            "controller checkpoint could not be persisted".to_string(),
-                            json!({ "phase": "checkpoint_persistence" }),
-                        );
-                        controller_job_runtimes()
-                            .lock()
-                            .expect("controller runtimes lock")
-                            .remove(&supervisor_runtime_key);
-                        return;
-                    }
-                    if job.is_cancelled() {
-                        match driver.cancel(&prepared) {
-                            Ok(()) => {
-                                persist_controller_cancellation(&job);
-                            }
-                            Err(error) => {
-                                let public = driver.public_error(&error);
-                                persist_controller_cancellation_failure(
-                                    &job,
-                                    public.message,
-                                    public.data,
-                                );
-                            }
+    // Detached: nothing joins this handle, so it is not retained. Drivers run
+    // registered agent-task hooks (a workflow resolves a Cook's canonical run
+    // projection) whose recursion overflows the default spawned-thread stack;
+    // the 32 MiB working stack matches the orchestration tick (homeboy#15010).
+    std::thread::Builder::new()
+        .name(format!("controller-job-{job_id}"))
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let _ = start_rx.recv();
+            let job = job_store.handle(job_id);
+            if job.is_cancelled() {
+                let checkpoint = if recovery {
+                    state.checkpoint.clone()
+                } else {
+                    driver.recovery_checkpoint(&state.request).ok().flatten()
+                };
+                if let Some(checkpoint) = checkpoint {
+                    match driver.cancel(&checkpoint) {
+                        Ok(()) => persist_controller_cancellation(&job),
+                        Err(error) => {
+                            let public = driver.public_error(&error);
+                            persist_controller_cancellation_failure(
+                                &job,
+                                public.message,
+                                public.data,
+                            );
                         }
-                        controller_job_runtimes()
-                            .lock()
-                            .expect("controller runtimes lock")
-                            .remove(&supervisor_runtime_key);
-                        return;
                     }
-                    prepared
-                }
-                Err(error) => {
-                    let public = driver.public_error(&error);
-                    persist_controller_failure(&job, public.message, public.data);
-                    controller_job_runtimes()
-                        .lock()
-                        .expect("controller runtimes lock")
-                        .remove(&supervisor_runtime_key);
-                    return;
-                }
-            }
-        };
-        // The checkpoint write and this durable read form the final gate before
-        // any execute/resume side effect can start.
-        if job.is_cancelled() {
-            match driver.cancel(&prepared) {
-                Ok(()) => {
+                } else if matches!(
+                    driver.execution_owner(&state.request, None),
+                    Ok(None)
+                        | Ok(Some(
+                            controller_job_driver::ControllerJobExecutionOwner::None
+                        ))
+                ) {
+                    // A claimless in-process driver can prove it admitted no external
+                    // work. Missing ownership evidence must remain active/ambiguous.
                     persist_controller_cancellation(&job);
                 }
-                Err(error) => {
-                    let public = driver.public_error(&error);
-                    persist_controller_cancellation_failure(&job, public.message, public.data);
-                }
+                controller_job_runtimes()
+                    .lock()
+                    .expect("controller runtimes lock")
+                    .remove(&supervisor_runtime_key);
+                return;
             }
-            controller_job_runtimes()
-                .lock()
-                .expect("controller runtimes lock")
-                .remove(&supervisor_runtime_key);
-            return;
-        }
-        let execute_driver = Arc::clone(&driver);
-        let driver_job =
-            controller_job_driver::ControllerJobHandle::new(job.clone(), Arc::clone(&driver));
-        let execute_prepared = prepared.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let execute = std::thread::spawn(move || {
-            let result = if recovery {
-                execute_driver.resume(execute_prepared, driver_job)
+            let prepared = if recovery {
+                state
+                    .checkpoint
+                    .clone()
+                    .expect("claimed recovery has checkpoint")
             } else {
-                execute_driver.execute(execute_prepared, driver_job)
+                match driver.prepare(state.request.clone()) {
+                    Ok(prepared) => {
+                        if job.record_controller_prepared(prepared.clone()).is_err() {
+                            persist_controller_failure(
+                                &job,
+                                "controller checkpoint could not be persisted".to_string(),
+                                json!({ "phase": "checkpoint_persistence" }),
+                            );
+                            controller_job_runtimes()
+                                .lock()
+                                .expect("controller runtimes lock")
+                                .remove(&supervisor_runtime_key);
+                            return;
+                        }
+                        if job.is_cancelled() {
+                            match driver.cancel(&prepared) {
+                                Ok(()) => {
+                                    persist_controller_cancellation(&job);
+                                }
+                                Err(error) => {
+                                    let public = driver.public_error(&error);
+                                    persist_controller_cancellation_failure(
+                                        &job,
+                                        public.message,
+                                        public.data,
+                                    );
+                                }
+                            }
+                            controller_job_runtimes()
+                                .lock()
+                                .expect("controller runtimes lock")
+                                .remove(&supervisor_runtime_key);
+                            return;
+                        }
+                        prepared
+                    }
+                    Err(error) => {
+                        let public = driver.public_error(&error);
+                        persist_controller_failure(&job, public.message, public.data);
+                        controller_job_runtimes()
+                            .lock()
+                            .expect("controller runtimes lock")
+                            .remove(&supervisor_runtime_key);
+                        return;
+                    }
+                }
             };
-            let _ = sender.send(result);
-        });
-        let mut cancellation_failed = false;
-        loop {
-            if !cancellation_failed && (job.is_cancelled() || cancel_rx.try_recv().is_ok()) {
+            // The checkpoint write and this durable read form the final gate before
+            // any execute/resume side effect can start.
+            if job.is_cancelled() {
                 match driver.cancel(&prepared) {
                     Ok(()) => {
-                        // A successful driver cancellation is not proof of stop.
-                        // Join the owned execute thread before terminalizing.
-                        let _ = execute.join();
                         persist_controller_cancellation(&job);
                     }
                     Err(error) => {
                         let public = driver.public_error(&error);
                         persist_controller_cancellation_failure(&job, public.message, public.data);
-                        // The driver could not confirm stop. Keep this supervisor
-                        // and execute handle live until completion proves it ended;
-                        // the durable Failed job is explicit uncertainty, never a
-                        // false Cancelled terminal.
-                        cancellation_failed = true;
-                        continue;
                     }
                 }
                 controller_job_runtimes()
@@ -5034,47 +5004,92 @@ fn dispatch_claimed_controller_job(
                     .remove(&supervisor_runtime_key);
                 return;
             }
-            match receiver.recv_timeout(Duration::from_millis(10)) {
-                Ok(Ok(private)) => match driver.public_result(&private) {
-                    Ok(public) => {
-                        // The driver has already produced this result. Retry only
-                        // this projection, never the driver side effect.
-                        if job.is_cancelled() {
+            let execute_driver = Arc::clone(&driver);
+            let driver_job =
+                controller_job_driver::ControllerJobHandle::new(job.clone(), Arc::clone(&driver));
+            let execute_prepared = prepared.clone();
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let execute = std::thread::spawn(move || {
+                let result = if recovery {
+                    execute_driver.resume(execute_prepared, driver_job)
+                } else {
+                    execute_driver.execute(execute_prepared, driver_job)
+                };
+                let _ = sender.send(result);
+            });
+            let mut cancellation_failed = false;
+            loop {
+                if !cancellation_failed && (job.is_cancelled() || cancel_rx.try_recv().is_ok()) {
+                    match driver.cancel(&prepared) {
+                        Ok(()) => {
+                            // A successful driver cancellation is not proof of stop.
+                            // Join the owned execute thread before terminalizing.
+                            let _ = execute.join();
+                            persist_controller_cancellation(&job);
+                        }
+                        Err(error) => {
+                            let public = driver.public_error(&error);
+                            persist_controller_cancellation_failure(
+                                &job,
+                                public.message,
+                                public.data,
+                            );
+                            // The driver could not confirm stop. Keep this supervisor
+                            // and execute handle live until completion proves it ended;
+                            // the durable Failed job is explicit uncertainty, never a
+                            // false Cancelled terminal.
+                            cancellation_failed = true;
                             continue;
                         }
-                        if !persist_controller_success_or_uncertainty(&job, public) {
-                            continue;
-                        }
-                        let _ = execute.join();
                     }
-                    Err(error) => {
+                    controller_job_runtimes()
+                        .lock()
+                        .expect("controller runtimes lock")
+                        .remove(&supervisor_runtime_key);
+                    return;
+                }
+                match receiver.recv_timeout(Duration::from_millis(10)) {
+                    Ok(Ok(private)) => match driver.public_result(&private) {
+                        Ok(public) => {
+                            // The driver has already produced this result. Retry only
+                            // this projection, never the driver side effect.
+                            if job.is_cancelled() {
+                                continue;
+                            }
+                            if !persist_controller_success_or_uncertainty(&job, public) {
+                                continue;
+                            }
+                            let _ = execute.join();
+                        }
+                        Err(error) => {
+                            let _ = execute.join();
+                            let public = driver.public_error(&error);
+                            persist_controller_failure(&job, public.message, public.data);
+                        }
+                    },
+                    Ok(Err(error)) => {
                         let _ = execute.join();
                         let public = driver.public_error(&error);
                         persist_controller_failure(&job, public.message, public.data);
                     }
-                },
-                Ok(Err(error)) => {
-                    let _ = execute.join();
-                    let public = driver.public_error(&error);
-                    persist_controller_failure(&job, public.message, public.data);
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = execute.join();
+                        persist_controller_failure(
+                            &job,
+                            "controller driver execution thread disconnected".to_string(),
+                            json!({ "phase": "driver_disconnected" }),
+                        );
+                    }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    let _ = execute.join();
-                    persist_controller_failure(
-                        &job,
-                        "controller driver execution thread disconnected".to_string(),
-                        json!({ "phase": "driver_disconnected" }),
-                    );
-                }
+                controller_job_runtimes()
+                    .lock()
+                    .expect("controller runtimes lock")
+                    .remove(&supervisor_runtime_key);
+                return;
             }
-            controller_job_runtimes()
-                .lock()
-                .expect("controller runtimes lock")
-                .remove(&supervisor_runtime_key);
-            return;
-        }
-    });
+        })
+        .expect("spawn controller job driver");
     controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")

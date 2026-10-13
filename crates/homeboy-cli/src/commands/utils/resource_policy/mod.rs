@@ -1527,8 +1527,6 @@ mod tests {
                 "{}",
             ]
             .as_slice(),
-            ["homeboy", "agent-task", "fanout", "status", "batch-123"].as_slice(),
-            ["homeboy", "agent-task", "fanout", "artifacts", "batch-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             for readiness in &runner_states {
@@ -1792,55 +1790,6 @@ mod tests {
         assert!(command.lab_offload_supported);
         assert!(command.allows_warm_runner_coordination);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
-    }
-
-    #[test]
-    fn runner_pinned_fanout_run_plan_admits_an_explicit_ready_runner_on_warm_or_hot_controller() {
-        // With an explicit ready runner, the fanout coordinator is admitted on a
-        // warm/hot controller so its child cooks can execute on Lab, instead of
-        // the whole batch being forced local (#9375).
-        let cli = Cli::parse_from([
-            "homeboy",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "fanout",
-            "run-plan",
-            "--input",
-            "@batch-cook-plan.json",
-        ]);
-        let command = hot_command(&cli.command).expect("fanout run-plan is resource managed");
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        let ready = ready_lab();
-
-        for recommendation in [ResourceRecommendation::Warm, ResourceRecommendation::Hot] {
-            let mut resources = coordination_resources();
-            resources.recommendation = recommendation;
-            resources.load.recommendation = recommendation;
-            assert!(admits_warm_runner_coordination(
-                command,
-                &resources,
-                Some("homeboy-lab"),
-                Some(&ready),
-            ));
-        }
-
-        // Without an explicit runner, or with an unavailable one, the warm/hot
-        // controller still declines — preserving the memory/process safety
-        // boundary shared with the single-cook coordinator.
-        let resources = coordination_resources();
-        assert!(!admits_warm_runner_coordination(
-            command,
-            &resources,
-            None,
-            Some(&ready),
-        ));
-        assert!(!admits_warm_runner_coordination(
-            command,
-            &resources,
-            Some("missing-lab"),
-            Some(&ready),
-        ));
     }
 
     #[test]

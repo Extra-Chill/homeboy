@@ -123,9 +123,6 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
         "candidate.patch",
     ],
     &["agent-task", "providers"],
-    &["agent-task", "fanout", "submit-batch", "--input", "{}"],
-    &["agent-task", "fanout", "status", "batch-1"],
-    &["agent-task", "fanout", "artifacts", "batch-1"],
     &[
         "agent-task",
         "fanout",
@@ -134,7 +131,6 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
         "owner/repo",
         "https://example.test/issues/1",
     ],
-    &["agent-task", "fanout", "run-plan", "--input", "{}"],
     &["agent-task", "auth", "status"],
     &["bench"],
     &["bench", "matrix"],
