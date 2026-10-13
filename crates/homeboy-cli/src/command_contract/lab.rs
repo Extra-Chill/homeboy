@@ -67,7 +67,8 @@ fn scope_cook_help(command: Command) -> Command {
         "model",
         "verify",
         "verify_file",
-        "verification_profiles",
+        "max_concurrency",
+        "join",
         "preview",
         "run_plan",
         "placement",
@@ -193,7 +194,6 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["agent-task", "cook"],
     &["agent-task", "run-plan"],
     &["agent-task", "run"],
-    &["agent-task", "run-next"],
     &["agent-task", "status"],
     &["agent-task", "list"],
     &["agent-task", "active"],
@@ -205,14 +205,9 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["agent-task", "retry"],
     &["agent-task", "promote"],
     &["agent-task", "providers"],
-    &["agent-task", "fanout", "submit-batch"],
-    &["agent-task", "fanout", "status"],
-    &["agent-task", "fanout", "artifacts"],
-    // The fanout coordinator is controller-owned, but split placement hands
-    // each child attempt to the selected runner, so the placement arguments are
-    // load-bearing here and must stay discoverable.
+    // A cook-batch is a controller-local workflow, but `--placement` places
+    // each child Cook, so the placement arguments must stay discoverable.
     &["agent-task", "fanout", "cook-batch"],
-    &["agent-task", "fanout", "run-plan"],
     &["agent-task", "auth", "status"],
     &["agent-task", "controller", "from-spec"],
     &["agent-task", "controller", "run-from-spec"],

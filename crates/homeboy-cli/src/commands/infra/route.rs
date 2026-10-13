@@ -7,10 +7,7 @@ use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
-    NoopLabDispatchObserver, PersistedRunRetrieval,
-};
-use homeboy::core::observation::{
-    finish_run_best_effort, NewRunRecord, ObservationStore, RunStatus,
+    NoopLabDispatchObserver,
 };
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::Error;
@@ -82,14 +79,6 @@ pub(crate) fn route_after_parse_with_provenance(
         )? {
             return Ok(Some(exit_code));
         }
-    }
-
-    // Fanout retains the same controller ownership for default handoff and
-    // explicit terminal observation, independent of provider placement.
-    if let Some(exit_code) =
-        local_detach_fanout::intercept_local_detached_fanout(cli, normalized_args, runner_side)?
-    {
-        return Ok(Some(exit_code));
     }
 
     if runner_side {
@@ -292,15 +281,6 @@ pub(crate) fn route_after_parse_with_provenance(
         inferred_runner_id.as_deref(),
         &preflight.placement,
         provenance,
-    )? {
-        return Ok(Some(exit_code));
-    }
-
-    if let Some(exit_code) = run_split_placement_fanout(
-        cli,
-        output_file,
-        inferred_runner_id.as_deref(),
-        &preflight.placement,
     )? {
         return Ok(Some(exit_code));
     }
@@ -775,18 +755,6 @@ fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str>
         Commands::AgentTask(AgentTaskArgs {
             command: AgentTaskCommand::Cook(cook),
         }) if !cook.dispatch.core.queue_only => Some("agent-task cook"),
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::RunPlan(_),
-                }),
-        }) => Some("agent-task fanout run-plan"),
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::SubmitBatch(_),
-                }),
-        }) => Some("agent-task fanout submit-batch"),
         Commands::AgentTask(AgentTaskArgs {
             command:
                 AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
@@ -2593,114 +2561,6 @@ fn runner_wait_step_key(
         "{RUNNER_WAIT_STEP_KEY_PREFIX}{}",
         homeboy_engine_primitives::content_hash::sha256_hex(&identity)
     ))
-}
-
-/// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
-/// gates, and finalization on the controller. Each child provider attempt is
-/// the only unit handed to the explicitly selected Lab runner.
-fn run_split_placement_fanout(
-    cli: &Cli,
-    output_file: Option<&str>,
-    runner_id: Option<&str>,
-    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
-) -> homeboy::core::Result<Option<i32>> {
-    if cli.placement == homeboy::cli_surface::Placement::Local {
-        return Ok(None);
-    }
-    let Some(runner_id) = runner_id else {
-        return Ok(None);
-    };
-    let runner_id = runner_id.to_string();
-    let job_overrides = lab_job_overrides(cli)?;
-    let placement = cli.placement;
-    let directive = directive.clone();
-    let allow_dirty_lab_workspace = cli.allow_dirty_lab_workspace;
-    let skip_deps_hydration = cli.skip_deps_hydration;
-    let detach_after_handoff = cli.detach_after_handoff;
-    let attempt_dispatcher = move |options: &crate::agents::agent_task_service::CookRequest| {
-        // Fanout compiles each child worktree before this factory runs. Bind
-        // its decision here, not at coordinator startup, so the decision
-        // names the child candidate/base that will actually be dispatched.
-        let source_path = options
-            .identity
-            .initial_plan
-            .tasks
-            .first()
-            .and_then(|task| task.workspace.root.as_ref())
-            .map(PathBuf::from);
-        let task = options
-            .identity
-            .initial_plan
-            .tasks
-            .first()
-            .map(|task| task.task_id.as_str())
-            .unwrap_or("fanout-provider-attempt");
-        let placement_decision = options
-            .identity
-            .initial_plan
-            .metadata
-            .get("execution_placement_decision")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_else(|| finalize_placement(&directive, task, source_path.as_deref()));
-        let selected_runner_id = placement_decision
-            .runner
-            .as_ref()
-            .map(|runner| runner.runner_id.clone())
-            .unwrap_or_else(|| runner_id.clone());
-        Arc::new(LabCookAttemptDispatcher {
-            runner_id: selected_runner_id,
-            placement_decision,
-            allow_local_fallback: false,
-            allow_dirty_lab_workspace,
-            skip_deps_hydration,
-            detach_after_handoff,
-            source_path,
-            job_overrides: job_overrides.clone(),
-            progress_reporter: crate::commands::agent_task::CookProgressReporter::new(false),
-        }) as Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>
-    };
-    let (value, exit_code) = match &cli.command {
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Fanout(
-                    crate::commands::agent_task::AgentTaskFanoutArgs {
-                        command: crate::commands::agent_task::AgentTaskFanoutCommand::RunPlan(args),
-                    },
-                ),
-        }) => crate::commands::agent_task::fanout::run_batch_cook_fanout_with_attempt_dispatcher_and_placement(
-            args.clone(),
-            &attempt_dispatcher,
-            placement,
-        )?,
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Fanout(
-                    crate::commands::agent_task::AgentTaskFanoutArgs {
-                        command:
-                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                    },
-                ),
-        }) if args.run_plan => {
-            crate::commands::agent_task::fanout::cook_batch_with_attempt_dispatcher_and_placement(
-                *args.clone(),
-                &attempt_dispatcher,
-                placement,
-            )?
-        }
-        _ => return Ok(None),
-    };
-    let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize controller-owned fanout result".to_string()),
-        )
-    })?;
-    if let Some(path) = output_file {
-        write_output_file(path, &stdout)?;
-    }
-    print!("{stdout}");
-    Ok(Some(exit_code))
 }
 
 /// Reject `agent-task cook` requests whose flags contradict each other.
@@ -4662,9 +4522,7 @@ fn agent_task_local_fanout_warning(
     command: &Commands,
     readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
 ) -> Option<String> {
-    use crate::commands::agent_task::{
-        AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
-    };
+    use crate::commands::agent_task::{AgentTaskArgs, AgentTaskCommand};
 
     let (label, concurrency, task_count) = match command {
         Commands::AgentTask(AgentTaskArgs {
@@ -4682,38 +4540,6 @@ fn agent_task_local_fanout_warning(
                 tasks.to_string(),
             )
         }
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::CookBatch(args),
-                }),
-        }) if args.run_plan && !args.preview => {
-            if args.issues.len() <= 1 {
-                return None;
-            }
-            // cook-batch has no --concurrency flag: local workers are capped by
-            // available parallelism, so report what will actually run.
-            let workers = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-                .min(args.issues.len());
-            (
-                "agent-task fanout cook-batch local fanout",
-                workers.to_string(),
-                args.issues.len().to_string(),
-            )
-        }
-        Commands::AgentTask(AgentTaskArgs {
-            command:
-                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
-                    command: AgentTaskFanoutCommand::RunPlan(_),
-                }),
-        }) => (
-            // The plan is read downstream, so the child count is not known here.
-            "agent-task fanout run-plan local fanout",
-            "available-parallelism".to_string(),
-            "plan-defined".to_string(),
-        ),
         _ => return None,
     };
 
@@ -4790,19 +4616,6 @@ fn lab_dispatch_observer(
                 .map(|observation| Box::new(observation) as Box<dyn LabDispatchObserver>)
                 .unwrap_or_else(|| Box::new(NoopLabDispatchObserver))
         }
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command:
-                crate::commands::agent_task::AgentTaskCommand::Fanout(
-                    crate::commands::agent_task::AgentTaskFanoutArgs {
-                        command:
-                            crate::commands::agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                    },
-                ),
-        }) if cli.detach_after_handoff && args.run_plan => {
-            start_agent_task_fanout_lab_dispatch_observation(args, normalized_args, runner_id)
-                .map(|observation| Box::new(observation) as Box<dyn LabDispatchObserver>)
-                .unwrap_or_else(|| Box::new(NoopLabDispatchObserver))
-        }
         _ => Box::new(NoopLabDispatchObserver),
     }
 }
@@ -4816,111 +4629,7 @@ fn placement_outcome_target<'a>(
         .map(|run_id| ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id })
 }
 
-struct AgentTaskFanoutLabDispatchObservation {
-    store: ObservationStore,
-    run_id: String,
-    fanout_id: String,
-}
-
-impl LabDispatchObserver for AgentTaskFanoutLabDispatchObservation {
-    fn run_id(&self) -> Option<&str> {
-        Some(self.run_id.as_str())
-    }
-
-    fn finish(
-        self: Box<Self>,
-        status: RunStatus,
-        metadata: serde_json::Value,
-    ) -> Option<PersistedRunRetrieval> {
-        let metadata =
-            agent_task_fanout_finish_metadata(metadata, &self.run_id, &self.fanout_id, status);
-        finish_run_best_effort(&self.store, &self.run_id, status, Some(metadata));
-        Some(PersistedRunRetrieval::for_run(&self.run_id))
-    }
-}
-
-fn agent_task_fanout_finish_metadata(
-    mut metadata: serde_json::Value,
-    run_id: &str,
-    fanout_id: &str,
-    status: RunStatus,
-) -> serde_json::Value {
-    if let Some(object) = metadata.as_object_mut() {
-        object.insert(
-            "agent_task_lab_dispatch".to_string(),
-            serde_json::json!({
-                "schema": "homeboy/agent-task-fanout-lab-dispatch/v1",
-                "fanout_id": fanout_id,
-                "phase": "route_lab_dispatch",
-                "status": status.as_str(),
-            }),
-        );
-        object.insert(
-            "fanout_id".to_string(),
-            serde_json::Value::String(fanout_id.to_string()),
-        );
-        object.insert(
-            "follow_commands".to_string(),
-            serde_json::json!({
-                "dispatch_status": format!("homeboy runs show {run_id}"),
-                "dispatch_evidence": format!("homeboy runs evidence --run {run_id}"),
-                "fanout_status": format!("homeboy agent-task fanout status {fanout_id}"),
-            }),
-        );
-    }
-    metadata
-}
-
-fn start_agent_task_fanout_lab_dispatch_observation(
-    args: &crate::commands::agent_task::AgentTaskFanoutCookBatchArgs,
-    normalized_args: &[String],
-    runner_id: Option<&str>,
-) -> Option<AgentTaskFanoutLabDispatchObservation> {
-    let store = ObservationStore::open_initialized().ok()?;
-    let cwd = std::env::current_dir().ok();
-    // Planning owns generated batch identities. Reusing its exact result keeps
-    // the observer's status command pointed at the record admission creates.
-    let fanout_id = crate::commands::agent_task::fanout::cook_batch_fanout_id(args).ok()?;
-    let run = store
-        .start_run(
-            NewRunRecord::builder("agent-task")
-                .component_id(args.repo.clone())
-                .command(normalized_args.join(" "))
-                .optional_cwd_path(cwd.as_deref())
-                .current_homeboy_version()
-                .metadata(serde_json::json!({
-                    "agent_task_lab_dispatch": {
-                        "schema": "homeboy/agent-task-fanout-lab-dispatch/v1",
-                        "fanout_id": fanout_id,
-                        "phase": "route_before_lab_dispatch",
-                        "status": "running",
-                        "runner_id": runner_id,
-                        "detach_after_handoff": true,
-                        "run_plan": true,
-                        "issue_count": args.issues.len(),
-                    },
-                    "runner_id": runner_id,
-                    "fanout_id": fanout_id,
-                    "follow_commands": {
-                        "fanout_status": format!("homeboy agent-task fanout status {}", fanout_id),
-                    },
-                }))
-                .build(),
-        )
-        .ok()?;
-    eprintln!(
-        "Lab offload handoff: local dispatch run `{}` is durable before remote preflight; inspect dispatch with `homeboy runs show {}`. Once the fanout batch is submitted, inspect it with `homeboy agent-task fanout status {}`.",
-        run.id, run.id, fanout_id
-    );
-    Some(AgentTaskFanoutLabDispatchObservation {
-        store,
-        run_id: run.id,
-        fanout_id,
-    })
-}
-
 mod local_detach;
-mod local_detach_fanout;
 mod rig_source;
 use rig_source::*;
 fn is_runs_list_runner_option(args: &[String]) -> bool {

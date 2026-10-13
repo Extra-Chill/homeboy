@@ -192,22 +192,6 @@ pub(crate) fn inject_agent_task_default_provider_config_in_args(
 pub(crate) fn inject_agent_task_resolved_provider_policy_in_args(
     args: &[String],
 ) -> Result<Vec<String>> {
-    if args.windows(2).any(|pair| pair == ["agent-task", "fanout"]) {
-        if args.iter().any(|arg| {
-            arg == "--resolved-provider-policies"
-                || arg.starts_with("--resolved-provider-policies=")
-        }) {
-            return Ok(args.to_vec());
-        }
-        if let Some(policies) = crate::cli_resolver::resolve_fanout_provider_policies(args)? {
-            return Ok(with_provider_policy_arg(
-                args,
-                "--resolved-provider-policies",
-                policies,
-            ));
-        }
-        return Ok(args.to_vec());
-    }
     if !is_agent_task_dispatch_or_cook(args)
         || args.iter().any(|arg| arg == "--resolved-provider-policy")
         || args

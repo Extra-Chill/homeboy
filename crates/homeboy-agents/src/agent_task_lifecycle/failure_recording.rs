@@ -1923,18 +1923,6 @@ pub fn terminal_artifact_projection_readiness_in_store(
     )
 }
 
-/// Bounded read-only counterpart used by fanout status while coordinators are
-/// writing observations. It intentionally leaves reconciliation to `resume`.
-pub(crate) fn terminal_artifact_projection_readiness_bounded(
-    run_id: &str,
-) -> Result<Option<String>> {
-    let record = store::read_record_bounded(&super::sanitize_run_id(run_id))?;
-    terminal_artifact_projection_readiness_for_record(
-        &record,
-        store::read_aggregate_bounded(&record.run_id),
-    )
-}
-
 /// [`terminal_artifact_projection_readiness_bounded`] against an explicitly
 /// injected durable lifecycle root.
 ///

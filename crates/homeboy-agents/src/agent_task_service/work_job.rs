@@ -33,18 +33,6 @@ pub enum WorkJobPhase {
     Completed,
 }
 
-/// Whether a supervised detached child must remain protected. A recycled PID
-/// is not the admitted child; unavailable inspection cannot prove it stopped.
-pub(crate) fn supervised_child_may_be_live(
-    child_pid: u32,
-    child_start_identity: &homeboy_core::process::ProcessStartIdentity,
-) -> bool {
-    matches!(
-        ControllerJobExecutionOwner::supervised(child_pid, child_start_identity.clone()).inspect(),
-        homeboy_core::process::ProcessIdentityState::Live
-            | homeboy_core::process::ProcessIdentityState::Unverifiable
-    )
-}
 pub(crate) const WORK_JOB_REQUEST_SCHEMA: &str = "homeboy/work-job-request/v1";
 pub(crate) const WORK_JOB_CHECKPOINT_SCHEMA: &str = "homeboy/work-job-checkpoint/v1";
 pub(crate) const WORK_JOB_PROGRESS_SCHEMA: &str = "homeboy/work-job-progress/v1";

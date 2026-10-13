@@ -60,7 +60,6 @@ pub(super) fn agent_task_resource_behavior(
 
     Some(match &args.command {
         agent_task::AgentTaskCommand::Doctor(_)
-        | agent_task::AgentTaskCommand::Submit(_)
         | agent_task::AgentTaskCommand::RuntimeRecover(_)
         | agent_task::AgentTaskCommand::RuntimeValidate(_)
         | agent_task::AgentTaskCommand::Cancel(_)
@@ -87,7 +86,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
-        | agent_task::AgentTaskCommand::RunNext(_)
         | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
         | agent_task::AgentTaskCommand::Resume(_)
         | agent_task::AgentTaskCommand::Promote(_)
@@ -145,23 +143,11 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Active(_) | agent_task::AgentTaskCommand::Reconcile(_) => {
             AgentTaskResourceBehavior::AdmittedWorkload
         }
-        agent_task::AgentTaskCommand::Fanout(fanout) => match &fanout.command {
-            agent_task::AgentTaskFanoutCommand::Status(_)
-            | agent_task::AgentTaskFanoutCommand::Artifacts(_) => {
-                AgentTaskResourceBehavior::BoundedMetadataRead
-            }
-            agent_task::AgentTaskFanoutCommand::Resume(_)
-            | agent_task::AgentTaskFanoutCommand::Cancel(_)
-            | agent_task::AgentTaskFanoutCommand::RunPlan(_) => {
-                AgentTaskResourceBehavior::AdmittedWorkload
-            }
-            agent_task::AgentTaskFanoutCommand::CookBatch(_)
-            | agent_task::AgentTaskFanoutCommand::Plan(_)
-            | agent_task::AgentTaskFanoutCommand::Submit(_)
-            | agent_task::AgentTaskFanoutCommand::SubmitBatch(_) => {
-                AgentTaskResourceBehavior::LocalControl
-            }
-        },
+        // Cook-batch admits a workflow; batch-prepare plans it. Their
+        // children are ordinary Cooks with their own admission.
+        agent_task::AgentTaskCommand::Fanout(_) | agent_task::AgentTaskCommand::BatchPrepare(_) => {
+            AgentTaskResourceBehavior::LocalControl
+        }
         agent_task::AgentTaskCommand::Loop(loop_args) => match &loop_args.command {
             agent_task::AgentTaskLoopCommand::Status(_) => {
                 AgentTaskResourceBehavior::BoundedMetadataRead
@@ -223,27 +209,6 @@ pub(super) fn is_controller_owned_fanout_coordination(command: &Commands) -> boo
         Commands::AgentTask(agent_task::AgentTaskArgs {
             command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                 command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
-            }),
-        })
-    )
-}
-
-/// The `fanout run-plan` coordinator executes a materialized batch-cook plan:
-/// it owns the durable batch record, worktrees, promotion, gates, and
-/// finalization, but dispatches each independent child provider attempt to a
-/// selected Lab runner (`run_split_placement_fanout`). Unlike `cook-batch`
-/// (which is unconditionally controller-local planning/coordination and is
-/// filtered out earlier so it never refuses), `run-plan` previously fell
-/// through to the generic local-only contract and refused on a warm/hot
-/// controller — stranding a validated batch that a ready Lab runner could
-/// serve (#9375). Recognize it here so its provider attempts can be admitted
-/// under warm-runner coordination.
-pub(super) fn is_lab_offloadable_fanout_coordinator(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
             }),
         })
     )

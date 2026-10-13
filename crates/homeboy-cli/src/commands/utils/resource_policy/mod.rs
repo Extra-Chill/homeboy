@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_executable_agent_task_retry, is_lab_offloadable_fanout_coordinator,
+    is_executable_agent_task_retry,
     is_local_registry_management, is_plan_only_command,
 };
 use messages::{
@@ -478,25 +478,6 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         }
         return Some(HotCommand {
             label: "agent-task cook/run-plan/retry --run",
-            lab_offload_supported: true,
-            lab_offload_unsupported_reason: None,
-            allows_warm_runner_coordination: true,
-            offload_only_when_hot: false,
-        });
-    }
-
-    // The batch-cook fanout coordinator keeps durable batch state, worktree
-    // ownership, promotion, gates, and finalization on the controller, but each
-    // independent child provider attempt is Lab-eligible (routed by
-    // `run_split_placement_fanout`). Treat `fanout run-plan` like a verified
-    // cook: a controller-owned coordinator whose provider work can be admitted
-    // under warm/hot CPU load when an explicit ready `--runner` is selected,
-    // rather than refusing the whole batch as local-only (#9375). Memory and
-    // process pressure remain hard local safety gates via
-    // `admits_warm_runner_coordination`.
-    if is_lab_offloadable_fanout_coordinator(command) {
-        return Some(HotCommand {
-            label: "agent-task fanout run-plan",
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,

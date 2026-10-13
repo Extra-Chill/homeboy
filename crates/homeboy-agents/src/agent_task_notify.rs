@@ -31,22 +31,16 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
 use crate::agent_task_loop_controller::AgentTaskLoopControllerState;
-use crate::agent_task_service::{AgentTaskCookBatchReport, AgentTaskCookReport};
+use crate::agent_task_service::AgentTaskCookReport;
 
 /// Generic subject class for every cook lifecycle notification.
 const COOK_SUBJECT_KIND: &str = "agent_task_cook";
-
-/// Generic subject class for a wave of cooks (a fanout or a cook batch).
-const BATCH_SUBJECT_KIND: &str = "agent_task_cook_batch";
 
 /// Generic subject class for a durable loop controller.
 const CONTROLLER_SUBJECT_KIND: &str = "agent_task_controller";
 
 /// Attribution recorded on the cook-level exactly-once marker.
 const COOK_TERMINAL_DELIVERED_BY: &str = "cook-controller";
-
-/// Attribution recorded on the batch-level exactly-once marker.
-const BATCH_TERMINAL_DELIVERED_BY: &str = "cook-batch";
 
 /// Whether a cook lifecycle event is delivered.
 ///
@@ -616,204 +610,6 @@ pub struct BatchPortfolioCounts {
     pub ready: usize,
     pub blocked: usize,
     pub merged: usize,
-}
-
-/// Resolve the destination for a wave.
-///
-/// A batch has no durable run of its own, so resolution walks outwards: the
-/// live thread-local (a fanout runs in the operator's own process), then the
-/// wave's own durable metadata if it has any, then the first child that
-/// recorded a route. Without the last step a wave resumed in a new process —
-/// `fanout resume`, a supervisor advance — would silently fall back to the
-/// ambient default transport instead of the thread that asked for the work.
-fn batch_route(subject_id: &str, report: &AgentTaskCookBatchReport) -> Option<NotificationRoute> {
-    notification_route::current()
-        .or_else(|| crate::agent_task_lifecycle::durable_notification_route(subject_id))
-        .or_else(|| {
-            report.cooks.iter().find_map(|cell| {
-                crate::agent_task_lifecycle::durable_notification_route(&cell.initial_run_id)
-            })
-        })
-}
-
-/// Build the wave-terminal payload. Separated from delivery so its content is
-/// assertable without spawning a transport.
-fn batch_terminal_payload(
-    report: &AgentTaskCookBatchReport,
-    subject_id: &str,
-    component: Option<&str>,
-    portfolio: Option<BatchPortfolioCounts>,
-    exit_code: i32,
-) -> NotifyPayload {
-    // Attention is not the exit code alone. A wave can exit zero with children
-    // that failed, and "wave done" with nothing else said is exactly the
-    // silence this emitter exists to remove.
-    let needs_attention =
-        exit_code != 0 || report.failed > 0 || report.cancelled > 0 || report.timed_out > 0;
-    let kind = if needs_attention {
-        NotifyEventKind::NeedsAttention
-    } else {
-        NotifyEventKind::Completed
-    };
-
-    let mut subject = NotifySubject::new(BATCH_SUBJECT_KIND, subject_id);
-    subject.component = component.map(str::to_string);
-    if subject_id != report.batch_id {
-        // The wave is addressed by its fanout id; the batch it ran is its
-        // parent record, not a separate subject.
-        subject.parent_id = Some(report.batch_id.clone());
-    }
-
-    let mut payload = NotifyPayload::new(kind, subject)
-        .with_fact("Status", report.status.clone())
-        .with_fact("Children", report.total.to_string())
-        .with_fact("Succeeded", report.succeeded.to_string())
-        .with_fact("Failed", report.failed.to_string());
-    if report.cancelled > 0 {
-        payload = payload.with_fact("Cancelled", report.cancelled.to_string());
-    }
-    if report.timed_out > 0 {
-        payload = payload.with_fact("Timed out", report.timed_out.to_string());
-    }
-    if report.queued > 0 || report.running > 0 {
-        payload = payload.with_fact(
-            "Still in flight",
-            format!("{} queued, {} running", report.queued, report.running),
-        );
-    }
-    if let Some(portfolio) = portfolio {
-        payload = payload
-            .with_fact("Ready", portfolio.ready.to_string())
-            .with_fact("Blocked", portfolio.blocked.to_string())
-            .with_fact("Merged", portfolio.merged.to_string());
-    }
-
-    // Name the children that need a decision. A wave summary whose failures
-    // are anonymous still costs the operator a second command.
-    let attention: Vec<&str> = report
-        .cooks
-        .iter()
-        .filter(|cell| cell.exit_code != 0)
-        .map(|cell| cell.cook_id.as_str())
-        .take(10)
-        .collect();
-    if !attention.is_empty() {
-        payload = payload.with_fact("Needs attention", attention.join(", "));
-    }
-
-    payload
-        .with_action(
-            NotifyAction::new(
-                "status",
-                format!("homeboy agent-task fanout status {subject_id}"),
-            )
-            .with_kind("show"),
-        )
-        .with_action(
-            NotifyAction::new(
-                "resume",
-                format!("homeboy agent-task fanout resume {subject_id}"),
-            )
-            .with_kind("repair"),
-        )
-}
-
-/// A wave of cooks reached a terminal outcome.
-///
-/// This is the notification a ten-child fanout never sent: previously the
-/// destination received ten unrelated cook messages and was never told the
-/// wave was done, how many were green, how many needed attention, or how many
-/// were blocked — even though the batch report already computed every one of
-/// those totals.
-///
-/// `subject_id` is the operator-facing wave identity: a fanout id when the
-/// batch ran under one, otherwise `report.batch_id`. `portfolio` carries the
-/// whole-portfolio `ready`/`blocked`/`merged` counts a fanout supervisor
-/// computes; pass `None` for a plain cook batch, which has no portfolio.
-///
-/// Delivered at most once per wave, through the same cook-notification claim
-/// the per-cook terminal event uses — that claim is keyed on an arbitrary id,
-/// so a wave gets its own without a second mechanism.
-pub fn batch_terminal(
-    report: &AgentTaskCookBatchReport,
-    subject_id: &str,
-    component: Option<&str>,
-    portfolio: Option<BatchPortfolioCounts>,
-    exit_code: i32,
-) {
-    // One store for the whole protocol, exactly as `cook_terminal` does, and
-    // for the same reason: claim, record, confirm, and release are one
-    // exactly-once transaction that has to name one installation (#7505).
-    let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-    else {
-        return;
-    };
-    // Claim before building the payload, exactly as `cook_terminal` does: a
-    // duplicated wave summary is worse than a missing one, and a failed claim
-    // is treated the same as a lost one.
-    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
-        &lifecycle_store,
-        subject_id,
-        BATCH_TERMINAL_DELIVERED_BY,
-    )
-    .unwrap_or(false);
-    if !claimed {
-        return;
-    }
-    let payload = batch_terminal_payload(report, subject_id, component, portfolio, exit_code);
-    let needs_attention = payload.kind == NotifyEventKind::NeedsAttention;
-    let event = NotifyEvent::lifecycle(payload.kind, subject_id, &report.status)
-        .with_title(format!(
-            "wave {} — {} of {} green{}",
-            if needs_attention {
-                "needs attention"
-            } else {
-                "done"
-            },
-            report.succeeded,
-            report.total,
-            portfolio
-                .filter(|portfolio| portfolio.blocked > 0)
-                .map(|portfolio| format!(", {} blocked", portfolio.blocked))
-                .unwrap_or_default(),
-        ))
-        .with_payload(payload);
-    let route = batch_route(subject_id, report);
-    let dispatch = notify_outbox::dispatch_with_outbox(
-        &event.with_route(route.as_ref()),
-        Some(NotifyOnceMarker::new(
-            BATCH_SUBJECT_KIND,
-            subject_id,
-            BATCH_TERMINAL_DELIVERED_BY,
-        )),
-    );
-    let persisted = terminal_outcome(
-        subject_id,
-        route.is_some(),
-        &dispatch.outcome,
-        &dispatch.disposition,
-    );
-    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
-        &lifecycle_store,
-        subject_id,
-        persisted,
-    );
-    match dispatch.disposition {
-        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
-            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
-                &lifecycle_store,
-                subject_id,
-                BATCH_TERMINAL_DELIVERED_BY,
-            );
-        }
-        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
-            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
-                &lifecycle_store,
-                subject_id,
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

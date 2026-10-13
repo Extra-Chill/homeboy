@@ -60,16 +60,6 @@ pub use super::agent_task_contract::{
     AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA, AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA,
 };
 
-pub use super::agent_task_batch::{
-    AgentTaskBatchRecord, AgentTaskBatchState, AGENT_TASK_BATCH_ARTIFACTS_SCHEMA,
-};
-
-/// Durable portfolio reconciliation for independent fanout children. Dependency
-/// topology is supplied through `FanoutDependencyResolver` by #10946.
-pub mod fanout_supervisor {
-    pub use super::super::agent_task_fanout_supervisor::*;
-}
-
 // Plan/scheduler/execution context types are widely consumed and stay at the
 // facade root for ergonomics.
 pub use super::agent_task_schedule::{
@@ -145,41 +135,6 @@ pub mod controller_service {
 /// Cook-loop evaluation contracts and entry points.
 pub mod cook_loop {
     pub use super::super::agent_task_cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
-}
-
-/// Durable batch/fanout lifecycle records built from independent child runs.
-pub mod batch {
-    pub use super::super::agent_task_batch::status;
-    pub use super::super::agent_task_batch::{
-        artifacts, claim_fanout_run_batch, fanout_dependency_graph_with_finalization_statuses,
-        finalize_provider_worktree_for_child, heartbeat_fanout_run_batch, persist_fanout_run_batch,
-        read_batch_record, record_fanout_run_batch_failure,
-        record_provider_worktree_finalization_deferred,
-        record_provider_worktree_finalization_preflight_error, start_fanout_run_batch,
-        BatchProviderWorktreeFinalization,
-    };
-    pub use super::super::agent_task_batch::{
-        fanout_aggregate_state, record_fanout_run_batch_failed_admissions, submit_plan_batch,
-        AgentTaskBatchRecord, AgentTaskBatchState, FanoutRunBatchChild,
-        AGENT_TASK_BATCH_ARTIFACTS_SCHEMA,
-    };
-}
-
-/// Generic dependency graph validation and readiness projection for fanout and
-/// supervisor orchestration.
-pub mod dependency_graph {
-    pub use super::super::agent_task_dependency_graph::{
-        dependency_graph_readiness, AgentTaskDependencyNode, AgentTaskDependencyReadiness,
-        AgentTaskDependencyState,
-    };
-}
-
-/// Durable Git/PR actions released by a merged fanout dependency.
-pub mod dependency_actions {
-    pub use super::super::agent_task_dependency_actions::{
-        execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
-        DependencyResolution,
-    };
 }
 
 /// Durable dispatch request, plan construction, and execution service.
@@ -405,10 +360,9 @@ pub mod service {
         compile_cook_attempt_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_readiness_cache, consume_claimed_terminal_with_dispatcher,
         consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,
-        cook_batch_job_submission, cook_continuation_owner_denial,
+        cook_continuation_owner_denial,
         cook_continuation_replays_provider, cook_continuation_requires_model_provenance,
-        cook_request_is_review_form_only, detached_batch_coordinator_control,
-        enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion_with_progress,
+        cook_request_is_review_form_only, enqueue_terminal_continuation, evidence_ref_task_id, execute_promotion_with_progress,
         hydrate_evidence_ref, hydrate_evidence_summary, live_owner_continuation_denial,
         liveness_for_record, load_recipe, load_recipe_for_attempt,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
@@ -424,22 +378,19 @@ pub mod service {
         reconstruct_options_for_record_with_dispatcher, reconstruct_options_with_dispatcher,
         reconstruct_options_with_local_placement_override, record_replacement_gate_proof,
         recover_cook_pr, recover_cook_pr_with_review_form, recover_missing_promotion_aggregate,
-        register_cook_batch_work_handler, register_cook_step_hooks, register_promotion_job_driver,
-        resolve_cook_budget, resume, resume_cook, resume_cook_batch,
-        retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
-        run_cook_batch_with_control, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
+        register_cook_step_hooks, register_promotion_job_driver,
+        resolve_cook_budget, resume, resume_cook, retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
+        run_loaded_plan, run_next, run_next_with_cook_dispatcher,
         run_submitted, run_submitted_with_timeout, source_worktree_path, submit_plan_spec,
         terminal_review_form_continuation_is_eligible,
         terminal_review_form_continuation_is_eligible_for_observation_readonly,
         terminal_transport_recovery_required, validate_recipe_attempt_record,
-        verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookBatchCellReport,
-        AgentTaskCookBatchControl, AgentTaskCookBatchOptions, AgentTaskCookBatchReport,
-        AgentTaskCookCellError, AgentTaskCookReport, AgentTaskDiscoveryFilter,
+        verify_replacement_gates, AgentTaskCandidateAdoptionOptions, AgentTaskCookReport, AgentTaskDiscoveryFilter,
         AgentTaskDiscoveryReport, AgentTaskHydratedEvidence, AgentTaskLiveness,
         AgentTaskPromotionRequest, AgentTaskRunResult, AgentTaskSuppliedReviewForm,
         CookContinuationState, CookMode, CookProgressEvent, CookProviderRouteOverride,
         CookRecipeStore, CookRequest, CookRuntime, CookService, DEFAULT_REVIEW_FORM_TIMEOUT_MS,
-        DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
+        MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, promotion_source,

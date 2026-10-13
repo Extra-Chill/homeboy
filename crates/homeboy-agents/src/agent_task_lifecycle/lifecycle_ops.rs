@@ -7710,23 +7710,6 @@ pub fn record_cook_recovery_checkpoint_in_store(
     }
 }
 
-/// Re-arm a finalized candidate after a dependency rebase. The original
-/// provider output remains authoritative; Cook resumes at the promotion/gate
-/// boundary and finalizes a fresh review only after those gates pass again.
-pub(crate) fn invalidate_cook_finalization_for_dependency(
-    run_id: &str,
-    dependency_revision: &str,
-    next_command: &str,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    invalidate_cook_finalization_for_dependency_in_store(
-        &lifecycle_store,
-        run_id,
-        dependency_revision,
-        next_command,
-    )
-}
-
 /// Re-arm a finalized candidate inside an explicitly rooted store.
 ///
 /// This is the invalidating half of [`record_cook_finalization_in_store`], and

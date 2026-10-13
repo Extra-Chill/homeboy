@@ -94,7 +94,7 @@ use super::super::lab_selection::{
     LabRunnerSelection, LabRunnerSelectionSource,
 };
 use super::super::lab_workspaces::{
-    agent_task_fanout_extra_workspaces, agent_task_plan_extra_workspaces,
+    agent_task_plan_extra_workspaces,
     agent_task_provider_runtime_component_extra_workspaces, declared_path_input_values,
     extension_source_extra_workspaces, lab_extra_workspaces, lab_runtime_overlay_metadata,
     lab_runtime_overlays, lab_workspace_mapping_metadata, path_setting_values,
