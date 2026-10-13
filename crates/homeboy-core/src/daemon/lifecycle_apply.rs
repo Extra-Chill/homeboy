@@ -6,6 +6,8 @@
 //!
 //! - [`Step::StartDaemon`] and [`Step::ClaimAdmission`] when the direct recovery
 //!   plan authorizes nothing;
+//! - [`Step::ReconcileProvenJobs`] and [`Step::ResumeDriverWork`]: the dead
+//!   generation is adopted in its own frame and restarted in place (#15830);
 //! - [`Plan::NeedsAttestation`]: the one operator confirmation, applied to
 //!   the generation's complete job set.
 //!
@@ -18,7 +20,7 @@ use std::path::Path;
 use serde_json::json;
 
 use super::lifecycle::observe_local;
-use super::lifecycle_plan::{plan, BlockCause, Plan, Step, WaitCause};
+use super::lifecycle_plan::{adoptable_dead_generations, plan, BlockCause, Plan, Step, WaitCause};
 use crate::error::{Error, Result};
 
 /// Plan for this process's own daemon router.
@@ -74,9 +76,29 @@ pub fn applies(planned: &Plan) -> bool {
         planned,
         Plan::NeedsAttestation(_)
             | Plan::Transition {
-                step: Step::StartDaemon | Step::ClaimAdmission { .. }
+                step: Step::StartDaemon
+                    | Step::ClaimAdmission { .. }
+                    | Step::ReconcileProvenJobs { .. }
+                    | Step::ResumeDriverWork { .. }
             }
     )
+}
+
+/// Adopt every dead generation whose own plan is an adoption: its jobs are
+/// proven gone or are checkpointed driver work (#15830).
+///
+/// The admission owner runs this on its orchestration tick, so durable driver
+/// work survives a daemon's death without an operator. Each adoption runs in
+/// the dead generation's own frame and restarts it in place; that directory's
+/// exclusive owner lock admits one adopter, so concurrent callers converge on
+/// one replacement. A generation that still has live workload, needs an
+/// operator attestation, or was already restarted in place is left alone.
+/// Returns the adopted leases.
+pub fn adopt_dead_generations(addr: &str) -> Vec<String> {
+    adoptable_dead_generations(&observe_local())
+        .into_iter()
+        .filter(|lease_id| super::adopt_orphaned_lease(lease_id, &[], addr).is_ok())
+        .collect()
 }
 
 /// Apply `planned` after proving it is still the current plan.
@@ -154,6 +176,18 @@ fn execute(planned: &Plan, addr: &str) -> Result<Vec<String>> {
             claim_admission(from_lease_id, to_lease_id)?;
             Ok(vec!["daemon.claim_admission".to_string()])
         }
+        // Both restart the dead generation in place, in its own frame: the
+        // adoption terminalizes jobs proven gone, and the replacement's startup
+        // recovery resumes checkpointed driver work.
+        Plan::Transition {
+            step:
+                Step::ReconcileProvenJobs { lease_id, .. } | Step::ResumeDriverWork { lease_id, .. },
+        } => {
+            super::adopt_orphaned_lease(lease_id, &[], addr)?;
+            Ok(vec![
+                super::recovery_actions::DAEMON_ADOPT_ORPHAN.to_string()
+            ])
+        }
         Plan::NeedsAttestation(attestation) => {
             let local_dir = crate::paths::daemon_state_file()?
                 .parent()
@@ -218,8 +252,7 @@ fn claim_admission(from_lease_id: &str, to_lease_id: &str) -> Result<()> {
         .filter(|state| validation.running && state.lease_id == to_lease_id)
         .ok_or_else(|| claim_refused(to_lease_id, "the target lease is not live"))?;
     let moved = super::generation_store::claim_admission_from_dead_owner(&state, |endpoint| {
-        endpoint.lease_id == from_lease_id
-            && super::admission_owner_is_dead(endpoint, Some(&target.state_dir))
+        endpoint.lease_id == from_lease_id && super::admission_owner_is_dead(endpoint)
     })?;
     if !moved {
         return Err(claim_refused(
@@ -359,6 +392,24 @@ mod tests {
                 ensure_mutation_allowed_with("entry", || planned.clone()).is_ok(),
                 "{planned:?}"
             );
+        }
+    }
+
+    /// #15830: a dead generation's reconciliation and driver resumption have
+    /// an executor; neither is reported without one.
+    #[test]
+    fn dead_generation_adoptions_are_applied_here() {
+        for step in [
+            Step::ReconcileProvenJobs {
+                lease_id: "DEAD".to_string(),
+                job_ids: vec![uuid::Uuid::nil()],
+            },
+            Step::ResumeDriverWork {
+                lease_id: "DEAD".to_string(),
+                job_ids: vec![uuid::Uuid::nil()],
+            },
+        ] {
+            assert!(applies(&Plan::Transition { step }));
         }
     }
 

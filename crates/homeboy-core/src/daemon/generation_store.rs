@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use fs4::fs_std::FileExt;
 
 use homeboy_engine_primitives::rolling_generation::{
-    RollingDrainState, RollingGenerations, RollingStart,
+    RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
 };
 use serde::{Deserialize, Serialize};
 
@@ -250,6 +250,70 @@ pub(super) fn claim_admission_from_dead_owner(
     })
 }
 
+/// Re-key the generation registered in the serving daemon's own state
+/// directory to the serving lease (#15830).
+///
+/// The caller holds that directory's exclusive owner lock, so any other lease
+/// registered there was restarted in place and cannot be serving (#15555). The
+/// directory, its store, and its work are one generation: the replacement takes
+/// over its drain state, admission ownership, and job routing, and the
+/// registry endpoint carries the replacement's address. Returns the leases it
+/// replaced.
+pub(super) fn succeed_in_place(serving: &DaemonState) -> Result<Vec<String>> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let endpoint = LocalDaemonEndpoint::from_state(serving);
+        let serving_dir = Path::new(&endpoint.state_dir);
+        let replaced = registry
+            .generations
+            .generations
+            .iter()
+            .filter(|(lease_id, generation)| {
+                lease_id.as_str() != serving.lease_id
+                    && super::same_directory(Path::new(&generation.endpoint.state_dir), serving_dir)
+            })
+            .map(|(lease_id, _)| lease_id.clone())
+            .collect::<Vec<_>>();
+        if replaced.is_empty() {
+            return Ok(Vec::new());
+        }
+        let generations = &mut registry.generations;
+        for lease_id in &replaced {
+            generations.generations.remove(lease_id);
+            for owner in generations
+                .job_owners
+                .values_mut()
+                .chain(generations.run_owners.values_mut())
+                .chain(generations.artifact_owners.values_mut())
+                .filter(|owner| owner.as_str() == lease_id.as_str())
+            {
+                owner.clone_from(&serving.lease_id);
+            }
+            if generations.admission_owner == *lease_id {
+                generations.admission_owner.clone_from(&serving.lease_id);
+            }
+        }
+        let admitting = generations.admission_owner == serving.lease_id;
+        let successor = generations
+            .generations
+            .entry(serving.lease_id.clone())
+            .or_insert_with(|| RollingGeneration {
+                endpoint: endpoint.clone(),
+                observed_active_jobs: None,
+                drain_state: RollingDrainState::Draining,
+            });
+        successor.endpoint = endpoint.clone();
+        successor.drain_state = if admitting {
+            RollingDrainState::Admitting
+        } else {
+            RollingDrainState::Draining
+        };
+        Ok(replaced)
+    })
+}
+
 pub(super) fn admitting() -> Result<Option<LocalDaemonEndpoint>> {
     Ok(read_registry()?.and_then(|registry| {
         registry
@@ -270,6 +334,19 @@ pub(super) fn endpoint_for_lease(lease_id: &str) -> Result<Option<LocalDaemonEnd
             .get(lease_id)
             .map(|entry| entry.endpoint.clone())
     }))
+}
+
+/// The registered generation holding `lease_id`, when it lives in a state
+/// directory other than this process's own. Lease-scoped lifecycle commands
+/// run in that generation's frame instead of this one (#15830). A bypassed
+/// process is already pinned to its frame.
+pub(super) fn registered_elsewhere(lease_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
+    if bypassed() {
+        return Ok(None);
+    }
+    let own = crate::paths::daemon_state_file()?;
+    Ok(endpoint_for_lease(lease_id)?
+        .filter(|endpoint| Path::new(&endpoint.state_dir).join("state.json") != own))
 }
 
 pub(super) fn endpoint_for_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
@@ -689,6 +766,21 @@ pub(super) fn generation_state_dir() -> Result<PathBuf> {
         .join(uuid::Uuid::new_v4().to_string()))
 }
 
+/// Whether any registered generation other than `serving_lease_id` holds its
+/// own lease with a dead PID. A cheap gate before full lifecycle observation.
+pub(super) fn has_dead_generation(serving_lease_id: &str) -> bool {
+    generations().unwrap_or_default().iter().any(|endpoint| {
+        endpoint.lease_id != serving_lease_id
+            && super::validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))
+                .is_ok_and(|validation| {
+                    !validation.running
+                        && validation
+                            .state
+                            .is_some_and(|state| state.lease_id == endpoint.lease_id)
+                })
+    })
+}
+
 pub(super) fn generations() -> Result<Vec<LocalDaemonEndpoint>> {
     Ok(read_registry()?
         .map(|registry| {
@@ -826,6 +918,74 @@ mod tests {
 
             // Idempotent once the serving daemon owns admission.
             assert!(!claim_admission_from_dead_owner(&restarted, |_| true).expect("again"));
+        });
+    }
+
+    /// #15830: a dead generation restarted in its own directory becomes that
+    /// generation. Its routing, drain state, and address move to the
+    /// replacement; other generations and admission elsewhere are untouched.
+    #[test]
+    fn a_restart_in_place_takes_over_its_directorys_generation() {
+        with_isolated_home(|home| {
+            let in_dir = |lease: &str, address: &str, dir: &str| {
+                let mut state = state(lease, address);
+                state.state_path = home
+                    .path()
+                    .join(dir)
+                    .join("state.json")
+                    .display()
+                    .to_string();
+                state
+            };
+            let dead = in_dir("DEAD", "127.0.0.1:1001", "gen-dead");
+            seed(&dead).expect("seed dead generation");
+            record_job("dead-job", "DEAD").expect("dead generation owns a job");
+            let owner = in_dir("OWNER", "127.0.0.1:1002", "gen-owner");
+            activate(&owner).expect("OWNER owns admission");
+            record_job("owner-job", "OWNER").expect("owner job");
+
+            let replacement = in_dir("REPLACEMENT", "127.0.0.1:1003", "gen-dead");
+            assert_eq!(
+                succeed_in_place(&replacement).expect("succeed in place"),
+                ["DEAD"]
+            );
+            assert!(endpoint_for_lease("DEAD").expect("lookup").is_none());
+            let routed = endpoint_for_job("dead-job").expect("route").expect("owner");
+            assert_eq!(routed.lease_id, "REPLACEMENT");
+            assert_eq!(routed.address, "127.0.0.1:1003");
+            assert!(is_draining("REPLACEMENT").expect("drain state"));
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "OWNER"
+            );
+            assert_eq!(
+                endpoint_for_job("owner-job")
+                    .expect("route")
+                    .expect("owner")
+                    .lease_id,
+                "OWNER"
+            );
+            // Idempotent once the directory is the replacement's.
+            assert!(succeed_in_place(&replacement).expect("again").is_empty());
+
+            // Restarting the admission owner in place keeps admission there.
+            let restarted_owner = in_dir("OWNER-2", "127.0.0.1:1004", "gen-owner");
+            assert_eq!(
+                succeed_in_place(&restarted_owner).expect("owner restart"),
+                ["OWNER"]
+            );
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "OWNER-2"
+            );
+            assert!(!is_draining("OWNER-2").expect("drain state"));
+            assert_eq!(
+                endpoint_for_job("owner-job")
+                    .expect("route")
+                    .expect("owner")
+                    .lease_id,
+                "OWNER-2"
+            );
         });
     }
 

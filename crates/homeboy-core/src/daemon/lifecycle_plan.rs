@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::lifecycle::{
-    BinaryFreshness, DaemonView, GenerationLifecycle, GenerationView, JobCustody,
+    BinaryFreshness, DaemonView, DeathProof, GenerationLifecycle, GenerationView, JobCustody,
     RegistryObservation, Supervision,
 };
 
@@ -181,6 +181,33 @@ pub fn plan(view: &DaemonView) -> Plan {
     }
 
     Plan::Converged
+}
+
+/// The dead generations that can be restarted in place without an operator
+/// (#15830): each holds its own lease, and its own plan is to reconcile jobs
+/// proven gone or to resume checkpointed driver work. A generation with live
+/// workload, one that needs an attestation, and one already restarted in place
+/// are not adoptable.
+pub fn adoptable_dead_generations(view: &DaemonView) -> Vec<String> {
+    view.generations
+        .iter()
+        .filter(|generation| {
+            generation.registered
+                && matches!(
+                    generation.lifecycle,
+                    GenerationLifecycle::Dead {
+                        proof: DeathProof::PidDead | DeathProof::TerminationEvidence
+                    }
+                )
+        })
+        .filter_map(|generation| match plan_dead_generation_jobs(generation)? {
+            Plan::Transition {
+                step:
+                    Step::ReconcileProvenJobs { lease_id, .. } | Step::ResumeDriverWork { lease_id, .. },
+            } => Some(lease_id),
+            _ => None,
+        })
+        .collect()
 }
 
 fn plan_dead_generation_jobs(generation: &GenerationView) -> Option<Plan> {

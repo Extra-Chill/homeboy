@@ -31,12 +31,8 @@ pub fn stop_with_force(force: bool) -> Result<DaemonStopResult> {
 }
 
 pub fn stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
-    if !generation_store::bypassed() {
-        if let Some(endpoint) = generation_store::endpoint_for_lease(expected_lease_id)? {
-            if std::path::Path::new(&endpoint.state_dir).join("state.json") != state_path()? {
-                return control::stop_registered_generation(&endpoint, false);
-            }
-        }
+    if let Some(endpoint) = generation_store::registered_elsewhere(expected_lease_id)? {
+        return control::stop_registered_generation(&endpoint, false);
     }
     // A live foreground `daemon serve` (for example under systemd) records no
     // startup token, so the PID-signalling path below refuses it. Ask it to

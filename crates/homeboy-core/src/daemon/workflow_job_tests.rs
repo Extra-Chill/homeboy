@@ -198,6 +198,157 @@ fn recovery_after_a_commit_starts_each_admitted_step_exactly_once() {
     });
 }
 
+fn generation_state(lease_id: &str, dir: &Path) -> crate::daemon::DaemonState {
+    crate::daemon::DaemonState {
+        schema: crate::daemon::DAEMON_LEASE_SCHEMA.to_string(),
+        lease_id: lease_id.to_string(),
+        startup_token: "test".to_string(),
+        address: format!("127.0.0.1:{}", 20_000 + lease_id.len()),
+        pid: 1,
+        state_path: dir.join("state.json").display().to_string(),
+        started_at: "now".to_string(),
+        last_seen_at: "now".to_string(),
+        build_identity: crate::build_identity::current(),
+        binary_sha256: None,
+        runtime_paths: crate::daemon::DaemonRuntimeSnapshot {
+            loaded_at: "now".to_string(),
+            paths: Vec::new(),
+        },
+    }
+}
+
+/// #15830: a daemon generation died mid-workflow in a directory other than
+/// the admission owner's. Two replacements race to restart it in place; the
+/// directory's exclusive owner lock admits exactly one. The winner takes over
+/// the generation's routing and resumes the instance from its checkpoint:
+/// every step key is submitted once, every step runs once, and the work is
+/// attributed to the lease now executing it.
+#[test]
+fn a_dead_generations_workflow_is_adopted_once_and_resumes_in_place() {
+    with_isolated_home(|home| {
+        let runs = home.path().join("runs.log");
+        let dead_dir = home.path().join("generations/dead");
+        let owner_dir = home.path().join("generations/owner");
+        std::fs::create_dir_all(&dead_dir).unwrap();
+        std::fs::create_dir_all(&owner_dir).unwrap();
+        let definition = json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "adopted",
+            "steps": [
+                {"id": "evaluate", "exec": sh(&format!("echo evaluate >> {}", runs.display()))},
+                {"id": "hold", "needs": ["evaluate"], "approval": {"prompt": "continue?"}},
+                {"id": "record", "needs": ["hold"], "exec": sh(&format!("echo record >> {}", runs.display()))}
+            ]
+        });
+        let request = request(definition, home.path());
+
+        // Generation DEAD admitted the instance and committed its first
+        // decision; then it died. OWNER serves admission from its own store.
+        crate::daemon::generation_store::seed(&generation_state("DEAD", &dead_dir)).unwrap();
+        crate::daemon::generation_store::activate(&generation_state("OWNER", &owner_dir)).unwrap();
+        let store = JobStore::open_without_reconciliation(dead_dir.join("jobs.json"))
+            .unwrap()
+            .with_daemon_lease("DEAD".to_string());
+        let job_id = admit(&store, &request);
+        crate::daemon::generation_store::record_job(&job_id.to_string(), "DEAD").unwrap();
+        store.claim_controller_execution(job_id, false).unwrap();
+        let (state, commands) = advance(
+            &request.definition,
+            &request.initial_state(),
+            &Event::Start,
+            now_ms(),
+        );
+        commit_without_start(&request, job_id, &state, &commands, &store);
+        drop(store);
+
+        // Two replacement daemons race for the dead generation's directory.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let contenders = ["REPLACEMENT-A", "REPLACEMENT-B"].map(|lease| {
+            let barrier = barrier.clone();
+            let state_path = dead_dir.join("state.json");
+            std::thread::spawn(move || {
+                barrier.wait();
+                crate::daemon::try_acquire_daemon_owner_lock_at(&state_path)
+                    .unwrap()
+                    .map(|lock| (lease, lock))
+            })
+        });
+        let mut winners = contenders
+            .into_iter()
+            .filter_map(|contender| contender.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(winners.len(), 1, "exactly one replacement owns the store");
+        let (winner, _owner_lock) = winners.pop().unwrap();
+
+        // The winner's startup: take over the generation, then resume.
+        let replacement = generation_state(winner, &dead_dir);
+        assert_eq!(
+            crate::daemon::generation_store::succeed_in_place(&replacement).unwrap(),
+            ["DEAD"]
+        );
+        let restarted = JobStore::open_without_reconciliation(dead_dir.join("jobs.json"))
+            .unwrap()
+            .with_daemon_lease(winner.to_string());
+        crate::daemon::recover_controller_jobs(&restarted);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let status = workflow_status(&restarted, &request.instance).unwrap();
+            if status["steps"]["hold"]["phase"] == "awaiting_approval" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{status}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        workflow_approve(&restarted, &request.instance, Some(json!({"step": "hold"}))).unwrap();
+        assert_eq!(
+            wait_terminal(&restarted, job_id, 20).status,
+            JobStatus::Succeeded
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&runs).unwrap(),
+            "evaluate\nrecord\n"
+        );
+        let children = restarted
+            .list()
+            .into_iter()
+            .filter(|job| {
+                restarted
+                    .controller_job_state(job.id)
+                    .is_ok_and(|state| state.parent_job_id == Some(job_id))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(children.len(), 2, "one step job per submission key");
+        for key in ["evaluate/1/1", "record/1/1"] {
+            let child = restarted
+                .controller_job_for_key(&format!("{}/{key}", request.instance))
+                .unwrap_or_else(|| panic!("{key} was submitted"));
+            assert_eq!(child.status, JobStatus::Succeeded);
+            assert_eq!(child.daemon_lease_id.as_deref(), Some(winner));
+        }
+        assert_eq!(
+            restarted.get(job_id).unwrap().daemon_lease_id.as_deref(),
+            Some(winner),
+            "the instance is attributed to the lease executing it"
+        );
+        let routed = crate::daemon::generation_store::endpoint_for_job(&job_id.to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!(routed.lease_id, winner);
+        assert_eq!(routed.address, replacement.address);
+        assert!(crate::daemon::generation_store::endpoint_for_lease("DEAD")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::daemon::generation_store::admitting()
+                .unwrap()
+                .unwrap()
+                .lease_id,
+            "OWNER"
+        );
+    });
+}
+
 fn commit_without_start(
     request: &WorkflowJobRequest,
     job_id: Uuid,
