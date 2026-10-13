@@ -3,6 +3,7 @@
 /**
  * External dependencies
  */
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -20,7 +21,8 @@ const {
 	createCliAgentTaskExecutor,
 	safeFileSegment,
 } = require('../../lib/cli-agent-task-executor');
-const { cliRuntimeReadiness } = require('../../lib/cli-runtime-readiness');
+const { cliRuntimeReadiness, READINESS_REQUEST_SCHEMA, READINESS_RESULT_SCHEMA } = require('../../lib/cli-runtime-readiness');
+const { piProviderCapacity, piRouteProvider } = require('./pi-provider-capacity');
 const { requiredOutputInstructions, structuredOutputsFromTexts } = require('../../lib/declared-outputs');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
@@ -99,6 +101,88 @@ function piRuntimeReadiness(request = {}, options = {}) {
 		requiredSecretEnv: [],
 		identityEnv: PI_ENV_ALLOWLIST,
 	}, options);
+}
+
+/**
+ * Readiness plus plan capacity (homeboy-extensions#2940): the runtime probe
+ * verdict, with the selected provider's account identity, usage windows, and
+ * reset time attached as Homeboy's optional readiness `capacity` object. An
+ * exhausted account makes the verdict `capacity`. `mode: "capacity"` answers
+ * from the lookup alone without spawning Pi. Lookups are best-effort; a failed
+ * lookup never changes the runtime verdict.
+ */
+async function piProviderReadiness(request = {}, options = {}) {
+	const config = request.effective_config && typeof request.effective_config === 'object' ? request.effective_config : {};
+	const provider = piRouteProvider(config.model);
+	const lookup = provider && request.schema === READINESS_REQUEST_SCHEMA
+		? await piProviderCapacity(provider, {
+			env: options.env || process.env,
+			fetch: options.fetch,
+			fs: options.capacityFs,
+			now: options.now,
+		}).catch(() => null)
+		: null;
+	if (request.mode === 'capacity') {
+		return attachCapacity(capacityVerdict(request, config, lookup), lookup);
+	}
+	const result = piRuntimeReadiness(request, options);
+	if (result.ready && lookup?.exhausted) {
+		Object.assign(result, {
+			ready: false,
+			classification: 'capacity',
+			retryable: true,
+			reason: 'provider_capacity_exhausted',
+			message: 'Wait for the provider plan usage window to reset, then retry.',
+			remediation: 'Wait for the provider plan usage window to reset, then retry.',
+		});
+	}
+	return attachCapacity(result, lookup);
+}
+
+function capacityVerdict(request, config, lookup) {
+	const [classification, reason, retryable, remediation] = request.schema !== READINESS_REQUEST_SCHEMA
+		? ['deterministic_incompatibility', 'invalid_readiness_request', false, 'Provide a resolved effective_config using the provider readiness request contract.']
+		: !lookup
+			? ['ready', 'capacity_not_published', false, 'The selected provider publishes no plan usage endpoint or Pi has no stored login for it; run the full readiness probe.']
+			: lookup.exhausted
+				? ['capacity', 'provider_capacity_exhausted', true, 'Wait for the provider plan usage window to reset, then retry.']
+				: lookup.diagnostic
+					? ['ready', 'capacity_unmeasured', false, 'Provider plan capacity could not be measured; run the full readiness probe.']
+					: ['ready', 'capacity_available', false, 'Provider capacity remains; run the full readiness probe for a live-inference verdict.'];
+	// Capacity-only results carry `mode: "capacity"` in their cache identity so
+	// they are never reused as live-inference readiness verdicts.
+	const identity = {
+		runtime_id: PI_BACKEND,
+		provider_id: PI_PROVIDER_ID,
+		executable: '',
+		version: '',
+		model: typeof config.model === 'string' ? config.model : '',
+		mode: 'capacity',
+	};
+	const cacheKey = `runtime-readiness:${crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+	return {
+		schema: READINESS_RESULT_SCHEMA,
+		ready: classification === 'ready',
+		classification,
+		retryable,
+		message: remediation,
+		remediation,
+		reason,
+		identity: { ...identity, cache_key: cacheKey },
+		cache_key: cacheKey,
+	};
+}
+
+function attachCapacity(result, lookup) {
+	if (lookup?.accounts) {
+		result.capacity = {
+			...(lookup.scope ? { scope: lookup.scope } : {}),
+			...(lookup.capacity || {}),
+			accounts: lookup.accounts,
+		};
+	}
+	if (lookup?.diagnostic) result.capacity_diagnostic = lookup.diagnostic;
+	return result;
 }
 
 function resolveCommandSpec(config = {}, options = {}) {
@@ -401,6 +485,7 @@ module.exports = {
 	executePiAgentTask,
 	outcome,
 	parsePiEventStream,
+	piProviderReadiness,
 	piRuntimeReadiness,
 	providerContract,
 	validationFailure,

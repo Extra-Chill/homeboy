@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { piRuntimeReadiness } = require('..');
+const { piProviderReadiness, piRuntimeReadiness } = require('..');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-pi-readiness-'));
 const executable = path.join(root, 'pi');
@@ -41,4 +41,74 @@ try {
 	fs.rmSync(root, { recursive: true, force: true });
 }
 
-process.stdout.write('Pi runtime readiness passed\n');
+// Capacity (homeboy-extensions#2940): pi's own auth store, account identity
+// from the profile endpoint, usage windows from the plan usage endpoint.
+(async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-pi-capacity-'));
+	const bin = path.join(agentDir, 'pi');
+	fs.writeFileSync(bin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+	const now = Date.parse('2026-10-13T15:00:00Z');
+	fs.writeFileSync(path.join(agentDir, 'auth.json'), JSON.stringify({
+		anthropic: { type: 'oauth', access: 'access-token', refresh: 'refresh-token', expires: now + 3_600_000 },
+	}));
+	const env = { PATH: process.env.PATH, PI_CODING_AGENT_DIR: agentDir };
+	const capacityRequest = (extra = {}) => ({
+		schema: 'homeboy/agent-task-provider-readiness-request/v1',
+		effective_config: { command: bin, model: 'anthropic/claude-test' },
+		...extra,
+	});
+	const usage = (utilization) => async (url, init) => {
+		assert.equal(init.headers.Authorization, 'Bearer access-token');
+		if (url.endsWith('/profile')) {
+			return { ok: true, json: async () => ({ account: { email_address: 'owner@example.test' } }) };
+		}
+		return { ok: true, json: async () => ({
+			five_hour: { utilization, resets_at: '2026-10-13T18:00:00Z' },
+			extra_usage: { is_enabled: extraEnabled, spend_limit_reached: false, user_disabled: !extraEnabled },
+		}) };
+	};
+	let extraEnabled = true;
+	const spawn = probe({ status: 0, stdout: '0.70.1\n', stderr: '' });
+	try {
+		const available = await piProviderReadiness(capacityRequest(), { env, now, fetch: usage(40), spawnSync: spawn });
+		assert.equal(available.ready, true);
+		assert.equal(available.capacity.scope, 'pi:anthropic');
+		assert.equal(available.capacity.remaining, 60);
+		assert.equal(available.capacity.accounts[0].account, 'owner@example.test');
+		assert.equal(JSON.stringify(available).includes('access-token'), false);
+
+		const exhausted = await piProviderReadiness(capacityRequest(), { env, now, fetch: usage(100), spawnSync: spawn });
+		assert.equal(exhausted.ready, false);
+		assert.equal(exhausted.classification, 'capacity');
+		assert.equal(exhausted.capacity.reset_at, '2026-10-13T18:00:00.000Z');
+
+		const capacityOnly = await piProviderReadiness(capacityRequest({ mode: 'capacity' }), {
+			env,
+			now,
+			fetch: usage(40),
+			spawnSync: () => { throw new Error('capacity mode must not spawn pi'); },
+		});
+		assert.equal(capacityOnly.reason, 'capacity_available');
+		assert.equal(capacityOnly.identity.mode, 'capacity');
+		assert.notEqual(capacityOnly.cache_key, available.cache_key);
+
+		// Plan headroom but extra usage disabled: pi cannot run on this login.
+		extraEnabled = false;
+		const noExtra = await piProviderReadiness(capacityRequest(), { env, now, fetch: usage(10), spawnSync: spawn });
+		assert.equal(noExtra.classification, 'capacity');
+		assert.equal(noExtra.capacity.accounts[0].extra_usage.enabled, false);
+		assert.match(noExtra.capacity.accounts[0].diagnostic, /extra usage is disabled/);
+		extraEnabled = true;
+
+		// No stored login for the provider: no capacity, verdict unchanged.
+		const none = await piProviderReadiness(capacityRequest({ effective_config: { command: bin, model: 'openai/gpt-x' } }), { env, now, fetch: usage(40), spawnSync: spawn });
+		assert.equal(none.ready, true);
+		assert.equal(none.capacity, undefined);
+	} finally {
+		fs.rmSync(agentDir, { recursive: true, force: true });
+	}
+	process.stdout.write('Pi runtime readiness passed\n');
+})().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});
