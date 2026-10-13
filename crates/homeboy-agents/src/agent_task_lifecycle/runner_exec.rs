@@ -37,7 +37,7 @@ pub fn record_runner_job_identity_in_store(
     let metadata = record.ensure_metadata_object();
     metadata.insert("runner_id".to_string(), json!(runner_id));
     metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
-    lifecycle_store.write_record_in_place(&mut record)?;
+    lifecycle_store.commit_record(&mut record)?;
     Ok(record)
 }
 
@@ -1247,6 +1247,7 @@ pub fn record_lab_offload_submission_intent_in_store(
     let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
     let mut record = lifecycle_store.read_record(&run_id)?;
     let submission_key = format!("agent-task:v1:{runner_id}:{run_id}");
+    let handoff_before = record.lab_handoff.clone();
     if let Some(handoff) = record.lab_handoff.as_mut() {
         handoff.submission_key = Some(submission_key.clone());
         handoff.payload_fingerprint = None;
@@ -1273,7 +1274,11 @@ pub fn record_lab_offload_submission_intent_in_store(
         "phase_activity".to_string(),
         json!("durable broker submission intent recorded; waiting for runner capacity"),
     );
-    lifecycle_store.write_record_in_place(&mut record)?;
+    if record.lab_handoff == handoff_before {
+        lifecycle_store.commit_record(&mut record)?;
+    } else {
+        lifecycle_store.advance_record(&mut record, AgentTaskAdvance::PendLabHandoff)?;
+    }
     Ok(record)
 }
 
@@ -1318,6 +1323,6 @@ pub fn record_lab_offload_submission_envelope(
             "replay_envelope_request": request,
         }),
     );
-    lifecycle_store.write_record_in_place(&mut record)?;
+    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::PendLabHandoff)?;
     Ok(record)
 }

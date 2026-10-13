@@ -102,6 +102,46 @@ fn validation_dependency_workspaces(
         .collect()
 }
 
+/// Excludes for copying a validation dependency checkout.
+///
+/// Keeps the parent's non-gitignore excludes (runner policy, secret
+/// patterns, explicit options) but drops patterns that came from the parent's
+/// gitignore and replaces them with the dependency's own gitignore-derived
+/// excludes. A path the dependency tracks is therefore never excluded just
+/// because the parent ignores the same name.
+fn dependency_scoped_excludes(dependency_path: &Path, inherited: &[String]) -> Vec<String> {
+    let parent_gitignored: std::collections::HashSet<String> = inherited
+        .iter()
+        .filter(|pattern| {
+            let name = pattern.trim_start_matches("./").trim_end_matches('/');
+            !name.is_empty() && !name.contains('*') && is_tracked(dependency_path, name)
+        })
+        .cloned()
+        .collect();
+    let mut excludes: Vec<String> = inherited
+        .iter()
+        .filter(|pattern| !parent_gitignored.contains(*pattern))
+        .cloned()
+        .collect();
+    for pattern in homeboy_core::source_snapshot::policy_for_path(dependency_path).sync_excludes {
+        if !excludes.contains(&pattern) {
+            excludes.push(pattern);
+        }
+    }
+    excludes
+}
+
+/// Whether `relative` is tracked by the Git checkout at `root`.
+fn is_tracked(root: &Path, relative: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", relative])
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Drop repeated dependency ids, keeping first-declared order, so one sync
 /// prepares each dependency at most once.
 fn unique_dependency_ids(ids: Vec<String>) -> Vec<String> {
@@ -164,16 +204,27 @@ fn prepare_validation_dependency_workspace(
     let (mut component, path) = resolve_managed_dependency_workspace(parent, dependency_id)?;
     component.local_path = path.display().to_string();
 
+    // The inherited `excludes` describe the *parent* workspace, including
+    // paths derived from the parent's own gitignore. A parent that ignores an
+    // untracked `composer.lock` would otherwise strip the dependency's
+    // *tracked* lockfile, so Composer resolved from scratch and failed
+    // (homeboy#15802). Use excludes scoped to the dependency checkout.
+    let excludes = &dependency_scoped_excludes(&path, excludes);
+
     prepare_dependency_git_state(&component, &path)?;
 
     // The copy + install + build is content-addressed and shared across calls,
     // transport retries, transitive syncs, and concurrent Cooks (#15253).
     // Every consumer still gets a private copy, because the source evidence
     // below is written into it.
-    let prepared = crate::validation_dependency_cache::prepare_with_cache(
+    let declared_outputs = homeboy_core::hygiene::validation_dependency_output_paths(&component);
+    // Never ships, so never copied out of the cache either (#15797).
+    let consumer_excludes = prepared_dependency_snapshot_excludes(&[], &declared_outputs);
+    let prepared = crate::validation_dependency_cache::prepare_with_cache_excluding(
         &component,
         &path,
         excludes,
+        &consumer_excludes,
         |prepared_component, prepared_path| {
             run_dependency_lifecycle(prepared_component, prepared_path)
         },
@@ -185,10 +236,7 @@ fn prepare_validation_dependency_workspace(
     )?;
 
     let prepared_path = canonicalize_dependency_path(&prepared.path, dependency_id)?;
-    let snapshot_excludes = prepared_dependency_snapshot_excludes(
-        excludes,
-        &homeboy_core::hygiene::validation_dependency_output_paths(&component),
-    );
+    let snapshot_excludes = prepared_dependency_snapshot_excludes(excludes, &declared_outputs);
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
@@ -418,6 +466,73 @@ fn is_homeboy_component_id(path: &Path, dependency_id: &str) -> bool {
         .get("id")
         .and_then(|value| value.as_str())
         .is_some_and(|id| id == dependency_id)
+}
+
+#[cfg(test)]
+mod dependency_scoped_excludes_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git")
+            .success());
+    }
+
+    #[test]
+    fn parent_gitignore_never_drops_a_tracked_dependency_lockfile() {
+        let dep = tempfile::tempdir().expect("dep");
+        git(dep.path(), &["init", "-q"]);
+        std::fs::write(dep.path().join("composer.json"), "{}\n").expect("json");
+        std::fs::write(dep.path().join("composer.lock"), "{}\n").expect("lock");
+        std::fs::write(dep.path().join(".gitignore"), "vendor/\n").expect("ignore");
+        std::fs::create_dir(dep.path().join("vendor")).expect("vendor");
+        std::fs::write(dep.path().join("vendor/x"), "x").expect("vendor file");
+        git(
+            dep.path(),
+            &["add", "composer.json", "composer.lock", ".gitignore"],
+        );
+
+        // Parent (e.g. data-machine-events) ignores its own untracked composer.lock.
+        let inherited = vec![
+            ".git".to_string(),
+            "*.pem".to_string(),
+            "composer.lock".to_string(),
+            "./composer.lock".to_string(),
+        ];
+        let excludes = dependency_scoped_excludes(dep.path(), &inherited);
+
+        assert!(
+            !excludes
+                .iter()
+                .any(|p| p.trim_start_matches("./") == "composer.lock"),
+            "{excludes:?}"
+        );
+        assert!(excludes.contains(&".git".to_string()));
+        assert!(excludes.contains(&"*.pem".to_string()));
+        assert!(
+            excludes
+                .iter()
+                .any(|p| p.trim_start_matches("./").trim_end_matches('/') == "vendor"),
+            "dependency's own gitignore applies: {excludes:?}"
+        );
+    }
+
+    #[test]
+    fn untracked_names_from_parent_are_kept() {
+        let dep = tempfile::tempdir().expect("dep");
+        git(dep.path(), &["init", "-q"]);
+        let inherited = vec!["composer.lock".to_string()];
+        let excludes = dependency_scoped_excludes(dep.path(), &inherited);
+        assert_eq!(
+            excludes.first(),
+            Some(&"composer.lock".to_string()),
+            "{excludes:?}"
+        );
+    }
 }
 
 #[cfg(test)]

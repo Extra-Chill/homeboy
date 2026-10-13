@@ -111,7 +111,7 @@ pub use runner_continuation::{
 };
 pub use runner_exec::*;
 pub use terminal_transition::{
-    AgentTaskTerminalOutcome, AgentTaskTransition, AgentTaskTransitionConflict,
+    AgentTaskAdvance, AgentTaskTerminalOutcome, AgentTaskTransition, AgentTaskTransitionConflict,
     AgentTaskTransitionError, AGENT_TASK_TRANSITION_CONFLICT,
 };
 pub use workspace_authority::*;

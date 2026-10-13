@@ -4,6 +4,41 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.418.15] - 2026-10-13
+
+### Fixed
+- expose admitted component's linked extensions in isolated gate HOME
+
+## [0.418.14] - 2026-10-12
+
+### Changed
+- compare-and-swap non-terminal run transitions
+
+### Fixed
+- keep a first-attempt Cook baseline alive for detached Lab staging
+
+## [0.418.13] - 2026-10-12
+
+### Fixed
+- size source artifacts for real plugins and skip gitignored trees
+
+## [0.418.12] - 2026-10-12
+
+### Fixed
+- copy validation dependencies with their own gitignore excludes
+- treat a daemon running a replaced executable as stale; retry stale-lease staging rejections
+
+## [0.418.11] - 2026-10-12
+
+### Fixed
+- omit package-manager trees when copying a cached validation dependency out
+
+## [0.418.10] - 2026-10-12
+
+### Fixed
+- report the tail of dependency command output, not its first line
+- fail fast on unknown top-level commands
+
 ## [0.418.9] - 2026-10-12
 
 ### Changed
