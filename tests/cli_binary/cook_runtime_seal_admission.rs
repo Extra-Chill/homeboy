@@ -450,15 +450,7 @@ fn failed_preseal_cook_replays_original_command_with_captured_stdin() {
     assert_eq!(
         completed.state,
         homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded,
-        "replay must finish the new durable Cook; record={completed:?}; log={}",
-        std::fs::read_to_string(
-            context
-                .data_dir()
-                .join("agent-task-detached")
-                .join(&replay_run_id)
-                .join("cook.log")
-        )
-        .unwrap_or_else(|error| format!("<unavailable: {error}>"))
+        "replay must finish the new durable Cook; record={completed:?}"
     );
     assert_ne!(
         completed.metadata["detached_cook_handoff"]["launcher_id"], original_launcher,

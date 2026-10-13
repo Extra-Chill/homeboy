@@ -1735,41 +1735,47 @@ pub fn record_detached_cook_supervisor_in_store(
     Ok(())
 }
 
-/// Bind a daemon supervisor to an already-materialized Cook retry attempt.
-/// Retry reservations own their exact lifecycle record before a child is
-/// launched, unlike an initial detached Cook handoff.
-pub fn record_local_cook_retry_supervisor_in_store(
+/// Bind the daemon `step` that runs a pending local Cook retry to that exact
+/// retry reservation.
+///
+/// The retry child calls this itself, from inside the step, before routing its
+/// retry. It is the only process that knows its own PID and kernel start
+/// identity, and the step job id the daemon injected. A reservation that has
+/// already advanced, belongs to another Cook, or names another supervisor is
+/// rejected so a stray child can never adopt it.
+pub fn record_local_cook_retry_step_supervision_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     cook_id: &str,
     job_id: &str,
+    child_pid: u32,
+    child_start_identity: homeboy_core::process::ProcessStartIdentity,
 ) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
     let cook_id = sanitize_run_id(cook_id);
     let job_id = job_id.to_string();
     let updated = lifecycle_store.mutate_record(&run_id, |record| {
+        let supervisor = &record.metadata["local_cook_supervisor"];
         if record.state.is_terminal()
             || record.metadata["cook_id"].as_str() != Some(cook_id.as_str())
-        {
-            return false;
-        }
-        if record.metadata["local_cook_supervisor"]["pinned_run_id"].as_str()
-            != Some(run_id.as_str())
+            || supervisor["pinned_run_id"].as_str() != Some(run_id.as_str())
+            || supervisor["state"] != "pending"
         {
             return false;
         }
         let supervisor = &mut record.ensure_metadata_object()["local_cook_supervisor"];
         supervisor["state"] = json!("supervising");
         supervisor["job_id"] = json!(job_id);
-        supervisor["job_type"] = json!(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE);
-        supervisor["pinned_run_id"] = json!(run_id);
+        supervisor["job_type"] = json!(homeboy_core::daemon::step_job::STEP_JOB_TYPE);
+        supervisor["child_pid"] = json!(child_pid);
+        supervisor["child_start_identity"] = json!(child_start_identity);
         supervisor["reattach_command"] = json!(format!("homeboy agent-task status {run_id}"));
         true
     })?;
     if updated.is_none() {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "local Cook retry became terminal or is not owned by the expected Cook",
+            "local Cook retry is no longer a pending reservation of the expected Cook",
             Some(run_id),
             None,
         ));
@@ -1783,13 +1789,6 @@ pub enum LocalCookRetryLaunchClaim {
     Acquired,
     OwnedElsewhere,
     RecoveryPending,
-    ChildSpawned {
-        pid: u32,
-        start_identity: homeboy_core::process::ProcessStartIdentity,
-        launch_token: String,
-        launch_token_path: String,
-    },
-    ChildExited,
     NotPending,
 }
 
@@ -1824,36 +1823,6 @@ pub fn claim_local_cook_retry_launch_in_store(
             return false;
         }
 
-        if supervisor["state"] == "child_spawned" {
-            let child = supervisor["child_pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .zip(serde_json::from_value(supervisor["child_start_identity"].clone()).ok())
-                .zip(supervisor["launch_token"].as_str())
-                .zip(supervisor["launch_token_path"].as_str());
-            let Some((((pid, start_identity), launch_token), launch_token_path)) = child else {
-                outcome = LocalCookRetryLaunchClaim::ChildExited;
-                return true;
-            };
-            outcome = if matches!(
-                homeboy_core::process::process_identity_state_with_start_identity(
-                    pid,
-                    None,
-                    Some(&start_identity),
-                ),
-                homeboy_core::process::ProcessIdentityState::Live
-            ) {
-                LocalCookRetryLaunchClaim::ChildSpawned {
-                    pid,
-                    start_identity,
-                    launch_token: launch_token.to_string(),
-                    launch_token_path: launch_token_path.to_string(),
-                }
-            } else {
-                LocalCookRetryLaunchClaim::ChildExited
-            };
-            return true;
-        }
         if supervisor["state"] != "pending" {
             return false;
         }
@@ -1914,49 +1883,6 @@ pub fn claim_local_cook_retry_launch_in_store(
         outcome = LocalCookRetryLaunchClaim::NotPending;
     }
     Ok(outcome)
-}
-
-/// Atomically record the one detached child that a retry launcher spawned.
-///
-/// The child remains blocked on its private readiness token until a controller
-/// job is durably projected. A takeover can therefore submit or re-submit the
-/// deterministic job for this exact child instead of spawning a replacement.
-pub fn record_local_cook_retry_child_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    cook_id: &str,
-    child_pid: u32,
-    child_start_identity: homeboy_core::process::ProcessStartIdentity,
-    launch_token: &str,
-    launch_token_path: &str,
-) -> Result<()> {
-    let run_id = sanitize_run_id(run_id);
-    let cook_id = sanitize_run_id(cook_id);
-    let updated = lifecycle_store.mutate_record(&run_id, |record| {
-        if record.state != AgentTaskRunState::Queued
-            || record.metadata["cook_id"].as_str() != Some(cook_id.as_str())
-            || record.metadata["local_cook_supervisor"]["state"] != "pending"
-            || record.metadata["local_cook_supervisor"]["pinned_run_id"] != run_id
-        {
-            return false;
-        }
-        let supervisor = &mut record.ensure_metadata_object()["local_cook_supervisor"];
-        supervisor["state"] = json!("child_spawned");
-        supervisor["child_pid"] = json!(child_pid);
-        supervisor["child_start_identity"] = json!(child_start_identity);
-        supervisor["launch_token"] = json!(launch_token);
-        supervisor["launch_token_path"] = json!(launch_token_path);
-        true
-    })?;
-    if updated.is_none() {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "local Cook retry was no longer pending when its child was attached",
-            Some(run_id),
-            None,
-        ));
-    }
-    Ok(())
 }
 
 /// Reserve a detached Cook's first attempt within its explicitly selected
@@ -3329,7 +3255,7 @@ where
             metadata["local_cook_supervisor"] = json!({
                 "state": "supervising",
                 "job_id": job_id,
-                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                "job_type": homeboy_core::daemon::step_job::STEP_JOB_TYPE,
                 "pinned_run_id": run_id,
             });
         }

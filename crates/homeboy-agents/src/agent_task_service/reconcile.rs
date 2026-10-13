@@ -1893,7 +1893,7 @@ mod tests {
                             serde_json::json!({
                                 "state": "supervising",
                                 "job_id": uuid::Uuid::new_v4(),
-                                "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+                                "job_type": homeboy_core::daemon::step_job::STEP_JOB_TYPE,
                                 "pinned_run_id": run_id,
                             }),
                         )]);
@@ -1960,11 +1960,15 @@ mod tests {
             )
             .expect("reserve retry");
 
-            agent_task_lifecycle::record_local_cook_retry_supervisor_in_store(
+            agent_task_lifecycle::record_local_cook_retry_step_supervision_in_store(
                 &test_lifecycle_store(),
                 run_id,
                 cook_id,
                 &uuid::Uuid::new_v4().to_string(),
+                std::process::id(),
+                homeboy_core::process::process_start_identity(std::process::id())
+                    .unwrap()
+                    .unwrap(),
             )
             .expect("project supervisor");
 
@@ -2011,7 +2015,7 @@ mod tests {
                     .remove("runner_process_start_identity");
                 record.metadata["cook_id"] = serde_json::json!("live-local-retry-cook");
                 record.metadata["local_cook_supervisor"] = serde_json::json!({
-                    "state": "child_spawned",
+                    "state": "supervising",
                     "pinned_run_id": run_id,
                     "child_pid": child_pid,
                     "child_start_identity": child_start_identity,

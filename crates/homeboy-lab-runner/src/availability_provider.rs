@@ -64,11 +64,28 @@ fn readiness_from_response(
     })
 }
 
+/// Whether `runner_id` accepts jobs right now, from its live readiness report.
+/// Unknown or failed readiness is not eligibility.
+fn runner_accepts_jobs(runner_id: &str) -> bool {
+    crate::RunnerDiscoveryService::readiness_api(&RunnerApiReadinessRequest {
+        schema: RUNNER_API_READINESS_REQUEST_SCHEMA.to_string(),
+        api_version: RUNNER_API_V1,
+        runner_id: runner_id.to_string(),
+    })
+    .map_err(|error| error.to_string())
+    .and_then(readiness_from_response)
+    .is_ok_and(|readiness| readiness.accepting_jobs)
+}
+
 /// Register the runner availability provider with core. Called once at startup.
 pub fn register() {
     homeboy_agents::agent_task_controller_service::runner_availability::register_runner_availability_provider(
         Box::new(RunnerAvailability),
     );
+    // A `step` that waits for a runner spawns only once that runner accepts jobs.
+    homeboy_core::daemon::step_job::register_step_runner_eligibility(std::sync::Arc::new(
+        runner_accepts_jobs,
+    ));
 }
 
 #[cfg(test)]
