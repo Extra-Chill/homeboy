@@ -363,30 +363,52 @@ fn run_on_runner(
             Error::internal_io(error.to_string(), Some(format!("runner exec {runner}")))
         })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let envelope: Value = stdout
-        .find('{')
-        .and_then(|start| serde_json::from_str(&stdout[start..]).ok())
-        .ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "runner `{runner}` returned no workflow envelope: {}{}",
-                stdout.trim(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        })?;
+    let first_json = |text: &str| -> Option<Value> {
+        text.find('{')
+            .and_then(|start| serde_json::from_str(&text[start..]).ok())
+    };
+    let mut envelope = first_json(&stdout);
+    // `runner exec` may wrap the remote command's stdout in its own envelope.
+    if let Some(remote) = envelope
+        .as_ref()
+        .filter(|envelope| envelope["command"] == "runner")
+        .and_then(|envelope| envelope.pointer("/data/presentation/stdout"))
+        .and_then(Value::as_str)
+        .and_then(first_json)
+    {
+        envelope = Some(remote);
+    }
+    let envelope = envelope.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "runner `{runner}` returned no workflow envelope: {}{}",
+            stdout.trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    })?;
     if envelope["success"] == false {
         return Err(Error::internal_unexpected(format!(
             "runner `{runner}` refused the workflow: {}",
             envelope["error"]
         )));
     }
+    let remote_exit = envelope["exit_code"].as_i64();
     let mut data = envelope.get("data").cloned().unwrap_or(envelope);
+    data["remote_exit_code"] = json!(remote_exit);
     data["runner"] = json!(runner);
     data["status_command"] = json!(format!(
         "homeboy runner exec {runner} -- homeboy workflow status {}",
         data["instance"].as_str().unwrap_or_default()
     ));
-    let code = output.status.code().unwrap_or(1);
+    let code = envelope_exit_code(&data, output.status.code());
     Ok((data, code))
+}
+
+fn envelope_exit_code(data: &Value, process: Option<i32>) -> i32 {
+    data["remote_exit_code"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok())
+        .or(process)
+        .unwrap_or(1)
 }
 
 fn watch_instance(client: &LocalControllerJobClient, instance: &str) -> Result<Value> {
