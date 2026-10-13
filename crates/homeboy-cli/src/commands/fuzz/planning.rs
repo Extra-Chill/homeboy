@@ -213,16 +213,21 @@ pub(super) fn run_campaign(
     for entry in &plan.entries {
         run_ids.push(entry.run_id.clone());
         if let Some(store) = store.as_ref() {
-            if store.get_run(&entry.run_id)?.is_some() {
-                dispatch_records.push(campaign_dispatch_record(
-                    entry,
-                    "skipped_existing",
-                    None,
-                    None,
-                    Vec::new(),
-                    Some("resume skipped existing persisted run id".to_string()),
-                ));
-                continue;
+            // A fuzz run row exists from the moment its workload starts. Only a
+            // finished attempt, or one whose owner is still alive, is skipped;
+            // an interrupted attempt (stale `running` row) is re-run.
+            if let Some(existing) = store.get_run(&entry.run_id)? {
+                if !campaign_run_was_interrupted(&existing) {
+                    dispatch_records.push(campaign_dispatch_record(
+                        entry,
+                        "skipped_existing",
+                        None,
+                        None,
+                        Vec::new(),
+                        Some("resume skipped existing persisted run id".to_string()),
+                    ));
+                    continue;
+                }
             }
         }
         if !args.execute {
@@ -275,6 +280,10 @@ pub(super) fn run_campaign(
         },
         exit_code,
     ))
+}
+
+pub(super) fn campaign_run_was_interrupted(run: &homeboy::core::observation::RunRecord) -> bool {
+    homeboy::core::observation::running_status_note(run).is_some()
 }
 
 fn campaign_dispatch_record(

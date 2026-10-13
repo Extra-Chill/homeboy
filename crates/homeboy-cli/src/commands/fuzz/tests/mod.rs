@@ -7,7 +7,8 @@ use super::execution::{
     fuzz_campaign_contract, fuzz_evidence_contract, fuzz_evidence_followups,
     fuzz_expected_metric_error, fuzz_max_duration, fuzz_postprocess_error,
     fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_contract, fuzz_runner_env,
-    persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
+    persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, start_fuzz_run_observation,
+    FuzzRunEvidenceInput, FuzzRunObservationStart,
 };
 use super::planning::{
     build_campaign_plan, campaign_child_run_args, load_or_default_isolation_proof,
@@ -351,6 +352,16 @@ fn artifact_complete_fuzz_campaign() -> FuzzCampaign {
         extra: std::collections::BTreeMap::new(),
     }];
     campaign
+}
+
+/// Drive one fuzz run observation through its shared lifecycle: start the
+/// running row with the start-time identity, then record evidence and finish.
+fn persist_observed_fuzz_run(
+    start: FuzzRunObservationStart<'_>,
+    finish: FuzzRunEvidenceInput<'_>,
+) -> homeboy::core::Result<homeboy::fuzz::FuzzRunPersisted> {
+    let observation = start_fuzz_run_observation(start)?;
+    persist_fuzz_run_evidence(&observation, finish)
 }
 
 fn fuzz_run_args_with_run_id(run_id: &str) -> FuzzRunArgs {

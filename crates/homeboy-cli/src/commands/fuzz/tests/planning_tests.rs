@@ -1323,3 +1323,30 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
     assert_eq!(run["kind"], "fuzz");
     assert_eq!(run["rig_id"], "package-fuzz");
 }
+
+#[test]
+fn campaign_resume_reruns_only_interrupted_fuzz_run_rows() {
+    let run = |status: &str, metadata: serde_json::Value| RunRecord {
+        id: "campaign-parser".to_string(),
+        kind: "fuzz".to_string(),
+        status: status.to_string(),
+        metadata_json: metadata,
+        ..RunRecord::default()
+    };
+
+    // A finished attempt is resumed past.
+    assert!(!super::super::planning::campaign_run_was_interrupted(&run(
+        "pass",
+        serde_json::json!({})
+    )));
+    // An attempt whose owner is still alive is in progress, not interrupted.
+    assert!(!super::super::planning::campaign_run_was_interrupted(&run(
+        "running",
+        serde_json::json!({ "homeboy_run_owner": { "pid": std::process::id() } })
+    )));
+    // A running row whose owner died is an interrupted attempt and re-runs.
+    assert!(super::super::planning::campaign_run_was_interrupted(&run(
+        "running",
+        serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } })
+    )));
+}

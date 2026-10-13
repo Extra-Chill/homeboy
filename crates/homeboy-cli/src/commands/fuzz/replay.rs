@@ -9,7 +9,7 @@ use homeboy::fuzz::{
     FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
 use homeboy::runner::runners::is_retrievable_runner_artifact;
-use homeboy_core::{self, extension::invoke::ExtensionRunner};
+use homeboy_core::extension::invoke::{build_scenario_runner, ScenarioRunnerOptions};
 use homeboy_extension_contract::ExtensionCapability;
 
 use super::super::utils::args::PositionalComponentArgs;
@@ -212,14 +212,23 @@ fn run_replay_like(
     };
 
     let run_dir = RunDir::create()?;
-    let mut runner = ExtensionRunner::for_context(context.execution_context.clone())
-        .component(context.component)
-        .settings(&args.setting_args.setting)
-        .settings_json(&args.setting_args.setting_json)
-        .path_override(args.path.clone())
-        .with_run_dir(&run_dir)
-        .command_override(command.clone())
-        .passthrough(false);
+    let mut runner = build_scenario_runner(ScenarioRunnerOptions {
+        execution_context: &context.execution_context,
+        component: &context.component,
+        path_override: args.path.clone(),
+        settings: &args.setting_args.setting,
+        settings_json: &args.setting_args.setting_json,
+        run_dir: &run_dir,
+        results_env: None,
+        scenario_env: None,
+        artifact_env: None,
+        list_only_env: None,
+        extra_workloads_env: None,
+        env_provider_extensions: &[],
+        invocation_requirements: Default::default(),
+    })?
+    .command_override(command.clone())
+    .passthrough(false);
     for item in &env {
         runner = runner.env(&item.name, &item.value);
     }
