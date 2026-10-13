@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.419.2] - 2026-10-13
+
+### Fixed
+- restart dead generations in place so checkpointed driver work resumes
+
 ## [0.419.1] - 2026-10-13
 
 ### Changed
