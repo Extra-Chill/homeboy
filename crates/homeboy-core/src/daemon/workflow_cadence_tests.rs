@@ -60,6 +60,8 @@ fn cadence(anchor_ms: u64, interval_ms: u64, next_due_ms: u64) -> Cadence {
             next_due_ms,
             cancelled_at_ms: None,
             last_instance: None,
+            last_instance_store: None,
+            pending: None,
             last_fired_at_ms: None,
             fired: 0,
             skipped: 0,
@@ -242,13 +244,23 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
         wait_terminal(&store, &second);
 
         // Crash after admission, before the registration advanced: the slot
-        // is due again and converges on the instance it already admitted.
+        // is still pending and is completed, not admitted again.
         let mut rewound = registration.clone();
         rewound.next_due_ms = base + 4 * MINUTE;
+        rewound.pending = Some(PendingSlot {
+            slot_ms: base + 4 * MINUTE,
+            instance_name: slot_instance_name(base + 4 * MINUTE),
+            instance: second.clone(),
+            store: store.persistence_path(),
+            next_due_ms: base + 6 * MINUTE,
+        });
         write(&open().unwrap(), &rewound).unwrap();
         let replayed = admit_due(&store, base + 4 * MINUTE + 2_000);
         assert_eq!(replayed[0]["instance"], second);
         assert_eq!(replayed[0]["admitted"], "existing");
+        let completed = list().unwrap().remove(0);
+        assert_eq!(completed.pending, None);
+        assert_eq!(completed.next_due_ms, base + 6 * MINUTE);
         assert_eq!(
             store.controller_jobs_of_type("workflow").len(),
             2,
@@ -256,5 +268,64 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
         );
         let lines = std::fs::read_to_string(&runs).unwrap();
         assert_eq!(lines.lines().count(), 2);
+    });
+}
+
+/// After a daemon rotation the next generation's store does not hold the
+/// previous instance or a pending slot's instance; both are read from the
+/// store that admitted them.
+#[test]
+fn another_generations_store_answers_overlap_and_pending_slots() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let gate = home.path().join("release");
+        let script = format!(
+            "while [ ! -f {gate} ]; do sleep 0.05; done",
+            gate = gate.display()
+        );
+        let old = JobStore::open_without_reconciliation(home.path().join("old/jobs.json"))
+            .unwrap()
+            .with_daemon_lease("old-generation".to_string());
+        let new = JobStore::open_without_reconciliation(home.path().join("new/jobs.json"))
+            .unwrap()
+            .with_daemon_lease("new-generation".to_string());
+        let base = 1_791_900_000_000;
+        register(
+            template(json!({"interval": "2m"}), &script, home.path()),
+            false,
+            base,
+        )
+        .unwrap();
+        assert_eq!(admit_due(&old, base + 1_000).len(), 1);
+        let first = list().unwrap().remove(0);
+        assert_eq!(first.last_instance_store, old.persistence_path());
+
+        // The new generation sees the old generation's instance running.
+        let skipped = admit_due(&new, base + 2 * MINUTE + 1_000);
+        assert_eq!(skipped[0]["skipped"], base + 2 * MINUTE);
+
+        // A slot left pending in the old store completes without a second
+        // admission in the new one.
+        std::fs::write(&gate, "").unwrap();
+        wait_terminal(&old, first.last_instance.as_deref().unwrap());
+        let mut crashed = list().unwrap().remove(0);
+        let slot = base + 4 * MINUTE;
+        let request = slot_request(&crashed.request, &slot_instance_name(slot));
+        admit_slot(&old, &request).unwrap();
+        crashed.pending = Some(PendingSlot {
+            slot_ms: slot,
+            instance_name: slot_instance_name(slot),
+            instance: request.instance.clone(),
+            store: old.persistence_path(),
+            next_due_ms: slot + 2 * MINUTE,
+        });
+        write(&open().unwrap(), &crashed).unwrap();
+        let completed = admit_due(&new, slot + 1_000);
+        assert_eq!(completed[0]["admitted"], "existing");
+        assert!(new.controller_jobs_of_type("workflow").is_empty());
+        let registration = list().unwrap().remove(0);
+        assert_eq!(registration.last_instance, Some(request.instance));
+        assert_eq!(registration.last_instance_store, old.persistence_path());
+        assert_eq!((registration.fired, registration.skipped), (2, 1));
     });
 }

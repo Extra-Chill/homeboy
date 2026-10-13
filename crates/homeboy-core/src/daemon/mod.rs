@@ -682,9 +682,20 @@ impl LocalControllerJobClient {
     /// This client's daemon first, then every other registered generation.
     fn workflow_endpoints(&self) -> Vec<String> {
         let mut endpoints = vec![self.endpoint.clone()];
-        for endpoint in generation_endpoints() {
-            if !endpoints.contains(&endpoint) {
-                endpoints.push(endpoint);
+        if !generation_store::bypassed() {
+            for generation in generation_store::generations().unwrap_or_default() {
+                // A generation replaced in place serves at the address its
+                // own lease file records, which the registry may predate.
+                let address =
+                    validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
+                        .ok()
+                        .and_then(|validation| validation.state)
+                        .map(|state| state.address)
+                        .unwrap_or(generation.address);
+                let endpoint = format!("http://{address}");
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
             }
         }
         endpoints
@@ -3833,28 +3844,6 @@ const DAEMON_ENDPOINT_PAYLOAD_POINTER: &str = "/data/body";
 /// Deliberately has no fallback. Accepting a second shape would let the reader
 /// keep succeeding after the writer moved, which converts the next envelope
 /// drift from a loud failure into a silent one.
-/// The address of every registered daemon generation. A generation replaced
-/// in place serves at the address its own lease file records, which the
-/// registry may predate.
-pub(crate) fn generation_endpoints() -> Vec<String> {
-    if generation_store::bypassed() {
-        return Vec::new();
-    }
-    let mut endpoints = Vec::new();
-    for generation in generation_store::generations().unwrap_or_default() {
-        let address = validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
-            .ok()
-            .and_then(|validation| validation.state)
-            .map(|state| state.address)
-            .unwrap_or(generation.address);
-        let endpoint = format!("http://{address}");
-        if !endpoints.contains(&endpoint) {
-            endpoints.push(endpoint);
-        }
-    }
-    endpoints
-}
-
 pub(crate) fn daemon_endpoint_payload(response: &serde_json::Value) -> Option<&serde_json::Value> {
     response.pointer(DAEMON_ENDPOINT_PAYLOAD_POINTER)
 }
