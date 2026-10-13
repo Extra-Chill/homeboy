@@ -116,24 +116,24 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         WorkflowCommand::Status { instance, watch } => {
             let client = LocalControllerJobClient::connect()?;
             let Some(instance) = instance else {
-                return Ok((client.workflows(None)?, 0));
+                return Ok((client.workflow_list()?, 0));
             };
             let view = if watch {
                 watch_instance(&client, &instance)?
             } else {
-                client.workflows(Some(&instance))?
+                client.workflow(&instance)?
             };
             let code = exit_code(&view);
             Ok((view, code))
         }
         WorkflowCommand::Cancel { instance } => {
             let client = LocalControllerJobClient::connect()?;
-            let view = client.workflows(Some(&instance))?;
+            let view = client.workflow(&instance)?;
             let job_id = view["job"]["job_id"]
                 .as_str()
                 .ok_or_else(|| Error::internal_unexpected("workflow status has no job id"))?;
             client.cancel(job_id, &format!("workflow `{instance}` cancelled"))?;
-            Ok((client.workflows(Some(&instance))?, 0))
+            Ok((client.workflow(&instance)?, 0))
         }
         WorkflowCommand::Approve { instance, step } => {
             let client = LocalControllerJobClient::connect()?;
@@ -143,7 +143,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             if registered {
                 return Ok((registered_workflows()?, 0));
             }
-            Ok((LocalControllerJobClient::connect()?.workflows(None)?, 0))
+            Ok((LocalControllerJobClient::connect()?.workflow_list()?, 0))
         }
     }
 }
@@ -163,7 +163,7 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let instance = definition.instance_id(&inputs, args.instance.as_deref());
     let client = LocalControllerJobClient::connect_current_build()?;
     // The same definition and inputs name the same instance: report it.
-    let disposition = match client.workflows(Some(&instance)) {
+    let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
             let request = admission_request(&definition, inputs, &instance, &args)?;
@@ -174,7 +174,7 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let mut view = if args.wait {
         watch_instance(&client, &instance)?
     } else {
-        client.workflows(Some(&instance))?
+        client.workflow(&instance)?
     };
     view["submission"] = json!({ "disposition": disposition, "source": source });
     view["status_command"] = json!(format!("homeboy workflow status {instance}"));
@@ -392,7 +392,7 @@ fn run_on_runner(
 fn watch_instance(client: &LocalControllerJobClient, instance: &str) -> Result<Value> {
     let mut last = String::new();
     loop {
-        let view = client.workflows(Some(instance))?;
+        let view = client.workflow(instance)?;
         let line = progress_line(&view);
         if line != last {
             eprintln!("{line}");

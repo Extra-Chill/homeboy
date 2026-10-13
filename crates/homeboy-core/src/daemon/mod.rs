@@ -613,31 +613,83 @@ impl LocalControllerJobClient {
         Ok(job)
     }
 
-    /// `GET /workflows` or `GET /workflows/<instance>`: the daemon's pure
-    /// projection of workflow instances from its job ledger.
-    pub fn workflows(&self, instance: Option<&str>) -> Result<serde_json::Value> {
-        let path = match instance {
-            Some(instance) => format!("/workflows/{instance}"),
-            None => "/workflows".to_string(),
-        };
-        let response = self
-            .client
-            .get(format!("{}{path}", self.endpoint))
-            .send()
-            .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
-        self.workflow_payload(response, &path)
+    /// `GET /workflows/<instance>`: the daemon's pure projection of one
+    /// workflow instance from its job ledger. An instance lives in the daemon
+    /// generation that admitted it, so every live generation is asked.
+    pub fn workflow(&self, instance: &str) -> Result<serde_json::Value> {
+        let path = format!("/workflows/{instance}");
+        let mut last_error = None;
+        for endpoint in self.workflow_endpoints() {
+            match self
+                .client
+                .get(format!("{endpoint}{path}"))
+                .send()
+                .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))
+                .and_then(|response| self.workflow_payload(response, &path))
+            {
+                Ok(mut view) => {
+                    view["daemon_endpoint"] = json!(endpoint);
+                    return Ok(view);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            Error::validation_invalid_argument(
+                "instance",
+                format!("no workflow instance `{instance}` in any live daemon generation"),
+                Some(instance.to_string()),
+                None,
+            )
+        }))
     }
 
-    /// `POST /workflows/<instance>/approvals`.
+    /// `GET /workflows` across every live daemon generation.
+    pub fn workflow_list(&self) -> Result<serde_json::Value> {
+        let mut entities = Vec::new();
+        for endpoint in self.workflow_endpoints() {
+            let Ok(response) = self.client.get(format!("{endpoint}/workflows")).send() else {
+                continue;
+            };
+            let Ok(list) = self.workflow_payload(response, "/workflows") else {
+                continue;
+            };
+            for mut entity in list["entities"].as_array().cloned().unwrap_or_default() {
+                entity["daemon_endpoint"] = json!(endpoint);
+                entities.push(entity);
+            }
+        }
+        Ok(json!({ "entities": entities }))
+    }
+
+    /// `POST /workflows/<instance>/approvals` on the generation that owns it.
     pub fn approve_workflow_step(&self, instance: &str, step: &str) -> Result<serde_json::Value> {
+        let endpoint = self.workflow(instance)?["daemon_endpoint"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.endpoint.clone());
         let path = format!("/workflows/{instance}/approvals");
         let response = self
             .client
-            .post(format!("{}{path}", self.endpoint))
+            .post(format!("{endpoint}{path}"))
             .json(&json!({ "step": step }))
             .send()
             .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
         self.workflow_payload(response, &path)
+    }
+
+    /// This client's daemon first, then every other registered generation.
+    fn workflow_endpoints(&self) -> Vec<String> {
+        let mut endpoints = vec![self.endpoint.clone()];
+        if !generation_store::bypassed() {
+            for generation in generation_store::generations().unwrap_or_default() {
+                let endpoint = format!("http://{}", generation.address);
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        endpoints
     }
 
     fn workflow_payload(
