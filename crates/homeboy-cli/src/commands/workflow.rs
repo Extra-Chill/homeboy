@@ -2,7 +2,9 @@
 //!
 //! A definition (`homeboy/workflow/v1`) is admitted as one daemon `workflow`
 //! job. The daemon submits `step` jobs and evaluates gates; these verbs only
-//! admit, observe, cancel, and approve.
+//! admit, observe, cancel, and approve. A definition with `every` is
+//! registered as a cadence instead: the daemon admits one instance per due
+//! slot.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,9 +46,9 @@ enum WorkflowCommand {
         #[arg(long)]
         watch: bool,
     },
-    /// Cancel an instance and every step it is running
+    /// Cancel an instance and every step it is running, or stop a registered cadence
     Cancel {
-        /// Instance id
+        /// Instance id, or the workflow id of a registered cadence
         instance: String,
     },
     /// Approve a step that is awaiting approval in the current iteration
@@ -56,9 +58,9 @@ enum WorkflowCommand {
         /// Step id
         step: String,
     },
-    /// List instances, or registered definitions with `--registered`
+    /// List instances, or registered definitions and cadences with `--registered`
     List {
-        /// List definitions in the workflow registry instead of instances
+        /// List registry definitions, built-ins, and daemon cadences instead of instances
         #[arg(long)]
         registered: bool,
     },
@@ -128,7 +130,16 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         }
         WorkflowCommand::Cancel { instance } => {
             let client = LocalControllerJobClient::connect()?;
-            let view = client.workflow(&instance)?;
+            let view = match client.workflow(&instance) {
+                Ok(view) => view,
+                // Not an instance: a registered cadence's workflow id.
+                Err(error) => {
+                    return client
+                        .cancel_workflow_cadence(&instance)
+                        .map(|cadence| (json!({ "cadence": cadence }), 0))
+                        .map_err(|_| error);
+                }
+            };
             let job_id = view["job"]["job_id"]
                 .as_str()
                 .ok_or_else(|| Error::internal_unexpected("workflow status has no job id"))?;
@@ -141,7 +152,10 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         }
         WorkflowCommand::List { registered } => {
             if registered {
-                return Ok((registered_workflows()?, 0));
+                let mut listed = registered_workflows()?;
+                listed["cadences"] =
+                    LocalControllerJobClient::connect()?.workflow_cadences()?["entities"].clone();
+                return Ok((listed, 0));
             }
             Ok((LocalControllerJobClient::connect()?.workflow_list()?, 0))
         }
@@ -151,8 +165,19 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
 fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let (definition, source) = load(&args.workflow)?;
     validate(&definition)?;
+    if definition.every.is_some() && (args.wait || args.instance.is_some()) {
+        return Err(Error::validation_invalid_argument(
+            "every",
+            "a workflow with `every` is registered as a cadence; each slot names its own instance, so `--wait` and `--instance` do not apply",
+            None,
+            None,
+        ));
+    }
     if let Some(runner) = &args.on {
         return run_on_runner(runner, &definition, &args);
+    }
+    if definition.every.is_some() {
+        return register_cadence(&definition, source, &args);
     }
     let provided = args
         .inputs
@@ -166,7 +191,13 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
-            let request = admission_request(&definition, inputs, &instance, &args)?;
+            let request = admission_request(
+                &definition,
+                inputs,
+                &instance,
+                args.instance.clone(),
+                current_dir()?,
+            )?;
             client.submit(request.submission()?)?;
             "created"
         }
@@ -182,12 +213,61 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     Ok((view, code))
 }
 
+/// `workflow run` on a definition with `every`: register its admitted request
+/// as the daemon's cadence template.
+fn register_cadence(
+    definition: &WorkflowDefinition,
+    source: String,
+    args: &RunArgs,
+) -> CmdResult<Value> {
+    let provided = args
+        .inputs
+        .iter()
+        .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let inputs = definition.resolve_inputs(&provided)?;
+    let instance = definition.instance_id(&inputs, None);
+    let request = admission_request(definition, inputs, &instance, None, current_dir()?)?;
+    let client = LocalControllerJobClient::connect_current_build()?;
+    let mut view = json!({ "cadence": client.register_workflow_cadence(&request)? });
+    view["submission"] = json!({ "disposition": view["cadence"]["disposition"], "source": source });
+    view["status_command"] = json!("homeboy workflow list --registered");
+    Ok((view, 0))
+}
+
+/// The admitted request the daemon registers for a built-in cadence, captured
+/// from the daemon's own environment and run from its home directory.
+pub fn register_builtin_cadence_factory() {
+    homeboy::core::daemon::workflow_cadence::register_builtin_request_factory(std::sync::Arc::new(
+        |definition: &WorkflowDefinition| {
+            let inputs = definition.resolve_inputs(&BTreeMap::new())?;
+            let instance = definition.instance_id(&inputs, None);
+            let cwd = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_dir())
+                .map(Ok)
+                .unwrap_or_else(current_dir)?;
+            admission_request(definition, inputs, &instance, None, cwd)
+        },
+    ));
+}
+
+fn current_dir() -> Result<PathBuf> {
+    std::env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve the working directory".into()),
+        )
+    })
+}
+
 /// Capture the admitted environment and pin every program the steps run.
 fn admission_request(
     definition: &WorkflowDefinition,
     inputs: BTreeMap<String, Value>,
     instance: &str,
-    args: &RunArgs,
+    instance_name: Option<String>,
+    cwd: PathBuf,
 ) -> Result<WorkflowJobRequest> {
     let mut env = EnvMaterializationPlan::default();
     for name in &definition.env.public {
@@ -257,22 +337,18 @@ fn admission_request(
     } else {
         EnvMaterializationPlan::default()
     };
-    let current_exe = std::env::current_exe().map_err(|error| {
+    // The installed path, even when the running binary was replaced: a
+    // cadence keeps running this program after upgrades.
+    let current_exe = homeboy::core::daemon::daemon_launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve the Homeboy executable".into()),
         )
     })?;
-    let cwd = std::env::current_dir().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve the working directory".into()),
-        )
-    })?;
     Ok(WorkflowJobRequest {
         schema: WORKFLOW_JOB_REQUEST_SCHEMA.to_string(),
         instance: instance.to_string(),
-        instance_name: args.instance.clone(),
+        instance_name,
         definition_digest: definition.digest(),
         definition: definition.clone(),
         inputs,
@@ -398,10 +474,11 @@ fn run_on_runner(
     let mut data = envelope.get("data").cloned().unwrap_or(envelope);
     data["remote_exit_code"] = json!(remote_exit);
     data["runner"] = json!(runner);
-    data["status_command"] = json!(format!(
-        "homeboy runner exec {runner} -- homeboy workflow status {}",
-        data["instance"].as_str().unwrap_or_default()
-    ));
+    data["status_command"] = json!(match data["instance"].as_str() {
+        Some(instance) =>
+            format!("homeboy runner exec {runner} -- homeboy workflow status {instance}"),
+        None => format!("homeboy runner exec {runner} -- homeboy workflow list --registered"),
+    });
     let code = envelope_exit_code(&data, output.status.code());
     Ok((data, code))
 }
@@ -495,6 +572,11 @@ fn load(workflow: &str) -> Result<(WorkflowDefinition, String)> {
         } else {
             homeboy::core::workflow::registry_dir()?.join(format!("{workflow}.json"))
         };
+        if !path.is_file() {
+            if let Some(definition) = homeboy::core::workflow::builtin(workflow) {
+                return Ok((definition, "builtin".to_string()));
+            }
+        }
         let text = std::fs::read_to_string(&path).map_err(|error| {
             Error::validation_invalid_argument(
                 "workflow",
@@ -551,6 +633,7 @@ fn registered_workflows() -> Result<Value> {
                     "path": path.display().to_string(),
                     "valid": true,
                     "steps": definition.steps.len(),
+                    "every": definition.every,
                 }),
                 Err(error) => json!({
                     "path": path.display().to_string(),
@@ -559,6 +642,15 @@ fn registered_workflows() -> Result<Value> {
                 }),
             });
         }
+    }
+    for definition in homeboy::core::workflow::builtins() {
+        workflows.push(json!({
+            "id": definition.id,
+            "builtin": true,
+            "valid": true,
+            "steps": definition.steps.len(),
+            "every": definition.every,
+        }));
     }
     Ok(json!({ "registry": dir.display().to_string(), "entities": workflows }))
 }
@@ -598,8 +690,8 @@ mod tests {
                 continue;
             }
             let parsed = WorkflowDefinition::from_value(value.clone());
-            // Examples B (`every`, `notify`) and C (`foreach`) use fields a
-            // later release implements; this one refuses them.
+            // Examples B (`notify`) and C (`foreach`) use fields a later
+            // release implements; this one refuses them.
             if value["id"] == "cook-batch" || value["id"] == "homeboy-nightly-red-main" {
                 assert!(parsed.is_err());
                 continue;
@@ -628,9 +720,11 @@ mod tests {
             std::fs::write(dir.join("bad.json"), "{").unwrap();
             let listed = registered_workflows().unwrap();
             let rows = listed["entities"].as_array().unwrap();
-            assert_eq!(rows.len(), 2);
+            assert_eq!(rows.len(), 3);
             assert_eq!(rows[0]["valid"], false);
             assert_eq!(rows[1]["id"], "ok");
+            assert_eq!(rows[2]["id"], "homeboy.retention");
+            assert_eq!(rows[2]["builtin"], true);
         });
     }
 }

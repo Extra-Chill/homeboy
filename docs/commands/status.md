@@ -14,13 +14,11 @@ homeboy status --global
 `homeboy status` behaves differently depending on whether you pass a project:
 
 - **`homeboy status`** (no project) — an inventory-free local snapshot. It
-  reports controller freshness, live dispatch readiness, and schedule run
-  health (wedged `running` markers and consecutive failures). It explicitly
+  reports controller freshness and live dispatch readiness. It explicitly
   marks CWD/context, Git, runner, and control-plane inventory as `not_checked`;
   it makes no claim that the CWD is registered or unregistered. Use
   `homeboy status --full` for the complete workspace/context report, or
-  `homeboy status --all` for component inspection. `homeboy schedule list`
-  is the drill-down for every declared schedule.
+  `homeboy status --all` for component inspection.
 - **`homeboy status <project>`** — a **target-accurate** dashboard that
   compares each component's installed-on-target version against its latest
   release tag and reports `current` / `outdated` / `pinned_current`.

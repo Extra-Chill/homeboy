@@ -1066,6 +1066,9 @@ fn register_startup_providers_after_reconcile(
     // A workflow instance is a daemon job that submits `step` jobs and
     // evaluates gates; it never runs work itself.
     homeboy::core::daemon::workflow_job::register_workflow_job_driver();
+    // The daemon registers built-in cadences (`homeboy.retention`) through
+    // the same admission the CLI uses.
+    crate::commands::workflow::register_builtin_cadence_factory();
     // A locally-placed detached fanout wave is daemon-owned on the same terms:
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.

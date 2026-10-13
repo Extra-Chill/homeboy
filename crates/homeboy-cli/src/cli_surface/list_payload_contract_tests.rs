@@ -95,10 +95,6 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "report-shaped: counts, search provenance, and degradations alongside runs",
     ),
     (
-        "schedule list",
-        "data is a bare array; adding a key is a breaking change needing its own decision",
-    ),
-    (
         "ssh list",
         "own versioned schema (homeboy/ssh-list/v1) with operator summary and truncation",
     ),
