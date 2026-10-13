@@ -329,6 +329,21 @@ fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
         Ok(super::CookContinuationState::Failed) => {
             return WorkflowRunOutcome::Settled("candidate_recoverable".to_string());
         }
+        // A runner-executed attempt that produced a candidate is promoted and
+        // finalized by the terminal continuation the controller admits once
+        // it projects the runner's result: until that continuation exists and
+        // ends, the Cook has not settled.
+        Ok(super::CookContinuationState::Absent)
+            if record.runner_id().is_some()
+                && matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                ) =>
+        {
+            return WorkflowRunOutcome::Pending;
+        }
         _ => {}
     }
     // The canonical run projection is the Cook's outcome: the attempt record
