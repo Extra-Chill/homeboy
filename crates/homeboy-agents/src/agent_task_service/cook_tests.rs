@@ -7821,18 +7821,17 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
             "used_for"
         ])
     );
-    assert!(request.instructions.contains("reviewer-facing PR dossier"));
-    assert!(request.instructions.contains("`pr_title`"));
-    assert!(request.instructions.contains("A successful response"));
-    // The review form does not replace controller-owned gate evidence, while
-    // still allowing the agent to describe bounded diagnostic observations.
-    assert!(request.instructions.contains("Bounded checks are allowed"));
-    assert!(request
+    // The contract is data (#15818): the prompt stays the operator's.
+    let original_instructions = batch_cook_options(
+        "initial-review-form-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    )
+    .identity
+    .initial_plan
+    .tasks[0]
         .instructions
-        .contains("never as authoritative final gate results"));
-    assert!(!request
-        .instructions
-        .contains("structured `verification` entries"));
+        .clone();
+    assert_eq!(request.instructions, original_instructions);
     assert_eq!(
         declaration.structural_schema["properties"].get("verification"),
         None,
@@ -7846,15 +7845,10 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
             "status": "not_attempted"
         })
     );
-    assert!(request
-        .instructions
-        .contains("non-publishable attempt workspace"));
-    assert!(request
-        .instructions
-        .contains("do not push, create a pull request"));
-    assert!(request
-        .instructions
-        .contains("controller-owned publication"));
+    assert_eq!(
+        request.inputs["homeboy"]["publication"]["owner"],
+        "controller"
+    );
 
     project_initial_finalizing_review_form_contract(&mut options);
     assert_eq!(
@@ -7868,37 +7862,31 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
 }
 
 #[test]
-fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
+fn controller_owned_gates_are_projected_as_data_not_prompt_prose() {
     let mut options = batch_cook_options(
         "controller-owned-gate-contract",
         Arc::new(AcceptedDetachedAttemptDispatcher),
     );
     options.gates.verify = vec!["cargo test --locked -p homeboy-agents".to_string()];
     options.gates.private_verify = vec!["private-gate --token secret".to_string()];
+    let original_instructions = options.identity.initial_plan.tasks[0].instructions.clone();
 
     project_controller_owned_gate_contract(&mut options);
-
-    let instructions = &options.identity.initial_plan.tasks[0].instructions;
-    assert!(instructions.contains("Declared deterministic gates are controller-owned."));
-    assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
-    assert!(instructions.contains("1 private deterministic gate(s)"));
-    assert!(!instructions.contains("private-gate --token secret"));
-    assert!(instructions.contains("bounded checks to reproduce behavior"));
-    assert!(instructions.contains("test a hypothesis"));
-    assert!(instructions.contains("develop regression coverage"));
-    assert!(instructions.contains("Treat those results as observations"));
-    assert!(instructions.contains("not as authoritative final gate results"));
-    assert!(instructions.contains("authoritative gate evidence separately after harvest"));
-    assert!(instructions.contains("Do not claim a focused check is a final gate result"));
-
     project_controller_owned_gate_contract(&mut options);
+
+    let request = &options.identity.initial_plan.tasks[0];
+    assert_eq!(request.instructions, original_instructions);
+    let gates = &request.inputs["homeboy"]["gates"];
+    assert_eq!(gates["owner"], "controller");
     assert_eq!(
-        options.identity.initial_plan.tasks[0]
-            .instructions
-            .matches("Declared deterministic gates are controller-owned.")
-            .count(),
-        1
+        gates["verify"],
+        serde_json::json!(["cargo test --locked -p homeboy-agents"])
     );
+    assert_eq!(gates["private_verify_count"], 1);
+    assert!(!request
+        .inputs
+        .to_string()
+        .contains("private-gate --token secret"));
 }
 
 #[test]
@@ -7914,48 +7902,41 @@ fn provider_prompt_without_declared_gates_preserves_existing_contract() {
     assert_eq!(options.identity.initial_plan.tasks[0], original);
 }
 
-/// End-to-end: the complete dispatched prompt — both the gate contract and the
-/// review-form dossier projections applied together — permits bounded checks
-/// without making them authoritative, and the declared output schema has no
-/// `verification` slot for the agent to fill.
+/// End-to-end (#15818): with no operator template declared, every Cook
+/// projection together leaves the model-visible prompt exactly the operator's
+/// prompt; the facts travel as structured request data.
 #[test]
-fn dispatched_prompt_allows_bounded_checks_without_authoritative_gate_claims() {
-    let mut options = batch_cook_options(
-        "dispatched-prompt-no-agent-verification",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    );
-    options.finalization.no_finalize = false;
-    options.gates.verify = vec!["homeboy review test sample-plugin".to_string()];
+fn dispatched_prompt_is_the_operator_prompt_without_a_template() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "dispatched-prompt-operator-owned",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.finalization.no_finalize = false;
+        options.gates.verify = vec!["homeboy review test sample-plugin".to_string()];
+        let original_instructions = options.identity.initial_plan.tasks[0].instructions.clone();
 
-    project_controller_owned_gate_contract(&mut options);
-    project_initial_finalizing_review_form_contract(&mut options);
+        project_controller_owned_gate_contract(&mut options);
+        project_initial_finalizing_review_form_contract(&mut options);
+        project_attempt_prompt_template(&mut options);
 
-    let request = &options.identity.initial_plan.tasks[0];
-    let instructions = &request.instructions;
-    assert!(instructions.contains("bounded checks to reproduce behavior"));
-    assert!(instructions.contains("describe those as observations"));
-    assert!(instructions.contains("never as authoritative final gate results"));
-
-    let declaration = request
-        .output_declarations
-        .iter()
-        .find(|declaration| declaration.name == "review_form")
-        .expect("review form declaration");
-    assert_eq!(
-        declaration.structural_schema["properties"].get("verification"),
-        None,
-        "the declared review_form schema must not request agent-run verification"
-    );
-    assert_eq!(
-        declaration.structural_schema["required"],
-        serde_json::json!([
-            "pr_title",
-            "summary",
-            "what_changed",
-            "compatibility",
-            "used_for"
-        ])
-    );
+        let request = &options.identity.initial_plan.tasks[0];
+        assert_eq!(request.instructions, original_instructions);
+        assert_eq!(
+            request.inputs["homeboy"]["gates"]["verify"],
+            serde_json::json!(["homeboy review test sample-plugin"])
+        );
+        let declaration = request
+            .output_declarations
+            .iter()
+            .find(|declaration| declaration.name == "review_form")
+            .expect("review form declaration");
+        assert_eq!(
+            declaration.structural_schema["properties"].get("verification"),
+            None,
+            "the declared review_form schema must not request agent-run verification"
+        );
+    });
 }
 
 #[test]
