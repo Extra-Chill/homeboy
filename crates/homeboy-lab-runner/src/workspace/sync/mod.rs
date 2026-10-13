@@ -377,6 +377,7 @@ fn sync_workspace_in_roots_controlled(
                     .actual_materialization_mode
                     .as_deref(),
                 fallback_reason: materialization_plan.fallback_reason.as_deref(),
+                source_transfer: materialization_plan.controller_git_bundle.as_ref(),
                 snapshot_identity: &snapshot,
                 snapshot_excludes: &excludes,
                 content_manifest: Some(content_manifest),
@@ -614,6 +615,7 @@ fn sync_workspace_in_roots_controlled(
                     .actual_materialization_mode
                     .as_deref(),
                 fallback_reason: materialization_plan.fallback_reason.as_deref(),
+                source_transfer: materialization_plan.controller_git_bundle.as_ref(),
                 snapshot_identity: &git.head,
                 snapshot_excludes: &excludes,
                 content_manifest: None,
@@ -983,6 +985,7 @@ fn materialize_git_fallback_filesystem_snapshot(
         sync_mode: options.mode,
         actual_materialization_mode: materialization_plan.actual_materialization_mode.as_deref(),
         fallback_reason: materialization_plan.fallback_reason.as_deref(),
+        source_transfer: None,
         snapshot_identity: &snapshot,
         snapshot_excludes: excludes,
         content_manifest: Some(content_manifest),
@@ -1156,6 +1159,7 @@ pub fn update_workspace(
         sync_mode: RunnerWorkspaceSyncMode::Snapshot,
         actual_materialization_mode: Some("prepared_workspace_delta"),
         fallback_reason: None,
+        source_transfer: None,
         snapshot_identity: &resulting_snapshot_identity,
         snapshot_excludes: &excludes,
         content_manifest: Some(manifest),
@@ -2375,6 +2379,7 @@ struct WorkspaceMetadataRequest<'a> {
     sync_mode: RunnerWorkspaceSyncMode,
     actual_materialization_mode: Option<&'a str>,
     fallback_reason: Option<&'a str>,
+    source_transfer: Option<&'a crate::workspace::types::ControllerGitBundleProvenance>,
     snapshot_identity: &'a str,
     snapshot_excludes: &'a [String],
     content_manifest: Option<super::snapshot::WorkspaceContentManifest>,
@@ -2401,6 +2406,9 @@ fn workspace_metadata(request: WorkspaceMetadataRequest<'_>) -> RunnerWorkspaceM
         sync_mode: request.sync_mode.as_str().to_string(),
         actual_materialization_mode: request.actual_materialization_mode.map(str::to_string),
         fallback_reason: request.fallback_reason.map(str::to_string),
+        source_transfer: request
+            .source_transfer
+            .and_then(|transfer| serde_json::to_value(transfer).ok()),
         snapshot_identity: request.snapshot_identity.to_string(),
         workspace_lease: Some(new_workspace_lease()),
         workspace_generation: 0,
