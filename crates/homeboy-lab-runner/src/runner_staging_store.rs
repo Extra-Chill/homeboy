@@ -30,6 +30,72 @@ use crate::{broker_submit_token_for_runner, RunnerSession, RunnerTunnelMode};
 
 const STORE_SCHEMA: &str = "homeboy/remote-runner-staging-store/v1";
 
+/// Operator override (whole seconds) for the sealed staging request deadline.
+pub(crate) const RUNNER_STAGING_TIMEOUT_ENV: &str = "HOMEBOY_RUNNER_STAGING_TIMEOUT_SECS";
+/// Connecting to the tunnel or broker is a control-plane step; only the
+/// upload-and-persist exchange needs the payload-scaled deadline.
+const STAGING_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Minimum total deadline for a sealed staging request, however small.
+const STAGING_TIMEOUT_FLOOR: Duration = Duration::from_secs(60);
+/// Upper bound so a wedged receiver cannot hold a Cook admission forever.
+const STAGING_TIMEOUT_CAP: Duration = Duration::from_secs(30 * 60);
+/// Budget per MiB of serialized request: a conservative 0.5 MiB/s for upload
+/// plus receiver-side persistence over SSH or broker links.
+const STAGING_SECS_PER_MIB: u64 = 2;
+
+/// Total deadline for one sealed staging request carrying `payload_bytes`.
+///
+/// A valid positive `override_secs` (from [`RUNNER_STAGING_TIMEOUT_ENV`]) wins
+/// outright. Otherwise the deadline is the floor plus a per-MiB allowance,
+/// capped. Extra-Chill/homeboy#15863: the request previously reused the 10s
+/// control-plane deadline, so any source large enough to need more than ten
+/// seconds to upload and persist failed every Lab Cook before the provider ran.
+pub(crate) fn staging_request_timeout(
+    payload_bytes: usize,
+    override_secs: Option<&str>,
+) -> Duration {
+    if let Some(secs) = override_secs
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+    {
+        return Duration::from_secs(secs);
+    }
+    let mib = (payload_bytes as u64).div_ceil(1024 * 1024);
+    let scaled = STAGING_TIMEOUT_FLOOR.saturating_add(Duration::from_secs(
+        mib.saturating_mul(STAGING_SECS_PER_MIB),
+    ));
+    scaled.min(STAGING_TIMEOUT_CAP)
+}
+
+/// Attach staging-specific evidence to a sealed staging transport timeout so
+/// the failure names the payload and deadline instead of reading as a generic
+/// tunnel problem. Non-timeout errors pass through unchanged.
+fn staging_timeout_context(mut error: Error, payload_bytes: usize, timeout: Duration) -> Error {
+    let is_timeout = error
+        .details
+        .pointer("/daemon_transport_error/kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("timeout")
+        || error.message.to_ascii_lowercase().contains("timed out");
+    if !is_timeout {
+        return error;
+    }
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "staging_upload_timeout".to_string(),
+            serde_json::json!({
+                "payload_bytes": payload_bytes,
+                "timeout_secs": timeout.as_secs(),
+                "override_env": RUNNER_STAGING_TIMEOUT_ENV,
+            }),
+        );
+    }
+    error.with_hint(format!(
+        "Sealed source staging ({payload_bytes} bytes) did not complete within {}s. Raise the deadline with {RUNNER_STAGING_TIMEOUT_ENV}=<secs> or check the runner link throughput.",
+        timeout.as_secs()
+    ))
+}
+
 /// Read the verified source package named by a staging receipt. Execution code
 /// uses this before extracting its own workspace; it never receives controller
 /// paths or the transfer's inline content.
@@ -802,14 +868,27 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
                     Some("serialize sealed staging request".to_string()),
                 )
             })?;
+        // The sealed request carries the whole source package, and the
+        // receiver persists it before replying, so its deadline must scale
+        // with the payload instead of reusing the 10s control-plane deadline
+        // (Extra-Chill/homeboy#15863).
+        let payload_bytes = serde_json::to_vec(&body)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        let timeout = staging_request_timeout(
+            payload_bytes,
+            std::env::var(RUNNER_STAGING_TIMEOUT_ENV).ok().as_deref(),
+        );
         let response = match self.session.mode {
             RunnerTunnelMode::DirectSsh => {
-                let data = crate::execution::daemon_api_post_json_for_session_with_broker_token(
+                let data = crate::execution::daemon_api_post_json_for_session_with_timeout(
                     &self.session,
                     "/runner/staging/direct",
                     &body,
                     self.broker_token.as_deref(),
-                )?;
+                    timeout,
+                )
+                .map_err(|error| staging_timeout_context(error, payload_bytes, timeout))?;
                 crate::execution::canonical_daemon_body(&data, "sealed staging daemon response")
                     .cloned()?
             }
@@ -823,7 +902,8 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
                     )
                 })?;
                 let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
+                    .connect_timeout(STAGING_CONNECT_TIMEOUT)
+                    .timeout(timeout)
                     .build()
                     .map_err(|error| {
                         Error::internal_unexpected(format!("build staging broker client: {error}"))
@@ -835,7 +915,8 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
                     body,
                     "submit sealed runner staging",
                     self.broker_token.as_deref(),
-                )?
+                )
+                .map_err(|error| staging_timeout_context(error, payload_bytes, timeout))?
             }
         };
         serde_json::from_value(response.get("receipt").cloned().unwrap_or(response)).map_err(
@@ -1865,5 +1946,135 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    #[test]
+    fn staging_request_timeout_scales_with_payload_within_floor_and_cap() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(staging_request_timeout(0, None), STAGING_TIMEOUT_FLOOR);
+        assert_eq!(staging_request_timeout(1, None), Duration::from_secs(62));
+        assert_eq!(
+            staging_request_timeout(100 * MIB, None),
+            Duration::from_secs(260)
+        );
+        assert_eq!(
+            staging_request_timeout(usize::MAX, None),
+            STAGING_TIMEOUT_CAP
+        );
+        // The fixed 10s control-plane deadline is never used for staging.
+        assert!(staging_request_timeout(0, None) > Duration::from_secs(10));
+    }
+
+    #[test]
+    fn staging_request_timeout_honors_a_valid_override_only() {
+        assert_eq!(
+            staging_request_timeout(0, Some("900")),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            staging_request_timeout(0, Some(" 5 ")),
+            Duration::from_secs(5)
+        );
+        for invalid in ["0", "-3", "abc", ""] {
+            assert_eq!(
+                staging_request_timeout(0, Some(invalid)),
+                STAGING_TIMEOUT_FLOOR,
+                "override {invalid:?} must fall back to the computed deadline"
+            );
+        }
+    }
+
+    #[test]
+    fn staging_timeout_context_annotates_timeouts_and_passes_other_errors_through() {
+        let timeout = crate::daemon_http_get::daemon_transport_error(
+            crate::daemon_http_get::DaemonHttpErrorKind::Timeout,
+            "/runner/staging/direct",
+            None,
+            "query runner daemon",
+            "operation timed out",
+        );
+        let annotated = staging_timeout_context(timeout, 4096, Duration::from_secs(61));
+        assert_eq!(
+            annotated.details["staging_upload_timeout"],
+            serde_json::json!({
+                "payload_bytes": 4096,
+                "timeout_secs": 61,
+                "override_env": RUNNER_STAGING_TIMEOUT_ENV,
+            })
+        );
+        assert!(annotated
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains(RUNNER_STAGING_TIMEOUT_ENV)));
+
+        let refused = crate::daemon_http_get::daemon_transport_error(
+            crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+            "/runner/staging/direct",
+            None,
+            "query runner daemon",
+            "connection refused",
+        );
+        let passed = staging_timeout_context(refused, 4096, Duration::from_secs(61));
+        assert!(passed.details.get("staging_upload_timeout").is_none());
+        assert!(passed.hints.is_empty());
+    }
+
+    /// A daemon that answers after `delay` with a successful envelope.
+    fn delayed_daemon(delay: Duration) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buffer = [0_u8; 16 * 1024];
+                let _ = stream.read(&mut buffer);
+                std::thread::sleep(delay);
+                let body = r#"{"success":true,"data":{"body":{"ok":true}}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn direct_daemon_post_uses_the_caller_deadline_not_the_control_plane_default() {
+        let payload = serde_json::json!({ "probe": true });
+
+        // Slower than the explicit deadline: times out at the caller's limit.
+        let slow = production_session(
+            RunnerTunnelMode::DirectSsh,
+            &delayed_daemon(Duration::from_millis(1500)),
+        );
+        let error = crate::execution::daemon_api_post_json_for_session_with_timeout(
+            &slow,
+            "/runner/staging/direct",
+            &payload,
+            None,
+            Duration::from_millis(300),
+        )
+        .expect_err("a response slower than the deadline must time out");
+        assert_eq!(
+            error.details.pointer("/daemon_transport_error/kind"),
+            Some(&serde_json::json!("timeout"))
+        );
+
+        // Within a longer explicit deadline: the same slow daemon succeeds.
+        let patient = production_session(
+            RunnerTunnelMode::DirectSsh,
+            &delayed_daemon(Duration::from_millis(1500)),
+        );
+        let data = crate::execution::daemon_api_post_json_for_session_with_timeout(
+            &patient,
+            "/runner/staging/direct",
+            &payload,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("a slow response within the explicit deadline succeeds");
+        assert_eq!(data["body"]["ok"], serde_json::json!(true));
     }
 }
