@@ -333,6 +333,36 @@ pub(super) fn provider_secret_env_plan_with_status(
     plan.with_status(status).redacted()
 }
 
+/// Secret env names this provider declares whose value is present only in the
+/// current process environment.
+///
+/// A process that does not inherit this environment (a daemon `step`) still
+/// resolves configured and provider-default sources itself, so only these
+/// ambient-only names would silently disappear there.
+pub(crate) fn ambient_only_provider_secret_env(
+    provider: &AgentTaskExecutorProvider,
+) -> Vec<String> {
+    let Ok(request) = serde_json::from_value::<AgentTaskRequest>(serde_json::json!({
+        "task_id": "step-environment-admission",
+        "executor": { "backend": provider.backend },
+        "instructions": "",
+    })) else {
+        return Vec::new();
+    };
+    let names = provider_secret_env_plan(provider, &request).secret_env_names();
+    secret_env_status_with_fallbacks(&names, &provider_secret_sources(provider, Some(&request)))
+        .into_iter()
+        .filter(|status| {
+            status.source == "env"
+                && !status
+                    .alternatives
+                    .iter()
+                    .any(|alternative| alternative.configured)
+        })
+        .map(|status| status.name)
+        .collect()
+}
+
 pub(super) fn provider_secret_sources(
     provider: &AgentTaskExecutorProvider,
     request: Option<&AgentTaskRequest>,

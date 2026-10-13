@@ -2641,10 +2641,7 @@ fn is_pending_local_cook_retry_reservation(
     Ok(
         record.state == agent_task_lifecycle::AgentTaskRunState::Queued
             && record.metadata["retry_of"] == source.run_id
-            && matches!(
-                supervisor["state"].as_str(),
-                Some("pending") | Some("child_spawned")
-            )
+            && supervisor["state"].as_str() == Some("pending")
             && supervisor["pinned_run_id"] == run_id
             && supervisor["launcher_pid"].as_u64().is_some()
             && !supervisor["launcher_process_start_identity"].is_null(),

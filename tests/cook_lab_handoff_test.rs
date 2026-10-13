@@ -380,35 +380,28 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
 }
 
 #[test]
-fn local_retry_launch_token_is_not_reinterpreted_as_a_detached_cook() {
+fn cook_id_is_reserved_for_the_daemon_step() {
     let context = HermeticTestContext::new();
-    std::fs::write(
-        context.config_dir().join("homeboy.json"),
-        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
-    )
-    .expect("disable host-capacity admission for fixture retry");
-    let token_path = context.root().join("retry-launch-token");
-    std::fs::write(&token_path, "consumed-token").expect("publish retry launch token");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    command
-        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
-        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "0")
-        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN", "consumed-token")
-        .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH", token_path)
-        .args([
-            "--placement",
-            "local",
-            "agent-task",
-            "retry",
-            "missing-cook-run",
-            "--run",
-        ]);
+    command.args([
+        "--placement",
+        "local",
+        "agent-task",
+        "cook",
+        "--cook-id",
+        "outside-a-step",
+        "--prompt",
+        "unused",
+        "--to-worktree",
+        "repo@branch",
+        "--verify",
+        "true",
+    ]);
 
     let output = bounded_output(command);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success(), "{stdout}");
-    assert!(!stdout.contains("empty_detached_plan"), "{stdout}");
-    assert!(stdout.contains("missing-cook-run"), "{stdout}");
+    assert!(stdout.contains("--cook-id is reserved"), "{stdout}");
 }
 
 /// A successful local detach exposes accepted only after the child has written
@@ -516,11 +509,10 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
             .events(supervisor_job_id)
             .expect("read controller job events")
             .iter()
-            .any(|event| event
-                .data
-                .as_ref()
-                .is_some_and(|data| { data["durable_run_id"].as_str() == Some(cook_id) })),
-        "controller job admission must carry its durable Cook identity"
+            .any(|event| event.data.as_ref().is_some_and(|data| {
+                data["controller_job"]["linked_durable_run_id"].as_str() == Some(cook_id)
+            })),
+        "the Cook step admission must carry its durable Cook identity"
     );
 
     // Cancel through the durable Cook alias, then wait on the returned attempt.
@@ -689,10 +681,11 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
     );
 }
 
-/// A launcher crash before the supervisor projection must retain a discoverable
-/// resumable parent without relying on a separate cancellation request (#14528).
+/// A launcher that crashes after its Cook step was admitted leaves a
+/// daemon-owned Cook, not an orphan, and no second launcher can start another
+/// attempt for the same Cook id (#14528).
 #[test]
-fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
+fn launcher_crash_after_step_admission_leaves_the_cook_daemon_owned() {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("pre-projection-crash");
@@ -765,71 +758,50 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
     let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
     assert_eq!(killed, 0, "crash routed launcher owner");
     launcher.wait().expect("reap crashed launcher");
-    let after_crash = lifecycle_store
-        .read_record(cook_id)
-        .expect("read owner after killing the launcher");
-    let launcher_start_identity: homeboy_core::process::ProcessStartIdentity =
-        serde_json::from_value(
-            after_crash.metadata["detached_cook_handoff"]["launcher_start_identity"].clone(),
-        )
-        .expect("persisted launcher start identity");
-    assert_eq!(
-        after_crash.metadata["detached_cook_handoff"]["launcher_pid"],
-        launcher_owner_pid,
-        "no descendant should take over while its local launch token is unpublished: {after_crash:?}"
-    );
-    assert_eq!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            launcher_owner_pid as u32,
-            None,
-            Some(&launcher_start_identity),
-        ),
-        homeboy_core::process::ProcessIdentityState::Dead,
-        "the exact persisted pre-projection owner died"
-    );
 
-    let mut status = context.command(TestBinary::HomeboyFixture);
-    // Action eligibility is part of the full report, not compact status (#15550).
-    status.args(["agent-task", "status", cook_id, "--full"]);
-    let status = bounded_output(status);
-    let status_stdout = String::from_utf8_lossy(&status.stdout);
-    assert!(status.status.success(), "{status_stdout}");
-    let lifecycle: serde_json::Value =
-        serde_json::from_str(&status_stdout).expect("terminal lifecycle status JSON");
-    assert_eq!(lifecycle["data"]["state"], "queued", "{status_stdout}");
-    assert_eq!(
-        lifecycle["data"]["action_eligibility"]["actions"]
-            .as_array()
-            .and_then(|actions| actions.iter().find(|action| action["action"] == "resume"))
-            .and_then(|action| action["availability"].as_str()),
-        Some("unavailable"),
-        "{status_stdout}"
-    );
-    assert!(
-        !lifecycle_store.cook_index_path(cook_id).exists(),
-        "a crashed pre-projection launcher must not admit an executable Cook"
-    );
-    let owner_before_replacement = lifecycle_store
-        .read_record(cook_id)
-        .expect("read owner before replacement");
-    let owner_pid_before_replacement = owner_before_replacement.metadata["detached_cook_handoff"]
-        ["launcher_pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .expect("current owner PID");
-    let owner_identity_before_replacement: homeboy_core::process::ProcessStartIdentity =
-        serde_json::from_value(
-            owner_before_replacement.metadata["detached_cook_handoff"]["launcher_start_identity"]
-                .clone(),
-        )
-        .expect("current owner start identity");
-    let owner_liveness_before_replacement =
-        homeboy_core::process::process_identity_state_with_start_identity(
-            owner_pid_before_replacement,
-            None,
-            Some(&owner_identity_before_replacement),
+    // The step was admitted before the launcher died, so the daemon already
+    // owns this Cook: the step child binds the handoff and the Cook runs to a
+    // terminal state without its launcher.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let attempt_id = loop {
+        let parent = lifecycle_store
+            .read_record(cook_id)
+            .expect("read handoff parent after launcher crash");
+        let handoff = &parent.metadata["detached_cook_handoff"];
+        if handoff["state"] == "redirected" {
+            break handoff["attempt_run_id"]
+                .as_str()
+                .expect("redirected handoff names its attempt")
+                .to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Cook step did not materialize after its launcher died: {parent:?}"
         );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let parent = lifecycle_store
+        .read_record(cook_id)
+        .expect("read bound handoff parent");
+    assert!(
+        parent.metadata["detached_cook_handoff"]["supervisor_job_id"].is_string(),
+        "the step job owns the handoff: {parent:?}"
+    );
+    loop {
+        let attempt = lifecycle_store
+            .read_record(&attempt_id)
+            .expect("read step-owned attempt");
+        if attempt.state.is_terminal() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "step-owned Cook did not terminalize: {attempt:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
+    // A second launcher for the same Cook id cannot start another Cook.
     let mut replacement = context.controller_runtime_command(TestBinary::HomeboyFixture);
     replacement
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "10000")
@@ -858,18 +830,17 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         ]);
     let replacement = bounded_output(replacement);
     assert!(
-        replacement.status.success(),
-        "replacement launcher failed: owner_pid={launcher_owner_pid} owner_state={:?} owner_identity={} current_pid={owner_pid_before_replacement} current_state={owner_liveness_before_replacement:?} current_identity={:?} original_pid={} stdout={} stderr={} previous status={status_stdout}",
-        homeboy_core::process::process_identity_state(launcher_owner_pid as u32, None),
-        claimed.metadata["detached_cook_handoff"]["launcher_start_identity"],
-        owner_identity_before_replacement,
-        launcher.id(),
-        String::from_utf8_lossy(&replacement.stdout),
-        String::from_utf8_lossy(&replacement.stderr)
+        !replacement.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replacement.stdout)
     );
-    assert!(
-        lifecycle_store.cook_index_path(cook_id).exists(),
-        "replacement launcher must complete durable Cook admission"
+    assert_eq!(
+        lifecycle_store
+            .read_cook_index(cook_id)
+            .expect("one durable Cook index")
+            .latest_run_id,
+        attempt_id,
+        "the replacement launcher must not admit a second attempt"
     );
 }
 

@@ -1209,8 +1209,7 @@ fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
 
 fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
     let supervisor = &record.metadata["local_cook_supervisor"];
-    if supervisor["job_type"].as_str() != Some(crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE)
-    {
+    if supervisor["job_type"].as_str() != Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE) {
         return false;
     }
     let Some(job_id) = supervisor["job_id"].as_str() else {
@@ -1243,7 +1242,7 @@ fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
     job.operation
         == format!(
             "controller.{}",
-            crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE
+            homeboy_core::daemon::step_job::STEP_JOB_TYPE
         )
         && job.daemon_lease_id.as_deref() == Some(lease.as_str())
         && matches!(job.status, JobStatus::Queued | JobStatus::Running)
@@ -1251,10 +1250,8 @@ fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
 
 fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
     let supervisor = &record.metadata["local_cook_supervisor"];
-    if !matches!(
-        supervisor["state"].as_str(),
-        Some("child_spawned" | "supervising")
-    ) || supervisor["pinned_run_id"].as_str() != Some(record.run_id.as_str())
+    if supervisor["state"].as_str() != Some("supervising")
+        || supervisor["pinned_run_id"].as_str() != Some(record.run_id.as_str())
     {
         return false;
     }

@@ -53,6 +53,7 @@ pub mod runner_exec_driver;
 mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
+pub mod step_job;
 mod stop;
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children

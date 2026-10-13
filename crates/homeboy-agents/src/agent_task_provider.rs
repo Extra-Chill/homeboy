@@ -59,7 +59,7 @@ mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
 mod secrets;
-pub(crate) use secrets::provider_secret_env_plan;
+pub(crate) use secrets::{ambient_only_provider_secret_env, provider_secret_env_plan};
 pub mod structured_error;
 mod types;
 mod usage_cap;
@@ -113,7 +113,7 @@ pub use dispatchability::{
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
-pub(crate) use launch_context::apply_admitted_public_environment;
+pub(crate) use launch_context::{apply_admitted_public_environment, BASE_INHERITED_ENV};
 pub use launch_context::{
     AgentTaskProviderLaunchContext, AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV,
     AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA, FANOUT_EXECUTION_AUTHORITY_SCHEMA,

@@ -46,7 +46,6 @@ use homeboy_upgrade::upgrade;
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 pub(crate) const COOK_STARTUP_LAUNCHER_ID_ENV: &str = "HOMEBOY_COOK_STARTUP_LAUNCHER_ID";
-pub(crate) const COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV: &str = "HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN";
 const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(any(test, feature = "test-support"))]
 const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV: &str =
@@ -115,7 +114,7 @@ impl CookStartupAdmission {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut owns_launcher = inherited_launcher_id.is_none();
         let is_local_detached_child =
-            std::env::var_os(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV).is_some();
+            std::env::var_os(homeboy::core::daemon::step_job::STEP_JOB_ID_ENV).is_some();
         if cook.dispatch.run_id.is_none() {
             cook.dispatch.run_id = Some(cook_id.clone());
             let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
@@ -124,11 +123,10 @@ impl CookStartupAdmission {
 
         let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
         let mut record = if inherited_launcher_id.is_some() && is_local_detached_child {
-            // The detached child is held behind its launch token until the
-            // pinned launcher publishes the supervisor. It inherits that
-            // launcher's token for the eventual handoff, but is not permitted
-            // to reclaim custody while waiting: a killed pre-projection parent
-            // must remain reclaimable by the next operator invocation.
+            // The Cook step binds itself to the handoff its launcher claimed.
+            // It inherits that launcher's id for the binding, but is not
+            // permitted to reclaim custody: a killed pre-binding parent must
+            // remain reclaimable by the next operator invocation.
             store.read_record_bounded(&cook_id)?
         } else {
             homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
@@ -247,7 +245,7 @@ impl CookStartupAdmission {
     }
 }
 
-fn persist_cook_stdin_replay_prompt(
+pub(crate) fn persist_cook_stdin_replay_prompt(
     data_root: &std::path::Path,
     cook_id: &str,
     prompt: &str,
@@ -1061,10 +1059,10 @@ fn register_startup_providers_after_reconcile(
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // New orchestration submissions share one versioned lifecycle driver.
     crate::agents::agent_task_service::register_work_job_driver();
-    // A locally-placed detached Cook is a daemon-owned durable job: the daemon
-    // owns its record, checkpointing, cancellation and HTTP inspection, while
-    // the launcher-spawned child keeps the operator's execution environment.
-    crate::agents::agent_task_service::register_cook_work_handler();
+    // A detached Cook is a daemon `step`: the daemon spawns it with the
+    // environment its launcher admitted and reconciles its Cook record when
+    // the child exits.
+    crate::agents::agent_task_service::register_cook_step_hooks();
     // A locally-placed detached fanout wave is daemon-owned on the same terms:
     // the daemon supervises a coordinator it did not spawn, so no branch of its
     // lifecycle can re-run a child that already completed.
@@ -1520,6 +1518,16 @@ impl CliRuntime {
         };
         let mut cli = compiled.value;
         let command_provenance = compiled.provenance;
+        if let Err(error) = normalize_cook_step_identity(&mut cli, &mut normalized) {
+            output_runtime::emit_json_result_for_identity(
+                Err(error),
+                output_file.as_deref(),
+                2,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(2);
+        }
+
         if let Err(error) = project_cli_options(&mut cli) {
             output_runtime::emit_json_result_for_identity(
                 Err(error),
@@ -2728,6 +2736,42 @@ fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
 /// Apply command-level option projection before either help is rendered or a
 /// parsed command is routed. Keeping this typed makes the two paths share the
 /// same conflict and action-support rules.
+/// `--cook-id` is how the daemon `step` names the Cook it runs. It pins the
+/// same durable identity `--run-id` does, so it is projected onto `--run-id`
+/// before anything reads or forwards the argv; it is valid only inside a step.
+fn normalize_cook_step_identity(
+    cli: &mut Cli,
+    normalized_args: &mut [String],
+) -> crate::core::Result<()> {
+    let Commands::AgentTask(agent_task) = &mut cli.command else {
+        return Ok(());
+    };
+    let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &mut agent_task.command else {
+        return Ok(());
+    };
+    let Some(cook_id) = cook.cook_id.clone() else {
+        return Ok(());
+    };
+    if std::env::var_os(homeboy::core::daemon::step_job::STEP_JOB_ID_ENV).is_none() {
+        return Err(crate::core::Error::validation_invalid_argument(
+            "cook_id",
+            "--cook-id is reserved for the daemon step that runs a detached Cook; use --run-id",
+            Some(cook_id),
+            None,
+        ));
+    }
+    cook.dispatch.run_id = Some(cook_id);
+    let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
+    for arg in &mut normalized_args[..owned] {
+        if arg == "--cook-id" {
+            *arg = "--run-id".to_string();
+        } else if let Some(value) = arg.strip_prefix("--cook-id=") {
+            *arg = format!("--run-id={value}");
+        }
+    }
+    Ok(())
+}
+
 fn project_cli_options(cli: &mut Cli) -> crate::core::Result<()> {
     if let Commands::Review(args) = &mut cli.command {
         args.project_effective_child_args()?;
@@ -4952,7 +4996,7 @@ mod tests {
             ]);
             std::env::set_var("HOMEBOY_CALLER_CONTEXT", "existing-checkout-caller");
             std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
-            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            std::env::remove_var(homeboy::core::daemon::step_job::STEP_JOB_ID_ENV);
             let mut normalized = vec![
                 "homeboy",
                 "--placement",
@@ -5033,7 +5077,7 @@ mod tests {
         crate::test_support::with_isolated_home(|home| {
             std::env::set_var("HOMEBOY_CALLER_CONTEXT", "unmaterialized-checkout-caller");
             std::env::remove_var(COOK_STARTUP_LAUNCHER_ID_ENV);
-            std::env::remove_var(COOK_LOCAL_DETACHED_LAUNCH_TOKEN_ENV);
+            std::env::remove_var(homeboy::core::daemon::step_job::STEP_JOB_ID_ENV);
             let destination = home.path().join("repository@unmaterialized");
             let mut normalized = vec![
                 "homeboy",

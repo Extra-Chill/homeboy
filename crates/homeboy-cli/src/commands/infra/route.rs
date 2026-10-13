@@ -699,8 +699,7 @@ fn materialized_placement_identity(
 
 fn needs_provider_resolved_cook_interception(cli: &Cli, inferred_runner_id: Option<&str>) -> bool {
     // Explicit local placement was already intercepted before provider
-    // resolution. Running it through this pass again consumes the supervised
-    // child's one-use launch token twice and recursively detaches the child.
+    // resolution; running it through this pass again would detach twice.
     cli.placement != homeboy::cli_surface::Placement::Local
         && (inferred_runner_id.is_some()
             || cli.placement.allows_local_fallback()

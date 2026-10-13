@@ -161,6 +161,13 @@ A useful headless UI can be built from this read/query surface:
   cancellable here — but through `POST /controller/jobs/:id/cancel`, not
   `POST /jobs/:id/cancel`, which fails closed on a controller job so the
   driver can stop the work it owns.
+  A detached Cook is a `step` controller job
+  (`homeboy/step-job-request/v1`): the daemon spawns its argv with
+  `env_clear()` plus the environment the launcher admitted (public values and
+  secret references only), supervises the child by PID and start identity,
+  writes its output to `artifacts/jobs/<job_id>/step.log`, and terminates the
+  child's whole process tree on cancellation. A step may wait for
+  `not_before` or `runner_eligible` before it spawns.
 - `GET /tools`, `GET /tools/:id`, and `POST /tools/:id/run` for sandbox agents
   that need typed Homeboy tool execution without arbitrary shell access
 

@@ -12,12 +12,12 @@ mod cook_baseline;
 /// Daemon-owned durable lifecycle for a locally-placed detached cook batch.
 pub(crate) mod cook_batch_job;
 mod cook_budget;
-/// Daemon-owned durable lifecycle for a locally-placed detached Cook.
-mod cook_job;
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_promotion;
 mod cook_recipe;
+/// Detached Cook execution as a daemon `step` with an admitted environment.
+mod cook_step;
 /// Resource supervision of a running Cook against its declared budgets.
 mod cook_supervision;
 mod discovery;
@@ -46,9 +46,6 @@ pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_batch_job::*;
 pub use cook_budget::*;
-#[cfg(test)]
-pub(crate) use cook_job::finalize_detached_cook_attempt;
-pub use cook_job::*;
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;
@@ -57,6 +54,9 @@ pub use cook_pre_execution::{
 };
 pub use cook_promotion::*;
 pub use cook_recipe::*;
+#[cfg(test)]
+pub(crate) use cook_step::finalize_detached_cook_attempt;
+pub use cook_step::*;
 pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
 pub use discovery::*;
 pub use execution::*;

@@ -1127,6 +1127,10 @@ pub struct AgentTaskCookArgs {
     /// or promote the first successful candidate.
     #[arg(long, default_value_t = AgentTaskCandidateCompletionPolicy::WaitAll, value_name = "POLICY")]
     pub candidate_completion: AgentTaskCandidateCompletionPolicy,
+    /// The durable Cook identity a daemon `step` runs. Equivalent to `--run-id`
+    /// and accepted only inside that step.
+    #[arg(long = "cook-id", hide = true, conflicts_with = "run_id")]
+    pub cook_id: Option<String>,
     #[arg(long, hide = true)]
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]

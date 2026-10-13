@@ -7,13 +7,10 @@
 //!
 //! # Why the launcher spawns and the daemon only supervises
 //!
-//! Identical to `local_detach`, and more load-bearing here. The ambient process
-//! environment is the first secret provider a cook consults; the real provider
-//! invocation never calls `env_clear`; the daemon inherits its environment and
-//! working directory from whichever caller first started it. A daemon-hosted
-//! wave would therefore run *every child* against credentials from an
-//! environment no operator chose. Spawning the coordinator here preserves the
-//! operator's environment exactly.
+//! The coordinator still runs in the operator's own environment, so the
+//! credentials every child resolves are the operator's. A single detached Cook
+//! already runs as a daemon `step` with an admitted environment instead; the
+//! wave adopts that model when cook-batch becomes a workflow.
 //!
 //! # Where the flag still refuses
 //!
@@ -203,7 +200,7 @@ pub(super) fn intercept_local_detached_fanout(
         submit_batch_controller_job(&fanout_id, pid, &start_identity),
     )?;
     if !cli.detach_after_handoff {
-        let status = super::local_detach::stream_attached_cook_log(&mut child, &log_path)?;
+        let status = stream_attached_log(&mut child, &log_path)?;
         return Ok(Some(status.code().unwrap_or(1)));
     }
     let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout())?;
@@ -506,6 +503,30 @@ impl DetachedHandoffState {
             Self::CoordinatorFailed => "coordinator_failed",
             Self::ExitedBeforeHandoff => "exited_before_handoff",
         }
+    }
+}
+
+fn stream_attached_log(
+    child: &mut std::process::Child,
+    log_path: &Path,
+) -> homeboy::core::Result<std::process::ExitStatus> {
+    let mut offset = 0;
+    loop {
+        if let Ok(log) = std::fs::read_to_string(log_path) {
+            if log.len() > offset {
+                print!("{}", &log[offset..]);
+                offset = log.len();
+            }
+        }
+        if let Some(status) = child.try_wait().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("observe supervised local fanout".to_string()),
+            )
+        })? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

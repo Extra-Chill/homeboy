@@ -275,40 +275,27 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
         );
 
         eprintln!("NATIVE_PHASE=admit_controlled_owner");
-        let mut child = OwnedChild(
-            Command::new("sh")
-                .args(["-c", "exec sleep 3600"])
-                .spawn()
-                .expect("spawn controlled private owner process"),
-        );
-        let child_identity = homeboy_core::process::process_start_identity(child.0.id())
-            .expect("read process identity")
-            .expect("owned child identity");
-        let work_request = json!({
-            "schema":"homeboy/work-job-request/v1",
-            "work_type":"agent-task-cook",
-            "work_version":2,
-            "request":{
-                "schema":"homeboy/agent-task-cook-job/v2",
-                "idempotency_key":format!("agent-task-cook:{RUN_ID}"),
-                "request":{
-                    "schema":"homeboy/agent-task-cook-job/v2",
-                    "cook_id":RUN_ID,
-                    "child_pid":child.0.id(),
-                    "child_start_identity":child_identity,
-                    "pinned_retry_run_id":RUN_ID
-                },
-                "phase":"queued",
-                "run_id":RUN_ID,
-                "terminal_state":null
-            }
-        });
+        // A daemon `step` owns one long-running process that ignores SIGTERM, so
+        // cancellation stays pending through the bounded termination grace and
+        // the owner is cancelled only once the process tree is gone.
+        let work_request =
+            serde_json::to_value(homeboy_core::daemon::step_job::StepJobRequest::new(
+                format!("native-proof-owner:{RUN_ID}"),
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    "trap '' TERM; exec sleep 3600".to_string(),
+                ],
+                std::env::temp_dir().display().to_string(),
+                Default::default(),
+            ))
+            .expect("serialize controlled owner step");
         let response = daemon_request(
             "POST",
             "/controller/jobs",
             Some(
                 serde_json::to_value(ControllerJobRequest {
-                    job_type: "work".to_string(),
+                    job_type: homeboy_core::daemon::step_job::STEP_JOB_TYPE.to_string(),
                     version: 1,
                     idempotency_key: format!("native-proof-work:{RUN_ID}"),
                     active_idempotency_key: None,
@@ -366,20 +353,11 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
         let first_ack = ack(&first);
         println!("NATIVE_FIRST_EXIT={:?}", first.status.code());
         println!("NATIVE_FIRST_ACK={first_ack}");
-        assert_eq!(first_ack["accepted"], "failed");
-        assert_eq!(first_ack["disposition"], "requested");
-        assert_eq!(first_ack["terminal"], false);
-        assert!(first_ack["message"]
-            .as_str()
-            .is_some_and(|detail| detail.contains(&controller_job_id)));
-        assert_eq!(
-            store.read_record(RUN_ID).unwrap().state,
-            AgentTaskRunState::Queued
-        );
-        assert_eq!(
-            controller_job_status(&controller_job_id),
-            homeboy_core::api_jobs::JobStatus::Running
-        );
+        // The step owner stops within the bounded termination grace, so the
+        // cancellation completes in the first request.
+        assert_eq!(first_ack["accepted"], "succeeded");
+        assert_eq!(first_ack["disposition"], "cancelled");
+        assert_eq!(first_ack["terminal"], true);
         assert_eq!(
             other_root.read_record(RUN_ID).unwrap().state,
             AgentTaskRunState::Queued
@@ -393,13 +371,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
             replay_ack, first_ack,
             "same idempotency key replays the retained acknowledgement"
         );
-        assert_eq!(
-            controller_job_status(&controller_job_id),
-            homeboy_core::api_jobs::JobStatus::Running
-        );
 
-        child.0.kill().expect("release controlled owner");
-        child.0.wait().expect("reap private owner process");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut controller_cancelled = false;
         while Instant::now() < deadline {
@@ -439,8 +411,8 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
             .map(|event| event.kind.clone())
             .collect::<Vec<_>>();
         println!("NATIVE_EVENT_KINDS={event_kinds:?}");
-        assert!(event_kinds.iter().any(|kind| kind == "action.failed"));
-        assert!(!event_kinds.iter().any(|kind| kind == "action.succeeded"));
+        assert!(event_kinds.iter().any(|kind| kind == "action.succeeded"));
+        assert!(!event_kinds.iter().any(|kind| kind == "action.failed"));
 
         let submissions = Arc::new(AtomicUsize::new(0));
         agent_task_lifecycle::register_runner_continuation_provider(Box::new(AdmissionProbe(

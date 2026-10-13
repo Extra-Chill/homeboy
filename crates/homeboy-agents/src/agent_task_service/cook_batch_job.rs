@@ -1,32 +1,16 @@
 //! Daemon-owned lifecycle for a locally-placed, detached cook batch.
 //!
-//! This is the sibling of [`super::cook_job`], and deliberately reads like it.
-//! Where that driver owns one detached Cook, this one owns a whole fanout wave:
-//! `fanout cook-batch --run-plan` and `fanout run-plan`.
-//!
-//! # It supervises rather than executes, for the same reasons
-//!
-//! Every argument in `cook_job`'s module documentation applies here unchanged,
-//! and applies *more*, because a batch multiplies it by the number of children:
-//!
-//! 1. `agent_task_secrets::resolve_secret_env_with_config_and_fallbacks` lists
-//!    the ambient process environment as the **first** secret provider, so
-//!    whichever process runs a cook decides which credentials its provider gets.
-//! 2. `agent_task_provider::command_runner` never calls `env_clear` for the
-//!    real provider invocation, so the provider inherits that environment whole.
-//! 3. The daemon is spawned with neither `env_clear` nor `current_dir`, is
-//!    long-lived and shared, and auto-starts on the first `connect()` — so its
-//!    environment is a snapshot of whoever happened to start it first.
-//!
-//! A daemon-hosted batch would therefore run every child against credentials
-//! from an environment no operator chose. So the launcher still spawns the
-//! coordinator as a child process in the operator's own environment, and the
-//! daemon owns everything *around* it: the durable job, checkpointing,
-//! cancellation, and HTTP inspection.
+//! This driver owns a whole fanout wave: `fanout cook-batch --run-plan` and
+//! `fanout run-plan`. The launcher spawns the coordinator in the operator's own
+//! environment and the daemon owns everything *around* it: the durable job,
+//! checkpointing, cancellation, and HTTP inspection. A single detached Cook
+//! instead runs as a daemon `step` with an admitted environment
+//! (`agent_task_service::cook_step`); the wave moves to that model when
+//! cook-batch becomes a workflow.
 //!
 //! # What the durable request is, and why a batch id is enough
 //!
-//! `cook_job` carries a `cook_id` because `CookRequest` cannot
+//! A Cook is addressed by its `cook_id` because `CookRequest` cannot
 //! be serialized — it holds an `Arc<dyn AgentTaskCookAttemptDispatcher>` — while
 //! the Cook recipe behind that id can. The batch has the same seam one level up.
 //! Before a batch dispatches its first child, the fanout coordinator has already
@@ -69,7 +53,7 @@ const AGENT_TASK_COOK_BATCH_JOB_SCHEMA: &str = "homeboy/agent-task-cook-batch-jo
 
 /// How often supervision re-reads durable batch state and coordinator liveness.
 ///
-/// Slower than `cook_job`'s poll on purpose: each tick reads the batch record
+/// Slow on purpose: each tick reads the batch record
 /// plus one lifecycle record per child, so the cost scales with wave width,
 /// while the events it is watching for — a child terminalizing, a multi-hour
 /// coordinator exiting — are minutes apart.
@@ -209,7 +193,7 @@ impl AgentTaskCookBatchJob {
     /// The public projection.
     ///
     /// Withholds the coordinator's pid and kernel start identity, matching
-    /// `AgentTaskCookJob::public_projection`: those are liveness tokens only
+    /// the `step` driver public projection: those are liveness tokens only
     /// supervision needs. It also withholds the child *id list*, projecting
     /// only counts. A child id names a branch and an issue, and the counts are
     /// what a reader of public job state actually needs; the full roster stays
@@ -245,7 +229,7 @@ impl AgentTaskCookBatchJob {
     ///
     /// A coordinator that died before it could even write its batch record is
     /// reported as `Failed` rather than dressed up as an empty success, the
-    /// same honesty `cook_job` applies to `exited_before_handoff`.
+    /// same honesty a detached Cook handoff applies to `exited_before_handoff`.
     fn observe_terminal(&mut self) -> Result<Value> {
         self.refresh_observations();
         self.terminal_state = Some(match agent_task_batch::status(&self.request.batch_id) {

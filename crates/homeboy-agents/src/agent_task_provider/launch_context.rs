@@ -17,7 +17,7 @@ pub const FANOUT_EXECUTION_AUTHORITY_SCHEMA: &str = "homeboy/fanout-execution-au
 
 // These are process mechanics, not credentials. Provider-specific additions
 // must be declared by the provider invocation instead of widening this list.
-const BASE_INHERITED_ENV: &[&str] = &[
+pub(crate) const BASE_INHERITED_ENV: &[&str] = &[
     "PATH",
     "HOME",
     "TMPDIR",

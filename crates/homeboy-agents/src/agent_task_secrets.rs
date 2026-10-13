@@ -372,6 +372,33 @@ pub fn resolve_secret_env_with_fallbacks(
     )
 }
 
+/// Resolve secret env names from configured agent-task sources only.
+///
+/// The ambient process environment is deliberately not a source: this is the
+/// resolver a daemon uses to materialize a `step`, and the daemon's own
+/// environment must never become credential authority for the work it runs.
+pub fn resolve_configured_secret_env(
+    names: &[String],
+) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
+    let config = AgentTaskSecretConfig::load();
+    let mut bundle_cache = HashMap::new();
+    resolve_secret_env_names(
+        names.iter().cloned(),
+        vec![SecretEnvValueProvider::new("agent-task", move |name| {
+            config
+                .secrets
+                .get(name)
+                .and_then(|source| resolve_secret_source(source, name, &mut bundle_cache))
+        })],
+        "missing required agent-task secret env",
+    )
+    .map(|resolution| resolution.env)
+    .map_err(|error| AgentTaskSecretResolutionError {
+        missing_secret_env: error.missing_secret_env,
+        message: error.message,
+    })
+}
+
 fn secret_env_status_with_config(
     names: &[String],
     config: &AgentTaskSecretConfig,

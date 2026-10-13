@@ -31,7 +31,7 @@ fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Valu
         json!({
             "state": "supervising",
             "job_id": uuid::Uuid::new_v4(),
-            "job_type": crate::agent_task_service::AGENT_TASK_COOK_JOB_TYPE,
+            "job_type": homeboy_core::daemon::step_job::STEP_JOB_TYPE,
             "pinned_run_id": run_id,
         }),
     )])
@@ -319,13 +319,17 @@ fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published
     )
     .expect("persist retry plan");
 
-    record_local_cook_retry_supervisor_in_store(
+    record_local_cook_retry_step_supervision_in_store(
         &store,
         run_id,
         cook_id,
         &uuid::Uuid::new_v4().to_string(),
+        std::process::id(),
+        homeboy_core::process::process_start_identity(std::process::id())
+            .unwrap()
+            .unwrap(),
     )
-    .expect("project retry supervisor");
+    .expect("project retry step supervision");
     let supervised = store.read_record(run_id).expect("supervised retry");
     assert!(supervised.has_live_pending_local_cook_supervisor(now));
     assert!(supervised.metadata.get("runner_pid").is_none());
@@ -430,11 +434,11 @@ fn pending_local_retry_launcher_claim_converges_live_owner_then_reclaims_dead_ow
 }
 
 #[test]
-fn spawned_local_retry_child_is_reclaimed_without_a_second_spawn() {
+fn a_retry_step_binds_only_its_own_pending_reservation() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "spawned-local-retry";
-    let cook_id = "spawned-local-retry-cook";
+    let run_id = "step-local-retry";
+    let cook_id = "step-local-retry-cook";
     store
         .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
         .expect("submit pending retry");
@@ -448,36 +452,53 @@ fn spawned_local_retry_child_is_reclaimed_without_a_second_spawn() {
             true
         })
         .expect("seed pending retry");
-    let mut child = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn retry child");
-    let identity = homeboy_core::process::process_start_identity(child.id())
-        .expect("inspect retry child")
-        .expect("retry child identity");
-    record_local_cook_retry_child_in_store(
+    let identity = homeboy_core::process::process_start_identity(std::process::id())
+        .unwrap()
+        .unwrap();
+
+    assert!(record_local_cook_retry_step_supervision_in_store(
+        &store,
+        run_id,
+        "another-cook",
+        "step-job",
+        std::process::id(),
+        identity.clone(),
+    )
+    .is_err());
+    record_local_cook_retry_step_supervision_in_store(
         &store,
         run_id,
         cook_id,
-        child.id(),
+        "step-job",
+        std::process::id(),
         identity.clone(),
-        "one-child-token",
-        "/tmp/one-child-token",
     )
-    .expect("persist retry child before submission");
-
-    assert!(matches!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("recover spawned child"),
-        LocalCookRetryLaunchClaim::ChildSpawned { pid, start_identity, .. }
-            if pid == child.id() && start_identity == identity
-    ));
-    child.kill().expect("kill retry child");
-    child.wait().expect("reap retry child");
+    .expect("bind pending reservation");
+    let record = store.read_record(run_id).expect("bound retry");
+    let supervisor = &record.metadata["local_cook_supervisor"];
+    assert_eq!(supervisor["state"], "supervising");
+    assert_eq!(supervisor["job_id"], "step-job");
     assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("observe dead child"),
-        LocalCookRetryLaunchClaim::ChildExited,
+        supervisor["job_type"],
+        homeboy_core::daemon::step_job::STEP_JOB_TYPE
+    );
+    assert_eq!(supervisor["child_pid"], std::process::id());
+    assert!(
+        record_local_cook_retry_step_supervision_in_store(
+            &store,
+            run_id,
+            cook_id,
+            "second-step",
+            std::process::id(),
+            identity,
+        )
+        .is_err(),
+        "a bound reservation cannot be adopted by a second step"
+    );
+    assert_eq!(
+        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id).expect("claim"),
+        LocalCookRetryLaunchClaim::NotPending,
+        "a bound reservation has no launcher left to claim"
     );
 }
 
