@@ -217,6 +217,10 @@ pub struct RetentionConfig {
     pub controller_runtime_days: u64,
     #[serde(default = "default_controller_runtime_max_bytes")]
     pub controller_runtime_max_bytes: u64,
+    /// Age after which a terminal run's controller scratch recovery directory
+    /// (`<artifact_root>/controller-scratch-recovery/<run>`) is reclaimable.
+    #[serde(default = "default_controller_scratch_recovery_days")]
+    pub controller_scratch_recovery_days: u64,
     /// Published release versions retained per repository in the durable
     /// release artifact store.
     ///
@@ -290,6 +294,7 @@ impl Default for RetentionConfig {
             runtime_run_max_count: default_runtime_run_max_count(),
             controller_runtime_days: default_controller_runtime_retention_days(),
             controller_runtime_max_bytes: default_controller_runtime_max_bytes(),
+            controller_scratch_recovery_days: default_controller_scratch_recovery_days(),
             release_artifact_max_count: default_release_artifact_max_count(),
             release_artifact_max_bytes: default_release_artifact_max_bytes(),
             limit: default_retention_limit(),
@@ -333,6 +338,10 @@ fn default_controller_runtime_retention_days() -> u64 {
 
 fn default_controller_runtime_max_bytes() -> u64 {
     2 * 1024 * 1024 * 1024
+}
+
+fn default_controller_scratch_recovery_days() -> u64 {
+    14
 }
 
 /// Five published versions per repository.

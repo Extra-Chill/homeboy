@@ -878,6 +878,19 @@ fn retained_storage_report(
             reference: format!("{} (task {})", resource.path, resource.task_id),
         });
     }
+    for recovery in homeboy::agents::controller_scratch::recovery_retained_storage_inventory()? {
+        records.push(RetainedStorageRecord {
+            category: "controller_scratch_recovery".to_string(),
+            reason: recovery.state.reason().to_string(),
+            owner: "controller-scratch".to_string(),
+            run_id: Some(recovery.run_id),
+            liveness: recovery.state.liveness().to_string(),
+            age: age_bucket(recovery.age_seconds),
+            age_seconds: Some(recovery.age_seconds),
+            size_bytes: recovery.size_bytes,
+            reference: recovery.path,
+        });
+    }
 
     retained_storage_progress("runtime_tmp");
     let runtime_tmp =

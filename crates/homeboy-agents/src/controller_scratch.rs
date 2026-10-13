@@ -44,6 +44,12 @@ pub struct ControllerScratchResource {
     /// deciding whether the workspace is safe to reclaim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    /// Commit the scheduler prepared this attempt's checkout at. Recovery
+    /// bundles only `<base_sha>..HEAD`, the commits the attempt produced.
+    /// Resources without one (provider-registered, or recorded before the
+    /// base was tracked) fall back to bundling all of HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +217,7 @@ fn allocate_attempt_at_roots(
             interrupted_at: None,
             git_worktree: None,
             component_id: component_id.map(str::to_string),
+            base_sha: None,
         });
         write_index_at_unlocked(&index_path, &index)
     })?;
@@ -324,23 +331,24 @@ pub fn mark_attempt_ephemeral(allocation: &ControllerScratchAllocation) -> Resul
     })
 }
 
-/// Record that a linked Git worktree has been materialized inside an allocated
-/// scratch lease, binding the worktree's Git registration to the durable run
-/// that owns the lease (#10568).
+/// Record the attempt checkout prepared inside an allocated scratch lease: the
+/// commit it was prepared at, and the Git registration of its linked worktree,
+/// binding both to the durable run that owns the lease (#10568, #15052).
+///
+/// The base bounds terminal recovery to the commits the attempt produced.
 ///
 /// The registration is read back out of Git rather than taken from the caller:
 /// the worktree's own `.git` pointer file is the only authority on which
 /// repository holds its registration, and a caller-supplied source root that
 /// disagrees with it would let cleanup prune the wrong repository. A path that
-/// is not a linked worktree records nothing and is not an error — providers may
-/// materialize plain directories.
-pub fn record_attempt_git_worktree(
+/// is not a linked worktree records no registration and is not an error —
+/// providers may materialize plain directories.
+pub fn record_attempt_workspace(
     allocation: &ControllerScratchAllocation,
     worktree: &Path,
+    base_sha: &str,
 ) -> Result<()> {
-    let Some(registration) = linked_worktree_registration(worktree) else {
-        return Ok(());
-    };
+    let registration = linked_worktree_registration(worktree);
     with_index_lock(&allocation.index_path, || {
         let mut index = read_index_at_unlocked(&allocation.index_path)?;
         let resource = index
@@ -358,7 +366,8 @@ pub fn record_attempt_git_worktree(
                     None,
                 )
             })?;
-        resource.git_worktree = Some(registration);
+        resource.git_worktree = registration;
+        resource.base_sha = Some(base_sha.to_string());
         write_index_at_unlocked(&allocation.index_path, &index)
     })
 }
@@ -584,6 +593,13 @@ pub struct ControllerScratchCleanupOutput {
     pub reclaimed_bytes: u64,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub candidate_detail: OutputTruncation,
+    /// Reclaimable terminal-run recovery directories. They are inspected on
+    /// the first page only and are included in the counts and byte totals
+    /// above.
+    pub recovery_candidates: Vec<ControllerScratchRecovery>,
+    pub recovery_candidate_detail: OutputTruncation,
+    /// Recovery directories retention still holds.
+    pub recovery_retained_count: usize,
     pub skipped: Vec<ControllerScratchSkipped>,
     pub skipped_detail: OutputTruncation,
     pub retention_reasons: Vec<ControllerScratchRetentionReason>,
@@ -718,6 +734,169 @@ pub fn retained_storage_inventory() -> Result<Vec<ControllerScratchRetainedResou
     })
 }
 
+/// Artifact-root subtree of terminal workspace recoveries, one directory per
+/// run. Run finalization writes it and this module owns its retention.
+const RECOVERY_DIR: &str = "controller-scratch-recovery";
+
+/// One run's recovery directory and what retention decides for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControllerScratchRecovery {
+    pub path: String,
+    pub run_id: String,
+    pub state: ControllerScratchRecoveryState,
+    pub age_seconds: u64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerScratchRecoveryState {
+    /// Terminal, no lease of the run left on disk, and past retention.
+    Reclaimable,
+    RunActive,
+    /// A lease of the run still exists, and its recovery may be what lets
+    /// that lease converge.
+    LeaseOnDisk,
+    WithinRetention,
+}
+
+impl ControllerScratchRecoveryState {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Reclaimable => "terminal run recovery past its retention window",
+            Self::RunActive => "owning run is still active",
+            Self::LeaseOnDisk => "a scratch lease of the owning run is still on disk",
+            Self::WithinRetention => "recovery retention has not expired",
+        }
+    }
+
+    pub fn liveness(self) -> &'static str {
+        match self {
+            Self::Reclaimable => "reclaimable",
+            Self::RunActive => "active",
+            Self::LeaseOnDisk => "lifecycle_pinned",
+            Self::WithinRetention => "terminal",
+        }
+    }
+}
+
+/// Where recoveries live and how long a terminal run keeps them.
+struct RecoveryRetention {
+    artifact_root: PathBuf,
+    min_age: std::time::Duration,
+}
+
+impl RecoveryRetention {
+    fn configured() -> Result<Self> {
+        let policy = homeboy_core::cleanup::resolve_cleanup_policy(
+            homeboy_core::cleanup::CleanupPolicyOverrides::default(),
+        )?;
+        Ok(Self {
+            artifact_root: paths::artifact_root()?,
+            min_age: policy.controller_scratch_recovery_min_age(),
+        })
+    }
+}
+
+/// Read-only recovery inventory for retained-storage reporting.
+pub fn recovery_retained_storage_inventory() -> Result<Vec<ControllerScratchRecovery>> {
+    let index_path = index_path()?;
+    let observation = ObservationStore::open_initialized()?;
+    let retention = RecoveryRetention::configured()?;
+    with_index_lock(&index_path, || {
+        recovery_inventory(
+            &retention,
+            &read_index_at_unlocked(&index_path)?,
+            &observation,
+            std::time::SystemTime::now(),
+        )
+    })
+}
+
+/// Classify every run directory under the recovery root. A directory is
+/// reclaimable once its run is terminal, none of the run's leases remain on
+/// disk, and its newest recovery is older than the retention window. The run
+/// directory's mtime advances whenever a lease recovery is added to it.
+fn recovery_inventory(
+    retention: &RecoveryRetention,
+    index: &ControllerScratchIndex,
+    observation: &ObservationStore,
+    now: std::time::SystemTime,
+) -> Result<Vec<ControllerScratchRecovery>> {
+    let root = retention.artifact_root.join(RECOVERY_DIR);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", root.display())),
+            ))
+        }
+    };
+    let mut recoveries = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", root.display())))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+        })?;
+        if !metadata.is_dir() {
+            continue;
+        }
+        let modified = metadata.modified().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+        })?;
+        // Directories are named by the sanitized run id; the index holds the
+        // exact run ids that map to each one.
+        let directory = entry.file_name().to_string_lossy().into_owned();
+        let leases: Vec<&ControllerScratchResource> = index
+            .resources
+            .iter()
+            .filter(|resource| paths::sanitize_path_segment(&resource.run_id) == directory)
+            .collect();
+        let mut run_ids: Vec<&str> = leases
+            .iter()
+            .map(|resource| resource.run_id.as_str())
+            .collect();
+        run_ids.sort_unstable();
+        run_ids.dedup();
+        if run_ids.is_empty() {
+            run_ids.push(&directory);
+        }
+        let mut run_active = false;
+        for run_id in &run_ids {
+            run_active |= observation
+                .get_run(run_id)?
+                .is_some_and(|run| run.status == "running");
+        }
+        let age = now.duration_since(modified).unwrap_or_default();
+        let state = if run_active {
+            ControllerScratchRecoveryState::RunActive
+        } else if leases
+            .iter()
+            .any(|resource| Path::new(&resource.path).exists())
+        {
+            ControllerScratchRecoveryState::LeaseOnDisk
+        } else if age < retention.min_age {
+            ControllerScratchRecoveryState::WithinRetention
+        } else {
+            ControllerScratchRecoveryState::Reclaimable
+        };
+        recoveries.push(ControllerScratchRecovery {
+            size_bytes: path_size(&path)?,
+            path: path.display().to_string(),
+            run_id: run_ids[0].to_string(),
+            state,
+            age_seconds: age.as_secs(),
+        });
+    }
+    recoveries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(recoveries)
+}
+
 pub(crate) fn register_outcome_resources_at(
     data_root: &Path,
     run_id: &str,
@@ -828,6 +1007,7 @@ fn register_outcome_resources_unlocked(
                 interrupted_at: None,
                 git_worktree: None,
                 component_id: None,
+                base_sha: None,
             };
             index
                 .resources
@@ -935,23 +1115,26 @@ pub fn cleanup(
 ) -> Result<ControllerScratchCleanupOutput> {
     let index_path = index_path()?;
     let observation = ObservationStore::open_initialized()?;
-    cleanup_at_index(&index_path, &observation, options, cursor)
+    let recovery = RecoveryRetention::configured()?;
+    cleanup_at_index(&index_path, &observation, &recovery, options, cursor)
 }
 
 fn cleanup_at_index(
     index_path: &Path,
     observation: &ObservationStore,
+    recovery: &RecoveryRetention,
     options: ControllerScratchCleanupOptions,
     cursor: Option<&str>,
 ) -> Result<ControllerScratchCleanupOutput> {
     with_index_lock(index_path, || {
-        cleanup_unlocked(index_path, observation, options, cursor)
+        cleanup_unlocked(index_path, observation, recovery, options, cursor)
     })
 }
 
 fn cleanup_unlocked(
     index_path: &Path,
     observation: &ObservationStore,
+    recovery: &RecoveryRetention,
     options: ControllerScratchCleanupOptions,
     cursor: Option<&str>,
 ) -> Result<ControllerScratchCleanupOutput> {
@@ -1116,7 +1299,7 @@ fn cleanup_unlocked(
         }
     }
     let candidate_count = eligible.len();
-    let estimated_bytes = eligible.iter().map(|candidate| candidate.size_bytes).sum();
+    let estimated_bytes: u64 = eligible.iter().map(|candidate| candidate.size_bytes).sum();
     let has_more = uninspected_resource_count > 0;
     let mutation_candidate_count = candidate_count;
     let mutation_candidates = eligible;
@@ -1164,6 +1347,47 @@ fn cleanup_unlocked(
     if reconciled {
         write_index_at_unlocked(index_path, &index)?;
     }
+    // Recoveries are not rows of the paged index, so the first page owns them.
+    // Inspected after lease removal, so a lease reclaimed above no longer pins
+    // its run's recovery.
+    let recoveries = match cursor {
+        None => recovery_inventory(recovery, &index, observation, std::time::SystemTime::now())?,
+        Some(_) => Vec::new(),
+    };
+    let recovery_retained_count = recoveries
+        .iter()
+        .filter(|recovery| recovery.state != ControllerScratchRecoveryState::Reclaimable)
+        .count();
+    let recovery_candidates: Vec<_> = recoveries
+        .into_iter()
+        .filter(|recovery| recovery.state == ControllerScratchRecoveryState::Reclaimable)
+        .collect();
+    let recovery_bytes: u64 = recovery_candidates
+        .iter()
+        .map(|recovery| recovery.size_bytes)
+        .sum();
+    if options.apply {
+        for candidate in &recovery_candidates {
+            fs::remove_dir_all(&candidate.path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", candidate.path)),
+                )
+            })?;
+            applied_count += 1;
+            reclaimed_bytes += candidate.size_bytes;
+        }
+    }
+    let recovery_candidate_count = recovery_candidates.len();
+    let (recovery_candidates, recovery_candidate_detail) = present_detail(
+        recovery_candidates,
+        options.full,
+        recovery_candidate_count,
+        format!("{} --full", cleanup_page_command(options, cursor)),
+    )?;
+    let candidate_count = candidate_count + recovery_candidate_count;
+    let estimated_bytes = estimated_bytes + recovery_bytes;
+    default_policy_eligible_bytes += recovery_bytes;
     let (candidates, candidate_detail) = present_detail(
         mutation_candidates,
         options.full,
@@ -1193,6 +1417,9 @@ fn cleanup_unlocked(
         reclaimed_bytes,
         candidates,
         candidate_detail,
+        recovery_candidates,
+        recovery_candidate_detail,
+        recovery_retained_count,
         retention_reasons: summarize_retention(&all_skips),
         skipped,
         skipped_detail,
@@ -2102,6 +2329,7 @@ fn recover_authoritative_workspace_inner(
         }));
     }
     let head = git::run_git(&workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
+    let head = head.trim();
     let patch = git::run_git(
         &workspace,
         &[
@@ -2116,7 +2344,7 @@ fn recover_authoritative_workspace_inner(
         "git diff HEAD",
     )?;
     let recovery_root = artifact_root
-        .join("controller-scratch-recovery")
+        .join(RECOVERY_DIR)
         .join(paths::sanitize_path_segment(&resource.run_id))
         .join(paths::sanitize_path_segment(&resource.lease_id));
     fs::create_dir_all(&recovery_root).map_err(|error| {
@@ -2125,17 +2353,6 @@ fn recover_authoritative_workspace_inner(
             Some(format!("create {}", recovery_root.display())),
         )
     })?;
-    let bundle_path = recovery_root.join("workspace.bundle");
-    git::run_git(
-        &workspace,
-        &[
-            "bundle",
-            "create",
-            &bundle_path.display().to_string(),
-            "HEAD",
-        ],
-        "git bundle create",
-    )?;
     let patch_path = recovery_root.join("tracked-changes.patch");
     fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
         Error::internal_io(
@@ -2143,24 +2360,68 @@ fn recover_authoritative_workspace_inner(
             Some(format!("write {}", patch_path.display())),
         )
     })?;
-    let bundle_sha256 = file_sha256(&bundle_path)?;
-    let patch_sha256 = sha256(patch.as_bytes());
-    Ok(serde_json::json!({
+    let mut recovery = serde_json::json!({
         "state": "recovered",
         "workspace": workspace,
-        "head": head.trim(),
+        "head": head,
         "status": status,
-        "bundle": {
-            "path": bundle_path,
-            "sha256": bundle_sha256,
-        },
         "patch": {
             "path": patch_path,
-            "sha256": patch_sha256,
+            "sha256": sha256(patch.as_bytes()),
         },
-    }))
+    });
+    if let Some(base) = resource.base_sha.as_deref() {
+        recovery["base"] = serde_json::json!(base);
+    }
+    // Committed work is preserved in exactly one of three ways, and the
+    // bundle carries only what nothing else already holds (#15052).
+    if head_is_remote_reachable(&workspace, head)? {
+        recovery["head_remote_reachable"] = serde_json::json!(true);
+    } else if resource.base_sha.as_deref() != Some(head) {
+        // `<base>..HEAD` is the attempt's own commits, restorable onto a
+        // checkout of the base. Only a resource with no recorded base bundles
+        // all of HEAD.
+        let revisions = resource
+            .base_sha
+            .as_deref()
+            .map_or_else(|| "HEAD".to_string(), |base| format!("{base}..HEAD"));
+        let bundle_path = recovery_root.join("workspace.bundle");
+        git::run_git(
+            &workspace,
+            &[
+                "bundle",
+                "create",
+                &bundle_path.display().to_string(),
+                &revisions,
+            ],
+            "git bundle create",
+        )?;
+        recovery["bundle"] = serde_json::json!({
+            "path": bundle_path,
+            "sha256": file_sha256(&bundle_path)?,
+        });
+    }
+    // Otherwise HEAD is the recorded base: the attempt committed nothing, so
+    // the patch alone restores it onto that base.
+    Ok(recovery)
 }
 
+/// Whether every commit reachable from `head` is already reachable from a
+/// remote-tracking ref, so the commits outlive this checkout without a bundle.
+fn head_is_remote_reachable(workspace: &Path, head: &str) -> Result<bool> {
+    let unreachable = git::run_git(
+        workspace,
+        &["rev-list", "--count", head, "--not", "--remotes"],
+        "git rev-list commits absent from remote-tracking refs",
+    )?;
+    Ok(unreachable.trim() == "0")
+}
+
+/// Whether the recorded recovery still describes this checkout exactly, so the
+/// checkout holds nothing the recovery does not. Accepts every recovery form:
+/// a bundle of the commits, a HEAD reachable from a remote-tracking ref, or a
+/// HEAD equal to the recorded base. Any failure to prove it answers `false`,
+/// which retains the checkout.
 fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: &Path) -> bool {
     let Some(recovery) = resource
         .terminal_evidence
@@ -2170,31 +2431,30 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     else {
         return false;
     };
-    let Some(bundle_path) = recovery
-        .pointer("/bundle/path")
-        .and_then(serde_json::Value::as_str)
+    let field = |pointer: &str| {
+        recovery
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+    };
+    let (Some(expected_head), Some(patch_path), Some(patch_sha256)) =
+        (field("/head"), field("/patch/path"), field("/patch/sha256"))
     else {
         return false;
     };
-    let Some(bundle_sha256) = recovery
-        .pointer("/bundle/sha256")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
+    let commits_preserved = match recovery.get("bundle") {
+        Some(_) => match (field("/bundle/path"), field("/bundle/sha256")) {
+            (Some(path), Some(expected)) => {
+                file_sha256(Path::new(path)).ok().as_deref() == Some(expected)
+            }
+            _ => false,
+        },
+        // A remote-tracking ref can be pruned after recovery, so reachability
+        // is proved again rather than trusted from the record.
+        None if recovery["head_remote_reachable"] == true => {
+            head_is_remote_reachable(workspace, expected_head).unwrap_or(false)
+        }
+        None => field("/base") == Some(expected_head),
     };
-    let Some(patch_path) = recovery
-        .pointer("/patch/path")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let Some(patch_sha256) = recovery
-        .pointer("/patch/sha256")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let expected_head = recovery.get("head").and_then(serde_json::Value::as_str);
     let expected_status = recovery.get("status").and_then(serde_json::Value::as_str);
     let current_head = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD").ok();
     let current_status = git::run_git(
@@ -2218,12 +2478,12 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     )
     .ok();
 
-    expected_head == current_head.as_deref().map(str::trim)
+    commits_preserved
+        && Some(expected_head) == current_head.as_deref().map(str::trim)
         && expected_status == current_status.as_deref()
         && current_patch
             .as_deref()
             .is_some_and(|patch| sha256(patch.as_bytes()) == patch_sha256)
-        && file_sha256(Path::new(bundle_path)).ok().as_deref() == Some(bundle_sha256)
         && file_sha256(Path::new(patch_path)).ok().as_deref() == Some(patch_sha256)
 }
 
@@ -2591,10 +2851,20 @@ mod tests {
         cleanup_at_index(
             &data_root.join("controller-scratch/resources.json"),
             observation,
+            &test_recovery_retention(data_root),
             options,
             None,
         )
         .expect("cleanup")
+    }
+
+    /// Recoveries land under `<data_root>/artifacts`, matching the artifact
+    /// root `finalize_run_at_roots` is given, with the default 14-day window.
+    fn test_recovery_retention(data_root: &Path) -> RecoveryRetention {
+        RecoveryRetention {
+            artifact_root: data_root.join("artifacts"),
+            min_age: std::time::Duration::from_secs(14 * 86_400),
+        }
     }
 
     fn resource(path: &Path, root: &Path) -> ControllerScratchResource {
@@ -2619,6 +2889,7 @@ mod tests {
             interrupted_at: None,
             git_worktree: None,
             component_id: None,
+            base_sha: None,
         }
     }
 
@@ -3371,6 +3642,309 @@ mod tests {
             output.skipped[0].reason,
             "git checkout has dirty or unpushed state"
         );
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        git::run_git(path, args, "test git")
+            .expect("git output")
+            .trim()
+            .to_string()
+    }
+
+    /// A scheduler attempt: a pushed source repository with some history and
+    /// a linked worktree detached at `main`, recorded on its lease exactly as
+    /// the scheduler records it. Returns the lease, worktree, and base.
+    fn recorded_attempt(
+        data_root: &Path,
+        root: &Path,
+        run_id: &str,
+    ) -> (ControllerScratchAllocation, PathBuf, String) {
+        let remote = root.join("remote.git");
+        run_git(root, &["init", "--bare", remote.to_str().expect("remote")]);
+        let source = clean_checkout(root, &remote, "source");
+        for number in 0..3 {
+            fs::write(source.join("history.txt"), format!("{number}\n")).expect("history");
+            run_git(&source, &["add", "."]);
+            run_git(&source, &["commit", "-m", &format!("history {number}")]);
+        }
+        run_git(&source, &["push", "origin", "main"]);
+        let allocation = allocate_at(data_root, run_id, "scheduler-plan", "task", 1);
+        let workspace = allocation.path.join("workspace");
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                workspace.to_str().expect("workspace"),
+                "main",
+            ],
+        );
+        let base = git_output(&workspace, &["rev-parse", "HEAD"]);
+        record_attempt_workspace(&allocation, &workspace, &base).expect("record attempt");
+        (allocation, workspace, base)
+    }
+
+    fn finalize_and_read(
+        data_root: &Path,
+        allocation: &ControllerScratchAllocation,
+        run_id: &str,
+    ) -> ControllerScratchResource {
+        abandon_attempt_for_test(allocation).expect("dead owner");
+        finalize_run_at_roots(
+            data_root.join("controller-scratch/resources.json"),
+            data_root.join("artifacts"),
+            run_id,
+        )
+        .expect("recover and finalize");
+        read_index_at(data_root)
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource")
+    }
+
+    fn workspace_recovery(resource: &ControllerScratchResource) -> &serde_json::Value {
+        &resource.terminal_evidence.as_ref().expect("evidence")["workspace_recovery"]
+    }
+
+    /// The bundle holds the attempt's commits and nothing of the base's
+    /// history, and restores onto a checkout of the base (#15052).
+    #[test]
+    fn recovery_bundles_only_the_attempt_commits_beyond_its_base() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let root = tempfile::tempdir().expect("root");
+        let (allocation, workspace, base) =
+            recorded_attempt(data_root.path(), root.path(), "range-run");
+        fs::write(workspace.join("attempt.txt"), "attempt\n").expect("attempt file");
+        run_git(&workspace, &["add", "."]);
+        run_git(&workspace, &["commit", "-m", "attempt"]);
+        fs::write(workspace.join("history.txt"), "uncommitted\n").expect("tracked change");
+        let head = git_output(&workspace, &["rev-parse", "HEAD"]);
+
+        let resource = finalize_and_read(data_root.path(), &allocation, "range-run");
+        assert_eq!(resource.base_sha.as_deref(), Some(base.as_str()));
+        let recovery = workspace_recovery(&resource);
+        assert_eq!(recovery["state"], "recovered");
+        assert_eq!(recovery["base"], base.as_str());
+        assert_eq!(recovery["head"], head.as_str());
+        assert!(recovery.get("head_remote_reachable").is_none());
+        let bundle = PathBuf::from(recovery["bundle"]["path"].as_str().expect("bundle"));
+        assert!(recovered_workspace_matches(&resource, &workspace));
+
+        // Without the base the bundle is unusable: it carries none of the
+        // base's history, only the base as a prerequisite.
+        let empty = root.path().join("empty");
+        run_git(root.path(), &["init", empty.to_str().expect("empty")]);
+        assert!(git::run_git(
+            &empty,
+            &["bundle", "verify", bundle.to_str().expect("bundle")],
+            "verify"
+        )
+        .is_err());
+
+        let restore = root.path().join("restore");
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                root.path().join("remote.git").to_str().expect("remote"),
+                restore.to_str().expect("restore"),
+            ],
+        );
+        run_git(&restore, &["checkout", "--detach", &base]);
+        run_git(
+            &restore,
+            &["fetch", bundle.to_str().expect("bundle"), "HEAD"],
+        );
+        assert_eq!(git_output(&restore, &["rev-parse", "FETCH_HEAD"]), head);
+        assert_eq!(
+            git_output(
+                &restore,
+                &["rev-list", "--count", &format!("{base}..FETCH_HEAD")]
+            ),
+            "1"
+        );
+        run_git(&restore, &["checkout", "--detach", "FETCH_HEAD"]);
+        let patch = recovery["patch"]["path"].as_str().expect("patch");
+        run_git(&restore, &["apply", patch]);
+        assert_eq!(
+            fs::read_to_string(restore.join("history.txt")).expect("restored"),
+            "uncommitted\n"
+        );
+    }
+
+    /// A HEAD a remote-tracking ref already holds needs no bundle; the
+    /// recovery records it and is re-proved before the checkout converges.
+    #[test]
+    fn remote_reachable_head_is_recorded_without_a_bundle() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let root = tempfile::tempdir().expect("root");
+        let (allocation, workspace, base) =
+            recorded_attempt(data_root.path(), root.path(), "remote-run");
+        fs::write(workspace.join("history.txt"), "uncommitted\n").expect("tracked change");
+
+        let resource = finalize_and_read(data_root.path(), &allocation, "remote-run");
+        let recovery = workspace_recovery(&resource);
+        assert_eq!(recovery["state"], "recovered");
+        assert_eq!(recovery["head"], base.as_str());
+        assert_eq!(recovery["head_remote_reachable"], true);
+        assert!(recovery.get("bundle").is_none());
+        let patch = PathBuf::from(recovery["patch"]["path"].as_str().expect("patch"));
+        assert!(patch.is_file());
+        assert!(!patch.with_file_name("workspace.bundle").exists());
+        assert!(recovered_workspace_matches(&resource, &workspace));
+
+        // Once no remote-tracking ref holds HEAD, the record no longer proves
+        // the commits outlive the checkout.
+        run_git(
+            &workspace,
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        assert!(!recovered_workspace_matches(&resource, &workspace));
+    }
+
+    /// An attempt that committed nothing beyond an unpushed base is restored
+    /// by its patch onto that base, with no bundle.
+    #[test]
+    fn head_at_its_recorded_base_is_recovered_by_its_patch_alone() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let allocation = allocate_at(data_root.path(), "base-run", "scheduler-plan", "task", 1);
+        let workspace = allocation.path.join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        let base = git_output(&workspace, &["rev-parse", "HEAD"]);
+        record_attempt_workspace(&allocation, &workspace, &base).expect("record attempt");
+        fs::write(workspace.join("tracked.txt"), "candidate\n").expect("tracked change");
+
+        let resource = finalize_and_read(data_root.path(), &allocation, "base-run");
+        let recovery = workspace_recovery(&resource);
+        assert_eq!(recovery["state"], "recovered");
+        assert_eq!(recovery["base"], base.as_str());
+        assert!(recovery.get("bundle").is_none());
+        assert!(recovery.get("head_remote_reachable").is_none());
+        assert!(recovered_workspace_matches(&resource, &workspace));
+
+        fs::write(workspace.join("tracked.txt"), "later\n").expect("later change");
+        assert!(!recovered_workspace_matches(&resource, &workspace));
+    }
+
+    fn recovery_run_dir(data_root: &Path, run_id: &str, age_days: u64) -> PathBuf {
+        let path = data_root.join("artifacts").join(RECOVERY_DIR).join(run_id);
+        fs::create_dir_all(path.join("lease")).expect("recovery dir");
+        fs::write(path.join("lease/tracked-changes.patch"), "patch").expect("patch");
+        let modified =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(age_days * 86_400);
+        File::open(&path)
+            .expect("open recovery dir")
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .expect("age recovery dir");
+        path
+    }
+
+    /// Recovery is owned by controller scratch cleanup: an aged terminal run's
+    /// recovery is reclaimed, while a recent one, an active run's, and one
+    /// whose lease is still on disk are retained.
+    #[test]
+    fn aged_terminal_recovery_is_reclaimed_and_live_recovery_retained() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let running = observation
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .expect("running run");
+        let aged = recovery_run_dir(data_root.path(), "aged-run", 20);
+        let recent = recovery_run_dir(data_root.path(), "recent-run", 1);
+        let active = recovery_run_dir(data_root.path(), &running.id, 20);
+        let pinned = recovery_run_dir(data_root.path(), "pinned-run", 20);
+        let lease_root = tempfile::tempdir().expect("lease root");
+        let lease = lease_root.path().join("lease");
+        fs::create_dir(&lease).expect("lease");
+        let mut live_lease = resource(&lease, lease_root.path());
+        live_lease.run_id = "pinned-run".to_string();
+        live_lease.owner_pid = std::process::id();
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![live_lease],
+            },
+        );
+
+        let states: BTreeMap<String, ControllerScratchRecoveryState> = recovery_inventory(
+            &test_recovery_retention(data_root.path()),
+            &read_index_at(data_root.path()),
+            &observation,
+            std::time::SystemTime::now(),
+        )
+        .expect("inventory")
+        .into_iter()
+        .map(|recovery| (recovery.run_id, recovery.state))
+        .collect();
+        assert_eq!(
+            states,
+            BTreeMap::from([
+                (
+                    "aged-run".to_string(),
+                    ControllerScratchRecoveryState::Reclaimable
+                ),
+                (
+                    "recent-run".to_string(),
+                    ControllerScratchRecoveryState::WithinRetention
+                ),
+                (
+                    running.id.clone(),
+                    ControllerScratchRecoveryState::RunActive
+                ),
+                (
+                    "pinned-run".to_string(),
+                    ControllerScratchRecoveryState::LeaseOnDisk
+                ),
+            ])
+        );
+
+        let options = ControllerScratchCleanupOptions {
+            apply: false,
+            limit: 10,
+            full: false,
+            retention_override_seconds: None,
+        };
+        let plan = cleanup_at(data_root.path(), &observation, options);
+        assert_eq!(plan.candidate_count, 1);
+        assert_eq!(plan.recovery_candidates.len(), 1);
+        assert_eq!(plan.recovery_candidates[0].path, aged.display().to_string());
+        assert_eq!(plan.recovery_retained_count, 3);
+        let aged_bytes = path_size(&aged).expect("aged size");
+        assert_eq!(plan.estimated_bytes, aged_bytes);
+        assert!(aged.exists());
+
+        let applied = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: true,
+                ..options
+            },
+        );
+        assert_eq!(applied.applied_count, 1);
+        assert_eq!(applied.reclaimed_bytes, aged_bytes);
+        assert!(!aged.exists());
+        assert!(recent.exists());
+        assert!(active.exists());
+        assert!(pinned.exists());
     }
 
     #[test]
@@ -4585,6 +5159,7 @@ mod tests {
             let page = cleanup_at_index(
                 &data_root.path().join("controller-scratch/resources.json"),
                 &observation,
+                &test_recovery_retention(data_root.path()),
                 options,
                 cursor.as_deref(),
             )
@@ -4616,18 +5191,25 @@ mod tests {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
         let index = data_root.path().join("controller-scratch/resources.json");
+        let recovery = test_recovery_retention(data_root.path());
         let options = ControllerScratchCleanupOptions {
             apply: false,
             limit: 1,
             full: false,
             retention_override_seconds: None,
         };
-        assert!(
-            cleanup_at_index(&index, &observation, options, Some("other-category:cursor")).is_err()
-        );
         assert!(cleanup_at_index(
             &index,
             &observation,
+            &recovery,
+            options,
+            Some("other-category:cursor")
+        )
+        .is_err());
+        assert!(cleanup_at_index(
+            &index,
+            &observation,
+            &recovery,
             ControllerScratchCleanupOptions {
                 limit: 0,
                 ..options
