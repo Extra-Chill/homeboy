@@ -6537,6 +6537,43 @@ fn rooted_status(
     .record)
 }
 
+/// Reviewers re-run a Cook's visible gates, so at least one `--verify` gate
+/// must yield a reviewer-safe command. The rule is static on the gate text:
+/// admission and preview call this before any workspace or provider work, and
+/// the spine re-checks it for every Cook it runs. The error names each rejected
+/// token and the rule it hit.
+pub fn validate_reviewer_visible_gates(verify: &[String], cook_id: Option<&str>) -> Result<()> {
+    if verify.is_empty()
+        || verify.iter().any(|command| {
+            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
+        })
+    {
+        return Ok(());
+    }
+    let mut rejected: Vec<String> = Vec::new();
+    for command in verify {
+        for unsafe_token in crate::agent_task_review_dossier::reviewer_unsafe_tokens(command) {
+            let entry = format!("`{}` ({})", unsafe_token.token, unsafe_token.rule);
+            if !rejected.contains(&entry) {
+                rejected.push(entry);
+            }
+        }
+    }
+    let rejected = if rejected.is_empty() {
+        "the gate command is empty".to_string()
+    } else {
+        format!("rejected tokens: {}", rejected.join(", "))
+    };
+    Err(Error::validation_invalid_argument(
+        "verification",
+        format!(
+            "Cook has no visible gate that can produce a reviewer-safe command; {rejected}. Move static machine-local values into gate environment configuration (--gate-env), or move checks that need runtime-computed local values into --private-verify, before provider work"
+        ),
+        cook_id.map(str::to_string),
+        None,
+    ))
+}
+
 /// The Cook spine, bound to explicit recipe and lifecycle roots. Every durable
 /// write on this path resolves through the two passed stores, so a caller can
 /// place a Cook's recipe and its lifecycle records wherever it owns them
@@ -6566,18 +6603,7 @@ fn run_cook_spine(
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     project_attempt_prompt_template(&mut options);
-    if !options.gates.verify.is_empty()
-        && !options.gates.verify.iter().any(|command| {
-            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
-        })
-    {
-        return Err(Error::validation_invalid_argument(
-            "verification",
-            "Cook has no visible gate that can produce a reviewer-safe command; move machine-local values into gate environment configuration before provider work",
-            Some(options.identity.cook_id.clone()),
-            None,
-        ));
-    }
+    validate_reviewer_visible_gates(&options.gates.verify, Some(&options.identity.cook_id))?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
