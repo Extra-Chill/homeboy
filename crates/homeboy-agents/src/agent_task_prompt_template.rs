@@ -91,23 +91,35 @@ pub(crate) fn apply_prompt_template_with(
     purpose: PromptPurpose,
     template: Option<&str>,
 ) {
-    if !request.metadata.is_object() {
-        request.metadata = json!({});
-    }
-    let base = request.metadata[BASE_INSTRUCTIONS_METADATA_KEY]
-        .as_str()
-        .map(str::to_string)
+    let recorded_base = request
+        .metadata
+        .get(BASE_INSTRUCTIONS_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let base = recorded_base
+        .clone()
         .unwrap_or_else(|| request.instructions.clone());
-    request.metadata[BASE_INSTRUCTIONS_METADATA_KEY] = Value::String(base.clone());
 
     let rendered = template
         .map(|template| render(template, &template_context(request, &base, purpose)))
         .map(|rendered| rendered.trim().to_string())
         .filter(|rendered| !rendered.is_empty());
-    request.instructions = match rendered {
-        Some(rendered) => format!("{base}\n\n{rendered}"),
-        None => base,
-    };
+    match rendered {
+        Some(rendered) => {
+            // Record the operator base only when a template is applied, so an
+            // untemplated request stays byte-identical to its persisted recipe.
+            if !request.metadata.is_object() {
+                request.metadata = json!({});
+            }
+            request.metadata[BASE_INSTRUCTIONS_METADATA_KEY] = Value::String(base.clone());
+            request.instructions = format!("{base}\n\n{rendered}");
+        }
+        None => {
+            if recorded_base.is_some() {
+                request.instructions = base;
+            }
+        }
+    }
 }
 
 fn template_context(request: &AgentTaskRequest, base: &str, purpose: PromptPurpose) -> Value {
@@ -197,8 +209,9 @@ mod tests {
             &mut request,
             json!({ "gates": { "verify": ["cargo test"] } }),
         );
+        let before = request.clone();
         apply_prompt_template_with(&mut request, PromptPurpose::Attempt, None);
-        assert_eq!(request.instructions, "Fix the bug.");
+        assert_eq!(request, before, "no template leaves the request untouched");
         assert_eq!(
             request.inputs["homeboy"]["gates"]["verify"][0],
             "cargo test"
