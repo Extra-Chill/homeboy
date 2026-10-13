@@ -96,6 +96,13 @@ impl AgentTaskLifecycleStore {
         self.run_dir(run_id).join("aggregate.json")
     }
 
+    /// Lock serializing a run's Lab handoff acceptance against expiry. Every
+    /// runner dispatch path takes it, so its presence marks a run that may have
+    /// crossed the runner boundary.
+    pub fn lab_handoff_lock_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("lab-handoff.lock")
+    }
+
     pub fn cook_index_path(&self, cook_id: &str) -> PathBuf {
         self.roots
             .data()

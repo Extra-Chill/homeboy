@@ -187,11 +187,22 @@ pub fn retain_terminal_runs(
     let mut store = ObservationStore::open_initialized()?;
     let artifact_root = store.artifact_root()?;
     let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
+    // A run that still owns an active task worktree keeps its record: that
+    // record is the terminal authority the worktree is reconciled against, and
+    // pruning it would leave the worktree unreconcilable (#15844).
+    let data_root = store.data_root().ok_or_else(|| {
+        Error::internal_unexpected("observation store has no resolvable data root")
+    })?;
+    let worktree_owners = crate::worktree::run_ids_owning_active_worktrees_in_root(data_root)?;
     let mut artifact_cleanup = Vec::new();
     let mut lifecycle_directories = Vec::new();
     let mut removable_run_ids = Vec::new();
     let mut skipped_run_ids = Vec::new();
     for run_id in &candidate_run_ids {
+        if worktree_owners.contains(run_id) {
+            skipped_run_ids.push(run_id.clone());
+            continue;
+        }
         let artifacts = cleanup_persisted_artifacts_with_store(
             &store,
             &artifact_root,
