@@ -18,7 +18,8 @@ use homeboy_core::{Error, Result};
 use super::envelope::ExecutionEnvelope;
 use super::path_remap::{
     is_absolute_controller_path, order_mappings_by_specificity, path_escapes_mapping,
-    remap_local_path, remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
+    remap_local_path, remap_local_path_references_in_text, remap_paths_in_value,
+    try_rewrite_flag_value_args, LabPathRemap,
 };
 
 pub(crate) struct AgentTaskSpecMaterialization<T> {
@@ -263,6 +264,7 @@ fn remap_agent_task_plan_spec(
     reject_paths_escaping_mappings(&controller_plan, mappings)?;
     reject_unmapped_controller_paths(&controller_plan, mappings)?;
     remap_paths_in_value(&mut value, mappings);
+    remap_task_instruction_path_references(&mut value, mappings);
     record_controller_workspace_provenance(&mut value, &controller_plan);
     serde_json::to_string(&value).map_err(|err| {
         Error::internal_json(
@@ -270,6 +272,21 @@ fn remap_agent_task_plan_spec(
             Some("serialize remapped agent-task plan".to_string()),
         )
     })
+}
+
+/// Task instructions are prose, so whole-value remapping leaves embedded
+/// controller paths untouched. A prompt naming a projected provider-evidence
+/// path must name the runner copy the provider policy allows, not the
+/// controller copy that does not exist on the runner.
+fn remap_task_instruction_path_references(plan: &mut Value, mappings: &[&LabPathRemap]) {
+    let Some(tasks) = plan.get_mut("tasks").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for task in tasks {
+        if let Some(Value::String(instructions)) = task.get_mut("instructions") {
+            *instructions = remap_local_path_references_in_text(instructions, mappings);
+        }
+    }
 }
 
 /// Reject any path that starts below a controller mapping but crosses back out.
