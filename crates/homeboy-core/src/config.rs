@@ -782,7 +782,7 @@ pub fn load_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<T> 
         if let Some(real_id) = resolve_alias_in(id, &entities) {
             let alias_path = T::config_path_in_root(config_root, &real_id);
             let content = local_files::local().read(&alias_path)?;
-            let mut entity: T = from_str(&content)?;
+            let mut entity: T = parse_entity_file(&alias_path, &content)?;
             entity.set_id(real_id);
             entity.post_load(&content);
             return Ok(entity);
@@ -791,10 +791,33 @@ pub fn load_in_root<T: ConfigEntity>(config_root: &Path, id: &str) -> Result<T> 
         return Err(T::not_found_error(id.to_string(), suggestions));
     }
     let content = local_files::local().read(&path)?;
-    let mut entity: T = from_str(&content)?;
+    let mut entity: T = parse_entity_file(&path, &content)?;
     entity.set_id(id.to_string());
     entity.post_load(&content);
     Ok(entity)
+}
+
+/// Parse an entity config file, naming the file and entity type in the error.
+///
+/// A bare serde error ("missing field `persist` at line 9") does not say which
+/// of many config files is broken. The raw content is not echoed back because
+/// entity configs can carry credentials.
+fn parse_entity_file<T: ConfigEntity>(path: &Path, content: &str) -> Result<T> {
+    serde_json::from_str(content).map_err(|err| {
+        let mut error = Error::validation_invalid_json(
+            err,
+            Some(format!("parse {} config", T::ENTITY_TYPE)),
+            None,
+        );
+        error.message = format!(
+            "Invalid {} config {}: {}",
+            T::ENTITY_TYPE,
+            path.display(),
+            error.details["error"].as_str().unwrap_or_default()
+        );
+        error.details["path"] = serde_json::json!(path.display().to_string());
+        error
+    })
 }
 
 pub fn load<T: ConfigEntity>(id: &str) -> Result<T> {
@@ -860,15 +883,10 @@ pub fn list_in_root<T: ConfigEntity>(config_root: &Path) -> Result<Vec<T>> {
                     return None;
                 }
             };
-            let mut entity: T = match from_str(&content) {
+            let mut entity: T = match parse_entity_file(&json_path, &content) {
                 Ok(e) => e,
                 Err(err) => {
-                    log_status!(
-                        "config",
-                        "Warning: failed to parse {}: {}",
-                        json_path.display(),
-                        err
-                    );
+                    log_status!("config", "Warning: {}", err.message);
                     return None;
                 }
             };
@@ -1680,6 +1698,32 @@ mod tests {
             find_similar_ids_in("stag", &entities),
             vec!["beta-project (alias: staging)".to_string()]
         );
+    }
+
+    #[test]
+    fn load_parse_failure_names_the_broken_config_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = TestEntity::config_dir_in_root(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("broken.json");
+        std::fs::write(&path, r#"{"id":"broken"}"#).unwrap();
+
+        let err = load_in_root::<TestEntity>(root.path(), "broken")
+            .err()
+            .expect("missing field must fail to load");
+
+        assert_eq!(err.code, crate::error::ErrorCode::ValidationInvalidJson);
+        assert!(
+            err.message.contains(&path.display().to_string()),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("missing field `aliases`"),
+            "{}",
+            err.message
+        );
+        assert_eq!(err.details["path"], path.display().to_string());
     }
 
     /// Run `body` on a worker thread and fail, rather than hang, if it does not

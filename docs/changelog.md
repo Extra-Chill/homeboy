@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.419.1] - 2026-10-13
+
+### Changed
+- queue deferred review tests as runner-wait steps and delete deferred-workload
+
+### Fixed
+- name the broken file when an entity config fails to parse
+
 ## [0.419.0] - 2026-10-13
 
 ### Added

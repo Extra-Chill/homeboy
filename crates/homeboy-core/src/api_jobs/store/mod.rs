@@ -2361,6 +2361,16 @@ impl JobStore {
         }
     }
 
+    /// The daemon that claims a controller job's execution owns it from then
+    /// on. A job admitted by an earlier lease of this store (a daemon restarted
+    /// in place, #15830) is attributed to the lease now executing it, so status
+    /// and lifecycle planning see live work rather than a dead lease's orphan.
+    fn stamp_executing_lease(&self, job: &mut Job) {
+        if let Some(lease_id) = &self.daemon_lease_id {
+            job.daemon_lease_id = Some(lease_id.clone());
+        }
+    }
+
     /// Claim a controller job before starting a worker. This is intentionally a
     /// durable transition: a failed HTTP response leaves a queued, claimless job.
     pub(crate) fn claim_controller_execution(
@@ -2416,6 +2426,7 @@ impl JobStore {
             }
             controller.execution_claim_id = Some(Uuid::new_v4().to_string());
             controller.recovery_attempted |= recovery;
+            self.stamp_executing_lease(&mut stored.job);
             stored.job.status = JobStatus::Running;
             stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
             stored.job.updated_at_ms = timestamp_ms();
@@ -2454,6 +2465,7 @@ impl JobStore {
                 return Ok(ControllerJobStartOutcome::Existing);
             }
             controller.execution_claim_id = Some(Uuid::new_v4().to_string());
+            self.stamp_executing_lease(&mut stored.job);
             stored.job.status = JobStatus::Running;
             stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
             stored.job.updated_at_ms = timestamp_ms();

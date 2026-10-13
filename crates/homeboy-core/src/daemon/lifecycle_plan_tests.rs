@@ -200,6 +200,65 @@ fn a_live_child_of_a_dead_generation_is_waited_for() {
     assert!(matches!(plan(&v), Plan::Wait { .. }));
 }
 
+/// #15830: every dead generation whose own plan is reconciliation or driver
+/// resumption is adoptable at once, even beside another dead generation that
+/// waits for live workload or an attestation. Live, unregistered, and
+/// restarted-in-place generations are never adopted.
+#[test]
+fn adoptable_dead_generations_are_exactly_those_restartable_in_place() {
+    let with_jobs = |lease: &str, lifecycle, jobs| {
+        let mut generation = generation(lease, lifecycle);
+        generation.jobs = jobs;
+        generation
+    };
+    let mut unregistered = with_jobs("UNREGISTERED", dead(), vec![job(1, JobCustody::Resumable)]);
+    unregistered.registered = false;
+    let v = view(
+        Some("LIVE"),
+        vec![
+            with_jobs(
+                "LIVE",
+                GenerationLifecycle::Admitting,
+                vec![job(2, JobCustody::Resumable)],
+            ),
+            with_jobs("BUSY", dead(), vec![job(3, JobCustody::Running)]),
+            with_jobs("RESUME", dead(), vec![job(4, JobCustody::Resumable)]),
+            with_jobs(
+                "ATTEST",
+                dead(),
+                vec![job(5, JobCustody::Orphaned { proof: None })],
+            ),
+            with_jobs(
+                "PROVEN",
+                GenerationLifecycle::Dead {
+                    proof: DeathProof::TerminationEvidence,
+                },
+                vec![
+                    job(
+                        6,
+                        JobCustody::Orphaned {
+                            proof: Some(DeathProof::PidDead),
+                        },
+                    ),
+                    job(7, JobCustody::Resumable),
+                ],
+            ),
+            with_jobs(
+                "REPLACED",
+                GenerationLifecycle::Dead {
+                    proof: DeathProof::SameDirReplaced {
+                        current_lease_id: "OCCUPANT".to_string(),
+                    },
+                },
+                vec![job(8, JobCustody::Resumable)],
+            ),
+            with_jobs("IDLE", dead(), Vec::new()),
+            unregistered,
+        ],
+    );
+    assert_eq!(adoptable_dead_generations(&v), ["RESUME", "PROVEN"]);
+}
+
 /// Chaos case 9: the whole process group died, nothing is left serving.
 #[test]
 fn a_dead_owner_with_nothing_live_starts_a_daemon() {
