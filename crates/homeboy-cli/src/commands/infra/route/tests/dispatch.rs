@@ -3002,39 +3002,6 @@ fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
 }
 
 #[test]
-fn agent_task_fanout_finish_metadata_preserves_discoverability_commands() {
-    let metadata = agent_task_fanout_finish_metadata(
-        serde_json::json!({
-            "lab_dispatch": {
-                "status": "error",
-                "runner_id": "homeboy-lab",
-            },
-        }),
-        "dispatch-run-7167",
-        "cook-batch-homeboy-issue-7167-1",
-        RunStatus::Error,
-    );
-
-    assert_eq!(
-        metadata["agent_task_lab_dispatch"]["fanout_id"],
-        "cook-batch-homeboy-issue-7167-1"
-    );
-    assert_eq!(metadata["agent_task_lab_dispatch"]["status"], "error");
-    assert_eq!(
-        metadata["follow_commands"]["dispatch_status"],
-        "homeboy runs show dispatch-run-7167"
-    );
-    assert_eq!(
-        metadata["follow_commands"]["dispatch_evidence"],
-        "homeboy runs evidence --run dispatch-run-7167"
-    );
-    assert_eq!(
-        metadata["follow_commands"]["fanout_status"],
-        "homeboy agent-task fanout status cook-batch-homeboy-issue-7167-1"
-    );
-}
-
-#[test]
 fn offloaded_stdout_write_preserves_bytes_for_output_file() {
     let dir = tempdir().unwrap();
     let output_path = dir.path().join("out.json");
@@ -3172,105 +3139,10 @@ fn rig_install_source_sync_root_skips_git_url_and_missing_paths() {
 }
 
 #[test]
-fn local_fanout_warning_covers_batch_fanout_not_just_cook() {
-    // Batch fanout is the command most able to overwhelm a controller, so a
-    // silent local fallback here is worse than for a single cook.
-    let cli = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "https://github.com/o/r/issues/1",
-        "https://github.com/o/r/issues/2",
-        "--repo",
-        "r",
-        "--verify",
-        "cargo test",
-        "--run-plan",
-    ]);
-    let warning =
-        agent_task_local_fanout_warning(&cli.command, None).expect("batch fanout warns locally");
-    assert!(warning.contains("HOMEBOY_LOCAL_FANOUT_WARNING"));
-    assert!(warning.contains("fanout cook-batch"));
-    assert!(warning.contains("tasks=2"));
-    assert!(warning.contains("execution_location=local"));
-}
-
-#[test]
-fn local_fanout_warning_is_silent_for_a_single_child() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "https://github.com/o/r/issues/1",
-        "--repo",
-        "r",
-        "--verify",
-        "cargo test",
-        "--run-plan",
-    ]);
-    assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);
-}
-
-#[test]
-fn local_fanout_warning_is_silent_for_a_dry_run_plan() {
-    // A dry run never dispatches providers, so it cannot heat the controller.
-    let cli = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "https://github.com/o/r/issues/1",
-        "https://github.com/o/r/issues/2",
-        "--repo",
-        "r",
-        "--verify",
-        "cargo test",
-        "--preview",
-        "--run-plan",
-    ]);
-    assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);
-}
-
-#[test]
-fn local_fanout_warning_carries_lab_readiness_reasons_and_remediation() {
-    let cli = Cli::parse_from([
-        "homeboy",
-        "agent-task",
-        "fanout",
-        "cook-batch",
-        "https://github.com/o/r/issues/1",
-        "https://github.com/o/r/issues/2",
-        "--repo",
-        "r",
-        "--verify",
-        "cargo test",
-        "--run-plan",
-    ]);
-    let readiness = homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
-        state: "stale".to_string(),
-        selected_runner_id: None,
-        available_runner_ids: vec!["lab-a".to_string()],
-        reasons: vec!["lab-a daemon is stale".to_string()],
-        remediation_commands: vec!["homeboy runner refresh-homeboy lab-a".to_string()],
-        repair_admitted_runner_ids: Vec::new(),
-    };
-    let warning = agent_task_local_fanout_warning(&cli.command, Some(&readiness))
-        .expect("batch fanout warns locally");
-    // Without these the operator has no way to learn why the Lab was skipped.
-    assert!(warning.contains("lab_unavailable_reason=lab-a daemon is stale"));
-    assert!(warning.contains("remediation=`homeboy runner refresh-homeboy lab-a`"));
-}
-
-#[test]
 fn batch_fanout_exposes_placement_arguments() {
-    // Split placement hands each child to the selected runner, so hiding these
-    // made a load-bearing flag undiscoverable.
-    for path in [
-        ["agent-task", "fanout", "cook-batch"],
-        ["agent-task", "fanout", "run-plan"],
-    ] {
+    // Placement travels to each child Cook, so hiding these made a
+    // load-bearing flag undiscoverable.
+    for path in [["agent-task", "fanout", "cook-batch"]] {
         let command = homeboy::cli_surface::Cli::command_with_scoped_lab_args();
         let leaf = path.iter().fold(&command, |command, segment| {
             command

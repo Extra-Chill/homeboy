@@ -641,6 +641,10 @@ pub(super) struct RunnerWorkspaceMetadata {
     pub actual_materialization_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// How the source commit reached this runner: a controller Git bundle
+    /// (with the cached commits it excluded) or the runner's object cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transfer: Option<serde_json::Value>,
     pub snapshot_identity: String,
     /// Opaque, single-generation capability for a prepared workspace. Older
     /// metadata intentionally has no lease and is ineligible for mutation.

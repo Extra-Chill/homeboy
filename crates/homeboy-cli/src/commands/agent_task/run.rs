@@ -1,9 +1,9 @@
-//! Durable run lifecycle handlers: cook, run-plan, run, run-next, submit,
+//! Durable run lifecycle handlers: cook, run-plan, run,
 //! resume, and retry.
 
 use serde_json::{json, Value};
 use sha2::Digest;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,8 +29,7 @@ use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, AgentTaskProviderEvidenceInput, CookContinueArgs, PlacementUpdateArgs,
-    PromotionProviderArgs, ResumeArgs, RetryArgs, RunArgs, RunNextArgs, RunPlanArgs, SubmitArgs,
-    ValidatePlanArgs,
+    PromotionProviderArgs, ResumeArgs, RetryArgs, RunArgs, RunPlanArgs, ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::{
@@ -332,7 +331,7 @@ fn cook_review_form_timeout_disclosure(plan: &AgentTaskPlan) -> String {
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
 /// path) without hand-digging the nested outcome JSON (#3806). The full nested
 /// payload is preserved unchanged; this only ADDS the surfaced summary.
-fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
+pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value {
     let aggregate = homeboy::agents::agent_task_artifacts::reviewer_facing_aggregate(aggregate);
     let mut value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
     let failure_reasons = super::status::failure_reasons_from_aggregate(&aggregate);
@@ -7869,7 +7868,7 @@ fn run_preflight_cook_execution(
                 protected_branches: args.protected_branches,
             },
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: super::fanout::resolve_ai_tool_disclosure(
+                ai_tool: resolve_ai_tool_disclosure(
                     &args.ai_tool,
                     selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
                     selected_identity
@@ -10846,59 +10845,6 @@ pub(super) fn run_submitted_with_executor(
     ))
 }
 
-pub(super) fn run_next(args: RunNextArgs) -> CmdResult<Value> {
-    run_next_with_executor_and_fanout(
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        args.fanout,
-    )
-}
-
-pub(super) fn run_next_with_executor_and_fanout(
-    executor: SharedAgentTaskExecutor,
-    fanout_id: Option<String>,
-) -> CmdResult<Value> {
-    let scoped_run_ids = fanout_id
-        .as_deref()
-        .map(|fanout_id| {
-            let service =
-                homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment(
-                )?;
-            let canonical =
-                homeboy::agents::orchestration::run_from_current_environment(fanout_id)?;
-            service.owned_child_run_ids(&canonical)
-        })
-        .transpose()?
-        .map(|run_ids| run_ids.into_iter().collect::<HashSet<_>>());
-    let result = agent_task_service::run_next_with_cook_dispatcher(
-        executor,
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-        scoped_run_ids.as_ref(),
-    )?;
-    let Some(aggregate) = result.value else {
-        return Ok((
-            serde_json::json!({ "claimed": false, "queue_skips": result.skipped, "queue_admission": result.queue_admission }),
-            0,
-        ));
-    };
-    let mut value = aggregate_value_with_failure_reasons(&aggregate);
-    if let Value::Object(object) = &mut value {
-        object.insert(
-            "queue_skips".to_string(),
-            serde_json::to_value(result.skipped).unwrap_or(Value::Null),
-        );
-        object.insert(
-            "queue_admission".to_string(),
-            serde_json::to_value(result.queue_admission).unwrap_or(Value::Null),
-        );
-    }
-    Ok((value, result.exit_code))
-}
-
-pub(super) fn submit(args: SubmitArgs) -> CmdResult<Value> {
-    let record = agent_task_service::submit_plan_spec(&args.plan, args.run_id.as_deref())?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
-}
-
 pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
     let report = agent_task_service_direct::validate_plan_spec(&args.plan);
     let valid = report.valid;
@@ -11217,6 +11163,47 @@ fn explicit_local_retry_admission_refusal(
         None,
         None,
     ))
+}
+
+/// Generic fallback disclosure used when no provider supplies one. Also the
+/// sentinel that marks `ai_tool` as "not explicitly overridden by the operator",
+/// so a `--model` selection can derive a concrete disclosure instead.
+const GENERIC_AI_DISCLOSURE: &str = "AI-assisted";
+
+/// Resolve the effective `ai_tool` disclosure for a cook.
+///
+/// When the operator explicitly supplied `--ai-tool`, that value is preserved.
+/// Otherwise (`ai_tool` is empty or the generic default) the disclosure is
+/// derived from the effective backend/selector/model via the provider catalog —
+/// the single typed disclosure source — so a `--model` override produces a
+/// correct AI-assistance statement rather than a stale hard-coded default.
+/// (#8404)
+pub(super) fn resolve_ai_tool_disclosure(
+    ai_tool: &str,
+    backend: Option<&str>,
+    selector: Option<&str>,
+    model: Option<&str>,
+) -> String {
+    let is_operator_override =
+        !ai_tool.trim().is_empty() && ai_tool.trim() != GENERIC_AI_DISCLOSURE;
+    if is_operator_override {
+        return ai_tool.to_string();
+    }
+
+    let backend = match backend {
+        Some(backend) if !backend.trim().is_empty() => backend.to_string(),
+        _ => match homeboy::agents::agent_tasks::provider::default_backend()
+            .ok()
+            .flatten()
+        {
+            Some(backend) => backend,
+            None => return ai_tool.to_string(),
+        },
+    };
+
+    homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover()
+        .ai_disclosure_for(&backend, selector, model)
+        .unwrap_or_else(|| ai_tool.to_string())
 }
 
 #[cfg(test)]

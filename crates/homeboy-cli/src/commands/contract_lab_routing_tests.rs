@@ -61,10 +61,7 @@ fn runner_resident_agent_task_reads_are_low_noise_polling() {
 
 #[test]
 fn runner_resident_agent_task_execution_keeps_full_runner_evidence() {
-    for args in [
-        ["homeboy", "agent-task", "run", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "run-next"].as_slice(),
-    ] {
+    for args in [["homeboy", "agent-task", "run", "agent-task-123"].as_slice()] {
         let contract = parsed_command(args)
             .lab_contract()
             .expect("runner-resident execution contract");
@@ -167,9 +164,12 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
         "homeboy",
         "agent-task",
         "fanout",
-        "run-plan",
-        "--input",
-        "fanout.json",
+        "cook-batch",
+        "--repo",
+        "homeboy",
+        "--verify",
+        "cargo test --lib",
+        "https://github.com/Extra-Chill/homeboy/issues/1",
     ]);
     let coordinator_contract = coordinator.lab_contract().expect("fanout contract");
     assert_eq!(

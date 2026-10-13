@@ -1,7 +1,6 @@
 use serde::Serialize;
 
 use crate::agents::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
-use crate::agents::agent_task_batch::AGENT_TASK_BATCH_ARTIFACTS_SCHEMA;
 use crate::agents::agent_task_executor_evidence::{
     EXECUTOR_INPUT_EVIDENCE_KIND, EXECUTOR_INPUT_FILE, EXECUTOR_RESULT_EVIDENCE_KIND,
     EXECUTOR_RESULT_FILE,
@@ -474,7 +473,6 @@ fn represented_artifact_schema_ids() -> Vec<String> {
         ARTIFACT_POSTPROCESS_PLAN_SCHEMA.to_string(),
         ARTIFACT_POSTPROCESS_RESULT_SCHEMA.to_string(),
         AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        AGENT_TASK_BATCH_ARTIFACTS_SCHEMA.to_string(),
         CHANGE_ARTIFACT_SCHEMA.to_string(),
         FUZZ_ARTIFACT_SCHEMA.to_string(),
         GENERIC_MATRIX_SUMMARY_SCHEMA.to_string(),

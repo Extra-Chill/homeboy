@@ -360,14 +360,12 @@ impl CookRecipeStore {
         replaced_run_id: &str,
         replacement_run_id: &str,
     ) -> Result<AgentTaskCookRecipe> {
-        let recipe = record_recipe_attempt_replacement_in_store(
+        record_recipe_attempt_replacement_in_store(
             self,
             cook_id,
             replaced_run_id,
             replacement_run_id,
-        )?;
-        sync_fanout_replacement(self, &recipe, replaced_run_id, replacement_run_id)?;
-        Ok(recipe)
+        )
     }
 
     pub(crate) fn record_recipe_attempt_replacement_with_plan(
@@ -377,15 +375,13 @@ impl CookRecipeStore {
         replacement_run_id: &str,
         plan: &AgentTaskPlan,
     ) -> Result<AgentTaskCookRecipe> {
-        let recipe = record_recipe_attempt_replacement_in_store_with_plan(
+        record_recipe_attempt_replacement_in_store_with_plan(
             self,
             cook_id,
             replaced_run_id,
             replacement_run_id,
             plan,
-        )?;
-        sync_fanout_replacement(self, &recipe, replaced_run_id, replacement_run_id)?;
-        Ok(recipe)
+        )
     }
 
     pub fn enqueue_continuation(
@@ -477,32 +473,6 @@ impl CookRecipeStore {
         }
         consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, CookMode::Resume)
     }
-}
-
-fn sync_fanout_replacement(
-    store: &CookRecipeStore,
-    recipe: &AgentTaskCookRecipe,
-    replaced_run_id: &str,
-    replacement_run_id: &str,
-) -> Result<()> {
-    let Some(attempt) = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == replacement_run_id)
-    else {
-        return Ok(());
-    };
-    let Some(batch_id) = attempt.plan.metadata["batch_id"].as_str() else {
-        return Ok(());
-    };
-    let batch_store =
-        crate::agent_task_batch::AgentTaskBatchStore::from_data_root(store.data_root());
-    crate::agent_task_batch::record_fanout_child_run_replacement_in_store(
-        &batch_store,
-        batch_id,
-        replaced_run_id,
-        replacement_run_id,
-    )
 }
 
 fn lock_workspace_base_capture(lock: &File, lock_path: &Path, timeout: Duration) -> Result<()> {

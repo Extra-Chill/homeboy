@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::super::{
-    accepted_extra_lab_workspaces, agent_task_fanout_extra_workspaces,
-    agent_task_plan_extra_workspaces, agent_task_plan_spec, declared_path_input_values,
-    extension_source_extra_workspaces, path_setting_values, path_values_extra_workspaces,
-    preflight_provider_config_source_cli_dependencies, provider_config_candidate_paths,
-    provider_config_extra_workspaces, resolve_path_setting_workspace_refs_in_args,
+    accepted_extra_lab_workspaces, agent_task_plan_extra_workspaces, agent_task_plan_spec,
+    declared_path_input_values, extension_source_extra_workspaces, path_setting_values,
+    path_values_extra_workspaces, preflight_provider_config_source_cli_dependencies,
+    provider_config_candidate_paths, provider_config_extra_workspaces,
+    resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces_from_entries, runtime_refresh_source_extra_workspaces,
     sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
     workspace_mapping_entry, workspace_ref_extra_workspaces, ExtraLabWorkspace,
@@ -613,48 +613,6 @@ fn agent_task_plan_stages_declared_inputs_without_historical_checkout_paths() {
     assert!(git_output(&selected, &["status", "--porcelain"])
         .unwrap()
         .is_empty());
-}
-
-#[test]
-fn agent_task_fanout_extra_workspaces_syncs_child_cook_paths() {
-    let controller = tempfile::tempdir().expect("controller");
-    let source = controller.path().join("primary");
-    let child = controller.path().join("homeboy@cook-one");
-    let spec = source.join("fanout.json");
-    std::fs::create_dir_all(&source).expect("source dir");
-    std::fs::create_dir_all(&child).expect("child dir");
-    std::fs::write(
-        &spec,
-        serde_json::json!({
-            "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
-            "fanout_id": "fanout/test",
-            "cooks": [{
-                "cook_id": "one",
-                "prompt": "fix it",
-                "cwd": child,
-                "to_worktree": "homeboy@fix-one",
-                "head": "fix/one",
-                "verify": ["cargo test -p homeboy"]
-            }]
-        })
-        .to_string(),
-    )
-    .expect("fanout spec");
-
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "fanout".to_string(),
-        "run-plan".to_string(),
-        "--input".to_string(),
-        format!("@{}", spec.display()),
-    ];
-
-    let workspaces = agent_task_fanout_extra_workspaces(&args, &source).expect("workspaces");
-
-    assert_eq!(workspaces.len(), 1);
-    assert_eq!(workspaces[0].role, "agent_task_fanout_cook_workspace");
-    assert_eq!(workspaces[0].path, child.canonicalize().unwrap());
 }
 
 #[test]

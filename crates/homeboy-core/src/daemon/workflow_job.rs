@@ -126,9 +126,21 @@ impl WorkflowJobRequest {
     }
 }
 
-/// Resolves a Cook step's durable outcome (its run state) once its run is
-/// terminal. Registered by the agent-task layer.
-pub type WorkflowRunOutcomeResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// What a Cook step's durable run says about its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowRunOutcome {
+    /// No durable record exists: the step job's own status is the outcome.
+    Unknown,
+    /// The Cook has not settled: its run, or the terminal continuation that
+    /// promotes and finalizes it, is still in progress.
+    Pending,
+    /// The Cook settled with this run state.
+    Settled(String),
+}
+
+/// Resolves a Cook step's durable outcome from its run record. Registered by
+/// the agent-task layer.
+pub type WorkflowRunOutcomeResolver = Arc<dyn Fn(&str) -> WorkflowRunOutcome + Send + Sync>;
 
 fn run_outcome_resolver() -> &'static RwLock<Option<WorkflowRunOutcomeResolver>> {
     static RESOLVER: OnceLock<RwLock<Option<WorkflowRunOutcomeResolver>>> = OnceLock::new();
@@ -139,6 +151,33 @@ pub fn register_workflow_run_outcome_resolver(resolver: WorkflowRunOutcomeResolv
     *run_outcome_resolver()
         .write()
         .expect("workflow run outcome resolver lock") = Some(resolver);
+}
+
+/// Reports a Cook step's live progress (its latest attempt's state and phase)
+/// for status projections. Registered by the agent-task layer.
+pub type WorkflowRunProgressResolver = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
+
+fn run_progress_resolver() -> &'static RwLock<Option<WorkflowRunProgressResolver>> {
+    static RESOLVER: OnceLock<RwLock<Option<WorkflowRunProgressResolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| RwLock::new(None))
+}
+
+pub fn register_workflow_run_progress_resolver(resolver: WorkflowRunProgressResolver) {
+    *run_progress_resolver()
+        .write()
+        .expect("workflow run progress resolver lock") = Some(resolver);
+}
+
+fn run_progress(run_id: Option<&str>) -> Value {
+    run_id
+        .and_then(|run_id| {
+            run_progress_resolver()
+                .read()
+                .expect("workflow run progress resolver lock")
+                .as_ref()
+                .and_then(|resolve| resolve(run_id))
+        })
+        .unwrap_or(Value::Null)
 }
 
 /// Register the `workflow` controller-job driver. Idempotent.
@@ -251,7 +290,7 @@ fn run_instance(
     job.progress(projection(&state, Some(store)))?;
     loop {
         if job.is_cancelled() {
-            return Ok(json!({ "instance": request.instance, "status": "cancelled" }));
+            return Ok(cancelled(request, &state, store));
         }
         if state.status.is_terminal() {
             return finish(request, &state, store);
@@ -265,7 +304,7 @@ fn run_instance(
             match commit(request, job_id, &next, &commands, store) {
                 Ok(()) => {}
                 Err(_) if job.is_cancelled() => {
-                    return Ok(json!({ "instance": request.instance, "status": "cancelled" }));
+                    return Ok(cancelled(request, &state, store));
                 }
                 Err(error) => return Err(error),
             }
@@ -288,6 +327,27 @@ fn run_instance(
             std::thread::sleep(POLL);
         }
     }
+}
+
+/// The instance was cancelled: stop every step job it still awaits (the
+/// daemon's cascade usually got there first) and report the final state.
+fn cancelled(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Value {
+    let (next, commands) = advance(
+        &request.definition,
+        state,
+        &Event::Cancel { reason: None },
+        now_ms(),
+    );
+    for command in commands {
+        if let Command::CancelStep { key, reason } = command {
+            if let Some(child) = store.controller_job_for_key(&key) {
+                if !child.status.is_terminal() {
+                    let _ = crate::daemon::cancel_controller_job(child.id, &reason, store);
+                }
+            }
+        }
+    }
+    projection(&next, Some(store))
 }
 
 fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
@@ -370,30 +430,40 @@ fn step_result(
         JobStatus::Cancelled => FinishedStatus::Cancelled,
         JobStatus::Queued | JobStatus::Running => return None,
     };
-    let step = state
-        .steps
-        .iter()
-        .find(|(_, step)| step.key.as_deref() == Some(key));
-    let kind = step.map(|(id, _)| {
+    let owner = state.owner_of(key);
+    let kind = owner.map(|(id, _)| {
         request
             .definition
             .steps
             .iter()
-            .find(|definition| &definition.id == id)
+            .find(|definition| definition.id == id)
             .map(|definition| definition.kind())
             .expect("state steps match the pinned definition")
     });
-    let run_id = step.and_then(|(_, step)| step.run_id.clone());
+    let run_id = owner.and_then(|(id, index)| {
+        let step = &state.steps[id];
+        match index {
+            Some(index) => step.items[index].run_id.clone(),
+            None => step.run_id.clone(),
+        }
+    });
     let output_path = output_path(&request.instance, key).ok();
     let (outcome, output) = match kind {
         Some(crate::workflow::definition::StepKind::Cook(_)) => {
-            let outcome = run_id.as_deref().and_then(|run_id| {
+            let resolved = run_id.as_deref().and_then(|run_id| {
                 run_outcome_resolver()
                     .read()
                     .expect("workflow run outcome resolver lock")
                     .as_ref()
-                    .and_then(|resolve| resolve(run_id))
+                    .map(|resolve| resolve(run_id))
             });
+            // The Cook process ending is only a wake-up: the Cook settles when
+            // its run (and its terminal continuation) does.
+            let outcome = match resolved {
+                Some(WorkflowRunOutcome::Pending) => return None,
+                Some(WorkflowRunOutcome::Settled(outcome)) => Some(outcome),
+                Some(WorkflowRunOutcome::Unknown) | None => None,
+            };
             (
                 outcome,
                 output_path.and_then(|path| read_envelope_data(&path)),
@@ -634,6 +704,19 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "key": step.key,
                 "job": step.key.as_deref().map(job_of).unwrap_or(Value::Null),
                 "run_id": step.run_id,
+                "run": if step.phase == StepPhase::Running { run_progress(step.run_id.as_deref()) } else { Value::Null },
+                "items": step.items.iter().enumerate().map(|(index, item)| json!({
+                    "index": index,
+                    "item": item.item,
+                    "phase": item.phase,
+                    "attempt": item.attempt,
+                    "outcome": item.outcome,
+                    "key": item.key,
+                    "job": item.key.as_deref().map(job_of).unwrap_or(Value::Null),
+                    "run_id": item.run_id,
+                    "run": if item.phase == StepPhase::Running { run_progress(item.run_id.as_deref()) } else { Value::Null },
+                    "error": item.error,
+                })).collect::<Vec<_>>(),
                 "prompt": step.prompt,
                 "error": step.error,
                 "gates": step.gates.values().map(|gate| json!({

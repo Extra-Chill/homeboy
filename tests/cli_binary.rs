@@ -20,8 +20,6 @@ mod daemon_chaos;
 mod daemon_serve_lifecycle;
 #[path = "cli_binary/extension_action_payload.rs"]
 mod extension_action_payload;
-#[path = "cli_binary/fanout_supervisor_cli.rs"]
-mod fanout_supervisor_cli;
 #[path = "cli_binary/help_fast_path.rs"]
 mod help_fast_path;
 #[path = "cli_binary/notification_route_admission.rs"]

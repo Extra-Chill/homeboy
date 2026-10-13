@@ -3698,7 +3698,11 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
         assert_eq!(record.metadata["runner_id"], "local");
         assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
         assert_eq!(
-            terminal_artifact_projection_readiness("detached-run").expect("projection readiness"),
+            terminal_artifact_projection_readiness_in_store(
+                &test_lifecycle_store(),
+                "detached-run"
+            )
+            .expect("projection readiness"),
             None,
             "a verified controller mirror makes a pathless runner declaration continuable"
         );

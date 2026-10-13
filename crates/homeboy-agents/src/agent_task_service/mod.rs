@@ -9,8 +9,6 @@ mod cook;
 mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;
-/// Daemon-owned durable lifecycle for a locally-placed detached cook batch.
-pub(crate) mod cook_batch_job;
 mod cook_budget;
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
@@ -42,7 +40,6 @@ pub use cook::*;
 pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderActivity};
 pub use cook_adoption::*;
 pub use cook_baseline::*;
-pub use cook_batch_job::*;
 pub use cook_budget::*;
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]

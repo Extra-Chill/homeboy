@@ -1,8 +1,9 @@
 //! Workflow templating: string substitution only.
 //!
 //! `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`,
-//! `{{iteration}}` and `{{instance}}`. A string value substitutes as itself;
-//! any other JSON value substitutes as its compact JSON text.
+//! `{{iteration}}`, `{{instance}}`, and inside a `foreach` step `{{item}}` or
+//! `{{item.<field>[.<field>...]}}`. A string value substitutes as itself; any
+//! other JSON value substitutes as its compact JSON text.
 
 use std::sync::OnceLock;
 
@@ -13,10 +14,15 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reference {
     Input(String),
-    StepOutput { step: String, pointer: String },
+    StepOutput {
+        step: String,
+        pointer: String,
+    },
     StepRunId(String),
     Iteration,
     Instance,
+    /// The current `foreach` item, at a JSON pointer (`""` for the item).
+    Item(String),
 }
 
 /// Values a template reads. Implementations come from the instance state.
@@ -26,6 +32,10 @@ pub trait TemplateValues {
     fn step_run_id(&self, step: &str) -> Option<&str>;
     fn iteration(&self) -> u32;
     fn instance(&self) -> &str;
+    /// The current `foreach` item, inside a fan-out step only.
+    fn item(&self) -> Option<&Value> {
+        None
+    }
 }
 
 fn pattern() -> &'static Regex {
@@ -45,11 +55,16 @@ fn parse_reference(raw: &str) -> Result<Reference, String> {
     match raw {
         "iteration" => return Ok(Reference::Iteration),
         "instance" => return Ok(Reference::Instance),
-        "item" => return Err(
-            "`{{item}}` belongs to `foreach` fan-out, which this workflow version does not support"
-                .to_string(),
-        ),
+        "item" => return Ok(Reference::Item(String::new())),
         _ => {}
+    }
+    if let Some(path) = raw.strip_prefix("item.") {
+        let fields = path.split('.').collect::<Vec<_>>();
+        if fields.iter().all(|field| valid_name(field)) {
+            return Ok(Reference::Item(
+                fields.iter().map(|field| format!("/{field}")).collect(),
+            ));
+        }
     }
     if let Some(name) = raw.strip_prefix("inputs.") {
         if valid_name(name) {
@@ -84,6 +99,37 @@ pub fn valid_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+/// Resolve `text` to a JSON value: a text that is exactly one reference
+/// yields the referenced value itself; any other text renders to a string.
+pub fn resolve_value(text: &str, values: &dyn TemplateValues) -> Result<Value, String> {
+    let trimmed = text.trim();
+    if let Some(capture) = pattern().captures(trimmed) {
+        if capture.get(0).expect("whole match").as_str() == trimmed {
+            let reference = parse_reference(&capture[1])?;
+            return match &reference {
+                Reference::Iteration | Reference::Instance | Reference::StepRunId(_) => {
+                    resolve(&reference, values).map(Value::String)
+                }
+                Reference::Input(name) => values
+                    .input(name)
+                    .cloned()
+                    .ok_or_else(|| format!("input `{name}` has no value")),
+                Reference::StepOutput { step, pointer } => values
+                    .step_output(step)
+                    .and_then(|output| output.pointer(pointer))
+                    .cloned()
+                    .ok_or_else(|| format!("step `{step}` output has no value at `{pointer}`")),
+                Reference::Item(pointer) => values
+                    .item()
+                    .and_then(|item| item.pointer(pointer))
+                    .cloned()
+                    .ok_or_else(|| format!("item has no value at `{pointer}`")),
+            };
+        }
+    }
+    render(text, values).map(Value::String)
+}
+
 /// Substitute every reference in `text`.
 pub fn render(text: &str, values: &dyn TemplateValues) -> Result<String, String> {
     let mut rendered = String::with_capacity(text.len());
@@ -115,6 +161,10 @@ fn resolve(reference: &Reference, values: &dyn TemplateValues) -> Result<String,
             .step_output(step)
             .and_then(|output| output.pointer(pointer))
             .ok_or_else(|| format!("step `{step}` output has no value at `{pointer}`"))?,
+        Reference::Item(pointer) => values
+            .item()
+            .and_then(|item| item.pointer(pointer))
+            .ok_or_else(|| format!("item has no value at `{pointer}`"))?,
     };
     Ok(match value {
         Value::String(text) => text.clone(),
@@ -148,6 +198,34 @@ mod tests {
         fn instance(&self) -> &str {
             "wf-x-abc"
         }
+        fn item(&self) -> Option<&Value> {
+            Some(&self.output)
+        }
+    }
+
+    #[test]
+    fn items_render_and_whole_references_resolve_to_values() {
+        let values = Values {
+            input: json!({"issues": ["a", "b"]}),
+            output: json!({"report_path": "/tmp/r.json", "list": [1, 2]}),
+        };
+        assert_eq!(
+            render("{{item.report_path}} {{item.list}}", &values).unwrap(),
+            "/tmp/r.json [1,2]"
+        );
+        assert_eq!(
+            resolve_value(" {{inputs.issues}} ", &values).unwrap(),
+            json!(["a", "b"])
+        );
+        assert_eq!(
+            resolve_value("{{steps.evaluate.output/list}}", &values).unwrap(),
+            json!([1, 2])
+        );
+        assert_eq!(
+            resolve_value("x {{inputs.issues}}", &values).unwrap(),
+            json!("x [\"a\",\"b\"]")
+        );
+        assert!(resolve_value("{{item.missing}}", &values).is_err());
     }
 
     #[test]
@@ -180,8 +258,17 @@ mod tests {
                 Reference::StepRunId("b".into())
             ]
         );
+        assert_eq!(
+            references("{{item}} {{item.issue_url}} {{item.a.b}}").unwrap(),
+            vec![
+                Reference::Item(String::new()),
+                Reference::Item("/issue_url".into()),
+                Reference::Item("/a/b".into()),
+            ]
+        );
         for bad in [
-            "{{item}}",
+            "{{item.}}",
+            "{{item.a..b}}",
             "{{env.HOME}}",
             "{{steps.a.status}}",
             "{{steps.a.outputx}}",

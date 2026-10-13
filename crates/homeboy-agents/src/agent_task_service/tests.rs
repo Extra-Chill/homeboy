@@ -1867,6 +1867,56 @@ fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_rec
 }
 
 #[test]
+fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-step-cancel-redirected";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("parent");
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some(&attempt_id)).expect("attempt");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            // A workflow step owns its Cook by ID; it records no launcher.
+            let handoff = &mut record.metadata["detached_cook_handoff"];
+            handoff["attempt_run_id"] = serde_json::json!(&attempt_id);
+            handoff["state"] = serde_json::json!("redirected");
+        })
+        .expect("redirect parent");
+        agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["cook_id"] = serde_json::json!(cook_id);
+        })
+        .expect("running attempt");
+        index_cook_attempt(cook_id, &attempt_id);
+
+        let exit = homeboy_core::daemon::step_job::StepExit {
+            job_id: "step-job".to_string(),
+            key: "wf-instance/cook/1/item-0/1".to_string(),
+            linked_durable_run_id: Some(cook_id.to_string()),
+            child: homeboy_core::daemon::step_job::StepChild {
+                pid: u32::MAX,
+                start_identity: homeboy_core::process::ProcessStartIdentity::Linux {
+                    starttime_ticks: 1,
+                },
+            },
+            exit_code: None,
+            cancelled: true,
+            log_path: std::path::PathBuf::new(),
+        };
+        super::cook_step::observe_cook_step_exit(&exit).expect("observe cancelled exit");
+
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&attempt_id)
+                .expect("attempt")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+    });
+}
+
+#[test]
 fn scoped_reconcile_keeps_exact_attempts_separate_and_expands_cook_aliases_to_their_parent() {
     with_isolated_home(|_| {
         let cook_id = "cook-reconcile-alias";

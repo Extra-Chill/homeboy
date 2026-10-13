@@ -3440,25 +3440,6 @@ mod moving_base_tests {
     }
 }
 
-/// Finalization publishes controller-owned state. Persist its completed report
-/// on the attempt so a restarted continuation cannot open a second PR.
-pub(crate) fn finalize_or_load_cook_pr(
-    options: &CookRequest,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-) -> Result<Value> {
-    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    finalize_or_load_cook_pr_with_stores(
-        &store,
-        &lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-    )
-}
-
 pub(crate) fn finalize_or_load_cook_pr_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,

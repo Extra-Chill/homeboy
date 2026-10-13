@@ -88,7 +88,7 @@ Lab offload support is intentionally command-specific:
 |---|---:|---:|---|
 | `agent-task cook` / `agent-task run-plan` | Yes | Yes | Portable agent-task execution when the command has deterministic gates where required. |
 | `agent-task retry --run` | Yes | Yes | Retry plus execution follows the portable agent-task run path. |
-| `agent-task run` / `run-next` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
+| `agent-task run` / `status` / `logs` / `artifacts` / `review` / `providers` | No | Yes | Runner-resident inspection and queue interaction. |
 | `agent-task auth status` | No | Yes | Runner-resident auth diagnostics. |
 | `bench run` / default bench run | Yes | Yes | Safe single-workspace replay; local baseline/ratchet writes are treated as mutation flags. |
 | `build` | No | No | Local quality gate; extension-owned build commands are not represented in the portable Lab contract yet. |

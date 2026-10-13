@@ -35,6 +35,6 @@
     "max_queue_depth": 1
   },
   "metadata": {
-    "purpose": "deterministic agent-task submit/run/artifacts/promote smoke fixture"
+    "purpose": "deterministic agent-task run-plan/artifacts/promote smoke fixture"
   }
 }

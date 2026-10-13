@@ -16,7 +16,7 @@ A workflow pre-defines multi-step and repeating agent work and runs it mechanica
 - **One instance is one daemon job.** `workflow run` admits a `workflow` job in the daemon job store. The daemon is its only writer.
 - **The instance never runs work itself.** It submits `step` jobs and evaluates gates. Every step job is a supervised child with an admitted environment (see `homeboy daemon` and the `step` job kind).
 - **Every decision is a pure function.** `advance(definition, state, event)` returns the next state and its commands: submit a step, cancel a step, complete the instance. The daemon commits the new checkpoint, the new step jobs, and their submission keys in **one store transaction**, and only then starts the steps. A crash at any point either loses a whole decision or replays it against the same keys.
-- **Keys are deterministic.** A step job's key is `<instance>/<step>/<iteration>/<attempt>`; a command gate's key is `<instance>/<step>/<iteration>/when-<n>` or `<instance>/~until/<iteration>/<n>`. A replayed submission converges on the existing job, so no step runs twice.
+- **Keys are deterministic.** A step job's key is `<instance>/<step>/<iteration>/<attempt>`; a `foreach` item's is `<instance>/<step>/<iteration>/item-<n>/<attempt>`; a command gate's key is `<instance>/<step>/<iteration>/when-<n>` or `<instance>/~until/<iteration>/<n>`. A replayed submission converges on the existing job, so no step runs twice.
 - **The instance id is deterministic too.** It is `wf-<definition-id>-<sha256(definition digest, inputs, --instance)[..12]>`. Re-running the same definition with the same inputs returns the existing instance; new inputs (or a new `--instance` name) start a new one.
 - **The definition is pinned.** Its digest and body are stored in the instance at admission, so editing the file never changes a running instance.
 
@@ -44,6 +44,9 @@ Statuses:
       "needs": ["step-id"],          // run after these succeed; a need that did not succeed skips this step
       "when": <gate>,                // evaluated after needs settle; false skips the step
       "always": false,               // run even if a need failed (cleanup)
+      "foreach": "{{steps.prepare.output/children}}",   // fan-out: one step job per item (or a JSON array)
+      "max_parallel": 4,             // at most this many items run at once (default: all)
+      "join": "all",                 // or "any", or {"min_succeeded": N}; decided once every item settled
       "retry": { "max": 2, "on": ["failed", "timed_out"], "backoff": "10m" },
       "timeout": "90m",
       // exactly one of:
@@ -56,7 +59,19 @@ Statuses:
 }
 ```
 
-`notify` and the fan-out fields `foreach`, `max_parallel`, and `join` belong to later releases. A definition that uses them is refused with a message that names the field.
+`notify` belongs to a later release. A definition that uses it is refused with a message that names the field.
+
+### Fan-out and join
+
+A step with `foreach` expands, once its `needs` and `when` pass, into one step job per item. `foreach` is a JSON array or a template that resolves to one (a whole-value reference such as `{{steps.prepare.output/children}}` keeps the array's JSON). Inside the step's own work, `{{item}}` is the item and `{{item.<field>}}` reads a field of it.
+
+- **`max_parallel`** bounds how many items run at once; the next item starts as one settles.
+- **Items are independent.** One item's failure neither cancels nor skips its siblings. `retry` and `timeout` apply to each item.
+- **`join`** decides the step once every item has settled: `all` (default) needs every item to succeed, `any` one, `{"min_succeeded": N}` at least `N`. A passing join makes the step `succeeded`; otherwise it is `partial_failure` (some items succeeded) or `failed` (none did), which fails the instance like any failed step.
+- **The step's output** is `{"total", "succeeded", "join", "items": [{"item", "outcome", "run_id", "output", "error"}]}`.
+- **Cancelling the instance** cancels every running item, the Cook a `cook` item runs included, and starts no further one.
+
+`agent-task fanout cook-batch` compiles to exactly this shape (Example C).
 
 ### Step kinds
 
@@ -80,7 +95,7 @@ A step's *latest* outcome and output carry into the next iteration until the ste
 
 ### Templating
 
-String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`, `{{iteration}}`, `{{instance}}`. A string substitutes as itself; any other JSON value substitutes as its compact JSON.
+String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{steps.<id>.run_id}}`, `{{iteration}}`, `{{instance}}`, and in a `foreach` step's work `{{item}}` / `{{item.<field>}}`. A string substitutes as itself; any other JSON value substitutes as its compact JSON.
 
 ### Validation
 
@@ -132,7 +147,7 @@ When the daemon that owns an instance dies, the instance resumes on its own. The
 
 - **`workflow validate`** parses and validates a definition and prints its digest and step graph.
 - **`workflow run`** admits an instance in the local daemon and prints its status; a definition with `every` is registered as a cadence instead. With `--wait` it follows the instance until it is terminal and exits non-zero unless it succeeded. `--on RUNNER` admits the same definition on that runner's daemon through `homeboy runner exec`, so the environment is admitted on the runner and an always-on runner can own the instance.
-- **`workflow status`** is a pure projection of the job ledger: the instance status, each step's phase, outcome, attempt, key, and step job, the gates, and every finished iteration. `--watch` polls until the instance is terminal.
+- **`workflow status`** is a pure projection of the job ledger: the instance status, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook, the gates, and every finished iteration. `--watch` polls until the instance is terminal.
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one in the current iteration.
 - **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence.
@@ -225,26 +240,28 @@ Requires `notify`, which a later release implements; this release refuses the de
 }
 ```
 
-### Example C: fan-out batch with a join gate (S6)
+### Example C: fan-out batch with a join gate
 
-Requires `foreach`, `max_parallel`, and `join`, which arrive with workflow fan-out (#15804 slice S6); this release refuses the definition. It is what `agent-task fanout cook-batch` compiles to.
+This is the shape `homeboy --placement lab agent-task fanout cook-batch --repo homeboy-cook-scratch --verify 'test -f DONE' --max-concurrency 2 --join 2 ISSUE...` compiles to (abridged to two issues). `prepare` resolves the base once and transfers its commit to the Lab runner once; `cook` runs one Cook per child, two at a time, and succeeds when at least two children do.
 
 ```json
 {
   "schema": "homeboy/workflow/v1",
   "id": "cook-batch",
-  "inputs": { "repo": {"required": true}, "issues": {"required": true}, "base": {"default": null} },
   "steps": [
     { "id": "prepare",
-      "homeboy": ["agent-task", "batch-prepare", "--repo", "{{inputs.repo}}", "--issues", "{{inputs.issues}}"] },
+      "homeboy": ["agent-task", "batch-prepare", "--repo", "homeboy-cook-scratch", "--branch-prefix", "fix",
+                  "--bundle-runner", "homeboy-lab",
+                  "https://github.com/chubes4/homeboy-cook-scratch/issues/1",
+                  "https://github.com/chubes4/homeboy-cook-scratch/issues/2"] },
     { "id": "cook", "needs": ["prepare"],
-      "foreach": "{{steps.prepare.output/children}}", "max_parallel": 3,
+      "foreach": "{{steps.prepare.output/children}}", "max_parallel": 2,
       "join": { "min_succeeded": 2 },
-      "cook": { "repo": "{{inputs.repo}}", "issue": "{{item.issue_url}}", "branch": "{{item.branch}}",
-                "from": "{{steps.prepare.output/base_sha}}", "workspace-bundle": "{{steps.prepare.output/bundle_ref}}",
-                "verify": ["{{item.verify}}"], "placement": "lab" } },
-    { "id": "report", "needs": ["cook"], "always": true,
-      "homeboy": ["runs", "evidence", "--instance", "{{instance}}"] }
+      "cook": { "repo": "homeboy-cook-scratch", "task-url": "{{item.issue_url}}", "prompt": "{{item.prompt}}",
+                "head": "{{item.branch}}", "to-worktree": "{{item.worktree}}",
+                "base": "{{steps.prepare.output/base}}", "title": "{{item.title}}",
+                "commit-message": "{{item.commit_message}}",
+                "verify": ["test -f DONE"], "placement": "lab" } }
   ]
 }
 ```

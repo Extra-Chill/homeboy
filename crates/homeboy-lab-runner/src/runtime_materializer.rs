@@ -91,13 +91,6 @@ pub(crate) struct LabResolvedAgentRuntime {
     pub(crate) args: Vec<String>,
     pub(crate) env: Vec<(String, String)>,
     pub(crate) generation: Option<ResolvedAgentRuntimeGeneration>,
-    pub(crate) cells: std::collections::BTreeMap<
-        String,
-        (
-            ResolvedAgentRuntimeGeneration,
-            AgentRuntimeExecutionEvidence,
-        ),
-    >,
 }
 
 /// Resolve a v2 controller runtime declaration after its source workspaces have
@@ -110,53 +103,6 @@ pub(crate) fn resolve_lab_agent_runtime(
     workspace_remaps: &[(String, String)],
     job_or_run_id: &str,
 ) -> Result<Option<LabResolvedAgentRuntime>> {
-    if let Some((index, raw)) = provider_policy_arg(args, "--resolved-provider-policies") {
-        let mut policies: std::collections::BTreeMap<String, ResolvedAgentTaskProviderPolicy> =
-            serde_json::from_str(raw).map_err(|error| {
-                Error::validation_invalid_argument(
-                    "resolved-provider-policies",
-                    "Lab received invalid fanout provider policies",
-                    Some(error.to_string()),
-                    None,
-                )
-            })?;
-        let mut cells = std::collections::BTreeMap::new();
-        for (cell, policy) in &mut policies {
-            let single = vec![
-                "--resolved-provider-policy".to_string(),
-                serde_json::to_string(policy)
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
-            ];
-            if let Some(resolved) = resolve_lab_agent_runtime(
-                operations,
-                runner,
-                &single,
-                workspace_remaps,
-                job_or_run_id,
-            )? {
-                *policy = serde_json::from_str(&resolved.args[1])
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
-                let generation = resolved
-                    .generation
-                    .expect("single runtime resolves one generation");
-                let evidence = runtime_execution_evidence(&generation, &resolved.args, &runner.id)?;
-                cells.insert(cell.clone(), (generation, evidence));
-            }
-        }
-        if cells.is_empty() {
-            return Ok(None);
-        }
-        let mut args = args.to_vec();
-        let encoded = serde_json::to_string(&policies)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        replace_provider_policy_arg(&mut args, index, "--resolved-provider-policies", encoded);
-        return Ok(Some(LabResolvedAgentRuntime {
-            args,
-            env: Vec::new(),
-            generation: None,
-            cells,
-        }));
-    }
     let Some((policy_index, raw_policy)) = resolved_provider_policy_arg(args) else {
         return Ok(None);
     };
@@ -258,7 +204,6 @@ pub(crate) fn resolve_lab_agent_runtime(
             ),
         ],
         generation: Some(generation),
-        cells: std::collections::BTreeMap::new(),
     }))
 }
 
@@ -1072,61 +1017,6 @@ mod tests {
         let mut mismatched = evidence_args(&generation);
         mismatched[0] = mismatched[0].replace(&generation.runtime_path, "/wrong/runtime");
         assert!(runtime_execution_evidence(&generation, &mismatched, "runner-a").is_err());
-    }
-
-    #[test]
-    fn fanout_materializes_cell_runtimes_without_a_shared_environment_override() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let (mut operations, runner, plan) = fixture("a", false);
-            let (_, raw) = resolved_provider_policy_arg(&evidence_args(&evidence_generation()))
-                .map(|(index, raw)| (index, raw.to_string()))
-                .unwrap();
-            let mut policy: ResolvedAgentTaskProviderPolicy = serde_json::from_str(&raw).unwrap();
-            let identity = policy.runtime_identity.as_mut().unwrap();
-            identity.runtime_id = plan.runtime_id.clone();
-            identity.provider_id = plan.provider_id.clone();
-            identity.source_revision = plan.source_revision.clone().unwrap();
-            identity.materialization_plan = serde_json::to_value(&plan).unwrap();
-            identity.provider = serde_json::json!({
-                "id": plan.provider_id, "backend": "test", "runtime_id": plan.runtime_id
-            });
-            let encoded = serde_json::to_string(&std::collections::BTreeMap::from([
-                ("first", policy.clone()),
-                ("second", policy),
-            ]))
-            .unwrap();
-            let args = vec![format!("--resolved-provider-policies={encoded}")];
-            let resolved = resolve_lab_agent_runtime(
-                &mut operations,
-                &runner,
-                &args,
-                &[],
-                "fanout-runtime-test",
-            )
-            .unwrap()
-            .unwrap();
-            assert!(resolved.env.is_empty(), "each cell owns its runtime path");
-            assert!(resolved.generation.is_none());
-            assert_eq!(resolved.cells.len(), 2);
-            assert_eq!(*operations.snapshots.lock().unwrap(), 1);
-            let (_, raw) =
-                provider_policy_arg(&resolved.args, "--resolved-provider-policies").unwrap();
-            let policies: std::collections::BTreeMap<String, ResolvedAgentTaskProviderPolicy> =
-                serde_json::from_str(raw).unwrap();
-            for (cell, policy) in policies {
-                let identity = policy.runtime_identity.unwrap();
-                let (generation, evidence) = &resolved.cells[&cell];
-                assert_eq!(identity.provider["runtime_path"], generation.runtime_path);
-                assert!(Path::new(&generation.runtime_path).is_dir());
-                assert_eq!(evidence.executed, evidence.resolved);
-                let plan: AgentRuntimeMaterializationPlan =
-                    serde_json::from_value(identity.materialization_plan).unwrap();
-                assert!(plan.runtime_sources.iter().all(|source| matches!(
-                    &source.locator, AgentRuntimeSourceLocator::LocalPath { path }
-                        if path.starts_with(&generation.immutable_root)
-                )));
-            }
-        });
     }
 
     #[derive(Clone, Default)]

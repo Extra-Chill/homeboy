@@ -15,9 +15,9 @@ pub mod auth;
 pub(crate) mod candidate;
 pub mod capacity;
 pub mod contract;
+pub mod cook_batch;
 pub(crate) mod default_branch;
 pub mod doctor;
-pub mod fanout;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod prompts;
@@ -30,17 +30,14 @@ pub mod tool;
 
 pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
-    AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs, AgentTaskDoctorArgs,
-    AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs, AgentTaskFanoutCommand,
-    AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs, AgentTaskFanoutPlanArgs,
-    AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs, AgentTaskFanoutSubmitBatchArgs,
+    AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
+    AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs, DiagnoseArgs,
     EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
     PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
     RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyGateArgs,
-    VerifyReplacementArgs,
+    RuntimeValidateArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -83,7 +80,7 @@ pub(crate) fn run_with_placement(
     placement: crate::cli_surface::Placement,
 ) -> CmdResult<Value> {
     if let AgentTaskCommand::Fanout(fanout_args) = args.command {
-        return fanout::fanout_with_placement(fanout_args, placement);
+        return cook_batch::fanout_with_placement(fanout_args, placement);
     }
     run(args)
 }
@@ -318,8 +315,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
-        AgentTaskCommand::RunNext(args) => run::run_next(args),
-        AgentTaskCommand::Submit(submit_args) => run::submit(submit_args),
         AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
         // Alias, not a second watch loop: route straight into `activity watch`,
@@ -389,7 +384,8 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Rearm(args) => status::rearm(args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
-        AgentTaskCommand::Fanout(fanout_args) => fanout::fanout(fanout_args),
+        AgentTaskCommand::Fanout(fanout_args) => cook_batch::fanout(fanout_args),
+        AgentTaskCommand::BatchPrepare(args) => cook_batch::batch_prepare(args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
         AgentTaskCommand::Promote(promote_args) => review::promote_artifact(*promote_args),
         AgentTaskCommand::Adopt(adopt_args) => review::adopt_candidate(adopt_args),

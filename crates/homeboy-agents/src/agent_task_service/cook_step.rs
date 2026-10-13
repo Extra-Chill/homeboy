@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use homeboy_core::daemon::step_job::{self, StepExit, StepJobRequest};
+use homeboy_core::daemon::workflow_job::WorkflowRunOutcome;
 use homeboy_core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use homeboy_core::{Error, ErrorCode, Result};
 use serde_json::{json, Value};
@@ -248,6 +249,10 @@ pub fn register_cook_step_hooks() {
         homeboy_core::daemon::workflow_job::register_workflow_run_outcome_resolver(Arc::new(
             |cook_id: &str| workflow_cook_outcome(cook_id),
         ));
+        // Per-child progress of a running Cook step (#15689).
+        homeboy_core::daemon::workflow_job::register_workflow_run_progress_resolver(Arc::new(
+            |cook_id: &str| workflow_cook_progress(cook_id),
+        ));
         step_job::register_step_exit_observer(Arc::new(|exit: &StepExit| {
             if let Err(error) = observe_cook_step_exit(exit) {
                 eprintln!(
@@ -259,7 +264,7 @@ pub fn register_cook_step_hooks() {
     });
 }
 
-fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
+pub(super) fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     let Some(linked) = exit.linked_durable_run_id.as_deref() else {
         return Ok(());
     };
@@ -272,29 +277,122 @@ fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
     }
 }
 
-/// The terminal run state of a Cook's latest attempt (or of its handoff
-/// parent, when no attempt materialized). `None` until it is terminal.
-fn workflow_cook_outcome(cook_id: &str) -> Option<String> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
-    let run_id = store
-        .read_cook_index(cook_id)
-        .map(|index| index.latest_run_id)
-        .unwrap_or_else(|_| cook_id.to_string());
-    let record = store.read_record(&run_id).ok()?;
-    if !record.state.is_terminal() {
-        return None;
+/// The record that speaks for a Cook, or why it cannot answer yet.
+///
+/// The latest attempt the durable recipe declares speaks for the Cook. The
+/// handoff parent speaks only for a Cook it never redirected to an attempt
+/// (one that failed before materializing, which the step exit observer
+/// records); a redirected parent's own state says nothing about the Cook's
+/// outcome, so an unreadable recipe or attempt then means "not yet".
+fn workflow_cook_record(
+    cook_id: &str,
+) -> std::result::Result<agent_task_lifecycle::AgentTaskRunRecord, WorkflowRunOutcome> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        .map_err(|_| WorkflowRunOutcome::Pending)?;
+    let parent = store.read_record(cook_id).ok();
+    let redirected = parent
+        .as_ref()
+        .is_some_and(|parent| parent.metadata["detached_cook_handoff"]["state"] == "redirected");
+    let latest = super::load_recipe(cook_id)
+        .ok()
+        .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
+    if let Some(attempt) = latest.and_then(|run_id| store.read_record(&run_id).ok()) {
+        return Ok(attempt);
     }
-    serde_json::to_value(record.state)
-        .ok()?
-        .as_str()
-        .map(str::to_string)
+    match parent {
+        _ if redirected => Err(WorkflowRunOutcome::Pending),
+        Some(parent) => Ok(parent),
+        None => Err(WorkflowRunOutcome::Unknown),
+    }
+}
+
+/// The settled canonical state of a Cook. A terminal attempt whose terminal
+/// continuation (promotion and PR finalization) is still queued or running has
+/// not settled: the continuation decides its final state.
+fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
+    let record = match workflow_cook_record(cook_id) {
+        Ok(record) => record,
+        Err(outcome) => return outcome,
+    };
+    if !record.state.is_terminal() {
+        return WorkflowRunOutcome::Pending;
+    }
+    let continuation = super::CookRecipeStore::from_current_data_root()
+        .and_then(|store| super::continuation_state_in_store(&store, cook_id, &record.run_id));
+    match continuation {
+        Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed) => {
+            return WorkflowRunOutcome::Pending;
+        }
+        // A runner-executed attempt that produced a candidate is promoted and
+        // finalized by the terminal continuation the controller admits once
+        // it projects the runner's result: until that continuation exists and
+        // ends, the Cook has not settled.
+        Ok(super::CookContinuationState::Absent)
+            if record.runner_id().is_some()
+                && matches!(
+                    record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                        | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+                ) =>
+        {
+            return WorkflowRunOutcome::Pending;
+        }
+        _ => {}
+    }
+    // The Cook's outcome is its canonical subject read, the one `agent-task
+    // status <cook>` and the control-plane API serve: an attempt record alone
+    // reports a provider attempt, not the candidate, gates, and publication
+    // that decide whether the Cook produced its result.
+    let Ok(run) = crate::orchestration::run_from_current_environment(cook_id) else {
+        return WorkflowRunOutcome::Pending;
+    };
+    if !run.state.is_terminal() {
+        return WorkflowRunOutcome::Pending;
+    }
+    match serde_json::to_value(run.state)
+        .ok()
+        .and_then(|state| state.as_str().map(str::to_string))
+    {
+        Some(state) => WorkflowRunOutcome::Settled(state),
+        None => WorkflowRunOutcome::Unknown,
+    }
+}
+
+/// The live state and phase of a Cook's latest attempt, `None` before its
+/// durable record exists.
+fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
+    let record = workflow_cook_record(cook_id).ok()?;
+    Some(json!({
+        "run_id": record.run_id,
+        "state": record.state,
+        "phase": record
+            .metadata
+            .get("phase")
+            .or_else(|| record.metadata.get("current_phase"))
+            .cloned()
+            .unwrap_or_else(|| json!(record.state)),
+        "updated_at": record.updated_at,
+        "provider": record.provider_handles.last().map(|handle| &handle.backend),
+    }))
 }
 
 fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let parent = store.read_record(cook_id)?;
     if exit.cancelled {
-        if let Some(launcher_id) = parent.metadata["detached_cook_handoff"]["launcher_id"].as_str()
+        // A workflow `cook` step derives its Cook ID from its own step key, so
+        // it is that Cook's only owner: cancel the Cook, attempt and runner
+        // job included. A detached launch only cancels the launch generation
+        // it still owns.
+        if !exit.key.starts_with(COOK_LAUNCH_STEP_KEY_PREFIX) {
+            let _ = agent_task_lifecycle::cancel_run_in_store(
+                &store,
+                cook_id,
+                Some("workflow Cook step cancelled"),
+            );
+        } else if let Some(launcher_id) =
+            parent.metadata["detached_cook_handoff"]["launcher_id"].as_str()
         {
             let _ = agent_task_lifecycle::cancel_claimed_detached_cook_in_store(
                 &store,

@@ -109,6 +109,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
                         "id": step.id,
                         "kind": kind_name(step.kind()),
                         "needs": step.needs,
+                        "foreach": step.foreach.is_some(),
                     })).collect::<Vec<_>>(),
                 }),
                 0,
@@ -184,32 +185,46 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect::<BTreeMap<_, _>>();
-    let inputs = definition.resolve_inputs(&provided)?;
-    let instance = definition.instance_id(&inputs, args.instance.as_deref());
+    admit(
+        &definition,
+        &provided,
+        args.instance.as_deref(),
+        args.wait,
+        &source,
+    )
+}
+
+/// Admit `definition` on the local daemon, or report the instance the same
+/// definition, inputs, and name already admitted.
+pub(crate) fn admit(
+    definition: &WorkflowDefinition,
+    provided: &BTreeMap<String, Value>,
+    instance_name: Option<&str>,
+    wait: bool,
+    source: &str,
+) -> CmdResult<Value> {
+    let inputs = definition.resolve_inputs(provided)?;
+    let instance = definition.instance_id(&inputs, instance_name);
     let client = LocalControllerJobClient::connect_current_build()?;
     // The same definition and inputs name the same instance: report it.
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
-            let request = admission_request(
-                &definition,
-                inputs,
-                &instance,
-                args.instance.clone(),
-                current_dir()?,
-            )?;
+            let request =
+                admission_request(definition, inputs, &instance, instance_name, current_dir()?)?;
             client.submit(request.submission()?)?;
             "created"
         }
     };
-    let mut view = if args.wait {
+    let mut view = if wait {
         watch_instance(&client, &instance)?
     } else {
         client.workflow(&instance)?
     };
     view["submission"] = json!({ "disposition": disposition, "source": source });
     view["status_command"] = json!(format!("homeboy workflow status {instance}"));
-    let code = if args.wait { exit_code(&view) } else { 0 };
+    view["cancel_command"] = json!(format!("homeboy workflow cancel {instance}"));
+    let code = if wait { exit_code(&view) } else { 0 };
     Ok((view, code))
 }
 
@@ -266,7 +281,7 @@ fn admission_request(
     definition: &WorkflowDefinition,
     inputs: BTreeMap<String, Value>,
     instance: &str,
-    instance_name: Option<String>,
+    instance_name: Option<&str>,
     cwd: PathBuf,
 ) -> Result<WorkflowJobRequest> {
     let mut env = EnvMaterializationPlan::default();
@@ -348,7 +363,7 @@ fn admission_request(
     Ok(WorkflowJobRequest {
         schema: WORKFLOW_JOB_REQUEST_SCHEMA.to_string(),
         instance: instance.to_string(),
-        instance_name,
+        instance_name: instance_name.map(str::to_string),
         definition_digest: definition.digest(),
         definition: definition.clone(),
         inputs,
@@ -514,13 +529,30 @@ fn progress_line(view: &Value) -> String {
             steps
                 .iter()
                 .map(|(id, step)| {
-                    format!(
-                        "{id}={}",
-                        step["outcome"]
-                            .as_str()
-                            .filter(|_| step["phase"] == "done")
-                            .unwrap_or_else(|| step["phase"].as_str().unwrap_or("?"))
-                    )
+                    let state = step["outcome"]
+                        .as_str()
+                        .filter(|_| step["phase"] == "done")
+                        .unwrap_or_else(|| step["phase"].as_str().unwrap_or("?"));
+                    let items = step["items"].as_array().filter(|items| !items.is_empty());
+                    match items {
+                        // Per-child progress of a fan-out (#15689).
+                        Some(items) => format!(
+                            "{id}={state}[{}]",
+                            items
+                                .iter()
+                                .map(|item| {
+                                    let phase = item["outcome"]
+                                        .as_str()
+                                        .filter(|_| item["phase"] == "done")
+                                        .or_else(|| item["run"]["phase"].as_str())
+                                        .unwrap_or_else(|| item["phase"].as_str().unwrap_or("?"));
+                                    phase.to_string()
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ),
+                        None => format!("{id}={state}"),
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -590,7 +622,7 @@ fn load(workflow: &str) -> Result<(WorkflowDefinition, String)> {
     Ok((WorkflowDefinition::parse(&text)?, source))
 }
 
-fn validate(definition: &WorkflowDefinition) -> Result<()> {
+pub(crate) fn validate(definition: &WorkflowDefinition) -> Result<()> {
     definition.validate(&cook_flag_exists)
 }
 
@@ -690,9 +722,9 @@ mod tests {
                 continue;
             }
             let parsed = WorkflowDefinition::from_value(value.clone());
-            // Examples B (`notify`) and C (`foreach`) use fields a later
-            // release implements; this one refuses them.
-            if value["id"] == "cook-batch" || value["id"] == "homeboy-nightly-red-main" {
+            // Example B (`notify`) uses a field a later release implements;
+            // this one refuses it.
+            if value["id"] == "homeboy-nightly-red-main" {
                 assert!(parsed.is_err());
                 continue;
             }
@@ -704,7 +736,7 @@ mod tests {
             });
             examples += 1;
         }
-        assert!(examples >= 2);
+        assert!(examples >= 3);
     }
 
     #[test]

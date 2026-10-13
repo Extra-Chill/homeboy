@@ -219,11 +219,7 @@ where
                 "lab.materialize_agent_runtime",
                 "lab.materialize_agent_runtime",
             )
-            .inputs(
-                PlanValues::new()
-                    .json("generation", &runtime_generation)
-                    .json("cells", &resolved.cells),
-            )
+            .inputs(PlanValues::new().json("generation", &runtime_generation))
             .build(),
         );
     }

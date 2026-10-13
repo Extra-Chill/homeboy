@@ -76,12 +76,9 @@ pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
 pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
-    "agent-task run/run-next/status/logs/artifacts/review/list/active/latest";
+    "agent-task run/status/logs/artifacts/review/list/active/latest";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
 pub(crate) const AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL: &str = "agent-task fanout cook-batch";
-pub(crate) const AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL: &str = "agent-task fanout run-plan";
-pub(crate) const AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL: &str = "agent-task fanout submit-batch";
-pub(crate) const AGENT_TASK_FANOUT_STATUS_LAB_LABEL: &str = "agent-task fanout status/artifacts";
 pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
 // The lab-runnable command labels below are the ones `LabRunnerWorkload`
 // classification matches on; they live in the homeboy-lab-contract crate and are
@@ -254,20 +251,13 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
-        message_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
-        hint_label:
-            "agent-task run/run-next/status/logs/artifacts/review/list/active/latest/providers",
+        message_label: "agent-task run/status/logs/artifacts/review/list/active/latest/providers",
+        hint_label: "agent-task run/status/logs/artifacts/review/list/active/latest/providers",
     },
     CommandLabSupportSummary {
-        contract_labels: &[
-            AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-            AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
-            AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL,
-            AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-        ],
-        message_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
-        hint_label: "agent-task fanout cook-batch/run-plan/submit-batch/status/artifacts",
+        contract_labels: &[AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL],
+        message_label: AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
+        hint_label: AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_AUTH_STATUS_LAB_LABEL],
@@ -819,7 +809,7 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["fanout cook-batch"],
         operator_safety(Some("--preview"), &["--run-plan"]),
-        "creates/reuses task worktrees and can run the generated fanout unless --preview is passed",
+        "admits a workflow instance that cooks every child when --run-plan is passed",
     ),
 ];
 

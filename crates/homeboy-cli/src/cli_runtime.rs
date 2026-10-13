@@ -24,7 +24,6 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use homeboy_agents::agent_task_service::cook_continue_command;
 use homeboy_core::extension::catalog::{is_extension_linked, load_all_extensions};
 use homeboy_core::extension::readiness::ExtensionReadinessMode;
 #[cfg(test)]
@@ -1001,37 +1000,6 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     crate::runner::register_runner_continuation_provider();
 }
 
-/// Resolve a fanout batch's admitted provider catalog into the executor and
-/// dispatcher its resume must use; no ambient provider discovery.
-fn fanout_resume_execution_context(
-    authority: &serde_json::Value,
-) -> homeboy::core::Result<(
-    homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
-    homeboy::agents::orchestration::FanoutResumeDispatcherFactory,
-)> {
-    let reference = authority
-        .get("provider_catalog_ref")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "fanout.execution_authority",
-                "fanout resume authority is missing its private provider catalog reference",
-                None,
-                None,
-            )
-        })?;
-    let catalog = homeboy::agents::orchestration::resolve_fanout_resume_catalog(reference)?;
-    Ok((
-        std::sync::Arc::new(
-            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(
-                catalog,
-            ),
-        ),
-        crate::commands::route::reconstruct_cook_attempt_dispatcher,
-    ))
-}
-
 /// Register every provider hook the CLI wires after the startup terminal-run
 /// reconcile.
 ///
@@ -1069,10 +1037,6 @@ fn register_startup_providers_after_reconcile(
     // The daemon registers built-in cadences (`homeboy.retention`) through
     // the same admission the CLI uses.
     crate::commands::workflow::register_builtin_cadence_factory();
-    // A locally-placed detached fanout wave is daemon-owned on the same terms:
-    // the daemon supervises a coordinator it did not spawn, so no branch of its
-    // lifecycle can re-run a child that already completed.
-    crate::agents::agent_task_service::register_cook_batch_work_handler();
     crate::commands::cleanup::register_cleanup_job_driver();
     // The configured acceptance verifier is the one registration that is
     // conditional: `register_acceptance_verifier_from_config` is a no-op when
@@ -1122,7 +1086,6 @@ fn register_startup_providers_after_reconcile(
     // Register the orchestration service behind daemon HTTP control-plane
     // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
-    crate::agents::orchestration::register_fanout_resume_context(fanout_resume_execution_context);
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.
@@ -1163,28 +1126,6 @@ fn register_startup_providers_after_reconcile(
             },
             _ => None,
         })
-    });
-    crate::runner::set_fanout_provider_policy_resolver(|argv| {
-        let cli =
-            <crate::cli_surface::Cli as clap::Parser>::try_parse_from(argv).map_err(|error| {
-                crate::core::Error::validation_invalid_argument(
-                    "fanout",
-                    "failed to parse fanout arguments while compiling Lab provider policy",
-                    Some(error.to_string()),
-                    None,
-                )
-            })?;
-        match cli.command {
-            crate::cli_surface::Commands::AgentTask(agent_task) => match agent_task.command {
-                crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) => {
-                    crate::commands::agent_task::fanout::resolve_lab_provider_policies(
-                        fanout.command,
-                    )
-                }
-                _ => Ok(None),
-            },
-            _ => Ok(None),
-        }
     });
     // Register the Lab-runner hint provider so core::runner can compose
     // `--runner`/`--placement` unsupported errors from the command-spec table
@@ -1715,19 +1656,6 @@ impl CliRuntime {
         match delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &normalized) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
-            Err(err) => {
-                output_runtime::emit_json_result_for_identity(
-                    Err(err),
-                    output_file.as_deref(),
-                    2,
-                    &command_identity,
-                );
-                return std::process::ExitCode::from(2);
-            }
-        }
-
-        match guard_fanout_resume_runtime(&cli) {
-            Ok(()) => {}
             Err(err) => {
                 output_runtime::emit_json_result_for_identity(
                     Err(err),
@@ -2594,53 +2522,6 @@ fn annotate_runner_pinned_runtime_failure(
     error.with_hint(format!(
         "Verify runner `{runner_id}` is reachable, then retry the exact durable command."
     ))
-}
-
-/// Fanout coordination is controller-owned and may span children from distinct
-/// generations. It must not be offloaded wholesale; return exact child-local
-/// continuations before any provider or coordinator work can begin.
-fn guard_fanout_resume_runtime(cli: &Cli) -> homeboy::core::Result<()> {
-    let Commands::AgentTask(agent_task) = &cli.command else {
-        return Ok(());
-    };
-    let crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) = &agent_task.command else {
-        return Ok(());
-    };
-    let crate::commands::agent_task::args::AgentTaskFanoutCommand::Resume(args) = &fanout.command
-    else {
-        return Ok(());
-    };
-    let batch = crate::agents::agent_tasks::batch::read_batch_record(&args.batch_id)?;
-    let mut actions = Vec::new();
-    for child in &batch.child_runs {
-        // Children without a recipe never reached cook admission, so preserve
-        // the existing per-child recovery report instead of inventing a pin.
-        if crate::agents::agent_tasks::service::load_recipe(&child.run_id).is_err() {
-            continue;
-        }
-        let run_id =
-            crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(&child.run_id)?;
-        if let Some(pinned) =
-            crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
-        {
-            actions.push(pinned_cook_continue_command(&pinned, &child.run_id));
-        }
-    }
-    if actions.is_empty() {
-        return Ok(());
-    }
-    let mut error = homeboy::core::Error::validation_invalid_argument(
-        "batch_id",
-        "fanout coordinator cannot resume children pinned to another controller runtime",
-        Some(args.batch_id.clone()),
-        None,
-    );
-    error.details["next_actions"] = serde_json::json!(actions);
-    Err(error.with_retryable(true))
-}
-
-fn pinned_cook_continue_command(pinned: &std::path::Path, cook_id: &str) -> String {
-    cook_continue_command(Some(&pinned.to_string_lossy()), cook_id, false, None)
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
@@ -6317,9 +6198,8 @@ mod tests {
                 "--runner",
                 "homeboy-lab",
                 "agent-task",
-                "fanout",
                 "run-plan",
-                "--input",
+                "--plan",
                 "{}",
                 "--output",
                 "/tmp/run-plan-result.json",
@@ -6664,17 +6544,6 @@ mod tests {
 
             assert_eq!(input.controller_execution, expected);
         }
-    }
-
-    #[test]
-    fn pinned_cook_continuation_command_quotes_the_executable_and_cook_id() {
-        assert_eq!(
-            pinned_cook_continue_command(
-                std::path::Path::new("/tmp/controller runtimes/homeboy's"),
-                "cook id's",
-            ),
-            "'/tmp/controller runtimes/homeboy'\\''s' agent-task cook-continue 'cook id'\\''s'"
-        );
     }
 
     #[test]

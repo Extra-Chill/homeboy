@@ -9,14 +9,12 @@ pub(in crate::commands::agent_task) use super::super::args::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
     AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, LogsArgs,
-    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, SubmitArgs,
-    ValidatePlanArgs,
+    ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::run::{
     continue_cook_with, resume, retry, retry_with, run_cook_with_executor,
-    run_cook_with_executor_and_dispatcher, run_loaded_plan, run_next_with_executor_and_fanout,
-    run_resume_with_executor, run_submitted, run_submitted_with_executor, submit,
-    validate_cook_request, validate_plan,
+    run_cook_with_executor_and_dispatcher, run_loaded_plan, run_resume_with_executor,
+    run_submitted, run_submitted_with_executor, validate_cook_request, validate_plan,
 };
 pub(in crate::commands::agent_task) use super::super::status::{
     cancel, diagnose, evidence, logs, reconcile_run, replay_provider_boundary, status,
@@ -338,4 +336,23 @@ pub(crate) fn test_plan() -> AgentTaskPlan {
             metadata: Value::Null,
         }],
     )
+}
+
+/// Claim and run the oldest queued durable run through the queue service the
+/// daemon's queued-retry replay uses, projected the way the CLI reports runs.
+pub(in crate::commands::agent_task) fn run_next_queued(
+    executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
+) -> homeboy::core::Result<(serde_json::Value, i32)> {
+    let result = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
+        executor,
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        None,
+    )?;
+    Ok(match result.value {
+        Some(aggregate) => (
+            super::super::run::aggregate_value_with_failure_reasons(&aggregate),
+            result.exit_code,
+        ),
+        None => (serde_json::json!({ "claimed": false }), 0),
+    })
 }

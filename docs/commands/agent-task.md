@@ -23,8 +23,6 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 |---|---|
 | `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
 | `run <run-id>` | Execute one exact durable run id, bypassing older queued work. |
-| `run-next` | Claim and execute the oldest eligible queued durable run, reporting skipped quarantined work. |
-| `submit` | Persist an agent-task plan and return a durable run id without executing it. |
 | `status <run-id> [--exact] [--watch]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. `--watch` emits changed snapshots and exits when terminal or timed out. |
 | `list [--latest] [--limit <n>] [--cursor <cursor>] [--branch <branch>]` | List durable runs, newest first; `--latest` returns the newest record matching the supplied filters. |
 | `active [--limit <n>] [--cursor <cursor>] [--branch <branch>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
@@ -61,11 +59,11 @@ credential-bearing fragments or arbitrary URLs.
 
 Resource admission follows command capability rather than command names. Bounded
 controller metadata reads (`status`, `logs`, metadata-only `artifacts`, `list`,
-`active`, `latest`, and their fanout/loop/controller equivalents) run locally by
+`active`, `latest`, and their loop/controller equivalents) run locally by
 default and produce no hot-machine or Lab-routing guidance. This keeps recovery
 inspection available when a runner is disconnected, stale, or reports conflicting
 readiness. An explicit `--runner` retains runner-resident polling for status,
-logs, artifacts, list, active, latest, and fanout state reads when the durable
+logs, artifacts, list, active, latest, and other state reads when the durable
 state lives there. Provider execution, deterministic gates, explicit evidence or
 provider-boundary hydration, and review remain subject to their admission and
 routing contracts. Reconciliation is an explicit workload even when it begins
@@ -79,28 +77,6 @@ normalized `runtime_task`, provider config, `runtime_component_paths`,
 `runtime_env`, artifact declarations, and package descriptor, then persists the
 inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for
 multi-task runs.
-
-### Durable Fanout Batches
-
-Use `agent-task fanout submit-batch` when a caller has many independent tasks and
-needs durable lifecycle records for every child run. Homeboy persists one parent
-batch record plus one queued `agent-task` run per packet/task, so callers can
-drive execution with `agent-task run-next` or existing runner/lab queue loops and
-later reconcile status/artifacts without in-process Promise fanout or manual
-collation.
-
-```bash
-homeboy agent-task fanout submit-batch --input @packets.json --batch-id audit-wave-1
-homeboy agent-task run-next
-homeboy agent-task fanout status audit-wave-1
-homeboy agent-task fanout artifacts audit-wave-1
-```
-
-`submit-batch` is intentionally provider-neutral: packets still carry ordinary
-`AgentTaskRequest` executor contracts, and child runs use the existing
-`agent-task` lifecycle. Dependent workflow plans are rejected because their
-ordering and output bindings belong in the existing single-run `fanout submit` /
-`run-plan` scheduler path.
 
 ### Cook/Review
 
@@ -139,30 +115,14 @@ and private program text are redacted from that provenance. Existing inline
 Private gate programs, whether inline or file-backed, use the existing trusted
 durable Cook recipe boundary so retries and adoption can replay the declared gate.
 They are not protected as secret material at rest. Homeboy excludes private gate
-text and paths from public Cook-batch plans, preflight summaries, reviewer-facing
+text and paths from preflight summaries, reviewer-facing
 evidence, and agent feedback according to `--private-gate-reveal`; operators who
 need encrypted secret storage should supply a non-secret command that retrieves
 credentials at execution time rather than place credentials in a gate program.
 
-For a Cook-batch with private gates, Homeboy atomically retains the exact plan in
-`$HOMEBOY_DATA_DIR/agent-task/private-batch-plans/<fanout-id>.json` before it
-returns its public result. The returned `run-plan --input @<absolute-path>` command
-uses that controller-owned artifact; its private contents are never included in
-public JSON. Its SHA-256 checksum detects accidental corruption in trusted local
-state; it is not adversarial authentication. On Unix, the private artifact
-directory is mode `0700` and temporary/final artifacts are created mode `0600`
-before private bytes are written; rename preserves that mode. Other platforms use
-their platform-default owner-private file semantics where exposed by the runtime.
-Artifacts are retained with Homeboy controller data until data-root cleanup. On
-platforms without Unix device/inode identity APIs, Homeboy retains
-the portable descriptor-bound contract: it opens once, validates the opened
-descriptor as a regular bounded file, and reads that descriptor; Unix additionally
-uses no-follow, nonblocking open flags and verifies device/inode identity.
-
-`fanout plan --input @<private-artifact>` may inspect this trusted local artifact,
-but it returns only the same public projection used by Cook-batch output: private
-gate commands and paths remain redacted. `fanout run-plan` is the execution path
-that loads the private gate bytes.
+A Cook-batch passes private gates to each child Cook as `--private-verify` flags
+in its workflow definition, which the daemon job store retains like any other
+admitted workflow; the same `--private-gate-reveal` policy applies to each child.
 
 ### Provider Execution Budgets
 
@@ -350,9 +310,8 @@ explains a stop. `agent-task status` projects both under
 | Subcommand | Purpose |
 |---|---|
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
-| `fanout cook-batch <issue-url>... --repo <repo>` | One-command multi-issue cook setup: derive prompts, create/reuse DMC worktrees, generate PR metadata, and return status/resume commands. |
-| `fanout plan\|submit\|run-plan` | Normalize, inspect, or run a batch of independent cooks, each with its own worktree/branch/PR. |
-| `fanout submit-batch\|status\|artifacts` | Submit and inspect durable batches of independent `AgentTaskPlan` tasks. |
+| `fanout cook-batch <issue-url>... --repo <repo>` | Cook independent issues as one workflow instance: one child Cook per issue, a bounded wave, and a join gate. |
+| `batch-prepare <issue-url>... --repo <repo>` | The `prepare` step of a cook-batch: resolve the base once, name each child, and prepare the shared Lab workspace bundle. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
@@ -559,162 +518,61 @@ stores, and GitHub before recording its first verdict; it does not repair,
 promote, or publish on Cook's behalf.
 
 Use `agent-task fanout cook-batch` only when there are multiple independent
-issues that should each get separate worktree materialization, branch/PR
-metadata, and fanout status collation.
-
-For one wave spanning independent repositories, submit a
-`homeboy/agent-task-batch-cook-fanout-plan/v1` to `fanout run-plan`. Its `cooks`
-array is a per-cell Cook contract, so each cell may select its own `repo`,
-`task_url`, `base`, `to_worktree`, gates or verification profile, provider
-policy, and finalization intent. The wave still owns one concurrency limit and
-one durable parent status, while every child retains its normal Cook recipe,
-evidence, PR finalization, and replay identity.
-
-Each planned child retains its controller-resolved provider policy: primary
-route, ordered fallback chain, retry/liveness intent, and runtime identity.
-Executing or resuming the saved batch on another machine uses that submitted
-policy, including an intentional absence of rotation. Receiver-local defaults
-cannot replace it. Explicit execution caps and pinned routes retain their
-declared semantics. Lab handoff materializes each child's runtime independently;
-credentials and machine capabilities remain local to the execution node.
-
-```json
-{
-  "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
-  "fanout_id": "portfolio-repairs",
-  "max_concurrency": 3,
-  "cooks": [
-    {
-      "cook_id": "blocks-engine-101",
-      "repo": "blocks-engine",
-      "task_url": "https://github.com/Automattic/blocks-engine/issues/101",
-      "prompt": "Fix issue 101.",
-      "to_worktree": "blocks-engine@fix-101",
-      "base": "trunk",
-      "verify": ["npm test"]
-    },
-    {
-      "cook_id": "homeboy-11088",
-      "repo": "homeboy",
-      "task_url": "https://github.com/Extra-Chill/homeboy/issues/11088",
-      "prompt": "Fix issue 11088.",
-      "to_worktree": "homeboy@fix-11088",
-      "base": "main",
-      "verify": ["cargo test -p homeboy-cli"]
-    }
-  ]
-}
-```
-
-Run the manifest with `homeboy agent-task fanout run-plan --input
-@portfolio-repairs.json`. Status, artifacts, cancellation, and resume use the
-single `fanout_id`. The durable parent retains a sanitized per-cell manifest;
-private gate commands, provider configuration, and evidence file paths remain
-only in the child Cook recipes.
-
-A cell with `repo`, `task_url`, `base`, `head`, and an absent native
-`to_worktree` declares creation intent. Cook creates that exact destination
-after durable child admission and binds its path and base revision before
-provider execution. Preview leaves it absent; an explicit `cwd` or `workspace`
-continues to select an existing source checkout.
+issues that should each get its own worktree, branch, gates, and PR.
 
 #### Multi-Issue Cook Batch
 
-Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues
-that should each get an isolated branch, worktree, cook run, deterministic gates,
-and PR finalization defaults. The command accepts issue URLs directly, derives
-the batch-cook plan, queues DMC worktree creation from `origin/main`, and returns
-one structured status envelope with the generated plan plus resume commands.
+`agent-task fanout cook-batch` is shorthand for one `homeboy/workflow/v1`
+instance (see [`homeboy workflow`](workflow.md)). It compiles the batch into two
+steps and admits that workflow on the local daemon:
 
-Every child needs at least one deterministic gate after shared and profile gates
-resolve; this is checked before any worktree is created.
+- **`prepare`** runs `homeboy agent-task batch-prepare`. It resolves the base
+  branch and its commit once, names each child's branch
+  (`<prefix>/issue-<number>-<repo>`) and worktree, renders each child's prompt
+  from `--prompt-template` (the issue URL when no template is given), and, when
+  the children are placed on Lab, transfers the base commit to that runner
+  once. Every child at that commit then installs it from the runner's git object
+  cache instead of shipping its own bundle (#15677); the step output reports
+  that transfer as `workspace_bundle`.
+- **`cook`** fans out one ordinary `agent-task cook` per child
+  (`foreach` over the prepared children), at most `--max-concurrency` at a time.
+  Each child creates its worktree, runs its deterministic gates, and finalizes
+  its own PR exactly like a single Cook. `--join` decides the batch outcome:
+  `all` (default) needs every child to succeed, `any` one, and a number `N` at
+  least `N`.
+
+Every child needs a deterministic gate from `--verify`, `--verify-file`,
+`--private-verify`, or `--private-verify-file`.
 
 ```bash
-homeboy agent-task fanout cook-batch \
+homeboy --placement lab agent-task fanout cook-batch \
   --repo homeboy \
   --verify 'homeboy review test homeboy' \
-  --backend sandbox \
-  --selector wordpress.sandbox-agent-task-executor \
+  --max-concurrency 2 --join 2 \
   https://github.com/Extra-Chill/homeboy/issues/6453 \
-  https://github.com/Extra-Chill/homeboy/issues/6454
+  https://github.com/Extra-Chill/homeboy/issues/6454 \
+  https://github.com/Extra-Chill/homeboy/issues/6455 \
+  --run-plan
 ```
 
-For mixed stacks, keep arbitrary shell gates on `--verify` and assign named typed
-test plans with one JSON declaration. `--verification-profiles` accepts inline
-JSON or `@file.json`. An assignment selector is an exact issue URL, GitHub issue
-key (`OWNER/REPO#NUMBER`), or generated task selector (`issue-NUMBER`). Every
-assignment must match one child; unmatched selectors return the typed
-`selector_unmatched` validation error before worktree creation.
+Without `--run-plan` (or with `--preview`) the command validates the batch and
+prints the compiled workflow and its instance id without admitting anything.
+With `--run-plan` it admits the instance and returns its status plus
+`status_command` and `cancel_command`. The instance id is derived from the
+compiled definition, so re-running the same command reports the same instance;
+`--fanout-id NAME` runs the same batch as a separate instance.
 
-```json
-{
-  "profiles": {
-    "review": {
-      "plan": {
-        "adapter": "homeboy_review_test",
-        "command": ["homeboy", "review", "test", "homeboy"],
-        "suite_timeout_seconds": 1800
-      }
-    }
-  },
-  "assignments": [
-    { "selector": "Extra-Chill/homeboy#6453", "profile": "review" }
-  ]
-}
-```
+Observe and control the batch through the workflow verbs:
 
-Each profile selects one `TestExecutionPlan`. The current declared contract
-enforces a canonical `homeboy review test` argv and a positive suite timeout.
-The typed declaration is persisted unchanged through Cook and Lab handoff; use
-`--verify` only for arbitrary shell programs.
+- `homeboy workflow status <instance> [--watch]` shows each child's phase,
+  outcome, step job, Cook run id, and the live state of its running Cook.
+- `homeboy workflow cancel <instance>` cancels the instance and every child step
+  it is running; no further child starts.
 
-Add `--preview` to inspect the derived branch/worktree names and batch-cook spec
-without creating worktrees. Add `--run-plan` after reviewing provider readiness
-to execute the generated batch immediately. When DMC worktree creation is blocked
-by an active lock or another queue issue, the output reports `status: blocked`,
-lists the exact worktree rows and retry commands, and exits non-zero before any
-provider process starts.
-
-Completed cook batches use one aggregate outcome across the result payload, the
-`homeboy/command-result/v3` envelope, and the shell exit code for the
-*executing* commands (`cook-batch --run-plan`, `fanout run-plan`, `fanout
-resume`): `succeeded` exits zero; `partial_failure` means at least one child
-succeeded and at least one failed, and exits non-zero; `failed` means every
-child failed and exits non-zero. Child results and durable evidence remain
-available for `fanout status`, `artifacts`, and `resume`. This changes prior
-behavior where a failed `cook-batch --run-plan` could report a zero exit code;
-callers must treat nonzero as an unsuccessful batch. Active child cooks remain
-`queued` or `running` (including detached `in_flight` handoffs) with exit zero;
-a resume retains active children until their durable lifecycle reaches a
-terminal state.
-
-`fanout status` is a read (#13702): it exits zero and reports
-`success: true` / `status: "succeeded"` whenever it returns the requested
-batch projection, regardless of the batch's own state. The batch's aggregate
-state — including `failed` — lives in `data.batch`, and failed batches still
-get a human summary in `presentation.stdout`. Previously the status command exited non-zero for
-failed batches, which broke the documented recovery path under `set -e`;
-scripts that branched on that exit code must branch on `subject_state` or
-`data.batch.status` instead.
-
-Planning-only cook-batch invocations (`cook-batch` without `--run-plan`, and
-`--preview`) report envelope status `planned`, not `succeeded` (#13702): no
-agent ran and no PR opened, even though worktrees may have been provisioned.
-A blocked worktree preflight remains a failed operation: it exits non-zero and
-lifts the primary blocked row into the envelope's failure summary.
-
-The generated plan uses the existing
-`homeboy/agent-task-batch-cook-fanout-plan/v1` contract. That means operators can
-save the returned `plan` object and resume with:
-
-```bash
-homeboy agent-task fanout run-plan --input @batch-cook-plan.json
-```
-
-Prompt templates can be customized with `--prompt-template`; placeholders are
-`{issue_url}`, `{issue_ref}`, `{repo}`, `{branch}`, and `{worktree}`. PR titles,
-commit messages, source refs, and AI disclosure defaults are derived per issue
-unless the generated plan is edited before `fanout run-plan`.
+`--max-duration SECONDS` becomes the workflow's `budget.deadline`: on expiry the
+instance ends `budget_exhausted` and cancels running children. `--secret-env`
+names become workflow secret references that the daemon resolves when each
+child spawns.
 
 ## Lab Guardrails
 
@@ -723,11 +581,11 @@ patch-producing `agent-task cook` waves that must not execute
 provider processes on the controller. If Lab routing cannot select or prepare a
 runner, Homeboy fails before local execution instead of falling back.
 
-`cook` and the batch fanout coordinators (`fanout run-plan`, `fanout cook-batch
---run-plan`) use *split placement*: the coordinator always stays on the
+`cook` uses *split placement*: the coordinator always stays on the
 controller — it owns target resolution, the durable record, artifact ingestion,
 promotion, gates, and finalization — while each provider attempt is dispatched
-to the selected Lab runner. `--placement lab` and `--runner <runner-id>` select
+to the selected Lab runner. `fanout cook-batch` passes the same placement to
+each child Cook. `--placement lab` and `--runner <runner-id>` select
 the runner for those attempts; neither offloads the coordinator itself. When no
 Lab runner is ready, these commands report the runner readiness verdict and its
 remediation commands rather than claiming Lab placement is unsupported. Use
@@ -909,44 +767,6 @@ The same `--model` value records adopted-candidate and manual-finalization AI
 provenance. `finalize-pr` still accepts `--ai-model` as a deprecated alias
 because external publication tooling calls it; `adopt` accepts only `--model`.
 
-## Fanout/Reconcile
-
-`agent-task fanout` means batch cook: many independent one-shot cooks launched
-from one plan. Each cook declares its own target worktree and optional head
-branch, runs through the same cook-loop path as a single PR cook, and finalizes
-its own pull request when deterministic gates pass.
-
-The public input shape is `homeboy/agent-task-batch-cook-fanout-plan/v1`:
-
-```json
-{
-  "schema": "homeboy/agent-task-batch-cook-fanout-plan/v1",
-  "fanout_id": "audit-batch-2026-06-21",
-  "cooks": [
-    {
-      "cook_id": "finding-a",
-      "prompt": "Fix finding A",
-      "repo": "homeboy",
-      "to_worktree": "homeboy@fix-finding-a",
-      "head": "fix/finding-a",
-      "verify": ["homeboy review test homeboy"]
-    }
-  ]
-}
-```
-
-Generic task fanout is not a public operator contract. Existing
-`homeboy/agent-task-plan/v1`, `homeboy/agent-task-fanout-plan/v1`, packet arrays,
-and `tasks`/`packets` objects are rejected by `agent-task fanout`; internal
-schedulers may still use provider-neutral fanout machinery behind a clearer
-batch-cook surface.
-
-Cook entries accept dispatch fields such as `prompt`, `tasks`, `repo`, `cwd`,
-`workspace`, `task_url`, `backend`, `selector`, `model`, `secret_env`,
-`provider_config`, and `client_context`. Review fields include `to_worktree`,
-`verify`, `private_verify`, `max_attempts`, `base`, `head`, `title`,
-`commit_message`, `protected_branches`, `ai_tool`, and `ai_used_for`.
-
 ## Gate Command Contracts
 
 Before Cook provisions a worktree or dispatches a provider, Homeboy validates
@@ -966,22 +786,6 @@ homeboy review test --path .
 
 Other shell gates remain unvalidated during admission. Declare a `--gate-toolchain`
 when Homeboy must probe an external executable before provider dispatch.
-Each cook must declare at least one deterministic `verify` or `private_verify`
-gate so PR finalization is reviewer-ready.
-
-```bash
-homeboy agent-task fanout submit \
-  --input @batch-cooks.json \
-  --fanout-id audit-batch-2026-06-21 \
-  --backend codex \
-  --selector openai-codex
-```
-
-`fanout submit` prints the exact per-cook commands for runner or operator
-execution. `fanout run-plan` executes each cook through the cook-loop service and
-returns a batch summary with each child cook result; successful child cooks open
-or update their own PRs.
-
 ## Headless Fleet-Cooking Review
 
 The authoritative non-chat workflow is the durable `agent-task` lifecycle. Chat
@@ -1214,16 +1018,12 @@ Run it from a disposable Homeboy worktree:
 run_id="agent-task-smoke-$(date +%s)"
 target_worktree="homeboy@fix-3392-agent-task-smoke"
 
-homeboy agent-task submit \
+homeboy agent-task run-plan \
   --plan @tests/fixtures/agent_task_smoke_plan.json \
-  --run-id "$run_id"
+  --record-run-id "$run_id"
 
 homeboy agent-task status "$run_id"
 homeboy agent-task logs "$run_id"
-homeboy agent-task run "$run_id"
-# Or let a generic worker claim the oldest queued durable run:
-# homeboy agent-task run-next
-homeboy agent-task status "$run_id"
 homeboy agent-task artifacts "$run_id"
 homeboy agent-task review "$run_id" \
   --to-worktree "$target_worktree"
@@ -1234,10 +1034,8 @@ homeboy agent-task promote "$run_id" \
 
 The gate passes when:
 
-- `submit` returns a durable `run_id` immediately with `state: "queued"`.
-- Pre-run `status` and `logs` show the queued fixture cell.
-- `run` exits successfully and writes the aggregate lifecycle record.
-- Post-run `status` shows `state: "succeeded"`.
+- `run-plan` exits successfully and writes the aggregate lifecycle record under the recorded run id.
+- `status` shows `state: "succeeded"` and `logs` show the fixture cell.
 - `artifacts` lists a patch artifact, an agent result artifact, and a transcript evidence ref.
 - `review` returns a `homeboy/agent-task-review/v1` envelope with `transport.chat_state_required: false`, aggregate reconciliation, and promotion candidates.
 - `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.

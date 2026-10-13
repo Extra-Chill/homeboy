@@ -17,13 +17,13 @@ fn positive_discovery_limit(value: &str) -> std::result::Result<usize, String> {
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
-use super::fanout::AgentTaskFanoutArgs;
+use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
-    RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
-    SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
+    RunArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
+    VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -89,10 +89,6 @@ pub enum AgentTaskCommand {
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable run.
     Run(RunArgs),
-    /// Claim and execute the oldest queued durable run, optionally within one fanout.
-    RunNext(RunNextArgs),
-    /// Persist an agent-task plan and return a durable run id without executing it.
-    Submit(SubmitArgs),
     /// Validate a plan and provider readiness without creating a lifecycle record.
     ValidatePlan(ValidatePlanArgs),
     /// Read durable run status.
@@ -163,12 +159,15 @@ pub enum AgentTaskCommand {
     PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
     Retry(RetryArgs),
-    /// Cook, submit, and inspect batches of independent tasks.
+    /// Cook a batch of independent issues as one workflow instance.
     ///
-    /// Each child declares its own target worktree and optional head branch, runs
-    /// through the same cook-loop path as a single PR cook, and finalizes its own
-    /// pull request when its deterministic gates pass.
+    /// `fanout cook-batch` compiles to a `homeboy/workflow/v1` fan-out: each
+    /// child is an ordinary `agent-task cook` that finalizes its own pull
+    /// request when its deterministic gates pass.
     Fanout(AgentTaskFanoutArgs),
+    /// Plan a cook-batch: resolve its base once, name each child, and prepare
+    /// the shared Lab workspace bundle. The `prepare` step of `fanout cook-batch`.
+    BatchPrepare(AgentTaskBatchPrepareArgs),
     /// Build a durable aggregate review envelope from run state, logs, artifacts,
     /// and promotion hints.
     Review(ReviewArgs),

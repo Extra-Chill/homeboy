@@ -7,10 +7,8 @@ use crate::agents::agent_tasks::provider::{default_backend, provider_requires_cw
 use crate::cli_surface::Commands;
 use crate::command_contract::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-    AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL, AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-    AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL, AGENT_TASK_PROMOTE_LAB_LABEL,
-    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
-    RUNTIME_REFRESH_LAB_LABEL,
+    AGENT_TASK_PROMOTE_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL,
+    AGENT_TASK_STATUS_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL,
 };
 use crate::commands::agent_task;
 use crate::core::engine::execution_context::{self, ResolveOptions};
@@ -87,7 +85,7 @@ pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
 pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
     "agent-task promote with a durable run reference or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
-    "agent-task fanout coordination is controller-owned so durable batch state, worktree ownership, and recovery remain available; `--placement lab` (or `--runner <runner-id>`) selects the Lab runner each child provider attempt is dispatched to, and never offloads the coordinator itself";
+    "agent-task fanout cook-batch admits a controller-local workflow instance; `--placement lab` (or `--runner <runner-id>`) places each child Cook on the Lab runner, and never offloads the batch itself";
 
 impl Commands {
     /// Resolve this built-in command through the generic Lab route contract.
@@ -190,61 +188,15 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::RunPlan(_),
-                    }),
-            }) => agent_task_fanout_local_only_contract(
-                AGENT_TASK_FANOUT_RUN_PLAN_LAB_LABEL,
-                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::CookBatch(args),
-                    }),
-            }) if args.preview => agent_task_fanout_local_only_contract(
-                AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
                         command: agent_task::AgentTaskFanoutCommand::CookBatch(_),
-                    }),
+                    })
+                    | agent_task::AgentTaskCommand::BatchPrepare(_),
             }) => agent_task_fanout_local_only_contract(
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
             Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::SubmitBatch(_),
-                    }),
-            }) => {
-                LabCommandContract::explicit_runner_simple(AGENT_TASK_FANOUT_SUBMIT_BATCH_LAB_LABEL)
-                    .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES)
-            }
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command: agent_task::AgentTaskFanoutCommand::Cancel(_),
-                    }),
-            }) => agent_task_fanout_local_only_contract(
-                AGENT_TASK_FANOUT_STATUS_LAB_LABEL,
-                AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
-            ),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {
-                        command:
-                            agent_task::AgentTaskFanoutCommand::Status(_)
-                            | agent_task::AgentTaskFanoutCommand::Artifacts(_),
-                    }),
-            }) => {
-                LabCommandContract::runner_resident_read_polling(AGENT_TASK_FANOUT_STATUS_LAB_LABEL)
-            }
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command:
-                    agent_task::AgentTaskCommand::Run(_) | agent_task::AgentTaskCommand::RunNext(_),
+                command: agent_task::AgentTaskCommand::Run(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:

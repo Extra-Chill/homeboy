@@ -812,6 +812,9 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
 
 struct StatusPoller {
     args: StatusArgs,
+    /// Waiting on a Cook admission: an attempt its replay is still
+    /// materializing (recipe written, lifecycle record not yet) is not an end.
+    await_materialization: bool,
 }
 
 impl WatchPoller for StatusPoller {
@@ -822,6 +825,12 @@ impl WatchPoller for StatusPoller {
     }
 
     fn is_terminal(&self, item: &Self::Item) -> bool {
+        if self.await_materialization && item.0["status"] == "recipe_only_recovery_required" {
+            // The admission stays open until its replay materializes the
+            // attempt or terminalizes the admission itself.
+            return agent_task_lifecycle::exact_record(&self.args.run_id)
+                .map_or(true, |admission| admission.state.is_terminal());
+        }
         status_is_terminal(&item.0)
     }
 }
@@ -834,7 +843,7 @@ fn watch_status(args: StatusArgs) -> CmdResult<Value> {
 /// Global `--wait` observes durable ownership until terminal completion rather
 /// than treating acceptance or the ordinary bounded watch timeout as success.
 pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
-    watch_status_with_timeout(
+    watch_status_until(
         StatusArgs {
             run_id: run_id.to_string(),
             full: false,
@@ -847,13 +856,25 @@ pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
             timeout: "30m".to_string(),
         },
         None,
+        true,
     )
 }
 
-fn watch_status_with_timeout(mut args: StatusArgs, timeout: Option<Duration>) -> CmdResult<Value> {
+fn watch_status_with_timeout(args: StatusArgs, timeout: Option<Duration>) -> CmdResult<Value> {
+    watch_status_until(args, timeout, false)
+}
+
+fn watch_status_until(
+    mut args: StatusArgs,
+    timeout: Option<Duration>,
+    await_materialization: bool,
+) -> CmdResult<Value> {
     let interval = parse_duration("--interval", &args.interval)?;
     args.watch = false;
-    let poller = StatusPoller { args: args.clone() };
+    let poller = StatusPoller {
+        args: args.clone(),
+        await_materialization,
+    };
     let started = Instant::now();
     let mut progress = StatusWatchProgress::default();
     let result = watch_loop(
@@ -6504,6 +6525,39 @@ mod tests {
                 .map(|diagnostic| diagnostic.class.as_str()),
             Some("agent_task.provider_liveness_timeout")
         );
+    }
+
+    /// `cook --wait` on an unmaterialized admission must not end while the
+    /// admission's replay is materializing the attempt: the recipe-only window
+    /// is not terminal until the admission itself is.
+    #[test]
+    fn a_recipe_only_attempt_ends_a_cook_wait_only_once_its_admission_is_terminal() {
+        crate::test_support::with_isolated_home(|_| {
+            let recipe_only = (
+                json!({ "status": "recipe_only_recovery_required", "run_id": "cook-a-attempt-1" }),
+                0,
+            );
+            let poller = |run_id: &str, await_materialization: bool| StatusPoller {
+                args: StatusArgs {
+                    run_id: run_id.to_string(),
+                    ..Default::default()
+                },
+                await_materialization,
+            };
+            agent_task_lifecycle::submit_plan(
+                &AgentTaskPlan::new("cook-a", Vec::new()),
+                Some("cook-a"),
+            )
+            .expect("queued admission");
+            assert!(!poller("cook-a", true).is_terminal(&recipe_only));
+            // A plain status watch reports the recipe-only state as its answer.
+            assert!(poller("cook-a", false).is_terminal(&recipe_only));
+            // An admission with no durable record cannot be waited on.
+            assert!(poller("cook-absent", true).is_terminal(&recipe_only));
+            agent_task_lifecycle::cancel_run("cook-a", Some("admission abandoned"))
+                .expect("terminal admission");
+            assert!(poller("cook-a", true).is_terminal(&recipe_only));
+        });
     }
 
     #[test]

@@ -3,10 +3,6 @@ pub use super::agent_task_aggregate::{
     AgentTaskDecisionRef, AgentTaskMatrixRow, AgentTaskReconciliationDecision,
     AgentTaskReconciliationItem, AgentTaskUsageSummary, AGENT_TASK_AGGREGATE_SCHEMA,
 };
-pub use super::agent_task_fanout::{
-    AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
-    AGENT_TASK_FANOUT_AGGREGATE_SCHEMA, AGENT_TASK_FANOUT_PLAN_SCHEMA,
-};
 
 mod artifacts;
 pub mod bench_matrix_provider;

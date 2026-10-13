@@ -38,12 +38,6 @@ pub const AGENT_TASK_PROVIDER_OUTCOME_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-outcome-contract/v1";
 pub const AGENT_TASK_DIAGNOSTIC_RANKING_SCHEMA: &str = "homeboy/agent-task-diagnostic-ranking/v1";
 pub const SECRET_ENV_REQUIREMENT_SCHEMA: &str = "homeboy/secret-env-requirement/v1";
-pub const AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA: &str =
-    "homeboy/agent-task-batch-cook-fanout-plan/v1";
-pub const AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA: &str =
-    "homeboy/agent-task-batch-cook-fanout-run/v1";
-pub const AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA: &str =
-    "homeboy/agent-task-batch-cook-fanout-submit/v1";
 pub const AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA: &str =
     "homeboy/agent-runtime-contract-handshake/v1";
 
@@ -106,9 +100,6 @@ pub struct AgentTaskCoreContractSchemas {
     pub agent_runtime_materialization_plan: String,
     pub agent_runtime_contract_handshake: String,
     pub resolved_agent_runtime_execution_contract: String,
-    pub batch_cook_fanout_plan: String,
-    pub batch_cook_fanout_run: String,
-    pub batch_cook_fanout_submit: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,9 +208,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             agent_runtime_contract_handshake: AGENT_RUNTIME_CONTRACT_HANDSHAKE_SCHEMA.to_string(),
             resolved_agent_runtime_execution_contract:
                 RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA.to_string(),
-            batch_cook_fanout_plan: AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA.to_string(),
-            batch_cook_fanout_run: AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA.to_string(),
-            batch_cook_fanout_submit: AGENT_TASK_BATCH_COOK_FANOUT_SUBMIT_SCHEMA.to_string(),
         },
         provider_capability: AgentTaskCoreProviderCapabilityContract {
             schema: provider_capability.schema,
@@ -572,10 +560,6 @@ mod tests {
             .iter()
             .any(|phase| phase.id == "resolved_execution_contract"
                 && phase.required_fields.contains(&"provider_id".to_string())));
-        assert_eq!(
-            contract.schemas.batch_cook_fanout_plan,
-            AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA
-        );
         assert_eq!(
             contract.provider_capability.request_required_fields,
             agent_task_request_required_fields()

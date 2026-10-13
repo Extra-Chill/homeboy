@@ -11,8 +11,7 @@ use serde::Serialize;
 
 use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_executable_agent_task_retry, is_lab_offloadable_fanout_coordinator,
-    is_local_registry_management, is_plan_only_command,
+    is_executable_agent_task_retry, is_local_registry_management, is_plan_only_command,
 };
 use messages::{
     append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
@@ -478,25 +477,6 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         }
         return Some(HotCommand {
             label: "agent-task cook/run-plan/retry --run",
-            lab_offload_supported: true,
-            lab_offload_unsupported_reason: None,
-            allows_warm_runner_coordination: true,
-            offload_only_when_hot: false,
-        });
-    }
-
-    // The batch-cook fanout coordinator keeps durable batch state, worktree
-    // ownership, promotion, gates, and finalization on the controller, but each
-    // independent child provider attempt is Lab-eligible (routed by
-    // `run_split_placement_fanout`). Treat `fanout run-plan` like a verified
-    // cook: a controller-owned coordinator whose provider work can be admitted
-    // under warm/hot CPU load when an explicit ready `--runner` is selected,
-    // rather than refusing the whole batch as local-only (#9375). Memory and
-    // process pressure remain hard local safety gates via
-    // `admits_warm_runner_coordination`.
-    if is_lab_offloadable_fanout_coordinator(command) {
-        return Some(HotCommand {
-            label: "agent-task fanout run-plan",
             lab_offload_supported: true,
             lab_offload_unsupported_reason: None,
             allows_warm_runner_coordination: true,
@@ -1547,8 +1527,6 @@ mod tests {
                 "{}",
             ]
             .as_slice(),
-            ["homeboy", "agent-task", "fanout", "status", "batch-123"].as_slice(),
-            ["homeboy", "agent-task", "fanout", "artifacts", "batch-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
             for readiness in &runner_states {
@@ -1781,6 +1759,21 @@ mod tests {
     }
 
     #[test]
+    fn batch_prepare_is_controller_planning_not_a_hot_workload() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "batch-prepare",
+            "--repo",
+            "homeboy",
+            "--bundle-runner",
+            "homeboy-lab",
+            "https://github.com/Extra-Chill/homeboy/issues/8025",
+        ]);
+        assert!(hot_command(&cli.command).is_none());
+    }
+
+    #[test]
     fn verified_agent_task_cook_can_offload_its_provider_attempt() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -1797,75 +1790,6 @@ mod tests {
         assert!(command.lab_offload_supported);
         assert!(command.allows_warm_runner_coordination);
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
-    }
-
-    #[test]
-    fn fanout_run_plan_coordinator_can_offload_its_child_provider_attempts() {
-        // A validated batch-cook fanout run-plan must not be refused as
-        // local-only under resource policy: the coordinator stays on the
-        // controller while each child provider attempt is Lab-eligible (#9375).
-        let cli = Cli::parse_from([
-            "homeboy",
-            "agent-task",
-            "fanout",
-            "run-plan",
-            "--input",
-            "@batch-cook-plan.json",
-        ]);
-        let command = hot_command(&cli.command).expect("fanout run-plan is resource managed");
-        assert!(command.lab_offload_supported);
-        assert!(command.allows_warm_runner_coordination);
-        assert!(command.lab_offload_unsupported_reason.is_none());
-        assert_eq!(command.label, "agent-task fanout run-plan");
-    }
-
-    #[test]
-    fn runner_pinned_fanout_run_plan_admits_an_explicit_ready_runner_on_warm_or_hot_controller() {
-        // With an explicit ready runner, the fanout coordinator is admitted on a
-        // warm/hot controller so its child cooks can execute on Lab, instead of
-        // the whole batch being forced local (#9375).
-        let cli = Cli::parse_from([
-            "homeboy",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "fanout",
-            "run-plan",
-            "--input",
-            "@batch-cook-plan.json",
-        ]);
-        let command = hot_command(&cli.command).expect("fanout run-plan is resource managed");
-        assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-        let ready = ready_lab();
-
-        for recommendation in [ResourceRecommendation::Warm, ResourceRecommendation::Hot] {
-            let mut resources = coordination_resources();
-            resources.recommendation = recommendation;
-            resources.load.recommendation = recommendation;
-            assert!(admits_warm_runner_coordination(
-                command,
-                &resources,
-                Some("homeboy-lab"),
-                Some(&ready),
-            ));
-        }
-
-        // Without an explicit runner, or with an unavailable one, the warm/hot
-        // controller still declines — preserving the memory/process safety
-        // boundary shared with the single-cook coordinator.
-        let resources = coordination_resources();
-        assert!(!admits_warm_runner_coordination(
-            command,
-            &resources,
-            None,
-            Some(&ready),
-        ));
-        assert!(!admits_warm_runner_coordination(
-            command,
-            &resources,
-            Some("missing-lab"),
-            Some(&ready),
-        ));
     }
 
     #[test]
