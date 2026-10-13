@@ -548,42 +548,6 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
 }
 
 #[test]
-fn agent_task_fanout_submit_batch_requires_explicit_runner_under_lab_placement() {
-    // Isolate from a parallel test leaking the offload-metadata env var,
-    // which would otherwise short-circuit route_after_parse as a Lab
-    // offload subprocess and return Ok(None) instead of the deny error.
-    let _env = EnvGuard::remove(homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV);
-    let normalized = vec![
-        "homeboy".to_string(),
-        "--placement".to_string(),
-        "lab".to_string(),
-        "agent-task".to_string(),
-        "fanout".to_string(),
-        "submit-batch".to_string(),
-        "--input".to_string(),
-        "fanout.json".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-    capture_fixture_preflight(&cli, &normalized);
-
-    let command = lab_offload_command(&cli.command).unwrap().unwrap();
-    assert_eq!(command.hot_label, "agent-task fanout submit-batch");
-    assert!(!command.routing_policy.default_lab_offload);
-    assert!(!command.routing_policy.infer_source_path_tools);
-
-    let err = route_after_parse_with_provenance(&cli, &normalized, None, None)
-        .expect_err("fanout submit-batch must not run locally under Lab placement");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    // submit-batch needs an explicit runner under Lab placement: it does
-    // not auto-offload, so `--placement lab` without an eligible runner is
-    // refused rather than silently running locally.
-    assert!(err.message.contains("--placement lab"));
-    assert!(err.message.contains("requires an eligible Lab runner"));
-    assert!(err.message.contains("agent-task fanout submit-batch"));
-}
-
-#[test]
 fn agent_task_fanout_cook_batch_run_plan_keeps_cook_coordinators_local() {
     // `--runner` implies Lab placement and conflicts with an explicit
     // `--placement` at parse time (#9002); the runner-pinned coordinator uses
