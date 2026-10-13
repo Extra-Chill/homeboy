@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.51.4] - 2026-10-13
+
+### Fixed
+- declare isolated_home_paths for WP Codebox runtime caches
+
 ## [3.51.3] - 2026-10-11
 
 ### Changed
