@@ -586,6 +586,57 @@ assert.equal(config.agent.title.disable, true);
 		config: { ...evidenceRequest.executor.config, evidence_inputs: [{ path: evidenceFile, read_only: false }] },
 	} }, { env: fixtureEnv }), /absolute read-only locations/);
 
+	// A Cook workspace is commonly a linked worktree whose `.git` file names a
+	// gitdir under another checkout. Git status, `git rev-parse --git-path
+	// info/exclude`, and native reads of that metadata must not be denied, and
+	// the grant must stay read-only and scoped to this repository.
+	const primaryCheckout = path.join(root, 'linked-git', 'primary');
+	const linkedWorkspace = path.join(root, 'linked-git', 'attempt', 'workspace');
+	const unrelatedCheckout = path.join(root, 'linked-git', 'unrelated');
+	fs.mkdirSync(primaryCheckout, { recursive: true });
+	fs.mkdirSync(unrelatedCheckout, { recursive: true });
+	const git = (cwd, ...args) => {
+		const result = spawnSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', ...args], { cwd, encoding: 'utf8' });
+		assert.equal(result.status, 0, result.stderr);
+		return result.stdout.trim();
+	};
+	git(primaryCheckout, 'init', '-q');
+	fs.writeFileSync(path.join(primaryCheckout, 'README.md'), 'fixture\n');
+	git(primaryCheckout, 'add', 'README.md');
+	git(primaryCheckout, 'commit', '-qm', 'fixture');
+	git(primaryCheckout, 'worktree', 'add', '-q', '--detach', linkedWorkspace);
+	git(unrelatedCheckout, 'init', '-q');
+	const commonDir = concretePath(path.resolve(linkedWorkspace, git(linkedWorkspace, 'rev-parse', '--git-common-dir')));
+	const linkedGitDir = concretePath(path.resolve(linkedWorkspace, git(linkedWorkspace, 'rev-parse', '--git-dir')));
+	const infoExclude = concretePath(path.resolve(linkedWorkspace, git(linkedWorkspace, 'rev-parse', '--git-path', 'info/exclude')));
+	const realLinkedWorkspace = concretePath(linkedWorkspace);
+	const linkedConfig = JSON.parse(opencodeSpawnEnv({
+		...evidenceRequest,
+		executor: { ...evidenceRequest.executor, config: { ...evidenceRequest.executor.config, workspace_root: linkedWorkspace } },
+	}, { env: fixtureEnv }).OPENCODE_CONFIG_CONTENT);
+	for (const filepath of [infoExclude, path.join(linkedGitDir, 'HEAD'), path.join(commonDir, 'HEAD')]) {
+		assert.equal(externalDirectoryAction(linkedConfig, 'build', path.join(path.dirname(filepath), '*')), 'allow', filepath);
+		assert.equal(readAction(linkedConfig, 'build', realLinkedWorkspace, filepath), 'allow', filepath);
+		assert.equal(nativeToolAction(linkedConfig, 'build', 'edit', path.relative(realLinkedWorkspace, filepath)), 'deny', filepath);
+	}
+	// Declared evidence stays readable alongside the git metadata grant.
+	for (const filepath of [evidenceFile, evidenceMember]) {
+		assert.equal(externalDirectoryAction(linkedConfig, 'build', path.join(path.dirname(concretePath(filepath)), '*')), 'allow');
+		assert.equal(readAction(linkedConfig, 'build', realLinkedWorkspace, concretePath(filepath)), 'allow');
+	}
+	assert.equal(externalDirectoryAction(linkedConfig, 'build', path.join(concretePath(primaryCheckout), '*')), 'deny');
+	assert.equal(externalDirectoryAction(linkedConfig, 'build', path.join(concretePath(unrelatedCheckout), '.git', '*')), 'deny');
+	assert.equal(externalDirectoryAction(linkedConfig, 'build', path.join(concretePath(neighborRoot), '*')), 'deny');
+	assert.equal(nativeToolAction(linkedConfig, 'build', 'edit', 'README.md'), 'allow');
+	// A primary checkout's own `.git` is inside the workspace and adds no grant.
+	const primaryConfig = JSON.parse(opencodeSpawnEnv({
+		...request,
+		executor: { ...request.executor, config: { ...request.executor.config, workspace_root: primaryCheckout } },
+	}, { env: fixtureEnv }).OPENCODE_CONFIG_CONTENT);
+	assert.deepEqual(Object.keys(primaryConfig.permission.external_directory), [
+		'*', concretePath(primaryCheckout), path.join(concretePath(primaryCheckout), '**'),
+	]);
+
 	const permissionWorkspaces = [
 		{
 			label: 'relative-long-attempt-workspace',

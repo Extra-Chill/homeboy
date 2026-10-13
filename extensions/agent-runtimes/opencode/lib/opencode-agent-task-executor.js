@@ -362,8 +362,11 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '', env
 	// shadow-git snapshots add nothing. Building one indexes the whole worktree at
 	// startup, which stalls past the liveness window on very large repositories.
 	content.snapshot = false;
-	const evidence = opencodeEvidenceInputs(request, config);
-	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config, evidence);
+	const readOnlyInputs = [
+		...opencodeEvidenceInputs(request, config),
+		...opencodeWorkspaceGitMetadataInputs(request, config),
+	];
+	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config, readOnlyInputs);
 	if (externalDirectoryPatterns.length > 0) {
 		content.permission = permissionWithExternalDirectoryAllowances(content.permission, externalDirectoryPatterns);
 		content.agent[primaryAgent] = {
@@ -392,10 +395,11 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '', env
 		};
 	}
 
-	// Evidence is readable source data, never another writable workspace. Native
-	// edit/write/apply_patch all use the edit permission with worktree-relative paths.
+	// Evidence and git metadata are readable source data, never another writable
+	// workspace. Native edit/write/apply_patch all use the edit permission with
+	// worktree-relative paths.
 	for (const permission of [content.permission, content.agent[primaryAgent].permission]) {
-		const denied = evidence.flatMap((input) => {
+		const denied = readOnlyInputs.flatMap((input) => {
 			const paths = [input.path, ...opencodeWorkspacePermissionRoots(request, config)
 				.map((root) => path.relative(concretePath(root), input.path))];
 			return input.directory ? paths.flatMap((value) => [value, path.join(value, '**')]) : paths;
@@ -435,13 +439,37 @@ function opencodeEvidenceInputs(request, config) {
 	return inputs;
 }
 
-function opencodeExternalDirectoryPatterns(request = {}, config = {}, evidence = []) {
+// A linked worktree's `.git` is a file naming a gitdir under the primary
+// checkout, and its objects, refs, and info/exclude live in the common dir. Git
+// cannot run in the workspace without reading both, so they are part of the
+// workspace's own readable surface even though they sit outside its root.
+function opencodeWorkspaceGitMetadataInputs(request = {}, config = {}) {
+	const roots = opencodeWorkspacePermissionRoots(request, config).map(concretePath);
+	const directories = roots.flatMap((root) => {
+		const result = spawnSync('git', ['rev-parse', '--git-common-dir', '--git-dir'], {
+			cwd: root,
+			...OPENCODE_GIT_CAPTURE_OPTIONS,
+			timeout: 10_000,
+		});
+		if (result.status !== 0 || result.error) return [];
+		return String(result.stdout || '').split('\n')
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.map((line) => concretePath(path.resolve(root, line)));
+	});
+	return [...new Set(directories)]
+		.filter((directory) => !roots.some((root) => directory === root || isStrictDescendant(directory, root)))
+		.filter((directory, _, all) => !all.some((other) => isStrictDescendant(directory, other)))
+		.map((directory) => ({ path: directory, directory: true }));
+}
+
+function opencodeExternalDirectoryPatterns(request = {}, config = {}, readOnlyInputs = []) {
 	const workspacePatterns = opencodeWorkspaceReadPatterns(request, config);
 	if (workspacePatterns.length === 0) {
 		return [];
 	}
 
-	const patterns = [...workspacePatterns, ...evidence.flatMap((input) => {
+	const patterns = [...workspacePatterns, ...readOnlyInputs.flatMap((input) => {
 		const root = input.directory ? input.path : path.dirname(input.path);
 		return [root, path.join(root, '**')];
 	})];
