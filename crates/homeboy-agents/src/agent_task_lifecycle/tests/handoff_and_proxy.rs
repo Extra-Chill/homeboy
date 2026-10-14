@@ -270,6 +270,68 @@ fn durable_terminal_run_rejects_unbound_or_tampered_evidence_without_mutating_st
     });
 }
 
+/// The runner-exec producer dispatches a record as its own controller run and
+/// mints a per-dispatch `{run_id}:{uuid}` attempt (#15914). That shape must
+/// recover terminal custody; an attempt minted for another run must not.
+#[test]
+fn durable_terminal_run_accepts_direct_dispatch_attempt_of_the_same_run() {
+    with_isolated_home(|_| {
+        let record = accepted_detached_handoff("retained-direct-dispatch");
+        let store = test_lifecycle_store();
+        let accepted = record.clone();
+        let source_for = |controller_run_id: &str, attempt: &str| {
+            let mut source = retained_terminal_run(&accepted);
+            let evidence = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon_with_dispatch_metadata(
+                Some(controller_run_id), Some(attempt), None,
+                accepted.runner_id().unwrap(), accepted.runner_job_id().unwrap(), "homeboy", "retained-reservation",
+            ).unwrap().evidence_record().unwrap();
+            source.metadata_json["agent_task_run"]["metadata"]["runner_execution_context"] =
+                evidence;
+            source
+        };
+
+        for (controller_run_id, attempt) in [
+            ("unrelated-run", "unrelated-run:f21ebd10"),
+            (
+                record.run_id.as_str(),
+                "retained-direct-dispatch-other:f21ebd10",
+            ),
+            (record.run_id.as_str(), "retained-direct-dispatch:"),
+        ] {
+            let mut candidate = record.clone();
+            assert!(
+                super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                    &store,
+                    &mut candidate,
+                    &source_for(controller_run_id, attempt)
+                )
+                .is_err(),
+                "{controller_run_id} / {attempt}"
+            );
+        }
+        assert_eq!(
+            store.read_record(&record.run_id).unwrap().state,
+            AgentTaskRunState::Running
+        );
+
+        let mut record = record;
+        let attempt = format!("{}:f21ebd10-2854-496d-9593-6385656c6bbd", record.run_id);
+        let run_id = record.run_id.clone();
+        assert!(
+            super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                &store,
+                &mut record,
+                &source_for(&run_id, &attempt)
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            store.read_record(&run_id).unwrap().state,
+            AgentTaskRunState::Failed
+        );
+    });
+}
+
 #[test]
 fn durable_terminal_run_preserves_parent_mission_and_explicit_handoff_identity() {
     with_isolated_home(|_| {
