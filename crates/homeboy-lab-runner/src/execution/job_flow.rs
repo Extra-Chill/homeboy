@@ -538,7 +538,7 @@ fn observed_agent_task_terminal_job_status(
     }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
     if let Some(endpoint) = control_plane_endpoint {
-        if let Ok(client) = homeboy_control_plane_client::ControlPlaneClient::new_local(
+        if let Ok(client) = crate::control_plane_client::ControlPlaneClient::new_local(
             endpoint,
             Duration::from_secs(2),
         ) {

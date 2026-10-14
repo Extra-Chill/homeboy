@@ -4,15 +4,16 @@ use std::fmt;
 use std::time::Duration;
 
 use homeboy_control_plane_contract::{
-    ControlPlaneError, ControlPlaneEventPage, ControlPlaneResult, ControlPlaneRun, EventCursor,
-    RunId,
+    ControlPlaneError, ControlPlaneResult, ControlPlaneRun, RunId,
 };
+#[cfg(test)]
+use homeboy_control_plane_contract::{ControlPlaneEventPage, EventCursor};
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 #[derive(Debug)]
-pub enum ClientError {
+pub(crate) enum ClientError {
     Transport(String),
     Decode(String),
     Protocol(String),
@@ -40,14 +41,15 @@ struct DaemonEnvelope {
     body: serde_json::Value,
 }
 
-pub struct ControlPlaneClient {
+pub(crate) struct ControlPlaneClient {
     base_url: String,
     client: Client,
     token: Option<String>,
 }
 
 impl ControlPlaneClient {
-    pub fn new(base_url: impl Into<String>) -> Result<Self, ClientError> {
+    #[cfg(test)]
+    pub(crate) fn new(base_url: impl Into<String>) -> Result<Self, ClientError> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -59,7 +61,10 @@ impl ControlPlaneClient {
         })
     }
 
-    pub fn new_local(base_url: impl Into<String>, timeout: Duration) -> Result<Self, ClientError> {
+    pub(crate) fn new_local(
+        base_url: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self, ClientError> {
         let client = Client::builder()
             .no_proxy()
             .timeout(timeout)
@@ -73,16 +78,18 @@ impl ControlPlaneClient {
         })
     }
 
-    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
         self
     }
 
-    pub fn run(&self, run: &RunId) -> Result<ControlPlaneRun, ClientError> {
+    pub(crate) fn run(&self, run: &RunId) -> Result<ControlPlaneRun, ClientError> {
         self.get(&format!("/v1/control-plane/runs/{run}"), None)
     }
 
-    pub fn events(
+    #[cfg(test)]
+    pub(crate) fn events(
         &self,
         run: &RunId,
         cursor: Option<&EventCursor>,
@@ -95,7 +102,8 @@ impl ControlPlaneClient {
 
     /// Consume all currently available pages. The cursor advances only after
     /// the caller accepts every event in a page, so reconnects can safely replay.
-    pub fn consume_available_events(
+    #[cfg(test)]
+    pub(crate) fn consume_available_events(
         &self,
         run: &RunId,
         mut cursor: Option<EventCursor>,
