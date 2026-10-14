@@ -46,8 +46,8 @@ pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
 pub use event::{
     ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
     ControlPlaneEventRetention, ControlPlaneEventSource, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EVENT_SCHEMA,
+    CONTROL_PLANE_EVENT_DATA_MAX_BYTES, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
 };
 pub use identity::{
     AttemptCursor, AttemptId, EventCursor, EventId, ExecutionId, IdentityError, MissionCursor,

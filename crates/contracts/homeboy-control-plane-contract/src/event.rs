@@ -6,6 +6,8 @@ use serde_json::Value;
 use crate::resource::ControlPlaneEvidenceRef;
 use crate::{AttemptId, EventCursor, EventId, ExecutionId, MissionId, RunId, TaskId};
 
+/// Largest serialized `data` an appended control-plane event may carry.
+pub const CONTROL_PLANE_EVENT_DATA_MAX_BYTES: usize = 64 * 1024;
 pub const CONTROL_PLANE_EVENT_SCHEMA: &str = "homeboy/control-plane-event/v1";
 pub const CONTROL_PLANE_EVENT_PAGE_SCHEMA: &str = "homeboy/control-plane-event-page/v1";
 pub const CONTROL_PLANE_EVENT_RETENTION_SCHEMA: &str = "homeboy/control-plane-event-retention/v1";
@@ -103,7 +105,9 @@ impl ControlPlaneEventAppendRequest {
                 .is_some_and(|value| value.len() > 128)
             || self.artifacts.len() > 32
             || self.evidence.len() > 32
-            || serde_json::to_vec(&self.data).map_or(true, |value| value.len() > 64 * 1024)
+            || serde_json::to_vec(&self.data).map_or(true, |value| {
+                value.len() > CONTROL_PLANE_EVENT_DATA_MAX_BYTES
+            })
         {
             return Err(crate::ControlPlaneError::invalid_argument(
                 "control-plane event append input exceeds its bound",
