@@ -2616,6 +2616,50 @@ fn sandbox_tool_run_rejects_unallowlisted_tool_and_arguments() {
 }
 
 #[test]
+fn only_run_readers_open_the_observation_store() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let path = crate::observation::store::database_path().expect("store path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not a sqlite database").unwrap();
+        let jobs = JobStore::default();
+        let get = |path: &str| {
+            http_api::handle_with_jobs(
+                HttpApiRequest {
+                    method: HttpMethod::Get,
+                    path: path.to_string(),
+                    body: None,
+                },
+                &jobs,
+            )
+        };
+
+        for path in ["/jobs", "/tools"] {
+            let response = get(path).unwrap_or_else(|err| panic!("{path}: {err:?}"));
+            assert_eq!(response.status, 200, "{path}");
+        }
+        let enqueued = http_api::handle_with_jobs(
+            HttpApiRequest {
+                method: HttpMethod::Post,
+                path: "/lint".to_string(),
+                body: Some(serde_json::json!({ "component": "missing-component" })),
+            },
+            &jobs,
+        )
+        .expect("job-ready enqueue does not depend on the observation store");
+        assert_eq!(enqueued.body["command"], "api.lint.enqueue");
+
+        let err = get("/runs").expect_err("run readers do open the store");
+        assert!(err.message.contains("not a database"), "{err:?}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"not a sqlite database",
+            "no endpoint rewrote the unavailable store"
+        );
+    });
+}
+
+#[test]
 fn job_ready_endpoint_enqueues_daemon_job() {
     let store = JobStore::default();
     let response = http_api::handle_with_jobs(
