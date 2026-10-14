@@ -24794,3 +24794,339 @@ fn tracked_candidate_destination_is_not_converged_to_a_newer_pinned_base() {
         );
     });
 }
+
+/// A linked task worktree registered as the native destination `handle`,
+/// owned by `owner_run_id`, with one committed tracked file.
+fn prior_candidate_destination(
+    home: &std::path::Path,
+    handle: &str,
+    owner_run_id: &str,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let primary = tempfile::tempdir_in(home).expect("primary repository");
+    let target = home.join("recook-destination");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {:?} failed", args);
+    };
+    git(primary.path(), &["init", "--initial-branch=main"]);
+    git(
+        primary.path(),
+        &["config", "user.email", "agent@example.test"],
+    );
+    git(primary.path(), &["config", "user.name", "Agent"]);
+    std::fs::write(primary.path().join("tracked.txt"), "base\n").expect("write base");
+    git(primary.path(), &["add", "tracked.txt"]);
+    git(primary.path(), &["commit", "-m", "base"]);
+    git(
+        primary.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fix/issue-15775",
+            target.to_str().expect("target path"),
+        ],
+    );
+    git(
+        primary.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            primary.path().to_str().expect("UTF-8 primary path"),
+        ],
+    );
+    homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, owner_run_id);
+    let target = std::fs::canonicalize(&target).expect("canonical target");
+    (primary, target)
+}
+
+/// Materialize a prior Cook attempt and terminalize it as `state`.
+fn materialize_prior_cook_attempt(cook_id: &str, state: AgentTaskRunState) -> String {
+    let prior = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    persist_initial_recipe(&prior).expect("persist prior Cook recipe");
+    super::super::materialize_initial_cook_attempt(&prior).expect("materialize prior Cook");
+    let run_id = prior.identity.initial_run_id.clone();
+    AgentTaskLifecycleStore::from_current_environment()
+        .expect("lifecycle store")
+        .mutate_record(&run_id, |record| {
+            record.state = state;
+            true
+        })
+        .expect("terminalize prior Cook attempt");
+    run_id
+}
+
+fn recook_options(cook_id: &str, handle: &str, target: &std::path::Path) -> CookRequest {
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.workspace.to_worktree = handle.to_string();
+    options.workspace.source_worktree_path = Some(target.to_path_buf());
+    options.identity.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
+    options
+}
+
+fn leave_prior_candidate(target: &std::path::Path) {
+    std::fs::write(target.join("tracked.txt"), "prior attempt edit\n").expect("edit tracked");
+    std::fs::create_dir_all(target.join("tests")).expect("create untracked dir");
+    std::fs::write(target.join("tests/runtime-smoke.php"), "<?php // prior\n")
+        .expect("write untracked");
+}
+
+fn porcelain(target: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(target)
+        .output()
+        .expect("git status");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+#[test]
+fn recook_preserves_prior_failed_candidate_and_starts_from_clean_base() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-15775-fixture";
+        let prior_run =
+            materialize_prior_cook_attempt("cook-15775-prior", AgentTaskRunState::Failed);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        leave_prior_candidate(&target);
+        let head_before = git_output(&target, &["rev-parse", "HEAD"]).expect("HEAD");
+
+        let options = recook_options("cook-15775-recook", handle, &target);
+        persist_initial_recipe(&options).expect("persist re-cook recipe");
+        super::super::materialize_initial_cook_attempt(&options).expect("materialize re-cook");
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let evidence = super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+            &lifecycle_store,
+            &options,
+        )
+        .expect("preserve prior candidate")
+        .expect("prior failed candidate is preserved");
+
+        // The destination is clean at its unchanged base.
+        assert_eq!(porcelain(&target), "");
+        assert_eq!(
+            git_output(&target, &["rev-parse", "HEAD"]).expect("HEAD"),
+            head_before
+        );
+        assert_eq!(evidence["action"], "preserved_and_reset");
+        assert_eq!(evidence["prior_run_id"], prior_run);
+        assert_eq!(evidence["prior_run_state"], "failed");
+        assert_eq!(evidence["changed_path_count"], 2);
+        assert_eq!(
+            evidence["changed_paths"],
+            serde_json::json!(["tracked.txt", "tests/runtime-smoke.php"])
+        );
+
+        // The candidate is reachable from a durable ref and contains both the
+        // tracked edit and the untracked file.
+        let reference = evidence["ref"].as_str().expect("ref").to_string();
+        assert!(reference.starts_with(&format!("refs/homeboy/preserved-candidates/{prior_run}/")));
+        assert_eq!(
+            git_output(&target, &["rev-parse", &reference]).expect("resolve ref"),
+            evidence["commit"].as_str().expect("commit")
+        );
+        assert_eq!(
+            git_output(&target, &["show", &format!("{reference}:tracked.txt")])
+                .expect("show tracked"),
+            "prior attempt edit"
+        );
+        assert_eq!(
+            git_output(
+                &target,
+                &["show", &format!("{reference}:tests/runtime-smoke.php")]
+            )
+            .expect("show untracked"),
+            "<?php // prior"
+        );
+
+        // The durable run evidence carries the same record.
+        let record = lifecycle_store
+            .read_record(&options.identity.initial_run_id)
+            .expect("re-cook record");
+        assert_eq!(
+            record.metadata["cook_prior_attempt_candidate_preservation"],
+            evidence
+        );
+
+        let prior = lifecycle_store
+            .read_record(&prior_run)
+            .expect("prior record");
+        assert_eq!(
+            prior.metadata["cook_prior_attempt_candidate_preservation"]["preserved_by_run_id"],
+            options.identity.initial_run_id
+        );
+
+        // The recorded recovery command restores the prior candidate.
+        let recovery = evidence["recovery_command"].as_str().expect("recovery");
+        let restored = Command::new("sh")
+            .args(["-c", recovery])
+            .output()
+            .expect("run recovery command");
+        assert!(
+            restored.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restored.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("tracked.txt")).expect("restored tracked"),
+            "prior attempt edit\n"
+        );
+        assert!(target.join("tests/runtime-smoke.php").is_file());
+    });
+}
+
+#[test]
+fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-15775-fixture";
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+
+        // Owner without a durable lifecycle record: dirt is not attributable.
+        let (_primary, target) =
+            prior_candidate_destination(home.path(), handle, "unknown-owner-run");
+        leave_prior_candidate(&target);
+        let dirty = porcelain(&target);
+        let options = recook_options("cook-15775-unknown", handle, &target);
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("classify unknown owner"),
+            None
+        );
+        assert_eq!(porcelain(&target), dirty);
+
+        // A still-running owner may be writing its candidate.
+        let running =
+            materialize_prior_cook_attempt("cook-15775-running", AgentTaskRunState::Running);
+        homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &running);
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("classify running owner"),
+            None
+        );
+
+        // A succeeded owner's leftovers are not a failed candidate.
+        let succeeded =
+            materialize_prior_cook_attempt("cook-15775-succeeded", AgentTaskRunState::Succeeded);
+        homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &succeeded);
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("classify succeeded owner"),
+            None
+        );
+
+        // This Cook's own candidate stays with its continuation paths.
+        let failed = materialize_prior_cook_attempt("cook-15775-own", AgentTaskRunState::Failed);
+        homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &failed);
+        let mut own = recook_options("cook-15775-own", handle, &target);
+        own.identity.initial_run_id = failed.clone();
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &own,
+            )
+            .expect("classify own attempt"),
+            None
+        );
+
+        // Explicit CWDs are caller-owned and never mutated.
+        let mut explicit = recook_options("cook-15775-explicit", handle, &target);
+        explicit.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({ "kind": "explicit_cwd" });
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &explicit,
+            )
+            .expect("classify explicit CWD"),
+            None
+        );
+        assert_eq!(porcelain(&target), dirty);
+    });
+}
+
+#[test]
+fn recook_preservation_is_a_noop_for_a_clean_prior_destination() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-15775-fixture";
+        let prior_run =
+            materialize_prior_cook_attempt("cook-15775-clean-prior", AgentTaskRunState::Failed);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        let options = recook_options("cook-15775-clean", handle, &target);
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        assert_eq!(
+            super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                &lifecycle_store,
+                &options,
+            )
+            .expect("classify clean destination"),
+            None
+        );
+        let refs = git_output(
+            &target,
+            &["for-each-ref", "refs/homeboy/preserved-candidates"],
+        )
+        .expect("list preserved refs");
+        assert_eq!(refs, "");
+    });
+}
+
+#[test]
+fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let handle = "fixture@fix-issue-15775-fixture";
+        let prior_run =
+            materialize_prior_cook_attempt("cook-15775-spine-prior", AgentTaskRunState::Failed);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        leave_prior_candidate(&target);
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            "cook-15775-spine",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            }),
+        );
+        options.workspace.to_worktree = handle.to_string();
+        options.workspace.source_worktree_path = Some(target.clone());
+        options.identity.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
+        options.ai_disclosure.ai_model = Some("openai/gpt-5.6-terra".to_string());
+        let run_id = options.identity.initial_run_id.clone();
+
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)));
+        // The destination is clean before any provider or Lab snapshot saw it.
+        assert_eq!(porcelain(&target), "");
+        // The terminal prior run durably records where its candidate went;
+        // the detached handoff re-projects the new run's record.
+        let prior = AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store")
+            .read_record(&prior_run)
+            .expect("prior record");
+        let evidence = &prior.metadata["cook_prior_attempt_candidate_preservation"];
+        assert_eq!(evidence["prior_run_id"], prior_run, "result: {result:?}");
+        assert_eq!(evidence["preserved_by_run_id"], run_id);
+        assert_eq!(evidence["action"], "preserved_and_reset");
+        let reference = evidence["ref"].as_str().expect("ref");
+        assert_eq!(
+            git_output(&target, &["show", &format!("{reference}:tracked.txt")])
+                .expect("show preserved tracked"),
+            "prior attempt edit"
+        );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1, "result: {result:?}");
+    });
+}

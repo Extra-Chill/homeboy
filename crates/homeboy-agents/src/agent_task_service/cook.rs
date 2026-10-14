@@ -5827,6 +5827,49 @@ fn run_cook_spine(
             error
         })?;
     }
+    // A re-cook of the same issue derives the same native worktree, which can
+    // still hold the previous failed Cook's uncommitted candidate. Preserve it
+    // under a recoverable ref and start from a clean base, before any
+    // workspace validation, adoption, or Lab snapshot observes it (#15775).
+    if !persisted_finalization
+        && !moving_base_continuation
+        && !verification_pending_continuation
+        && !authenticated_historical_review_continuation
+        && cook_attempt_needs_execution_with_store(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+        )
+        && !cook_workspace_lookup_pending(&options.identity.initial_plan)
+        && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
+        && matches!(
+            tracked_promotion_continuation_in_store(lifecycle_store, &options),
+            Ok(None)
+        )
+        // Only a destination owned by a different, terminal, unsuccessful run
+        // enters the phase; every other Cook keeps its startup sequence.
+        && matches!(
+            super::cook_prior_candidate::prior_failed_attempt_owner(lifecycle_store, &options),
+            Ok(Some(_))
+        )
+    {
+        run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "prior_attempt_candidate_preservation",
+            || {
+                super::cook_prior_candidate::preserve_prior_attempt_candidate(
+                    lifecycle_store,
+                    &options,
+                )
+            },
+        )
+        .map_err(|mut error| {
+            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
+            error
+        })?;
+    }
     // Reject a known-invalid managed workspace before base capture reaches its
     // remote. Detached first handoffs have no local source path and remain
     // eligible for runner-owned materialization below.
@@ -9217,7 +9260,7 @@ fn preflight_initial_cook_workspace_provider(options: &CookRequest) -> Result<()
     Ok(())
 }
 
-fn cook_uses_explicit_cwd_workspace(options: &CookRequest) -> bool {
+pub(crate) fn cook_uses_explicit_cwd_workspace(options: &CookRequest) -> bool {
     options
         .identity
         .initial_plan
