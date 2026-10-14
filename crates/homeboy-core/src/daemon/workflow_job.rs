@@ -141,7 +141,9 @@ impl WorkflowJobRequest {
 /// What a Cook step's durable run says about its outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowRunOutcome {
-    /// No durable record exists: the step job's own status is the outcome.
+    /// No durable record exists. A Cook that never recorded its run did not
+    /// cook, so a clean step exit settles it as failed; a failed or cancelled
+    /// step job keeps its own status.
     Unknown,
     /// The Cook has not settled: its run, or the terminal continuation that
     /// promotes and finalizes it, is still in progress.
@@ -469,13 +471,7 @@ fn step_result(
                     .as_ref()
                     .map(|resolve| resolve(run_id))
             });
-            // The Cook process ending is only a wake-up: the Cook settles when
-            // its run (and its terminal continuation) does.
-            let outcome = match resolved {
-                Some(WorkflowRunOutcome::Pending) => return None,
-                Some(WorkflowRunOutcome::Settled(outcome)) => Some(outcome),
-                Some(WorkflowRunOutcome::Unknown) | None => None,
-            };
+            let outcome = cook_step_outcome(resolved, status)?;
             (
                 outcome,
                 output_path.and_then(|path| read_envelope_data(&path)),
@@ -494,6 +490,27 @@ fn step_result(
         output,
         run_id,
     })
+}
+
+/// A Cook step's outcome once its step job is terminal: `None` while the Cook
+/// has not settled, otherwise the outcome that overrides the job status.
+///
+/// The Cook process ending is only a wake-up: the Cook settles when its run
+/// (and its terminal continuation) does. A step that exited cleanly without
+/// ever recording a run did not cook, so it fails rather than inheriting the
+/// exit status.
+fn cook_step_outcome(
+    resolved: Option<WorkflowRunOutcome>,
+    status: FinishedStatus,
+) -> Option<Option<String>> {
+    match resolved {
+        Some(WorkflowRunOutcome::Pending) => None,
+        Some(WorkflowRunOutcome::Settled(outcome)) => Some(Some(outcome)),
+        Some(WorkflowRunOutcome::Unknown) if status == FinishedStatus::Succeeded => {
+            Some(Some("failed".to_string()))
+        }
+        Some(WorkflowRunOutcome::Unknown) | None => Some(None),
+    }
 }
 
 fn read_output(path: &Path) -> Option<Value> {

@@ -691,3 +691,28 @@ fn terminal_workflow_is_read_from_a_retired_unregistered_generation() {
                 && entity["source"] == "retained_generation"));
     });
 }
+
+#[test]
+fn a_cook_step_that_exits_without_recording_its_run_fails() {
+    assert_eq!(
+        cook_step_outcome(Some(WorkflowRunOutcome::Unknown), FinishedStatus::Succeeded),
+        Some(Some("failed".to_string())),
+        "a clean exit with no Cook record must not settle as succeeded"
+    );
+    assert_eq!(
+        cook_step_outcome(Some(WorkflowRunOutcome::Unknown), FinishedStatus::Cancelled),
+        Some(None),
+        "a cancelled step keeps its own status"
+    );
+    assert_eq!(
+        cook_step_outcome(Some(WorkflowRunOutcome::Pending), FinishedStatus::Succeeded),
+        None
+    );
+    assert_eq!(
+        cook_step_outcome(
+            Some(WorkflowRunOutcome::Settled("succeeded".to_string())),
+            FinishedStatus::Succeeded
+        ),
+        Some(Some("succeeded".to_string()))
+    );
+}
