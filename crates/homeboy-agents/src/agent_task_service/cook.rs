@@ -6225,7 +6225,7 @@ fn run_cook_spine(
         })
         .and_then(|retries| u32::try_from(retries).ok())
         .unwrap_or(0);
-    let attempt_limit = if continuation_attempt_limit > 0 {
+    let mut attempt_limit = if continuation_attempt_limit > 0 {
         first_attempt.saturating_add(continuation_attempt_limit)
     } else {
         max_attempts
@@ -8099,6 +8099,16 @@ fn run_cook_spine(
                     } => {
                         run_id = next_run_id;
                         attempt = attempt.saturating_add(1);
+                        // A review-form nudge runs under its own review budget,
+                        // not the code-attempt budget, so a change that turns
+                        // green on its final attempt still executes the nudge.
+                        // This mirrors the review-form continuation limit above.
+                        if review_form_only {
+                            attempt_limit = attempt_limit.max(
+                                attempt
+                                    .saturating_add(scoped_budget_limit.max_same_provider_retries),
+                            );
+                        }
                     }
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
                         return Ok(cook_report(CookReportInput {
