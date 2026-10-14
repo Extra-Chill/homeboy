@@ -19,7 +19,9 @@ function request(config = {}) {
 	};
 }
 
-const probe = (result) => () => result;
+const probe = (result) => (command, args) => args[0] === '--list-models'
+	? { status: 0, stdout: 'provider  model  context\nanthropic  claude-test  200000\nopenai  gpt-x  128000\n', stderr: '' }
+	: result;
 
 try {
 	const ready = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: probe({ status: 0, stdout: '0.70.1\n', stderr: '' }) });
@@ -27,6 +29,21 @@ try {
 	assert.equal(ready.classification, 'ready');
 	assert.equal(ready.identity.version, '0.70.1');
 	assert.equal(ready.identity.model, 'anthropic/claude-test');
+	assert.equal(ready.identity.agent_dir, path.join(os.homedir(), '.pi', 'agent'));
+
+	const catalogProbe = (stdout, listResult = {}) => (command, args, options) => args[0] === '--list-models'
+		? { status: 0, stdout, stderr: '', ...listResult }
+		: { status: 0, stdout: '0.70.1\n', stderr: '' };
+	const noModels = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('No models available\n') });
+	assert.equal(noModels.classification, 'auth_failure');
+	assert.equal(noModels.reason, 'no_models_available');
+	const unavailable = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nanthropic other-model 200000\n') });
+	assert.equal(unavailable.classification, 'deterministic_incompatibility');
+	assert.equal(unavailable.reason, 'model_not_available');
+	const timeout = piRuntimeReadiness(request(), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('', { error: Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) }) });
+	assert.equal(timeout.classification, 'transient_failure');
+	const unspecified = piRuntimeReadiness(request({ model: undefined }), { env: { PATH: process.env.PATH }, spawnSync: catalogProbe('provider model context\nany model 1000\n') });
+	assert.equal(unspecified.ready, true);
 
 	// Not installed: not ready (the old runtime reported structurally dispatchable here).
 	const missing = piRuntimeReadiness(request({ command: path.join(root, 'missing-pi') }), { env: { PATH: '' } });

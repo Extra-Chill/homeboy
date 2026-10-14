@@ -4,6 +4,7 @@
  * External dependencies
  */
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -21,7 +22,7 @@ const {
 	createCliAgentTaskExecutor,
 	safeFileSegment,
 } = require('../../lib/cli-agent-task-executor');
-const { cliRuntimeReadiness, READINESS_REQUEST_SCHEMA, READINESS_RESULT_SCHEMA } = require('../../lib/cli-runtime-readiness');
+const { cliRuntimeReadiness, boundedTimeout, resolveExecutable, READINESS_REQUEST_SCHEMA, READINESS_RESULT_SCHEMA } = require('../../lib/cli-runtime-readiness');
 const { piProviderCapacity, piRouteProvider } = require('./pi-provider-capacity');
 const { requiredOutputInstructions, structuredOutputsFromTexts } = require('../../lib/declared-outputs');
 
@@ -91,7 +92,7 @@ function providerContract(options = {}) {
 }
 
 function piRuntimeReadiness(request = {}, options = {}) {
-	return cliRuntimeReadiness(request, {
+	const spec = {
 		runtimeId: PI_BACKEND,
 		providerId: PI_PROVIDER_ID,
 		label: 'Pi',
@@ -100,7 +101,51 @@ function piRuntimeReadiness(request = {}, options = {}) {
 		commandConfigKey: 'executor.config.command',
 		requiredSecretEnv: [],
 		identityEnv: PI_ENV_ALLOWLIST,
-	}, options);
+	};
+	const result = cliRuntimeReadiness(request, spec, options);
+	const config = request.effective_config && typeof request.effective_config === 'object' ? request.effective_config : {};
+	const env = options.env || process.env;
+	const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.HOME || os.homedir(), '.pi', 'agent');
+	const identity = { ...result.identity, agent_dir: agentDir, model: typeof config.model === 'string' ? config.model.trim() : '' };
+	const rekey = () => {
+		const cacheKey = `runtime-readiness:${crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
+		result.identity = { ...identity, cache_key: cacheKey };
+		result.cache_key = cacheKey;
+	};
+	rekey();
+	if (!result.ready) return result;
+
+	const executable = result.identity.executable || resolveExecutable(config.command || env.HOMEBOY_PI_COMMAND || PI_DEFAULT_COMMAND, env, options);
+	const timeout = boundedTimeout(config.readiness_timeout_ms);
+	const probe = (options.spawnSync || spawnSync)(executable, ['--list-models'], {
+		// The catalog grows with every configured provider (hundreds of rows with
+		// aggregator keys); a small buffer would turn into a permanent ENOBUFS.
+		encoding: 'utf8', timeout, maxBuffer: 1024 * 1024, env,
+	});
+	if (probe.error || probe.signal) {
+		Object.assign(result, { ready: false, classification: 'transient_failure', retryable: true,
+			reason: probe.error?.code || 'model_list_probe_interrupted',
+			message: 'Retry the bounded Pi model catalog probe; the local runtime process was temporarily unavailable.',
+			remediation: 'Retry the bounded Pi model catalog probe; the local runtime process was temporarily unavailable.' });
+		rekey();
+		return result;
+	}
+	const output = String(probe.stdout || '');
+	const rows = output.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^provider\s+model\b/i.test(line) && !/^[-\s]+$/.test(line))
+		.filter((line) => !/^no models available\.?$/i.test(line))
+		.map((line) => line.split(/\s+/)).filter((columns) => columns.length >= 2);
+	const remediationBase = `Pi agent directory ${agentDir}`;
+	if (/no models available/i.test(output) || rows.length === 0) {
+		Object.assign(result, { ready: false, classification: 'auth_failure', retryable: false, reason: 'no_models_available',
+			message: `No Pi models are available in ${remediationBase}.`,
+			remediation: `Log in to a provider for ${remediationBase}, or point PI_CODING_AGENT_DIR at an agent dir that has one.` });
+	} else if (identity.model.includes('/') && !rows.some(([provider, model]) => `${provider}/${model}` === identity.model)) {
+		Object.assign(result, { ready: false, classification: 'deterministic_incompatibility', retryable: false, reason: 'model_not_available',
+			message: `Pi model ${identity.model} is not available in ${remediationBase}.`,
+			remediation: `Select a model available in ${remediationBase}, or point PI_CODING_AGENT_DIR at an agent dir that provides ${identity.model}.` });
+	}
+	rekey();
+	return result;
 }
 
 /**
