@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.422.6] - 2026-10-14
+
+### Fixed
+- give the review-form nudge its own budget so green final attempts still request the form
+- refuse review-form deferral for an empty change set
+- rotate providers after a verified no-change attempt and surface skipped primary routes
+
 ## [0.422.5] - 2026-10-14
 
 ### Fixed
