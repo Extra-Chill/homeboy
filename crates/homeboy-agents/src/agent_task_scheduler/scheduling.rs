@@ -1058,27 +1058,67 @@ impl AgentTaskScheduleSupport {
     /// the patch as `CandidateRecoverable`, which the loop never revisits, so
     /// the cook stalled with passing gates and `resume` had nothing to resume
     /// (#15440). Any other missing output keeps its failure classification.
+    ///
+    /// A deferred form is only valid when there is a candidate (#15880). The
+    /// deferral runs after the provider-owned normalization, which classifies
+    /// empty change sets only on `Succeeded` outcomes, so deferral is the first
+    /// time a `Failed` empty attempt reaches classification; promoting it here
+    /// would project a green gate-eligible candidate that gates an unchanged
+    /// tree and parks the cook as `candidate_recoverable`, because the no-change
+    /// path (#15850) requires `homeboy_empty_attempt_verified`. An empty change
+    /// set in this gap is therefore classified like any empty attempt instead of
+    /// being deferred:
+    /// - a checkout provably unchanged from its attempt base is recorded as a
+    ///   verified unchanged attempt (#15294), so promotion reports a no-change
+    ///   attempt without gates and the cook's no-change feedback/retry acts on
+    ///   it;
+    /// - anything Homeboy cannot verify keeps the shared empty-change
+    ///   classification (`classify_empty_change_outcome`): evidence-bearing
+    ///   empties park as `CandidateRecoverable` for patch-capture review
+    ///   (#7719), bare empties collapse to `NoOp`.
     pub(super) fn defer_missing_review_form_to_cook_loop(
         outcome: &mut AgentTaskOutcome,
         request: &AgentTaskRequest,
     ) {
-        use crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY;
-        if outcome.status != AgentTaskOutcomeStatus::Failed
-            || outcome.failure_classification != Some(AgentTaskFailureClassification::Provider)
-        {
-            return;
-        }
-        let Some(missing) = missing_required_output_names(outcome) else {
+        use crate::agent_task_provider::{
+            classify_empty_change_outcome, has_known_empty_change_set,
+            record_verified_unchanged_empty_attempt, verify_unchanged_empty_checkout,
+        };
+        let Some(missing) = Self::review_form_only_deferral_gap(outcome, request) else {
             return;
         };
-        let only_review_form =
-            !missing.is_empty() && missing.iter().all(|name| name == AI_REVIEW_FORM_OUTPUT_KEY);
-        let review_form_declared = request.output_declarations.iter().any(|declaration| {
-            declaration.name == AI_REVIEW_FORM_OUTPUT_KEY && declaration.required
-        });
-        if !only_review_form || !review_form_declared {
+        if has_known_empty_change_set(outcome) {
+            let workspace_root = request.workspace.root.as_deref().map(std::path::Path::new);
+            let attempt_base = request
+                .workspace
+                .attempt
+                .as_ref()
+                .map(|attempt| attempt.base_ref.as_str());
+            if verify_unchanged_empty_checkout(workspace_root, attempt_base) {
+                // A provably unchanged checkout needs no candidate for its
+                // record: this is exactly the no-change record an empty attempt
+                // receives on a clean checkout (#15294/#15850).
+                record_verified_unchanged_empty_attempt(outcome);
+            } else {
+                classify_empty_change_outcome(outcome, workspace_root);
+                if outcome.status == AgentTaskOutcomeStatus::NoOp {
+                    // Mirror the owning classification: a collapsed empty
+                    // attempt is no longer a provider failure.
+                    outcome.failure_classification = None;
+                }
+            }
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.review_form_deferral_refused_empty_change".to_string(),
+                message: "the only missing required output was review_form, but the change set is empty; a deferred form needs a candidate, so the empty-change classification applies instead"
+                    .to_string(),
+                data: serde_json::json!({
+                    "missing_required_outputs": missing,
+                    "homeboy_empty_attempt_verified": outcome.is_verified_unchanged_attempt(),
+                }),
+            });
             return;
         }
+
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
         outcome.failure_classification = None;
         outcome.summary = Some(
@@ -1091,6 +1131,33 @@ impl AgentTaskScheduleSupport {
                 .to_string(),
             data: serde_json::json!({ "missing_required_outputs": missing }),
         });
+    }
+
+    /// Whether the outcome is exactly the deferral gap
+    /// [`Self::defer_missing_review_form_to_cook_loop`] recovers: a
+    /// provider-classified failure whose only missing required output is a
+    /// `review_form` the request declares. Returns the missing output names so
+    /// the deferral carries the same evidence.
+    pub(super) fn review_form_only_deferral_gap(
+        outcome: &AgentTaskOutcome,
+        request: &AgentTaskRequest,
+    ) -> Option<Vec<String>> {
+        use crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY;
+        if outcome.status != AgentTaskOutcomeStatus::Failed
+            || outcome.failure_classification != Some(AgentTaskFailureClassification::Provider)
+        {
+            return None;
+        }
+        let missing = missing_required_output_names(outcome)?;
+        let only_review_form =
+            !missing.is_empty() && missing.iter().all(|name| name == AI_REVIEW_FORM_OUTPUT_KEY);
+        let review_form_declared = request.output_declarations.iter().any(|declaration| {
+            declaration.name == AI_REVIEW_FORM_OUTPUT_KEY && declaration.required
+        });
+        if !only_review_form || !review_form_declared {
+            return None;
+        }
+        Some(missing)
     }
 
     pub(super) fn classify_incomplete_executor_result(outcome: &mut AgentTaskOutcome) {

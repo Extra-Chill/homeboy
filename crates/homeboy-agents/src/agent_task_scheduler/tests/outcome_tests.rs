@@ -647,3 +647,40 @@ fn other_missing_outputs_stay_provider_failures() {
     AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &undeclared);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
 }
+
+/// #15880's #15440 half: the empty-change refusal must not hijack the ordinary
+/// deferral. A candidate with a real patch whose only missing required output is
+/// the `review_form` still defers to the cook loop's form-only follow-up.
+#[test]
+fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
+    let mut form_request = request("form-task");
+    form_request
+        .output_declarations
+        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
+    outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+    outcome.summary =
+        Some("OpenCode completed without required structured output(s): review_form.".to_string());
+    outcome.artifacts.push(AgentTaskArtifact {
+        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: "provider-patch".to_string(),
+        kind: "patch".to_string(),
+        role: Some("patch".to_string()),
+        size_bytes: Some(42),
+        metadata: json!({}),
+        ..Default::default()
+    });
+
+    AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
+
+    // #15440/#15880: only a KNOWN-empty change set refuses the deferral; a
+    // candidate missing only the review form still defers to the cook loop.
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
+    assert!(!outcome.diagnostics.iter().any(
+        |diagnostic| diagnostic.class == "agent_task.review_form_deferral_refused_empty_change"
+    ));
+}

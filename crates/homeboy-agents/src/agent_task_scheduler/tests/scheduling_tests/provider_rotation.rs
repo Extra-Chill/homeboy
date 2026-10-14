@@ -28,6 +28,11 @@ mod provider_rotation_tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct EmptyChangeMissingReviewFormExecutor {
+        empty_patch_path: std::path::PathBuf,
+        calls: Arc<AtomicUsize>,
+    }
+
     struct ProviderReportedTimeoutExecutor {
         calls: Arc<AtomicUsize>,
         returns_patch: bool,
@@ -236,6 +241,38 @@ mod provider_rotation_tests {
             )
             .expect("candidate edit");
             outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+    }
+
+    impl AgentTaskExecutorAdapter for EmptyChangeMissingReviewFormExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Failed);
+            outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
+            outcome.summary = Some(
+                "OpenCode completed without required structured output(s): review_form."
+                    .to_string(),
+            );
+            outcome.artifacts.push(AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "provider-empty-patch".to_string(),
+                kind: "patch".to_string(),
+                name: Some("empty.patch".to_string()),
+                label: None,
+                role: Some("patch".to_string()),
+                semantic_key: None,
+                path: Some(self.empty_patch_path.display().to_string()),
+                url: None,
+                mime: Some("text/x-patch".to_string()),
+                size_bytes: Some(0),
+                sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(&[])),
+                metadata: Value::Null,
+            });
+            outcome
         }
     }
 
@@ -769,6 +806,62 @@ mod provider_rotation_tests {
             .as_deref()
             .is_some_and(|message| message.contains("provider rotation queued"))));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// #15880: a deferred review form is only valid when there is a candidate.
+    /// An attempt whose change set is empty (0-byte patch, sha256 e3b0c442…,
+    /// unchanged checkout) must not project as a green gate-eligible candidate
+    /// through the deferral; with a provably unchanged checkout it ends as a
+    /// Homeboy-verified unchanged attempt so the cook loop's no-change
+    /// feedback/retry acts on it.
+    #[test]
+    fn empty_attempt_missing_only_the_review_form_is_never_a_deferred_green_candidate() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        super::super::concurrency::concurrency_tests::init_git_workspace(&workspace);
+        // Outside the attempt checkout, so the 0-byte artifact never dirties
+        // the workspace whose emptiness must be verified.
+        let empty_patch = temp.path().join("empty.patch");
+        std::fs::write(&empty_patch, "").expect("0-byte patch artifact");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        plan.tasks[0].output_declarations =
+            vec![crate::agent_task_review_dossier::review_form_output_declaration()];
+        plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
+        enable_rotation(&mut plan);
+
+        let aggregate = AgentTaskScheduler::new(Arc::new(EmptyChangeMissingReviewFormExecutor {
+            empty_patch_path: empty_patch.clone(),
+            calls: Arc::clone(&calls),
+        }))
+        .run(plan);
+
+        assert_eq!(
+            aggregate.outcomes[0].status,
+            AgentTaskOutcomeStatus::Succeeded,
+            "unchanged-tree failure output: {aggregate:#?}"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["homeboy_empty_attempt_verified"],
+            Value::Bool(true),
+            "the empty change set must be classified like any empty attempt"
+        );
+        assert!(!aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.class == "agent_task.review_form_deferred_to_cook_loop"));
+        assert!(aggregate.outcomes[0]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.class
+                == "agent_task.review_form_deferral_refused_empty_change"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a verified unchanged attempt parks no retry and no rotation: {aggregate:#?}"
+        );
     }
 
     fn retained_timeout_candidate_converges_before_rotation() {
