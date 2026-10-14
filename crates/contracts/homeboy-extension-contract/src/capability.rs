@@ -15,6 +15,10 @@ pub enum ExtensionCapability {
     Fuzz,
     Trace,
     Deps,
+    /// An extension-declared workload kind (`workloads.<kind>`). The kind is
+    /// data, not a variant: resolution goes through the `workload.<kind>`
+    /// catalog capability and the script comes from the kind's declaration.
+    Workload,
 }
 
 /// Static metadata for an [`ExtensionCapability`] variant.
@@ -67,6 +71,12 @@ impl ExtensionCapability {
                 has_manifest_support: ExtensionManifest::has_deps,
                 script_path: ExtensionManifest::deps_script,
             },
+            ExtensionCapability::Workload => ExtensionCapabilityDescriptor {
+                label: "workload",
+                has_manifest_support: ExtensionManifest::has_workloads,
+                // Per kind: `workloads.<kind>.script`.
+                script_path: |_| None,
+            },
         }
     }
 
@@ -84,7 +94,11 @@ impl ExtensionCapability {
 
     pub fn requires_script(self) -> bool {
         // Fuzz supports manifest-only workload discovery; `fuzz run` validates
-        // its runner script before execution.
-        !matches!(self, ExtensionCapability::Build | ExtensionCapability::Fuzz)
+        // its runner script before execution. A workload kind's script is
+        // per kind and validated by `homeboy workload run`.
+        !matches!(
+            self,
+            ExtensionCapability::Build | ExtensionCapability::Fuzz | ExtensionCapability::Workload
+        )
     }
 }

@@ -147,6 +147,11 @@ pub struct ExtensionManifest {
     pub fuzz: Option<FuzzConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<TraceConfig>,
+    /// Extension-declared workload kinds, keyed by kind (#15840). Core runs
+    /// whatever is declared here through `homeboy workload --kind <kind>`
+    /// and never enumerates kinds itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workloads: BTreeMap<String, crate::workload_kind::WorkloadKindConfig>,
     /// Structured run-directory sidecars this extension declares as a public
     /// machine-readable contract.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -267,6 +272,9 @@ pub fn validate_isolated_home_paths(paths: &[String]) -> homeboy_error::Result<(
 impl ExtensionManifest {
     pub fn validate_notification_transports(&self) -> homeboy_error::Result<()> {
         validate_isolated_home_paths(&self.isolated_home_paths)?;
+        for (kind, config) in &self.workloads {
+            config.validate(kind)?;
+        }
         if let Some(test) = &self.test {
             test.portable_env.validate()?;
             crate::manifest_toolchain_config::validate_test_secret_env_references(
@@ -345,6 +353,16 @@ impl ExtensionManifest {
 
     pub fn has_fuzz(&self) -> bool {
         self.fuzz.is_some()
+    }
+
+    /// Whether this extension declares any workload kind.
+    pub fn has_workloads(&self) -> bool {
+        !self.workloads.is_empty()
+    }
+
+    /// The declaration for one workload kind.
+    pub fn workload_kind(&self, kind: &str) -> Option<&crate::workload_kind::WorkloadKindConfig> {
+        self.workloads.get(kind)
     }
 
     pub fn has_trace(&self) -> bool {
@@ -631,5 +649,66 @@ mod isolated_home_paths_tests {
                 "{bad:?} must be rejected"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod workload_kind_tests {
+    use super::*;
+
+    #[test]
+    fn workloads_section_is_a_typed_map_keyed_by_kind() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "nodejs",
+            "version": "1.0.0",
+            "workloads": {
+                "fuzz": { "script": "scripts/workload/fuzz.sh", "replay_command": "bash replay.sh" },
+                "db-perf": { "script": "perf.sh", "safety_class": "destructive" }
+            }
+        }))
+        .expect("manifest with workloads");
+
+        assert!(manifest.has_workloads());
+        assert!(
+            manifest.extra.is_empty(),
+            "workloads must not land in extra"
+        );
+        assert_eq!(
+            manifest
+                .workload_kind("fuzz")
+                .and_then(|k| k.replay_command.as_deref()),
+            Some("bash replay.sh")
+        );
+        assert!(!manifest
+            .workload_kind("db-perf")
+            .unwrap()
+            .safety_class
+            .is_read_only());
+        assert!(manifest.workload_kind("bench").is_none());
+        manifest.validate_notification_transports().expect("valid");
+    }
+
+    #[test]
+    fn manifest_validation_refuses_an_invalid_workload_kind() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "x",
+            "version": "1.0.0",
+            "workloads": { "Not A Slug": { "script": "run.sh" } }
+        }))
+        .expect("deserializes");
+        let error = manifest.validate_notification_transports().unwrap_err();
+        assert!(error.to_string().contains("workload kind"));
+    }
+
+    #[test]
+    fn manifests_without_workloads_are_unchanged() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "x",
+            "version": "1.0.0"
+        }))
+        .expect("deserializes");
+        assert!(!manifest.has_workloads());
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(value.get("workloads").is_none());
     }
 }
