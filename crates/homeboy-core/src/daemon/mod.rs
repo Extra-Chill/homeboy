@@ -35,6 +35,8 @@ mod control;
 #[doc(hidden)]
 pub use control::bounded_redacted_reader;
 #[cfg(test)]
+mod completion_notify_tests;
+#[cfg(test)]
 mod controller_completion_tests;
 pub mod controller_job_driver;
 #[cfg(test)]
@@ -2490,6 +2492,9 @@ fn completion_notify_pass(
         // A transient store error is not evidence of completion.
         Err(_) => completion_tracker::RunTerminality::Unresolved,
     });
+    // Claim each completion's exactly-once marker first, then decide how to
+    // announce what this pass actually won.
+    let mut claimed: Vec<(String, Option<crate::observation::RunRecord>)> = Vec::new();
     for completed_id in completed {
         let already_delivered = store
             .is_notification_delivered(&completed_id)
@@ -2499,6 +2504,49 @@ fn completion_notify_pass(
         }
         // Loaded by the terminality resolver above; no second read.
         let run = terminal_runs.remove(&completed_id);
+        let won_race = store
+            .mark_notification_delivered(&completed_id, "controller")
+            .unwrap_or(false);
+        if won_race {
+            claimed.push((completed_id, run));
+        }
+    }
+    for (event, once_marker) in completion_notifications(claimed) {
+        // Outbox-backed: a transport outage no longer destroys the
+        // completion of a detached run. A per-run exactly-once marker is
+        // already consumed and is carried into the entry so the outbox
+        // settles it rather than re-claiming it.
+        let _ = crate::notify_outbox::dispatch_with_outbox(&event, once_marker);
+    }
+}
+
+/// The notifications for one pass's claimed completions.
+///
+/// Two or more runs reconciled to `stale` in the same pass are one sweep of
+/// orphaned records and fold into a single summary (#15853); their per-run
+/// markers were already consumed by the claim, so the summary carries none.
+/// Every other completion, including a lone stale run, keeps its own event.
+fn completion_notifications(
+    claimed: Vec<(String, Option<crate::observation::RunRecord>)>,
+) -> Vec<(
+    crate::notify::NotifyEvent,
+    Option<crate::notify_outbox::NotifyOnceMarker>,
+)> {
+    let is_stale = |run: &Option<crate::observation::RunRecord>| {
+        run.as_ref().is_some_and(|run| {
+            crate::observation::RunStatus::from_label(&run.status)
+                == Some(crate::observation::RunStatus::Stale)
+        })
+    };
+    let stale_count = claimed.iter().filter(|(_, run)| is_stale(run)).count();
+    let summarize_stale = stale_count > 1;
+    let mut notifications = Vec::new();
+    let mut stale_runs = Vec::new();
+    for (completed_id, run) in &claimed {
+        if summarize_stale && is_stale(run) {
+            stale_runs.extend(run.as_ref());
+            continue;
+        }
         let status = run
             .as_ref()
             .map(|run| run.status.as_str())
@@ -2506,36 +2554,30 @@ fn completion_notify_pass(
         let route = run.as_ref().and_then(|run| {
             crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json)
         });
-        let won_race = store
-            .mark_notification_delivered(&completed_id, "controller")
-            .unwrap_or(false);
-        if !won_race {
-            continue;
-        }
         let mut event = crate::notify::NotifyEvent::run_completed_with_route(
-            &completed_id,
+            completed_id,
             status,
             route.as_ref(),
         );
-        // The completed record is already loaded above; carry its
-        // component, command, and evidence handles instead of
-        // re-deriving prose from the id and status alone.
+        // The completed record is already loaded; carry its component,
+        // command, and evidence handles instead of re-deriving prose from
+        // the id and status alone.
         if let Some(run) = run.as_ref() {
             event = event.with_payload(crate::notify::run_completed_payload(run));
         }
-        // Outbox-backed: a transport outage no longer destroys the
-        // completion of a detached run. The exactly-once marker above
-        // is already consumed and is carried into the entry so the
-        // outbox settles it rather than re-claiming it.
-        let _ = crate::notify_outbox::dispatch_with_outbox(
-            &event,
+        notifications.push((
+            event,
             Some(crate::notify_outbox::NotifyOnceMarker::new(
                 "run",
-                &completed_id,
+                completed_id,
                 "controller",
             )),
-        );
+        ));
     }
+    if !stale_runs.is_empty() {
+        notifications.push((crate::notify::stale_runs_summary(&stale_runs), None));
+    }
+    notifications
 }
 
 /// Every run currently marked running — exhaustively, not a page of them.
