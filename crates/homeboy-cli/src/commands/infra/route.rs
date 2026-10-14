@@ -1733,7 +1733,54 @@ struct TerminalCookJobRequest {
     run_id: String,
     #[serde(default)]
     generation: u64,
+    /// Checkpoint-only: the worker process consuming this continuation. A
+    /// daemon restart re-adopts it by kernel identity instead of losing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker: Option<TerminalCookWorker>,
+    /// Checkpoint-only: workers that exited without publishing an outcome.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    interrupted_workers: u32,
 }
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// One spawned continuation worker: its exact process instance and the file
+/// it publishes its outcome to before exiting.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalCookWorker {
+    pid: u32,
+    start_identity: homeboy::core::process::ProcessStartIdentity,
+    outcome_path: PathBuf,
+}
+
+/// What a worker reports back to its supervising work job.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum TerminalCookWorkerOutcome {
+    Complete {
+        result: serde_json::Value,
+    },
+    Continue {
+        wait_ms: u64,
+    },
+    Failed {
+        /// Stable `ErrorCode` string, so the daemon re-raises the same class.
+        code: String,
+        message: String,
+        details: serde_json::Value,
+    },
+}
+
+const TERMINAL_COOK_WORKER_SCHEMA: &str = "homeboy/terminal-cook-continuation-worker/v1";
+/// Poll interval while a worker runs. Short enough that a finished pass is
+/// settled promptly, long enough to be negligible daemon load.
+const TERMINAL_COOK_WORKER_POLL: Duration = Duration::from_secs(1);
+/// A worker that repeatedly dies before publishing an outcome is a fault, not
+/// recoverable work; fail the job rather than respawn forever.
+const TERMINAL_COOK_MAX_INTERRUPTED_WORKERS: u32 = 3;
 
 fn terminal_cook_job_idempotency_keys(
     cook_id: &str,
@@ -1833,8 +1880,29 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
     }
 
     fn prepare(&self, request: serde_json::Value) -> homeboy::core::Result<serde_json::Value> {
-        let request = parse_terminal_cook_job(&request)?;
+        let mut request = parse_terminal_cook_job(&request)?;
+        // Worker custody is established by `advance`, never admitted inline.
+        request.worker = None;
+        request.interrupted_workers = 0;
         serde_json::to_value(request).map_err(|error| Error::internal_json(error.to_string(), None))
+    }
+
+    fn execution_owner(
+        &self,
+        state: &serde_json::Value,
+    ) -> homeboy::core::Result<
+        homeboy::core::daemon::controller_job_driver::ControllerJobExecutionOwner,
+    > {
+        use homeboy::core::daemon::controller_job_driver::ControllerJobExecutionOwner;
+        // Before a worker is recorded no process exists. A worker spawned but
+        // not yet checkpointed holds the durable claim, which `advance`
+        // observes instead of spawning a second consumer.
+        Ok(match parse_terminal_cook_job(state)?.worker {
+            Some(worker) => {
+                ControllerJobExecutionOwner::supervised(worker.pid, worker.start_identity)
+            }
+            None => ControllerJobExecutionOwner::None,
+        })
     }
 
     fn initial_progress(
@@ -1861,12 +1929,8 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
         checkpoint: serde_json::Value,
         _invocation: crate::agents::agent_task_service::WorkJobInvocation,
     ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
-        let request = parse_terminal_cook_job(&checkpoint)?;
-        run_terminal_cook_continuation(
-            &request,
-            checkpoint.clone(),
-            self.initial_progress(&checkpoint)?,
-        )
+        let progress = self.initial_progress(&checkpoint)?;
+        supervise_terminal_cook_worker(parse_terminal_cook_job(&checkpoint)?, progress)
     }
 
     fn cancelled(
@@ -1879,6 +1943,230 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
     fn cancel(&self, _checkpoint: &serde_json::Value) -> homeboy::core::Result<()> {
         Ok(())
     }
+}
+
+/// Advance one terminal continuation by supervising a worker process.
+///
+/// The Cook pass runs in its own `homeboy` process, never on a daemon thread:
+/// a daemon restart re-adopts the live worker by kernel identity, and a worker
+/// that died is re-run, its dead `owner_pid` claim making it reclaimable.
+fn supervise_terminal_cook_worker(
+    mut request: TerminalCookJobRequest,
+    progress: serde_json::Value,
+) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+    use crate::agents::agent_task_service::{
+        CookContinuationState, ScheduledContinuationGate, WorkJobStep,
+    };
+    use homeboy::core::process::ProcessIdentityState;
+
+    let to_checkpoint = |request: &TerminalCookJobRequest| {
+        serde_json::to_value(request).map_err(|error| Error::internal_json(error.to_string(), None))
+    };
+    if let Some(worker) = request.worker.clone() {
+        match homeboy::core::process::process_identity_state_with_start_identity(
+            worker.pid,
+            None,
+            Some(&worker.start_identity),
+        ) {
+            ProcessIdentityState::Live | ProcessIdentityState::Unverifiable => {
+                return Ok(WorkJobStep::Continue {
+                    checkpoint: to_checkpoint(&request)?,
+                    progress,
+                    wait: TERMINAL_COOK_WORKER_POLL,
+                });
+            }
+            ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => {}
+        }
+        request.worker = None;
+        match read_terminal_cook_worker_outcome(&worker.outcome_path) {
+            Some(TerminalCookWorkerOutcome::Complete { result }) => {
+                return Ok(WorkJobStep::Complete(result));
+            }
+            Some(TerminalCookWorkerOutcome::Failed {
+                code,
+                message,
+                details,
+            }) => {
+                let code = homeboy::core::error::ErrorCode::from_str(&code)
+                    .unwrap_or(homeboy::core::error::ErrorCode::InternalUnexpected);
+                return Err(Error::new(code, message, details));
+            }
+            Some(TerminalCookWorkerOutcome::Continue { wait_ms }) => {
+                return Ok(WorkJobStep::Continue {
+                    checkpoint: to_checkpoint(&request)?,
+                    progress,
+                    wait: Duration::from_millis(wait_ms),
+                });
+            }
+            None => {
+                request.interrupted_workers += 1;
+                if request.interrupted_workers > TERMINAL_COOK_MAX_INTERRUPTED_WORKERS {
+                    return Err(Error::internal_unexpected(format!(
+                        "terminal Cook continuation worker exited without an outcome {} times",
+                        request.interrupted_workers
+                    )));
+                }
+            }
+        }
+    }
+
+    let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let wait = match store.scheduled_continuation_gate(&request.run_id) {
+        ScheduledContinuationGate::RetryAfter(wait) => Some(wait.min(TERMINAL_COOK_RETRY_POLL_MAX)),
+        // A worker spawned before its checkpoint was persisted (or another
+        // consumer) owns the claim. Observe; never start a second consumer.
+        ScheduledContinuationGate::HeldByLiveOwner => Some(TERMINAL_COOK_WORKER_POLL),
+        ScheduledContinuationGate::Settled(CookContinuationState::Completed) => {
+            return Ok(WorkJobStep::Complete(
+                serde_json::json!({ "claimed": false, "completed": true }),
+            ));
+        }
+        ScheduledContinuationGate::Settled(state) => {
+            announce_failed_terminal_continuation(&store, &request);
+            return Err(Error::internal_unexpected(format!(
+                "terminal Cook continuation is {state:?} without a claim"
+            )));
+        }
+        ScheduledContinuationGate::Ready => None,
+    };
+    if let Some(wait) = wait {
+        return Ok(WorkJobStep::Continue {
+            checkpoint: to_checkpoint(&request)?,
+            progress,
+            wait,
+        });
+    }
+    request.worker = Some(spawn_terminal_cook_worker(&request)?);
+    Ok(WorkJobStep::Continue {
+        checkpoint: to_checkpoint(&request)?,
+        progress,
+        wait: TERMINAL_COOK_WORKER_POLL,
+    })
+}
+
+fn read_terminal_cook_worker_outcome(path: &Path) -> Option<TerminalCookWorkerOutcome> {
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (value["schema"] == TERMINAL_COOK_WORKER_SCHEMA)
+        .then(|| serde_json::from_value(value["outcome"].clone()).ok())
+        .flatten()
+}
+
+fn spawn_terminal_cook_worker(
+    request: &TerminalCookJobRequest,
+) -> homeboy::core::Result<TerminalCookWorker> {
+    let dir = homeboy::core::paths::artifact_root()?
+        .join("terminal-continuations")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?;
+    let log_path = dir.join("worker.log");
+    let log = std::fs::File::create(&log_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let log_err = log.try_clone().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let outcome_path = dir.join("outcome.json");
+    let request_json = serde_json::json!({
+        "schema": "homeboy/terminal-cook-continuation-request/v1",
+        "cook_id": request.cook_id,
+        "run_id": request.run_id,
+        "generation": request.generation,
+    })
+    .to_string();
+    let exe = homeboy::core::daemon::daemon_launchable_executable().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve current executable".to_string()),
+        )
+    })?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(["agent-task", "terminal-continuation-worker", "--request"])
+        .arg(&request_json)
+        .arg("--outcome")
+        .arg(&outcome_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    // The worker leads its own session so a daemon restart leaves it running.
+    homeboy::core::process::detach_from_caller_session(&mut command);
+    let mut process = command.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("spawn terminal Cook continuation worker".to_string()),
+        )
+    })?;
+    let pid = process.id();
+    // Capture the start identity while the child is still unreaped.
+    let start_identity = match homeboy::core::process::process_start_identity(pid) {
+        Ok(Some(identity)) => identity,
+        other => {
+            let _ = homeboy::core::process::terminate_process_tree(pid);
+            let _ = process.wait();
+            return Err(Error::internal_unexpected(format!(
+                "terminal Cook continuation worker start identity is unavailable: {other:?}"
+            )));
+        }
+    };
+    // Reap in the background so a finished worker does not linger as a
+    // zombie, which would still read as live to the identity check.
+    std::thread::spawn(move || {
+        let _ = process.wait();
+    });
+    Ok(TerminalCookWorker {
+        pid,
+        start_identity,
+        outcome_path,
+    })
+}
+
+/// Entry point of `homeboy agent-task terminal-continuation-worker`: run one
+/// continuation pass and publish its outcome for the supervising work job.
+pub(crate) fn run_terminal_cook_worker(
+    request: &str,
+    outcome_path: &Path,
+) -> homeboy::core::Result<i32> {
+    use crate::agents::agent_task_service::WorkJobStep;
+
+    let request = parse_terminal_cook_job(&serde_json::from_str(request).map_err(|error| {
+        Error::validation_invalid_argument(
+            "terminal_cook_continuation",
+            format!("invalid terminal Cook continuation request: {error}"),
+            None,
+            None,
+        )
+    })?)?;
+    let (outcome, exit_code) = match run_terminal_cook_continuation(
+        &request,
+        serde_json::Value::Null,
+        serde_json::Value::Null,
+    ) {
+        Ok(WorkJobStep::Complete(result)) => (TerminalCookWorkerOutcome::Complete { result }, 0),
+        Ok(WorkJobStep::Continue { wait, .. }) => (
+            TerminalCookWorkerOutcome::Continue {
+                wait_ms: wait.as_millis() as u64,
+            },
+            0,
+        ),
+        Err(error) => (
+            TerminalCookWorkerOutcome::Failed {
+                code: error.code.as_str().to_string(),
+                message: error.message,
+                details: error.details,
+            },
+            1,
+        ),
+    };
+    let body = serde_json::json!({ "schema": TERMINAL_COOK_WORKER_SCHEMA, "outcome": outcome });
+    // Publish atomically: a partially written outcome must read as absent.
+    let staging = outcome_path.with_extension("json.tmp");
+    std::fs::write(&staging, serde_json::to_vec(&body).unwrap_or_default())
+        .and_then(|()| std::fs::rename(&staging, outcome_path))
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(outcome_path.display().to_string()))
+        })?;
+    Ok(exit_code)
 }
 
 fn run_terminal_cook_continuation(
