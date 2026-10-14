@@ -4909,6 +4909,44 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
     }
 }
 
+/// Review-form follow-up that declines to review: it returns a verified
+/// `investigation_only` no-change verdict about a revision it inspected
+/// instead of reviewing the gated candidate (#14970).
+#[derive(Clone)]
+struct DecliningReviewFormExecutor;
+
+impl AgentTaskExecutorAdapter for DecliningReviewFormExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        assert_eq!(request.policy.write, "none");
+        let mut outputs = test_review_form_outputs();
+        outputs["provider_run_result"] = serde_json::json!({
+            "status": "succeeded",
+            "intentional_no_change": {
+                "schema": "homeboy/intentional-no-change/v1",
+                "verdict": "investigation_only",
+                "inspected_revision": "fc8735c2",
+                "next_action": "Not enough evidence to identify a failing condition.",
+                "source_evidence": ["provider://review/transcript"]
+            }
+        });
+        crate::agent_task::AgentTaskOutcome {
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("not enough evidence to identify a failing condition".to_string()),
+            outputs,
+            metadata: serde_json::json!({
+                "model": request.executor.model(),
+                "intentional_no_change_verified": true,
+            }),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TerminalSuccessExecutor;
 
@@ -14477,160 +14515,274 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
 }
 
 #[test]
+fn review_form_follow_up_no_change_verdict_never_drops_the_gated_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repositories");
+        let cook_id = "cook-14970-declined-review";
+        let fixture = adopt_green_candidate_missing_review_form(
+            temp.path(),
+            cook_id,
+            Arc::new(DecliningReviewFormExecutor),
+        );
+        let result = fixture
+            .result
+            .expect("a declined review is a typed Cook result");
+
+        // #14970: the review-form follow-up's `investigation_only` verdict must
+        // not convert the applied, gate-green candidate into a successful
+        // intentional no-change with nothing finalized.
+        assert!(result.value.intentional_no_change.is_none());
+        assert_eq!(result.exit_code, 1, "{:?}", result.value);
+        assert!(
+            !fixture.backend.created,
+            "nothing is published without a review"
+        );
+        // Once the review budget is spent the Cook ends as a visible
+        // non-success that still names the gated candidate.
+        assert_eq!(result.value.status, "execution_budget_exhausted");
+        assert!(result.value.finalization.is_none());
+        assert_eq!(
+            result.value.attempts.len(),
+            3,
+            "{:?}",
+            result.value.attempts
+        );
+        for review in &result.value.attempts[1..] {
+            let feedback = review
+                .feedback
+                .as_ref()
+                .expect("review attempt is evaluated");
+            assert_eq!(feedback.status, AgentTaskCookLoopStatus::RetryRequested);
+            assert!(feedback.intentional_no_change.is_none());
+            assert_eq!(
+                review.promotion.as_ref().expect("carried candidate").status,
+                AgentTaskPromotionStatus::Applied
+            );
+        }
+        let feedback = result.value.attempts[1].feedback.as_ref().unwrap();
+        let gap = feedback
+            .follow_up_request
+            .as_ref()
+            .expect("declined review is a review-form gap")
+            .inputs["cook_loop"]["review_form_feedback"]
+            .as_str()
+            .expect("typed gap feedback");
+        assert!(gap.contains("investigation_only"), "{gap}");
+        assert_eq!(
+            result
+                .value
+                .selected_candidate
+                .as_ref()
+                .expect("the gated code attempt remains the Cook's candidate")["run_id"],
+            fixture.run_id
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.target.join("lib.rs")).unwrap(),
+            "candidate\n"
+        );
+    });
+}
+
+/// Green adopted candidate whose source attempt emitted no review form, so
+/// adoption dispatches a review-form-only follow-up to `review_executor`.
+struct AdoptedMissingFormFixture {
+    result: Result<AgentTaskRunResult<AgentTaskCookReport>>,
+    backend: CaptureBackend,
+    run_id: String,
+    base: String,
+    candidate: String,
+    target: std::path::PathBuf,
+    workspace_handle: String,
+    plan: AgentTaskPlan,
+}
+
+fn adopt_green_candidate_missing_review_form(
+    temp: &std::path::Path,
+    cook_id: &str,
+    review_executor: SharedAgentTaskExecutor,
+) -> AdoptedMissingFormFixture {
+    let source = temp.join("source");
+    let target = temp.join("target");
+    std::fs::create_dir(&source).expect("create source repository");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let git_output = |cwd: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("read git output");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.email", "agent@example.test"]);
+    git(&source, &["config", "user.name", "Agent"]);
+    std::fs::write(source.join("lib.rs"), "base\n").unwrap();
+    git(&source, &["add", "lib.rs"]);
+    git(&source, &["commit", "-m", "base"]);
+    let base = git_output(&source, &["rev-parse", "HEAD"]);
+    git(
+        &source,
+        &["remote", "add", "origin", source.to_str().unwrap()],
+    );
+    git(&source, &["fetch", "origin", "main"]);
+    git(
+        &source,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fixture-target",
+            target.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    std::fs::write(target.join("lib.rs"), "candidate\n").unwrap();
+    git(&target, &["commit", "-am", "candidate"]);
+    let candidate = git_output(&target, &["rev-parse", "HEAD"]);
+    let provider = temp.join("promotion-provider.sh");
+    std::fs::write(
+        &provider,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ngit -C {target} reset --hard --quiet {candidate}\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+            target = target.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).unwrap();
+    }
+
+    let run_id = format!("{cook_id}-attempt-1");
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.to_string();
+    options.workspace.source_worktree_path = None;
+    options.workspace.task_base_sha = Some(base.clone());
+    options.provider_transport.provider_invocation =
+        Some(homeboy_core::command_invocation::CommandInvocation {
+            argv: vec![provider.display().to_string()],
+
+            ..Default::default()
+        });
+    options.provider_transport.attempt_dispatcher = None;
+    options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
+    options.retry_policy.max_attempts = 2;
+    options.finalization.no_finalize = false;
+    options.finalization.head = Some("fix/8058".to_string());
+    options.ai_disclosure.ai_tool = "fixture-provider".to_string();
+    options.ai_disclosure.ai_model = Some("fixture-model-implementation".to_string());
+    options.identity.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
+    options.identity.initial_plan.tasks[0].executor.model =
+        Some("fixture-model-implementation".to_string());
+    let workspace_handle = format!("fixture@{cook_id}");
+    homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+        handle: workspace_handle.clone(),
+        path: target.display().to_string(),
+        kind: Some("test-fixture".to_string()),
+        provenance: None,
+    })
+    .expect("register fixture destination workspace");
+    options.workspace.to_worktree = workspace_handle.clone();
+    super::super::persist_initial_recipe(&options).unwrap();
+    agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+    seed_substantive_candidate_aggregate(
+        &run_id,
+        &options.identity.initial_plan,
+        &temp.join("candidate.patch"),
+        "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-base\n+candidate\n",
+    );
+    agent_task_lifecycle::record_cook_attempt_in_store(
+        &test_lifecycle_store(),
+        cook_id,
+        1,
+        &run_id,
+    )
+    .unwrap();
+
+    let mut gate_proof = serde_json::to_value(promotion("fixture-gate-proof")).unwrap();
+    gate_proof["to_worktree"] = serde_json::json!(workspace_handle);
+    gate_proof["target"] = serde_json::json!({
+        "worktree": workspace_handle,
+        "path": target.display().to_string(),
+    });
+    gate_proof["changed_files"] = serde_json::json!(["lib.rs"]);
+    gate_proof["verified_base"] = serde_json::json!({ "base": "main", "sha": base });
+    let candidate_checkout = serde_json::json!({
+        "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+        "commit": candidate,
+        "tree": "fixture-candidate-tree",
+        "candidate_sha256": "fixture-candidate-sha",
+    });
+    gate_proof["deterministic_gates"][0]["command"] =
+        serde_json::json!(["sh", "-c", "test \"$(cat lib.rs)\" = candidate"]);
+    gate_proof["deterministic_gates"][0]["candidate_checkout"] = candidate_checkout.clone();
+    gate_proof["provenance"]["worktree_path"] = serde_json::json!(target.display().to_string());
+    gate_proof["provenance"]["candidate_checkout"] = candidate_checkout;
+    let mut backend = CaptureBackend {
+        synthetic_gate_proof: Some(serde_json::from_value(gate_proof).unwrap()),
+        ..Default::default()
+    };
+    let result = adopt_cook_candidate_with_dispatcher_and_backend(
+        cook_id,
+        &candidate,
+        AgentTaskCandidateAdoptionOptions {
+            ai_model: Some("fixture-model-review".to_string()),
+            replace_interrupted: false,
+            accept_inherited_failures: false,
+        },
+        |_| Ok(None),
+        review_executor,
+        &mut backend,
+    );
+    AdoptedMissingFormFixture {
+        result,
+        backend,
+        run_id,
+        base,
+        candidate,
+        target,
+        workspace_handle,
+        plan: options.identity.initial_plan.clone(),
+    }
+}
+
+#[test]
 fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_finalizes() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repositories");
-        let source = temp.path().join("source");
-        let target = temp.path().join("target");
-        std::fs::create_dir(&source).expect("create source repository");
-        let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("run git");
-            assert!(
-                output.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        let git_output = |cwd: &std::path::Path, args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("read git output");
-            assert!(output.status.success());
-            String::from_utf8(output.stdout).unwrap().trim().to_string()
-        };
-        git(&source, &["init", "-b", "main"]);
-        git(&source, &["config", "user.email", "agent@example.test"]);
-        git(&source, &["config", "user.name", "Agent"]);
-        std::fs::write(source.join("lib.rs"), "base\n").unwrap();
-        git(&source, &["add", "lib.rs"]);
-        git(&source, &["commit", "-m", "base"]);
-        let base = git_output(&source, &["rev-parse", "HEAD"]);
-        git(
-            &source,
-            &["remote", "add", "origin", source.to_str().unwrap()],
-        );
-        git(&source, &["fetch", "origin", "main"]);
-        git(
-            &source,
-            &[
-                "worktree",
-                "add",
-                "-b",
-                "fixture-target",
-                target.to_str().unwrap(),
-                "HEAD",
-            ],
-        );
-        std::fs::write(target.join("lib.rs"), "candidate\n").unwrap();
-        git(&target, &["commit", "-am", "candidate"]);
-        let candidate = git_output(&target, &["rev-parse", "HEAD"]);
-        let provider = temp.path().join("promotion-provider.sh");
-        std::fs::write(
-            &provider,
-            format!(
-                "#!/bin/sh\ncat >/dev/null\ngit -C {target} reset --hard --quiet {candidate}\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
-                target = target.display(),
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&provider, permissions).unwrap();
-        }
-
         let cook_id = "cook-adopt-review-form";
-        let run_id = "cook-adopt-review-form-attempt-1";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = run_id.to_string();
-        options.workspace.source_worktree_path = None;
-        options.workspace.task_base_sha = Some(base.clone());
-        options.provider_transport.provider_invocation =
-            Some(homeboy_core::command_invocation::CommandInvocation {
-                argv: vec![provider.display().to_string()],
-
-                ..Default::default()
-            });
-        options.provider_transport.attempt_dispatcher = None;
-        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
-        options.retry_policy.max_attempts = 2;
-        options.finalization.no_finalize = false;
-        options.finalization.head = Some("fix/8058".to_string());
-        options.ai_disclosure.ai_tool = "fixture-provider".to_string();
-        options.ai_disclosure.ai_model = Some("fixture-model-implementation".to_string());
-        options.identity.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
-        options.identity.initial_plan.tasks[0].executor.model =
-            Some("fixture-model-implementation".to_string());
-        let workspace_handle = format!("fixture@{cook_id}");
-        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
-            handle: workspace_handle.clone(),
-            path: target.display().to_string(),
-            kind: Some("test-fixture".to_string()),
-            provenance: None,
-        })
-        .expect("register fixture destination workspace");
-        options.workspace.to_worktree = workspace_handle.clone();
-        super::super::persist_initial_recipe(&options).unwrap();
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
-        seed_substantive_candidate_aggregate(
+        let AdoptedMissingFormFixture {
+            result,
+            backend,
             run_id,
-            &options.identity.initial_plan,
-            &temp.path().join("candidate.patch"),
-            "diff --git a/lib.rs b/lib.rs\n--- a/lib.rs\n+++ b/lib.rs\n@@ -1 +1 @@\n-base\n+candidate\n",
-        );
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
+            base,
+            candidate,
+            target,
+            workspace_handle,
+            plan,
+        } = adopt_green_candidate_missing_review_form(
+            temp.path(),
             cook_id,
-            1,
-            run_id,
-        )
-        .unwrap();
-
-        let mut gate_proof = serde_json::to_value(promotion("fixture-gate-proof")).unwrap();
-        gate_proof["to_worktree"] = serde_json::json!(workspace_handle);
-        gate_proof["target"] = serde_json::json!({
-            "worktree": workspace_handle,
-            "path": target.display().to_string(),
-        });
-        gate_proof["changed_files"] = serde_json::json!(["lib.rs"]);
-        gate_proof["verified_base"] = serde_json::json!({ "base": "main", "sha": base });
-        let candidate_checkout = serde_json::json!({
-            "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
-            "commit": candidate,
-            "tree": "fixture-candidate-tree",
-            "candidate_sha256": "fixture-candidate-sha",
-        });
-        gate_proof["deterministic_gates"][0]["command"] =
-            serde_json::json!(["sh", "-c", "test \"$(cat lib.rs)\" = candidate"]);
-        gate_proof["deterministic_gates"][0]["candidate_checkout"] = candidate_checkout.clone();
-        gate_proof["provenance"]["worktree_path"] = serde_json::json!(target.display().to_string());
-        gate_proof["provenance"]["candidate_checkout"] = candidate_checkout;
-        let mut backend = CaptureBackend {
-            synthetic_gate_proof: Some(serde_json::from_value(gate_proof).unwrap()),
-            ..Default::default()
-        };
-        let result = adopt_cook_candidate_with_dispatcher_and_backend(
-            cook_id,
-            &candidate,
-            AgentTaskCandidateAdoptionOptions {
-                ai_model: Some("fixture-model-review".to_string()),
-                replace_interrupted: false,
-                accept_inherited_failures: false,
-            },
-            |_| Ok(None),
             Arc::new(ReviewFormOnlyExecutor),
-            &mut backend,
-        )
-        .expect("adoption retries only the missing review form");
+        );
+        let result = result.expect("adoption retries only the missing review form");
+        let run_id = run_id.as_str();
 
         let follow_up_aggregate = result
             .value
@@ -14697,14 +14849,9 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "the bound form-only continuation owns failed-finalization recovery"
         );
         let unrelated_run_id = format!("{cook_id}-unrelated-continuation");
-        super::super::record_recipe_attempt(
-            cook_id,
-            3,
-            &unrelated_run_id,
-            &options.identity.initial_plan,
-        )
-        .expect("persist unrelated recipe attempt");
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&unrelated_run_id))
+        super::super::record_recipe_attempt(cook_id, 3, &unrelated_run_id, &plan)
+            .expect("persist unrelated recipe attempt");
+        agent_task_lifecycle::submit_plan(&plan, Some(&unrelated_run_id))
             .expect("persist unrelated attempt record");
         agent_task_lifecycle::record_cook_attempt_in_store(
             &test_lifecycle_store(),

@@ -342,8 +342,25 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     // outstanding "gate".
     let gates_green_with_changes = failed_gates.is_empty()
         && options.promotion_report.status == AgentTaskPromotionStatus::Applied;
-    let review_form_gap = (options.require_review_form && gates_green_with_changes)
-        .then(|| review_form_requirement_gap(&options.review_form));
+    // A review-form follow-up exists only to attach a review to an already
+    // gated candidate. A no-change verdict from it declines that review; it is
+    // a review-form gap, never a verdict on the candidate (#14970).
+    let declined_review = request_is_review_form_only(&options.source_request)
+        .then(|| {
+            options
+                .metadata
+                .get("intentional_no_change")
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<AgentTaskIntentionalNoChange>(value).ok()
+                })
+        })
+        .flatten();
+    let review_form_gap =
+        (options.require_review_form && gates_green_with_changes).then(|| match &declined_review {
+            Some(declaration) => Some(declined_review_form_gap(declaration)),
+            None => review_form_requirement_gap(&options.review_form),
+        });
 
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
@@ -716,6 +733,15 @@ fn review_form_requirement_gap(form: &Option<AiFilledReviewForm>) -> Option<Stri
         )),
         Some(form) => form.validate().err().map(|error| error.message),
     }
+}
+
+fn declined_review_form_gap(declaration: &AgentTaskIntentionalNoChange) -> String {
+    format!(
+        "the review-form follow-up returned a `{}` no-change verdict at revision {} instead of a review_form for the gated candidate; a review-form follow-up has no no-change outcome. {}",
+        declaration.verdict,
+        declaration.inspected_revision,
+        AiFilledReviewForm::requirement_feedback()
+    )
 }
 
 /// Build a follow-up attempt request that nudges the agent to emit a valid
@@ -2604,6 +2630,52 @@ mod tests {
             .expect("green final attempt without a form requests the form");
         assert_eq!(request.inputs["cook_loop"]["review_form_required"], true);
         assert_eq!(request.metadata["cook_loop"]["kind"], "review_form_only");
+    }
+
+    #[test]
+    fn review_form_follow_up_no_change_verdict_is_a_review_gap_not_a_candidate_verdict() {
+        // #14970: attempt 1 left an applied, gate-green candidate; its
+        // review-form follow-up returned `investigation_only`. That verdict
+        // declines the review. It must not decide the candidate, even when
+        // the follow-up also emitted an otherwise valid form.
+        let mut review_request = source_request();
+        review_request.metadata = json!({ "cook_loop": { "kind": "review_form_only" } });
+        for review_form in [None, Some(valid_review_form())] {
+            let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                source_request: review_request.clone(),
+                promotion_report: promotion_report(
+                    AgentTaskPromotionStatus::Applied,
+                    vec![green_gate()],
+                ),
+                attempt: 2,
+                max_attempts: 2,
+                source_run_id: Some("run-review-form-2".to_string()),
+                current_diff: String::new(),
+                require_review_form: true,
+                review_form,
+                metadata: json!({
+                    "intentional_no_change": {
+                        "schema": "homeboy/intentional-no-change/v1",
+                        "verdict": "investigation_only",
+                        "inspected_revision": "fc8735c2",
+                        "next_action": "",
+                        "source_evidence": []
+                    }
+                }),
+            });
+
+            assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+            assert!(report.intentional_no_change.is_none());
+            let request = report
+                .follow_up_request
+                .expect("a declined review requests the form again");
+            assert_eq!(request.metadata["cook_loop"]["kind"], "review_form_only");
+            let feedback = request.inputs["cook_loop"]["review_form_feedback"]
+                .as_str()
+                .expect("typed review-form gap");
+            assert!(feedback.contains("investigation_only"), "{feedback}");
+            assert!(feedback.contains("fc8735c2"), "{feedback}");
+        }
     }
 
     #[test]

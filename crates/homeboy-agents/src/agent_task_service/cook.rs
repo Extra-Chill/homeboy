@@ -3722,8 +3722,9 @@ fn dispatch_bound_cook_follow_up(
         lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
         lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
+            let adoption_run_id = candidate_adoption_owner_run_id(lifecycle_store, source_run_id)?;
             lifecycle_store
-                .checkpoint_candidate_adoption_remediation(source_run_id, &next_run_id)?;
+                .checkpoint_candidate_adoption_remediation(&adoption_run_id, &next_run_id)?;
         }
         if let Some(dispatcher) = &options.provider_transport.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
@@ -3878,6 +3879,37 @@ pub(crate) fn ensure_cook_attempt_admitted(
         }
         Ok(())
     })
+}
+
+/// The adoption claim lives on the adopted attempt, not on the review-form
+/// continuations that carry its candidate forward. A repeated review-form
+/// remediation therefore checkpoints the adopted attempt reached through the
+/// carried `cook_follow_up` lineage (#14970).
+fn candidate_adoption_owner_run_id(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    source_run_id: &str,
+) -> Result<String> {
+    let mut run_id = source_run_id.to_string();
+    for _ in 0..8 {
+        if lifecycle_store
+            .read_record(&run_id)
+            .is_ok_and(|record| record.candidate_adoption.is_some())
+        {
+            return Ok(run_id);
+        }
+        let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
+        else {
+            break;
+        };
+        if promotion.provenance["cook_follow_up"]["kind"] != "review_form_only" {
+            break;
+        }
+        let Some(parent) = promotion.provenance["cook_follow_up"]["source_run_id"].as_str() else {
+            break;
+        };
+        run_id = parent.to_string();
+    }
+    Ok(source_run_id.to_string())
 }
 
 fn adopted_attempt_is_ready_for_cook_continuation(
@@ -7408,12 +7440,14 @@ fn run_cook_spine(
             }
             return Ok(report);
         }
+        // Only the adopted attempt itself carries adoption authority past a
+        // terminal state; a failed form-only continuation of it does not.
         if !matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                 | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
-        ) && adopted_continuation.is_none()
+        ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
             && !review_form_continuation
         {
             attempts.push(AgentTaskCookAttemptReport {
@@ -7529,7 +7563,13 @@ fn run_cook_spine(
             return Ok(report);
         }
 
-        if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate) {
+        // A review-form follow-up carries an already-gated candidate forward; a
+        // no-change verdict from it declines the review rather than deciding
+        // the candidate. It continues to the carried promotion, where the Cook
+        // loop classifies it as a review-form gap (#14970).
+        if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate)
+            .filter(|_| !plan_is_review_form_only(&plan))
+        {
             let review_form = review_form_from_aggregate(&aggregate)?;
             let requires_candidate =
                 no_change_requires_substantive_candidate(&declaration, &source_request);
