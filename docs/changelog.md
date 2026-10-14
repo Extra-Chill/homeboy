@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.426.1] - 2026-10-14
+
+### Fixed
+- run terminal Cook continuations in a supervised worker process
+
 ## [0.426.0] - 2026-10-14
 
 ### Added
