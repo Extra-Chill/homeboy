@@ -386,6 +386,7 @@ fn gate_flags(gates: &VerifyGateArgs) -> Result<Vec<(String, Value)>> {
     for (key, enabled) in [
         ("rerun-completed-gates", gates.rerun_completed_gates),
         ("accept-inherited-failures", gates.accept_inherited_failures),
+        ("no-component-lint-gate", gates.no_component_lint_gate),
         ("gate-shared-cargo-target", gates.gate_shared_cargo_target),
         (
             "no-gate-shared-cargo-target",

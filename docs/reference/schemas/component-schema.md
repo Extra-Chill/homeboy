@@ -65,7 +65,7 @@ Component configuration defines buildable and deployable units stored in `compon
 ### Optional Fields
 
 - **`name`** (string): Human-readable component name, defaults to `id`
-- **`default_verify_gates`** (array): Public verification commands used by `agent-task cook` when no `--verify` or private verification gates are supplied. Explicit per-run gates take precedence.
+- **`default_verify_gates`** (array): Public verification commands used by `agent-task cook` when no `--verify` or private verification gates are supplied. Explicit per-run gates take precedence. Independently of this field, when the component declares lint support (`scripts.lint` or a linked lint extension), Cook also requires `homeboy review lint <component> --path .` before promotion unless a gate already runs `review lint` or the operator passes `--no-component-lint-gate`.
 - **`extract_command`** (string): Command to execute after artifact upload, runs inside target directory
   - Supports template variables: `{artifact}`, `{targetDir}`
 - **`version_targets`** (array): List of version detection patterns
