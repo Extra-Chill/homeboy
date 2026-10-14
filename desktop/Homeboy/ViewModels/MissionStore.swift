@@ -20,6 +20,12 @@ final class MissionStore: ObservableObject {
     @Published private(set) var isLoadingRuns = false
 
     @Published var selectedRunId: String?
+    /// The selected run as returned by the single-run read
+    /// (`GET /v1/control-plane/runs/:id`). Run-list rows are summaries that
+    /// omit `action_eligibility`, so this detail is the only source of the
+    /// selected run's actions. It is held apart from `runsById` so list
+    /// refreshes (e.g. Activity's periodic reload) never overwrite it.
+    @Published private(set) var selectedRunDetail: ControlPlaneRun?
     @Published private(set) var selectedRunEvents: [ControlPlaneEvent] = []
     @Published private(set) var selectedRunReview: ControlPlaneRunReview?
     @Published private(set) var isLoadingEvents = false
@@ -41,8 +47,14 @@ final class MissionStore: ObservableObject {
         pollingTask?.cancel()
     }
 
+    /// The selected run, preferring the single-run detail (which carries
+    /// actions) over the list summary until the detail has loaded.
     var selectedRun: ControlPlaneRun? {
-        selectedRunId.flatMap { runsById[$0] }
+        guard let selectedRunId else { return nil }
+        if let selectedRunDetail, selectedRunDetail.run == selectedRunId {
+            return selectedRunDetail
+        }
+        return runsById[selectedRunId]
     }
 
     /// Runs across every mission, newest-created first. Used by Activity.
@@ -155,6 +167,7 @@ final class MissionStore: ObservableObject {
         guard selectedRunId != runId else { return }
         stopPolling()
         selectedRunId = runId
+        selectedRunDetail = nil
         selectedRunEvents = []
         selectedRunReview = nil
         eventsCursor = nil
@@ -177,6 +190,9 @@ final class MissionStore: ObservableObject {
         do {
             let run = try await client.run(id: runId)
             applyUpdatedRun(run)
+            if selectedRunId == runId {
+                selectedRunDetail = run
+            }
         } catch {
             self.error = error.toDisplayableError(source: "Missions")
         }
@@ -211,7 +227,7 @@ final class MissionStore: ObservableObject {
 
     private func startPollingIfNeeded(runId: String) {
         guard selectedRunId == runId else { return }
-        guard let run = runsById[runId], !run.isTerminal else { return }
+        guard let run = selectedRun, !run.isTerminal else { return }
 
         pollingTask?.cancel()
         pollingTask = Task { [weak self] in
@@ -248,7 +264,7 @@ final class MissionStore: ObservableObject {
         }
 
         await refreshSelectedRun(runId: runId)
-        return runsById[runId]?.isTerminal ?? true
+        return selectedRun?.isTerminal ?? true
     }
 
     private func snapshotEvents(runId: String) async {

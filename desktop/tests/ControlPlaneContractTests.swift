@@ -214,6 +214,22 @@ func testControlPlaneRuns(fixturesDir: String, decoder: JSONDecoder) throws {
             userInfo: [NSLocalizedDescriptionKey: "first action reason did not decode Homeboy's stated reason"])
     }
     print("[PASS] First action's availability and reason decode")
+
+    // Run-list rows are summaries: core omits `action_eligibility` from
+    // `GET /v1/control-plane/runs` and serves it only on the single-run read.
+    let summaryPage = Data("""
+    {"success":true,"data":{"body":{"ok":true,"resource":{"runs":[
+      {"run":"agent-task-summary-row","mission":"mission-1","state":"running"}
+    ],"has_more":false}}}}
+    """.utf8)
+    let summary = try decoder.decode(ControlPlaneEnvelopeTest<ControlPlaneRunPageTest>.self, from: summaryPage)
+    guard let summaryRow = summary.data.body.resource?.runs.first,
+          summaryRow.run == "agent-task-summary-row",
+          summaryRow.actionEligibility == nil else {
+        throw NSError(domain: "ContractTest", code: 216,
+            userInfo: [NSLocalizedDescriptionKey: "summary run-list row without action_eligibility did not decode"])
+    }
+    print("[PASS] Summary run-list row decodes without action_eligibility")
     print("")
 }
 

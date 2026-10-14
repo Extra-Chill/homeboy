@@ -353,7 +353,6 @@ runs artifact postprocess
 runs artifact preview
 runs artifact preview-handle
 runs artifacts
-runs bench-compare
 runs cancel
 runs compare
 runs distribution
@@ -362,7 +361,6 @@ runs env
 runs evidence
 runs export
 runs findings
-runs fuzz-compare
 runs hotspots
 runs import
 runs latest-run
