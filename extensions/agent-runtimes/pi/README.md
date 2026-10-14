@@ -38,6 +38,11 @@ usage with cost. Stdout and stderr are saved as artifacts.
   Keep `--mode json`; the outcome is read from that stream.
 - Credentials are Pi's own: its auth file under the agent dir (`PI_CODING_AGENT_DIR`
   passes through) or provider API key env declared via `secret_env` / `env_allowlist`.
+- Set `pi_agent_dir` to choose the Pi agent directory (including logins and
+  models). Host-wide: `homeboy config set /settings/pi_agent_dir '"~/.roadie/pi-agent"'`.
+  Per Cook: `--provider-config '{"pi_agent_dir":"..."}'`. Controller settings
+  travel with the plan to the runner, so a per-Cook value is the safe choice
+  when runners keep their own agent directories.
 
 Readiness (`scripts/agent/homeboy-pi-provider-readiness.cjs`) resolves the
 executable and runs `pi --version`; a missing binary is not ready.

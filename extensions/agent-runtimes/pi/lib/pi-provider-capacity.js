@@ -16,16 +16,12 @@
  * extra usage.
  */
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { providerCapacity, readJson, storedAccount } = require('../../lib/provider-capacity');
+const { piAgentDir } = require('./pi-agent-dir');
 
-function piAgentDir(env = process.env) {
-	return env.PI_CODING_AGENT_DIR || path.join(env.HOME || os.homedir(), '.pi', 'agent');
-}
-
-function piAuthStorePath(env = process.env) {
-	return path.join(piAgentDir(env), 'auth.json');
+function piAuthStorePath(env = process.env, config = {}) {
+	return path.join(piAgentDir(env, config), 'auth.json');
 }
 
 /** Pi routes are `provider/model`; the provider names the auth store entry. */
@@ -36,13 +32,14 @@ function piRouteProvider(model = '') {
 
 function piProviderCapacity(provider, options = {}) {
 	const env = options.env || process.env;
+	const config = options.config || {};
 	const fileSystem = options.fs || fs;
 	return providerCapacity(provider, {
 		...options,
 		scopePrefix: 'pi',
 		billing: provider === 'anthropic' ? 'extra_usage' : undefined,
 		accounts: (name) => {
-			const account = storedAccount(readJson(piAuthStorePath(env), fileSystem), name);
+			const account = storedAccount(readJson(piAuthStorePath(env, config), fileSystem), name);
 			return account ? [account] : [];
 		},
 	});

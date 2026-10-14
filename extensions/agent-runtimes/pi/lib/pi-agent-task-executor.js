@@ -24,6 +24,7 @@ const {
 } = require('../../lib/cli-agent-task-executor');
 const { cliRuntimeReadiness, boundedTimeout, resolveExecutable, READINESS_REQUEST_SCHEMA, READINESS_RESULT_SCHEMA } = require('../../lib/cli-runtime-readiness');
 const { piProviderCapacity, piRouteProvider } = require('./pi-provider-capacity');
+const { piAgentDir, piAgentEnv } = require('./pi-agent-dir');
 const { requiredOutputInstructions, structuredOutputsFromTexts } = require('../../lib/declared-outputs');
 
 const PI_PROVIDER_ID = 'pi.agent-task-executor';
@@ -102,10 +103,11 @@ function piRuntimeReadiness(request = {}, options = {}) {
 		requiredSecretEnv: [],
 		identityEnv: PI_ENV_ALLOWLIST,
 	};
-	const result = cliRuntimeReadiness(request, spec, options);
 	const config = request.effective_config && typeof request.effective_config === 'object' ? request.effective_config : {};
-	const env = options.env || process.env;
-	const agentDir = env.PI_CODING_AGENT_DIR || path.join(env.HOME || os.homedir(), '.pi', 'agent');
+	const env = piAgentEnv(options.env || process.env, config);
+	const readinessOptions = { ...options, env };
+	const result = cliRuntimeReadiness(request, spec, readinessOptions);
+	const agentDir = piAgentDir(env, config);
 	const identity = { ...result.identity, agent_dir: agentDir, model: typeof config.model === 'string' ? config.model.trim() : '' };
 	const rekey = () => {
 		const cacheKey = `runtime-readiness:${crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
@@ -161,7 +163,8 @@ async function piProviderReadiness(request = {}, options = {}) {
 	const provider = piRouteProvider(config.model);
 	const lookup = provider && request.schema === READINESS_REQUEST_SCHEMA
 		? await piProviderCapacity(provider, {
-			env: options.env || process.env,
+			env: piAgentEnv(options.env || process.env, config),
+			config,
 			fetch: options.fetch,
 			fs: options.capacityFs,
 			now: options.now,
@@ -503,7 +506,7 @@ const { execute: executePiAgentTask, outcome, validationFailure } = createCliAge
 		];
 	},
 	buildSpawn: (request, config, options) => ({
-		env: cliAgentTaskSpawnEnv(request, options, { allowlist: PI_ENV_ALLOWLIST }),
+		env: piAgentEnv(cliAgentTaskSpawnEnv(request, options, { allowlist: PI_ENV_ALLOWLIST }), config),
 		// Pi treats piped stdin as extra prompt input; keep it empty.
 		input: '',
 	}),

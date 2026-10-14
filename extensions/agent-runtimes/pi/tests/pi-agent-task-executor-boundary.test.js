@@ -163,6 +163,10 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 		assert.equal(result.metadata.usage.cost_usd, 0.02);
 		assert.equal(result.artifacts.some((artifact) => artifact.name === 'pi-stdout'), true);
 	}
+	{
+		const { record } = run({ events: okStream, config: { pi_agent_dir: '~/cook-agent' } });
+		assert.equal(record.agentDir, path.join(os.homedir(), 'cook-agent'));
+	}
 
 	// No artifacts dir: no session file is written.
 	{

@@ -30,6 +30,23 @@ try {
 	assert.equal(ready.identity.version, '0.70.1');
 	assert.equal(ready.identity.model, 'anthropic/claude-test');
 	assert.equal(ready.identity.agent_dir, path.join(os.homedir(), '.pi', 'agent'));
+	const selectedEnv = { PATH: process.env.PATH, HOME: '/runner/home', PI_CODING_AGENT_DIR: '/ambient/pi' };
+	const seenProbeEnvs = [];
+	const selected = piRuntimeReadiness(request({ pi_agent_dir: '~/x' }), {
+		env: selectedEnv,
+		spawnSync: (command, args, options) => {
+			seenProbeEnvs.push(options.env.PI_CODING_AGENT_DIR);
+			return args[0] === '--list-models'
+				? { status: 0, stdout: 'provider model context\nanthropic claude-test 200000\n', stderr: '' }
+				: { status: 0, stdout: '0.70.1\n', stderr: '' };
+		},
+	});
+	assert.equal(selected.identity.agent_dir, path.join('/runner/home', 'x'));
+	assert.deepEqual(seenProbeEnvs, [path.join('/runner/home', 'x'), path.join('/runner/home', 'x')]);
+	const ambient = piRuntimeReadiness(request(), { env: selectedEnv, spawnSync: (command, args) => args[0] === '--list-models'
+		? { status: 0, stdout: 'provider model context\nanthropic claude-test 200000\n', stderr: '' }
+		: { status: 0, stdout: '0.70.1\n', stderr: '' } });
+	assert.equal(ambient.identity.agent_dir, '/ambient/pi');
 
 	const catalogProbe = (stdout, listResult = {}) => (command, args, options) => args[0] === '--list-models'
 		? { status: 0, stdout, stderr: '', ...listResult }
@@ -68,10 +85,10 @@ try {
 	fs.writeFileSync(path.join(agentDir, 'auth.json'), JSON.stringify({
 		anthropic: { type: 'oauth', access: 'access-token', refresh: 'refresh-token', expires: now + 3_600_000 },
 	}));
-	const env = { PATH: process.env.PATH, PI_CODING_AGENT_DIR: agentDir };
+	const env = { PATH: process.env.PATH, PI_CODING_AGENT_DIR: path.join(agentDir, 'ambient') };
 	const capacityRequest = (extra = {}) => ({
 		schema: 'homeboy/agent-task-provider-readiness-request/v1',
-		effective_config: { command: bin, model: 'anthropic/claude-test' },
+		effective_config: { command: bin, model: 'anthropic/claude-test', pi_agent_dir: agentDir },
 		...extra,
 	});
 	const usage = (utilization) => async (url, init) => {
