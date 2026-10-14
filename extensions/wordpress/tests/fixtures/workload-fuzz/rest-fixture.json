@@ -1,0 +1,23 @@
+{
+  "schema": "homeboy/fuzz-workload/v1",
+  "id": "rest-fixture",
+  "safety_class": "read_only",
+  "fixture_only": true,
+  "wp_codebox_result": {
+    "schema": "wp-codebox/fuzz-suite-result/v1",
+    "request_id": "rest-fixture",
+    "status": "failed",
+    "cases": [
+      { "id": "case-list-posts", "status": "passed", "seed": 7, "operation_id": "GET /wp/v2/posts" },
+      { "id": "case-get-post-404", "status": "failed", "seed": 7, "operation_id": "GET /wp/v2/posts/{id}", "error": "HTTP 500 for a missing post" },
+      {
+        "id": "case-search-slow",
+        "status": "passed",
+        "seed": 7,
+        "operation_id": "GET /wp/v2/search",
+        "budget": { "max_query_count": 10 },
+        "performance_metrics": { "query_count": 42 }
+      }
+    ]
+  }
+}

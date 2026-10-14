@@ -511,6 +511,30 @@
       "WP_CODEBOX_FUZZ_WORKLOAD_ROOT"
     ]
   },
+  "workloads": {
+    "fuzz": {
+      "script": "scripts/workload/fuzz-workload.sh",
+      "env": [
+        "HOMEBOY_FUZZ_MAX_DURATION",
+        "HOMEBOY_WP_CODEBOX_FUZZ_DISPATCH",
+        "HOMEBOY_SETTINGS_JSON",
+        "HOMEBOY_SETTINGS_WP_CODEBOX_BIN",
+        "HOMEBOY_WP_CODEBOX_BIN",
+        "WP_CODEBOX_BIN",
+        "WP_CODEBOX_FUZZ_WORKLOAD_ROOT"
+      ],
+      "result_schema": "homeboy/fuzz-campaign/v1",
+      "replay_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-replay.sh\"",
+      "compare": {
+        "metrics": [
+          { "name": "cases_failed", "direction": "lower_is_better" },
+          { "name": "findings_total", "direction": "lower_is_better" }
+        ],
+        "findings_key": "fingerprint"
+      },
+      "safety_class": "read_only"
+    }
+  },
   "ci": {
     "profiles": {
       "pr": {
