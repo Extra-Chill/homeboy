@@ -11,7 +11,7 @@ mod types;
 mod types_extra;
 mod workloads;
 
-pub(crate) use compare::compare_envelopes;
+pub(crate) use compare::compare_runs as compare_fuzz_runs;
 pub use dispatch::run;
 pub use types::{
     FuzzArgs, FuzzCampaignContract, FuzzCompareHotspotPolicy, FuzzCompareOutput,

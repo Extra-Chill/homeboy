@@ -10,8 +10,8 @@ homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
 homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
-homeboy runs bench-compare --from-run <run-id> --to-run <run-id> [--metric <name>]
-homeboy runs fuzz-compare --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
+homeboy runs compare --kind bench --from-run <run-id> --to-run <run-id> [--metric <name>]
+homeboy runs compare --kind fuzz --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
 homeboy runs hotspots <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
 homeboy runs show <run-id> [--format json|--json]
@@ -153,9 +153,10 @@ homeboy runs compare --kind bench --component studio --metric total_elapsed_ms -
 
 Metric lookup supports top-level run metadata such as `results.total_elapsed_ms`, direct dotted paths, and benchmark scenario metrics recorded under `scenario_metrics[].metrics` or `metric_groups`.
 
-`homeboy runs bench-compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares numeric metrics recorded in two exact benchmark runs. It captures both run IDs, component state, shared benchmark context, selected metric deltas, and a Markdown table under `reports.markdown` in the JSON payload.
+With `--from-run <baseline-run-id> --to-run <candidate-run-id>`, `runs compare` compares two exact runs through the kind's adapter on the shared compare engine (the same engine behind `--baseline`/`--ratchet` and `homeboy fuzz compare`). Run-to-run output is always JSON.
 
-`homeboy runs fuzz-compare --from-run <baseline-run-id> --to-run <candidate-run-id>` compares persisted fuzz result envelope artifacts for two exact runs. It resolves `fuzz_result_envelope` artifacts from the observation store, folds in related persisted fuzz hotspot/observation artifacts for hotspot analysis, and returns the same `homeboy/fuzz-compare/v1` payload as `homeboy fuzz compare` without requiring local file paths.
+- `--kind bench` compares the numeric metrics recorded in two benchmark runs. It refuses runs with a different shared benchmark context (settings, scenarios, workloads, iterations, runs, concurrency) and reports both run IDs, component state, the shared context, metric deltas (every metric either run recorded, or those selected with `--metric`), missing metrics, and a Markdown table under `reports.markdown`.
+- `--kind fuzz` compares the persisted fuzz result envelope artifacts of two runs. It resolves `fuzz_result_envelope` artifacts from the observation store, folds in related persisted fuzz hotspot/observation artifacts for hotspot analysis, and returns the same `homeboy/fuzz-compare/v1` payload as `homeboy fuzz compare` without requiring local file paths. `--hotspot-policy` sets whether hotspot regressions block.
 
 `homeboy runs hotspots <run-id>...` ranks generic fuzz hotspots from persisted fuzz artifacts. It reads typed `homeboy/fuzz-hotspot-set/v1` artifacts directly, ranks typed `homeboy/fuzz-observation-set/v1` artifacts into hotspot points, and falls back to generic finding or coverage-gap signals only when typed hotspot data is absent:
 
@@ -179,7 +180,7 @@ homeboy runs hotspots \
 homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig <id>] [--limit 20]
 homeboy runs dossier <run-id>
 homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy runs bench-compare --from-run <run-id> --to-run <run-id>
+homeboy runs compare --kind bench --from-run <run-id> --to-run <run-id>
 ```
 
 ## Portable Bundles

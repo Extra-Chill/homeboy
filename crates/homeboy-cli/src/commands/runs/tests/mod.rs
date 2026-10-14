@@ -2401,7 +2401,7 @@ fn missing_and_mismatched_run_ids_return_clear_errors() {
         assert_eq!(missing.code.as_str(), "validation.invalid_argument");
         assert!(missing.message.contains("run record not found"));
 
-        let mismatch = bench_compare(&trace.id, &trace.id, &[])
+        let mismatch = bench_compare(&store, &trace.id, &trace.id, &[])
             .err()
             .expect("kind mismatch should fail");
         assert_eq!(mismatch.code.as_str(), "validation.invalid_argument");

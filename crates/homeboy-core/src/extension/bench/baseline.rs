@@ -1,47 +1,26 @@
-//! Bench baseline — ratchet for scenario metric regressions.
+//! Bench baseline adapter: scenario metric regressions (#15840).
 //!
-//! Stored under `homeboy.json` → `baselines.bench` via the generic
-//! `engine::baseline` primitive, alongside `baselines.test` and
-//! `baselines.audit`. Each scenario appears as a `Fingerprintable` item
-//! with fingerprint = `scenario_id`, so adding or removing scenarios
-//! tracks through the generic `new_items` / `resolved_fingerprints`
-//! lanes automatically.
+//! Bench plugs into the shared baseline / compare / gate engine
+//! ([`homeboy_engine_primitives::workload_compare`]) and supplies only what is
+//! bench-specific. A snapshot is one entry per scenario (stored under
+//! `homeboy.json` → `baselines.bench`, or `baselines.bench.rig.<rig-id>` when
+//! rig-pinned); the delta applies the runner's metric policies; the gate fails
+//! on any regressed metric.
 //!
-//! On top of that, bench adds a **threshold-based regression check**.
 //! Runners may declare metric policies for arbitrary numeric metrics
-//! (lower-is-better error rates, higher-is-better throughput, etc.). If
-//! they do not, Homeboy preserves the original p95 latency behavior.
-//!
-//! Default p95 threshold is 5%. Callers can pass any threshold per run
-//! via the command flag, while runner-declared policies can carry their
-//! own percent or absolute tolerances.
+//! (lower-is-better error rates, higher-is-better throughput, etc.). If they
+//! do not, Homeboy keeps the original p95 latency gate at the run's
+//! `--regression-threshold` (default 5%).
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::error::Result;
-use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
+use homeboy_engine_primitives::baseline as generic;
+use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter, Verdict};
 
 use super::metrics::{resolve_metric_policies, MetricDelta};
-use super::parsing::{BenchResults, BenchScenario};
-
-const BASELINE_KEY: &str = "bench";
-
-/// Resolve the baseline storage key for a given rig context.
-///
-/// - `None` → `"bench"` (the historic, unpinned baseline). Same shape and
-///   path as before this change so existing baselines load unchanged.
-/// - `Some("studio-playground-dev")` → `"bench.rig.studio-playground-dev"`
-///   so rig-pinned runs don't collide with bare ones, and different rigs
-///   keep their own histories side by side under the same `homeboy.json`.
-fn baseline_key_for(rig_id: Option<&str>) -> String {
-    match rig_id {
-        None => BASELINE_KEY.to_string(),
-        Some(id) => format!("{}.rig.{}", BASELINE_KEY, id),
-    }
-}
+use super::parsing::{BenchMetricPolicy, BenchResults, BenchScenario};
 
 /// Default regression threshold: 5% p95_ms slowdown flags a regression.
 pub const DEFAULT_REGRESSION_THRESHOLD_PERCENT: f64 = 5.0;
@@ -59,36 +38,19 @@ pub struct BenchScenarioSnapshot {
     pub metrics: BTreeMap<String, f64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub distributions: BTreeMap<String, Vec<f64>>,
-    /// Legacy fields from the first bench baseline shape. They remain
-    /// readable so existing baselines keep working, but new baselines store
-    /// metrics under the generic `metrics` map.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub p95_ms: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub p50_ms: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mean_ms: Option<f64>,
 }
 
 impl BenchScenarioSnapshot {
-    pub(crate) fn from_scenario(scenario: &BenchScenario) -> Self {
+    fn from_scenario(scenario: &BenchScenario) -> Self {
         Self {
             id: scenario.id.clone(),
             metrics: scenario.metrics.values.clone(),
             distributions: scenario.metrics.distributions.clone(),
-            p95_ms: None,
-            p50_ms: None,
-            mean_ms: None,
         }
     }
 
     fn metric_value(&self, name: &str) -> Option<f64> {
-        self.metrics.get(name).copied().or(match name {
-            "p95_ms" => self.p95_ms,
-            "p50_ms" => self.p50_ms,
-            "mean_ms" => self.mean_ms,
-            _ => None,
-        })
+        self.metrics.get(name).copied()
     }
 
     fn distribution(&self, name: &str) -> Option<&[f64]> {
@@ -96,25 +58,7 @@ impl BenchScenarioSnapshot {
     }
 }
 
-impl generic::Fingerprintable for BenchScenarioSnapshot {
-    fn fingerprint(&self) -> String {
-        self.id.clone()
-    }
-    fn description(&self) -> String {
-        if let Some(p95) = self.metric_value("p95_ms") {
-            return format!("p95 {:.2}ms", p95);
-        }
-        if let Some((name, value)) = self.metrics.iter().next() {
-            return format!("{} {:.2}", name, value);
-        }
-        "no metrics".to_string()
-    }
-    fn context_label(&self) -> String {
-        self.id.clone()
-    }
-}
-
-/// Metadata stored alongside the fingerprint list in the baseline file.
+/// Bench snapshot; exactly what `homeboy.json` stores as the baseline metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchBaselineMetadata {
     pub scenarios: Vec<BenchScenarioSnapshot>,
@@ -122,6 +66,10 @@ pub struct BenchBaselineMetadata {
     /// human context; comparisons don't require matching iteration
     /// counts.
     pub iterations: u64,
+    /// The runner's declared metric policies. A comparison runs under the
+    /// candidate's policies, so they are carried but never stored.
+    #[serde(skip)]
+    pub metric_policies: BTreeMap<String, BenchMetricPolicy>,
 }
 
 pub type BenchBaseline = generic::Baseline<BenchBaselineMetadata>;
@@ -161,141 +109,116 @@ pub struct BenchBaselineComparison {
     pub reasons: Vec<String>,
 }
 
-pub fn save_baseline(
-    source_path: &Path,
-    component_id: &str,
-    results: &BenchResults,
-    rig_id: Option<&str>,
-) -> Result<std::path::PathBuf> {
-    let snapshots: Vec<BenchScenarioSnapshot> = results
-        .scenarios
-        .iter()
-        .map(BenchScenarioSnapshot::from_scenario)
-        .collect();
-    let metadata = BenchBaselineMetadata {
-        scenarios: snapshots.clone(),
-        iterations: results.iterations,
-    };
-    let key = baseline_key_for(rig_id);
-    let config = BaselineConfig::new(source_path, key);
-    generic::save(&config, component_id, &snapshots, metadata)
-}
+/// The bench [`KindAdapter`]. Options are the p95 threshold percent used
+/// when the runner declares no metric policies.
+pub struct BenchAdapter;
 
-pub fn load_baseline(source_path: &Path, rig_id: Option<&str>) -> Option<BenchBaseline> {
-    let key = baseline_key_for(rig_id);
-    let config = BaselineConfig::new(source_path, key);
-    generic::load::<BenchBaselineMetadata>(&config)
-        .ok()
-        .flatten()
-}
+impl KindAdapter for BenchAdapter {
+    const KIND: &'static str = "bench";
+    type Source = BenchResults;
+    type Snapshot = BenchBaselineMetadata;
+    type Options = f64;
+    type Delta = BenchBaselineComparison;
 
-/// Compare a current run against a loaded baseline. The threshold is used
-/// for the legacy p95 policy when the runner does not declare policies.
-pub fn compare(
-    current: &BenchResults,
-    baseline: &BenchBaseline,
-    threshold_percent: f64,
-) -> BenchBaselineComparison {
-    let baseline_by_id: HashMap<&str, &BenchScenarioSnapshot> = baseline
-        .metadata
-        .scenarios
-        .iter()
-        .map(|snap| (snap.id.as_str(), snap))
-        .collect();
-
-    let current_ids: std::collections::HashSet<&str> =
-        current.scenarios.iter().map(|s| s.id.as_str()).collect();
-
-    let mut scenario_deltas = Vec::new();
-    let mut new_scenario_ids = Vec::new();
-    let mut reasons = Vec::new();
-    let mut has_improvements = false;
-    let mut any_regression = false;
-    let metric_policies = resolve_metric_policies(current, threshold_percent);
-
-    for scenario in &current.scenarios {
-        let Some(prior) = baseline_by_id.get(scenario.id.as_str()) else {
-            new_scenario_ids.push(scenario.id.clone());
-            continue;
-        };
-
-        let mut metric_deltas = Vec::new();
-
-        for policy in &metric_policies {
-            if policy.variance_aware() {
-                let Some(baseline_samples) = prior.distribution(policy.name()) else {
-                    continue;
-                };
-                let Some(current_samples) = scenario.metrics.distribution(policy.name()) else {
-                    continue;
-                };
-                if let Some(delta) = policy.compare_distribution(baseline_samples, current_samples)
-                {
-                    metric_deltas.push(delta);
-                }
-            } else {
-                let Some(baseline_value) = prior.metric_value(policy.name()) else {
-                    continue;
-                };
-                let Some(current_value) = scenario.metrics.get(policy.name()) else {
-                    continue;
-                };
-                metric_deltas.push(policy.compare(baseline_value, current_value));
-            }
+    fn snapshot(results: &BenchResults) -> BenchBaselineMetadata {
+        BenchBaselineMetadata {
+            scenarios: results
+                .scenarios
+                .iter()
+                .map(BenchScenarioSnapshot::from_scenario)
+                .collect(),
+            iterations: results.iterations,
+            metric_policies: results.metric_policies.clone(),
         }
-
-        let regression = metric_deltas.iter().any(|d| d.regression);
-        let improvement = metric_deltas.iter().any(|d| d.improvement);
-
-        if regression {
-            any_regression = true;
-            for delta in metric_deltas.iter().filter(|d| d.regression) {
-                reasons.push(delta.reason(&scenario.id));
-            }
-        }
-        if improvement {
-            has_improvements = true;
-        }
-
-        let baseline_p95 = prior.metric_value("p95_ms");
-        let current_p95 = scenario.metrics.get("p95_ms");
-        let p95_delta_ms = baseline_p95.zip(current_p95).map(|(b, c)| c - b);
-        let p95_delta_pct = baseline_p95.zip(current_p95).and_then(|(b, c)| {
-            if b > 0.0 {
-                Some(((c - b) / b) * 100.0)
-            } else {
-                None
-            }
-        });
-
-        scenario_deltas.push(ScenarioDelta {
-            id: scenario.id.clone(),
-            baseline_p95_ms: baseline_p95,
-            current_p95_ms: current_p95,
-            p95_delta_ms,
-            p95_delta_pct,
-            metric_deltas,
-            regression,
-            improvement,
-        });
     }
 
-    let removed_scenario_ids: Vec<String> = baseline
-        .metadata
-        .scenarios
-        .iter()
-        .filter(|s| !current_ids.contains(s.id.as_str()))
-        .map(|s| s.id.clone())
-        .collect();
+    fn fingerprints(snapshot: &BenchBaselineMetadata) -> Vec<String> {
+        snapshot.scenarios.iter().map(|s| s.id.clone()).collect()
+    }
 
-    BenchBaselineComparison {
-        threshold_percent,
-        scenarios: scenario_deltas,
-        new_scenario_ids,
-        removed_scenario_ids,
-        regression: any_regression,
-        has_improvements,
-        reasons,
+    fn delta(
+        baseline: &BenchBaselineMetadata,
+        current: &BenchBaselineMetadata,
+        threshold_percent: &f64,
+    ) -> BenchBaselineComparison {
+        let threshold_percent = *threshold_percent;
+        let reports_p95 = current
+            .scenarios
+            .iter()
+            .any(|scenario| scenario.metric_value("p95_ms").is_some());
+        let metric_policies =
+            resolve_metric_policies(&current.metric_policies, reports_p95, threshold_percent);
+
+        let paired = pair_by_key(&baseline.scenarios, &current.scenarios, |s| s.id.as_str());
+        let mut scenario_deltas = Vec::new();
+        let mut reasons = Vec::new();
+
+        for (prior, scenario) in paired.matched {
+            let metric_deltas: Vec<MetricDelta> = metric_policies
+                .iter()
+                .filter_map(|policy| {
+                    if policy.variance_aware() {
+                        policy.compare_distribution(
+                            prior.distribution(policy.name())?,
+                            scenario.distribution(policy.name())?,
+                        )
+                    } else {
+                        Some(policy.compare(
+                            prior.metric_value(policy.name())?,
+                            scenario.metric_value(policy.name())?,
+                        ))
+                    }
+                })
+                .collect();
+
+            reasons.extend(
+                metric_deltas
+                    .iter()
+                    .filter(|d| d.regression)
+                    .map(|d| d.reason(&scenario.id)),
+            );
+
+            let baseline_p95 = prior.metric_value("p95_ms");
+            let current_p95 = scenario.metric_value("p95_ms");
+            let p95_delta_pct = baseline_p95
+                .zip(current_p95)
+                .filter(|(b, _)| *b > 0.0)
+                .map(|(b, c)| ((c - b) / b) * 100.0);
+
+            scenario_deltas.push(ScenarioDelta {
+                id: scenario.id.clone(),
+                baseline_p95_ms: baseline_p95,
+                current_p95_ms: current_p95,
+                p95_delta_ms: baseline_p95.zip(current_p95).map(|(b, c)| c - b),
+                p95_delta_pct,
+                regression: metric_deltas.iter().any(|d| d.regression),
+                improvement: metric_deltas.iter().any(|d| d.improvement),
+                metric_deltas,
+            });
+        }
+
+        BenchBaselineComparison {
+            threshold_percent,
+            regression: scenario_deltas.iter().any(|d| d.regression),
+            has_improvements: scenario_deltas.iter().any(|d| d.improvement),
+            scenarios: scenario_deltas,
+            new_scenario_ids: paired.added,
+            removed_scenario_ids: paired.removed,
+            reasons,
+        }
+    }
+
+    fn gate(comparison: &BenchBaselineComparison) -> Verdict {
+        Verdict {
+            regressions: comparison.reasons.clone(),
+            advisories: Vec::new(),
+            improvements: comparison
+                .scenarios
+                .iter()
+                .filter(|scenario| scenario.improvement)
+                .map(|scenario| scenario.id.clone())
+                .collect(),
+        }
     }
 }
 
@@ -306,6 +229,40 @@ mod tests {
         RegressionTest,
     };
     use super::*;
+    use homeboy_engine_primitives::workload_compare::{self as engine, BaselineSlot};
+    use std::path::{Path, PathBuf};
+
+    // Storage and the compare entry point now belong to the shared engine.
+    // These keep every test below pinned to the same observable behaviour
+    // (stored baseline, comparison payload) it covered before.
+    fn save_baseline(
+        root: &Path,
+        component_id: &str,
+        results: &BenchResults,
+        rig_id: Option<&str>,
+    ) -> homeboy_core::Result<PathBuf> {
+        engine::save_baseline::<BenchAdapter>(
+            &BaselineSlot::new(root, rig_id),
+            component_id,
+            results,
+        )
+    }
+
+    fn load_baseline(root: &Path, rig_id: Option<&str>) -> Option<BenchBaseline> {
+        engine::load_baseline::<BenchAdapter>(&BaselineSlot::new(root, rig_id))
+    }
+
+    fn compare(
+        current: &BenchResults,
+        baseline: &BenchBaseline,
+        threshold_percent: f64,
+    ) -> BenchBaselineComparison {
+        BenchAdapter::delta(
+            &baseline.metadata,
+            &BenchAdapter::snapshot(current),
+            &threshold_percent,
+        )
+    }
 
     fn scenario(id: &str, p95_ms: f64) -> BenchScenario {
         let mut values = BTreeMap::new();

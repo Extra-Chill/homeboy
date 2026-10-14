@@ -13,8 +13,8 @@ use super::types::{
 };
 use super::CmdResult;
 use super::{
-    bench, compare, distribution, dossier, evidence, findings, fuzz_compare, handlers, hotspots,
-    latest, proof, reconcile, refs, report, resources, watch,
+    compare, distribution, dossier, evidence, findings, handlers, hotspots, latest, proof,
+    reconcile, refs, report, resources, watch,
 };
 
 impl RunsArgs {
@@ -195,8 +195,6 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         }
         RunsCommand::LatestRun(args) => latest::latest_run(args),
         RunsCommand::Compare(args) => compare::compare_runs(&store, args),
-        RunsCommand::BenchCompare(args) => bench::bench_compare_from_args(args),
-        RunsCommand::FuzzCompare(args) => fuzz_compare::fuzz_compare_from_args(&store, args),
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(&store, args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(&store, args),
         RunsCommand::Watch(args) => watch::watch_run(&store, args),

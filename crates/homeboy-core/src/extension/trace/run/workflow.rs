@@ -8,10 +8,14 @@ use crate::extension::stderr_tail;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
+use homeboy_engine_primitives::workload_compare::{
+    apply_baseline_flags, BaselineGate, BaselineSlot,
+};
 use homeboy_extension_contract::ExtensionCapability;
 use homeboy_lifecycle_contract::RigStateSnapshot;
 
 use super::super::attach::{append_attach_observations, observe_trace_attachments};
+use super::super::baseline::{TraceAdapter, TraceThresholds};
 use super::super::canonicality::{
     evaluate_trace_canonicality, refused_trace_result, TraceCanonicalPolicy,
 };
@@ -335,46 +339,25 @@ pub(super) fn run_trace_workflow_with_context(
     // Boundary: one trace workflow run is one unit of work (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let baseline_root = resolve_trace_baseline_root(roots.config(), &component_path, rig_id)?;
-    let mut baseline_comparison = None;
-    let mut baseline_exit_override = None;
     let mut hints = non_canonical_evidence_hints(&evidence);
     let has_baseline_items = results
         .as_ref()
         .is_some_and(|parsed| !parsed.span_results.is_empty() || !parsed.assertions.is_empty());
 
-    if args.baseline_flags.baseline && status == "pass" && has_baseline_items {
-        if let Some(ref parsed) = results {
-            let _ = super::super::baseline::save_baseline(
-                &baseline_root,
-                &args.component_id,
-                parsed,
-                rig_id,
-            )?;
-        }
-    }
-    if has_baseline_items && !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
-        if let Some(ref parsed) = results {
-            if let Some(existing) = super::super::baseline::load_baseline(&baseline_root, rig_id) {
-                let comparison = super::super::baseline::compare(
-                    parsed,
-                    &existing,
-                    args.regression_threshold_percent,
-                    args.regression_min_delta_ms,
-                );
-                if comparison.regression {
-                    baseline_exit_override = Some(1);
-                } else if comparison.has_improvements && args.baseline_flags.ratchet {
-                    let _ = super::super::baseline::save_baseline(
-                        &baseline_root,
-                        &args.component_id,
-                        parsed,
-                        rig_id,
-                    );
-                }
-                baseline_comparison = Some(comparison);
-            }
-        }
-    }
+    let BaselineGate {
+        comparison: baseline_comparison,
+        exit_override: baseline_exit_override,
+    } = apply_baseline_flags::<TraceAdapter>(
+        &BaselineSlot::new(&baseline_root, rig_id),
+        &args.component_id,
+        &args.baseline_flags,
+        results.as_ref().filter(|_| has_baseline_items),
+        status == "pass",
+        &TraceThresholds {
+            threshold_percent: args.regression_threshold_percent,
+            min_delta_ms: args.regression_min_delta_ms,
+        },
+    )?;
 
     let trace_invocation = match rig_id {
         Some(id) => format!(

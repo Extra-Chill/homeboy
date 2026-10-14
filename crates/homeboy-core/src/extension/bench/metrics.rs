@@ -1,8 +1,10 @@
 //! Generic bench metric comparison policy.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
-use super::parsing::{BenchMetricDirection, BenchMetricPolicy, BenchResults, RegressionTest};
+use super::parsing::{BenchMetricDirection, BenchMetricPolicy, RegressionTest};
 
 /// Per-metric delta vs baseline. Extensions can opt into comparing any
 /// numeric metric by declaring a policy in the bench results JSON.
@@ -294,23 +296,21 @@ fn kolmogorov_smirnov_critical_value(n1: usize, n2: usize) -> f64 {
     1.36 * (((n1 + n2) as f64) / ((n1 * n2) as f64)).sqrt()
 }
 
+/// Resolve the policies a run is compared under. Runner-declared policies
+/// win; without them a run that reports `p95_ms` keeps the original p95 gate.
 pub(crate) fn resolve_metric_policies(
-    current: &BenchResults,
+    metric_policies: &BTreeMap<String, BenchMetricPolicy>,
+    reports_p95: bool,
     default_threshold_percent: f64,
 ) -> Vec<ResolvedMetricPolicy> {
-    if current.metric_policies.is_empty() {
-        let has_p95 = current
-            .scenarios
-            .iter()
-            .any(|scenario| scenario.metrics.get("p95_ms").is_some());
-        if !has_p95 {
+    if metric_policies.is_empty() {
+        if !reports_p95 {
             return Vec::new();
         }
         return vec![ResolvedMetricPolicy::legacy_p95(default_threshold_percent)];
     }
 
-    current
-        .metric_policies
+    metric_policies
         .iter()
         .map(|(name, policy)| ResolvedMetricPolicy::custom(name, policy))
         .collect()
@@ -320,7 +320,7 @@ pub(crate) fn resolve_metric_policies(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::super::parsing::{BenchMetrics, BenchScenario};
+    use super::super::parsing::{BenchMetrics, BenchResults, BenchScenario};
     use super::*;
 
     fn policy(direction: BenchMetricDirection) -> BenchMetricPolicy {
@@ -495,7 +495,12 @@ mod tests {
         let mut metrics = BTreeMap::new();
         metrics.insert("p95_ms".to_string(), 100.0);
 
-        let resolved = resolve_metric_policies(&results(metrics), 5.0);
+        let results = results(metrics);
+        let reports_p95 = results
+            .scenarios
+            .iter()
+            .any(|scenario| scenario.metrics.get("p95_ms").is_some());
+        let resolved = resolve_metric_policies(&results.metric_policies, reports_p95, 5.0);
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name(), "p95_ms");

@@ -1,10 +1,21 @@
-use std::collections::{BTreeMap, BTreeSet};
+//! The fuzz adapter on the shared compare engine (#15840), behind both
+//! `homeboy fuzz compare <baseline> <candidate>` (envelope files) and
+//! `homeboy runs compare --kind fuzz --from-run .. --to-run ..` (envelopes
+//! resolved from persisted run artifacts).
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use serde_json::Value;
+
+use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
+use homeboy::core::Error;
 use homeboy::fuzz::{
     parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
     parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzFindingStatus,
-    FuzzHotspot, FuzzResultEnvelope,
+    FuzzHotspot, FuzzResultEnvelope, FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
+use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter, Verdict};
 
 use super::report::{
     evaluate_fuzz_result_envelope_gates, fuzz_coverage_completeness, gate_status,
@@ -18,12 +29,43 @@ use super::types::{
 
 const FUZZ_COMPARE_SCHEMA: &str = "homeboy/fuzz-compare/v1";
 
+/// The fuzz [`KindAdapter`]: findings keyed by fingerprint, coverage, case
+/// outcomes, required artifacts, gate statuses and hotspots under a
+/// [`FuzzCompareHotspotPolicy`].
+pub(crate) struct FuzzAdapter;
+
+impl KindAdapter for FuzzAdapter {
+    const KIND: &'static str = "fuzz";
+    type Source = FuzzResultEnvelope;
+    type Snapshot = FuzzCompareSnapshot;
+    type Options = FuzzCompareHotspotPolicy;
+    type Delta = FuzzCompareDeltas;
+
+    fn snapshot(envelope: &FuzzResultEnvelope) -> FuzzCompareSnapshot {
+        snapshot(envelope)
+    }
+
+    fn delta(
+        baseline: &FuzzCompareSnapshot,
+        candidate: &FuzzCompareSnapshot,
+        policy: &FuzzCompareHotspotPolicy,
+    ) -> FuzzCompareDeltas {
+        deltas(baseline, candidate, *policy)
+    }
+
+    fn gate(deltas: &FuzzCompareDeltas) -> Verdict {
+        Verdict {
+            regressions: regressions(deltas),
+            advisories: advisories(deltas),
+            improvements: improvements(deltas),
+        }
+    }
+}
+
 pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCompareOutput> {
-    let baseline_envelope = parse_fuzz_result_envelope_file(&args.baseline)?;
-    let candidate_envelope = parse_fuzz_result_envelope_file(&args.candidate)?;
     compare_envelopes(
-        baseline_envelope,
-        candidate_envelope,
+        &parse_fuzz_result_envelope_file(&args.baseline)?,
+        &parse_fuzz_result_envelope_file(&args.candidate)?,
         args.hotspot_policy,
         args.baseline.to_string_lossy().to_string(),
         args.candidate.to_string_lossy().to_string(),
@@ -31,50 +73,66 @@ pub(super) fn run_compare(args: FuzzCompareArgs) -> homeboy::core::Result<FuzzCo
     )
 }
 
-pub(crate) fn compare_envelopes(
-    baseline_envelope: FuzzResultEnvelope,
-    candidate_envelope: FuzzResultEnvelope,
+/// `runs compare --kind fuzz`: compare the result envelopes persisted for two
+/// exact runs.
+pub(crate) fn compare_runs(
+    store: &ObservationStore,
+    from_run: &str,
+    to_run: &str,
+    hotspot_policy: FuzzCompareHotspotPolicy,
+    command: &str,
+) -> homeboy::core::Result<FuzzCompareOutput> {
+    let (baseline, baseline_ref) = resolve_run_fuzz_envelope(store, from_run)?;
+    let (candidate, candidate_ref) = resolve_run_fuzz_envelope(store, to_run)?;
+    compare_envelopes(
+        &baseline,
+        &candidate,
+        hotspot_policy,
+        baseline_ref,
+        candidate_ref,
+        command,
+    )
+}
+
+fn compare_envelopes(
+    baseline: &FuzzResultEnvelope,
+    candidate: &FuzzResultEnvelope,
     hotspot_policy: FuzzCompareHotspotPolicy,
     baseline_ref: String,
     candidate_ref: String,
     command: &str,
 ) -> homeboy::core::Result<FuzzCompareOutput> {
-    let baseline = snapshot(&baseline_envelope);
-    let candidate = snapshot(&candidate_envelope);
-    let deltas = deltas(&baseline, &candidate, hotspot_policy);
-    let hotspot_summary = hotspot_summary(&deltas, hotspot_policy);
-    let regressions = regressions(&deltas);
-    let advisories = advisories(&deltas);
-    let improvements = improvements(&deltas);
-    let status = if regressions.is_empty() {
-        if improvements.is_empty() {
-            "same"
-        } else {
-            "better"
-        }
+    let Compared {
+        baseline,
+        candidate,
+        delta: deltas,
+        verdict,
+    } = workload_compare::compare::<FuzzAdapter>(baseline, candidate, &hotspot_policy)?;
+    let status = verdict.status().to_string();
+    let advisory_status = if verdict.regressed() || !verdict.advisories.is_empty() {
+        "worse".to_string()
     } else {
-        "worse"
-    }
-    .to_string();
+        status.clone()
+    };
 
     Ok(FuzzCompareOutput {
         schema: FUZZ_COMPARE_SCHEMA.to_string(),
         command: command.to_string(),
-        status: status.clone(),
-        advisory_status: advisory_status(&status, &advisories),
-        baseline_file: baseline_ref,
-        candidate_file: candidate_ref,
-        baseline,
-        candidate,
-        deltas,
-        hotspot_summary,
-        regressions,
-        advisories,
-        improvements,
         summary: vec![
             format!("fuzz compare status: {status}"),
             format!("hotspot policy: {}", hotspot_policy.as_str()),
         ],
+        status,
+        advisory_status,
+        baseline_file: baseline_ref,
+        candidate_file: candidate_ref,
+        baseline,
+        candidate,
+        hotspot_summary: hotspot_summary(&deltas, hotspot_policy),
+        deltas,
+        regressions: verdict.regressions,
+        advisories: verdict.advisories,
+        improvements: verdict.improvements,
     })
 }
 
@@ -88,7 +146,11 @@ fn snapshot(envelope: &FuzzResultEnvelope) -> FuzzCompareSnapshot {
     for gate in &gates {
         *gate_status_counts.entry(gate.status.clone()).or_default() += 1;
     }
-    let coverage = envelope.campaign.as_ref().map(fuzz_coverage_completeness);
+    let coverage = envelope
+        .campaign
+        .as_ref()
+        .map(fuzz_coverage_completeness)
+        .unwrap_or_default();
     let missing_required_artifacts = envelope
         .required_artifacts
         .iter()
@@ -122,30 +184,12 @@ fn snapshot(envelope: &FuzzResultEnvelope) -> FuzzCompareSnapshot {
             .campaign
             .as_ref()
             .map(|campaign| campaign.id.clone()),
-        target_coverage_ratio: coverage
-            .as_ref()
-            .map(|coverage| coverage.target_coverage_ratio)
-            .unwrap_or_default(),
-        operation_coverage_ratio: coverage
-            .as_ref()
-            .map(|coverage| coverage.operation_coverage_ratio)
-            .unwrap_or_default(),
-        declared_targets: coverage
-            .as_ref()
-            .map(|coverage| coverage.declared_targets)
-            .unwrap_or_default(),
-        proven_targets: coverage
-            .as_ref()
-            .map(|coverage| coverage.proven_targets)
-            .unwrap_or_default(),
-        declared_operations: coverage
-            .as_ref()
-            .map(|coverage| coverage.declared_operations)
-            .unwrap_or_default(),
-        proven_operations: coverage
-            .as_ref()
-            .map(|coverage| coverage.proven_operations)
-            .unwrap_or_default(),
+        target_coverage_ratio: coverage.target_coverage_ratio,
+        operation_coverage_ratio: coverage.operation_coverage_ratio,
+        declared_targets: coverage.declared_targets,
+        proven_targets: coverage.proven_targets,
+        declared_operations: coverage.declared_operations,
+        proven_operations: coverage.proven_operations,
         case_count,
         case_status_counts,
         failure_rate,
@@ -272,26 +316,14 @@ fn deltas(
     candidate: &FuzzCompareSnapshot,
     hotspot_policy: FuzzCompareHotspotPolicy,
 ) -> FuzzCompareDeltas {
-    let baseline_missing = baseline
-        .missing_required_artifacts
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let candidate_missing = candidate
-        .missing_required_artifacts
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let baseline_critical = baseline
-        .critical_finding_keys
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let candidate_critical = candidate
-        .critical_finding_keys
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let (missing_required_artifacts, resolved_required_artifacts) = set_changes(
+        &baseline.missing_required_artifacts,
+        &candidate.missing_required_artifacts,
+    );
+    let (new_critical_findings, resolved_critical_findings) = set_changes(
+        &baseline.critical_finding_keys,
+        &candidate.critical_finding_keys,
+    );
     let (new_findings, resolved_findings) = finding_deltas(baseline, candidate);
     let hotspot_deltas = hotspot_deltas(&baseline.hotspots, &candidate.hotspots, hotspot_policy);
     let new_hotspots = hotspot_deltas
@@ -324,22 +356,10 @@ fn deltas(
             &baseline.finding_severity_counts,
             &candidate.finding_severity_counts,
         ),
-        missing_required_artifacts: candidate_missing
-            .difference(&baseline_missing)
-            .cloned()
-            .collect(),
-        resolved_required_artifacts: baseline_missing
-            .difference(&candidate_missing)
-            .cloned()
-            .collect(),
-        new_critical_findings: candidate_critical
-            .difference(&baseline_critical)
-            .cloned()
-            .collect(),
-        resolved_critical_findings: baseline_critical
-            .difference(&candidate_critical)
-            .cloned()
-            .collect(),
+        missing_required_artifacts,
+        resolved_required_artifacts,
+        new_critical_findings,
+        resolved_critical_findings,
         new_findings,
         resolved_findings,
         hotspot_deltas,
@@ -481,12 +501,7 @@ fn hotspot_deltas(
         .map(|hotspot| (hotspot.id.clone(), hotspot))
         .collect::<BTreeMap<_, _>>();
 
-    baseline_by_id
-        .keys()
-        .chain(candidate_by_id.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+    union_keys(&baseline_by_id, &candidate_by_id)
         .map(|id| {
             let before = baseline_by_id.get(&id).copied();
             let after = candidate_by_id.get(&id).copied();
@@ -642,12 +657,7 @@ fn count_deltas(
     baseline: &BTreeMap<String, usize>,
     candidate: &BTreeMap<String, usize>,
 ) -> BTreeMap<String, i64> {
-    baseline
-        .keys()
-        .chain(candidate.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+    union_keys(baseline, candidate)
         .map(|key| {
             let delta = candidate.get(&key).copied().unwrap_or_default() as i64
                 - baseline.get(&key).copied().unwrap_or_default() as i64;
@@ -656,16 +666,31 @@ fn count_deltas(
         .collect()
 }
 
+/// `(added, removed)`: entries only the candidate has, then entries only the
+/// baseline has, each sorted.
+fn set_changes(baseline: &[String], candidate: &[String]) -> (Vec<String>, Vec<String>) {
+    let baseline = baseline.iter().collect::<BTreeSet<_>>();
+    let candidate = candidate.iter().collect::<BTreeSet<_>>();
+    let only = |a: &BTreeSet<&String>, b: &BTreeSet<&String>| {
+        a.difference(b).map(|key| (*key).clone()).collect()
+    };
+    (only(&candidate, &baseline), only(&baseline, &candidate))
+}
+
+/// Every key either side has, sorted.
+fn union_keys<V, W>(
+    baseline: &BTreeMap<String, V>,
+    candidate: &BTreeMap<String, W>,
+) -> std::collections::btree_set::IntoIter<String> {
+    let keys = baseline.keys().chain(candidate.keys()).cloned();
+    keys.collect::<BTreeSet<_>>().into_iter()
+}
+
 fn gate_status_changes(
     baseline: &BTreeMap<String, String>,
     candidate: &BTreeMap<String, String>,
 ) -> Vec<FuzzGateStatusChange> {
-    baseline
-        .keys()
-        .chain(candidate.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+    union_keys(baseline, candidate)
         .filter_map(|gate_id| {
             let before = baseline.get(&gate_id).cloned();
             let after = candidate.get(&gate_id).cloned();
@@ -766,20 +791,131 @@ fn improvements(deltas: &FuzzCompareDeltas) -> Vec<String> {
     improvements
 }
 
-fn advisory_status(status: &str, advisories: &[String]) -> String {
-    if status == "worse" || !advisories.is_empty() {
-        "worse"
-    } else {
-        status
-    }
-    .to_string()
-}
-
 fn is_failure_status(status: &str) -> bool {
     matches!(
         status,
         "failed" | "failure" | "error" | "crashed" | "crash" | "timeout" | "panic"
     )
+}
+
+/// The result envelope persisted for one run, with the run's related
+/// hotspot/observation artifacts folded into its metadata so hotspot deltas
+/// see them. Returns the envelope and its `homeboy://run/..` source ref.
+fn resolve_run_fuzz_envelope(
+    store: &ObservationStore,
+    run_id: &str,
+) -> homeboy::core::Result<(FuzzResultEnvelope, String)> {
+    runs_service::require_run(store, run_id)?;
+    let artifacts = runs_service::list_artifacts_for_run(store, run_id)?;
+    let mut candidates = artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact_type == "file")
+        .filter_map(|artifact| Some((envelope_candidate_rank(artifact)?, artifact)))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(rank, _)| *rank);
+
+    for (_, artifact) in candidates {
+        let Ok(mut envelope) = read_fuzz_envelope_artifact(artifact) else {
+            continue;
+        };
+        attach_related_fuzz_artifacts(&mut envelope, &artifacts);
+        return Ok((
+            envelope,
+            format!("homeboy://run/{run_id}/artifact/{}", artifact.id),
+        ));
+    }
+
+    Err(Error::validation_invalid_argument(
+        "run_id",
+        format!("fuzz result envelope artifact not found for run: {run_id}"),
+        Some(run_id.to_string()),
+        Some(vec![
+            format!("Run `homeboy runs artifacts {run_id}` to inspect recorded artifacts."),
+            "Persist a result envelope with `homeboy fuzz report <campaign> --run-id <run-id>`, or ensure the runner writes a homeboy/fuzz-result-envelope/v1 JSON artifact.".to_string(),
+        ]),
+    ))
+}
+
+/// Preference among a run's artifacts that may hold its result envelope:
+/// the typed envelope artifact, then any artifact declaring the envelope
+/// schema, then the raw fuzz results file.
+fn envelope_candidate_rank(artifact: &ArtifactRecord) -> Option<u8> {
+    if artifact.kind == "fuzz_result_envelope" {
+        Some(0)
+    } else if artifact.metadata_json.get("schema").and_then(Value::as_str)
+        == Some(FUZZ_RESULT_ENVELOPE_SCHEMA)
+    {
+        Some(1)
+    } else {
+        (artifact.kind == "fuzz_results").then_some(2)
+    }
+}
+
+fn read_fuzz_envelope_artifact(
+    artifact: &ArtifactRecord,
+) -> homeboy::core::Result<FuzzResultEnvelope> {
+    let contents = std::fs::read_to_string(Path::new(&artifact.path))
+        .map_err(|error| Error::internal_io(error.to_string(), Some(artifact.path.clone())))?;
+    let envelope: FuzzResultEnvelope = serde_json::from_str(&contents).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some(format!(
+                "parse fuzz result envelope artifact {}",
+                artifact.id
+            )),
+            Some(contents),
+        )
+    })?;
+    if envelope.schema != FUZZ_RESULT_ENVELOPE_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "schema",
+            format!(
+                "fuzz result envelope schema must be {FUZZ_RESULT_ENVELOPE_SCHEMA}, got {}",
+                envelope.schema
+            ),
+            Some(envelope.schema),
+            None,
+        ));
+    }
+    Ok(envelope)
+}
+
+fn attach_related_fuzz_artifacts(envelope: &mut FuzzResultEnvelope, artifacts: &[ArtifactRecord]) {
+    let values = artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact_type == "file")
+        .filter(|artifact| artifact.kind != "fuzz_result_envelope")
+        .filter_map(read_related_fuzz_artifact_json)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return;
+    }
+    let mut metadata = match std::mem::take(&mut envelope.metadata) {
+        Value::Object(object) => object,
+        value if value.is_null() => serde_json::Map::new(),
+        value => {
+            let mut object = serde_json::Map::new();
+            object.insert("original".to_string(), value);
+            object
+        }
+    };
+    metadata.insert("resolved_run_artifacts".to_string(), Value::Array(values));
+    envelope.metadata = Value::Object(metadata);
+}
+
+fn read_related_fuzz_artifact_json(artifact: &ArtifactRecord) -> Option<Value> {
+    let file = std::fs::File::open(Path::new(&artifact.path)).ok()?;
+    let json = serde_json::from_reader::<_, Value>(file).ok()?;
+    let schema = json
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let related = schema.contains("fuzz-hotspot")
+        || schema.contains("fuzz-observation")
+        || json.get("hotspots").is_some()
+        || json.get("observation_set").is_some()
+        || json.get("observations").is_some();
+    related.then_some(json)
 }
 
 #[cfg(test)]

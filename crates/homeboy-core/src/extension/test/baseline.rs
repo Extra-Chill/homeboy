@@ -1,89 +1,97 @@
-//! Test baseline — ratchet for test pass/fail counts.
+//! Test baseline adapter: ratchet on pass/fail counts (#15840).
 //!
-//! Unlike item-based baselines, the test baseline tracks aggregate pass/fail/skip
-//! counts. The ratchet check is:
-//! - `passed >= baseline.passed`
-//! - `failed <= baseline.failed`
+//! Unlike item-based kinds, the test snapshot is the aggregate pass/fail/skip
+//! counts, stored under `homeboy.json` → `baselines.test` by the shared
+//! baseline / compare / gate engine. The gate regresses when
+//! `passed < baseline.passed` or `failed > baseline.failed`.
 
-use std::path::Path;
-
-use homeboy_core::error::Result;
-use homeboy_engine_primitives::baseline::{self as generic, BaselineConfig};
+use homeboy_engine_primitives::workload_compare::{KindAdapter, Verdict};
 pub use homeboy_extension_contract::test_result::TestCounts;
 pub use homeboy_extension_contract::test_workflow::TestBaselineComparison;
 
-const BASELINE_KEY: &str = "test";
+/// The test-counts [`KindAdapter`].
+pub struct TestAdapter;
 
-pub type TestBaseline = generic::Baseline<TestCounts>;
+impl KindAdapter for TestAdapter {
+    const KIND: &'static str = "test";
+    type Source = TestCounts;
+    type Snapshot = TestCounts;
+    type Options = ();
+    type Delta = TestBaselineComparison;
 
-pub fn save_baseline(
-    source_path: &Path,
-    component_id: &str,
-    counts: &TestCounts,
-) -> Result<std::path::PathBuf> {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
-    let empty: Vec<EmptyItem> = Vec::new();
-    generic::save(&config, component_id, &empty, counts.clone())
-}
-
-pub fn load_baseline(source_path: &Path) -> Option<TestBaseline> {
-    let config = BaselineConfig::new(source_path, BASELINE_KEY);
-    generic::load::<TestCounts>(&config).ok().flatten()
-}
-
-pub fn load_baseline_from_ref(source_path: &str, git_ref: &str) -> Option<TestBaseline> {
-    generic::load_from_git_ref::<TestCounts>(source_path, git_ref, BASELINE_KEY)
-}
-
-pub fn compare(current: &TestCounts, baseline: &TestBaseline) -> TestBaselineComparison {
-    let baseline_counts = &baseline.metadata;
-
-    let passed_delta = current.passed as i64 - baseline_counts.passed as i64;
-    let failed_delta = current.failed as i64 - baseline_counts.failed as i64;
-
-    let mut reasons = Vec::new();
-
-    if current.passed < baseline_counts.passed {
-        reasons.push(format!(
-            "Passing tests decreased: {} → {} ({})",
-            baseline_counts.passed, current.passed, passed_delta
-        ));
+    fn snapshot(counts: &TestCounts) -> TestCounts {
+        counts.clone()
     }
 
-    if current.failed > baseline_counts.failed {
-        reasons.push(format!(
-            "Failing tests increased: {} → {} (+{})",
-            baseline_counts.failed, current.failed, failed_delta
-        ));
+    fn delta(baseline: &TestCounts, current: &TestCounts, _: &()) -> TestBaselineComparison {
+        let passed_delta = current.passed as i64 - baseline.passed as i64;
+        let failed_delta = current.failed as i64 - baseline.failed as i64;
+
+        let mut reasons = Vec::new();
+        if current.passed < baseline.passed {
+            reasons.push(format!(
+                "Passing tests decreased: {} → {} ({})",
+                baseline.passed, current.passed, passed_delta
+            ));
+        }
+        if current.failed > baseline.failed {
+            reasons.push(format!(
+                "Failing tests increased: {} → {} (+{})",
+                baseline.failed, current.failed, failed_delta
+            ));
+        }
+
+        TestBaselineComparison {
+            baseline: baseline.clone(),
+            current: current.clone(),
+            passed_delta,
+            failed_delta,
+            regression: !reasons.is_empty(),
+            reasons,
+        }
     }
 
-    TestBaselineComparison {
-        baseline: baseline_counts.clone(),
-        current: current.clone(),
-        passed_delta,
-        failed_delta,
-        regression: !reasons.is_empty(),
-        reasons,
-    }
-}
-
-struct EmptyItem;
-
-impl generic::Fingerprintable for EmptyItem {
-    fn fingerprint(&self) -> String {
-        String::new()
-    }
-    fn description(&self) -> String {
-        String::new()
-    }
-    fn context_label(&self) -> String {
-        String::new()
+    fn gate(comparison: &TestBaselineComparison) -> Verdict {
+        let mut improvements = Vec::new();
+        if comparison.passed_delta > 0 {
+            improvements.push("passing tests increased".to_string());
+        }
+        if comparison.failed_delta < 0 {
+            improvements.push("failing tests decreased".to_string());
+        }
+        Verdict {
+            regressions: comparison.reasons.clone(),
+            advisories: Vec::new(),
+            improvements,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_engine_primitives::workload_compare::{self as engine, BaselineSlot};
+    use std::path::{Path, PathBuf};
+
+    type TestBaseline = homeboy_engine_primitives::baseline::Baseline<TestCounts>;
+
+    // Storage and the compare entry point now belong to the shared engine.
+    // These keep every test below pinned to the same observable behaviour.
+    fn save_baseline(
+        root: &Path,
+        component_id: &str,
+        counts: &TestCounts,
+    ) -> homeboy_core::Result<PathBuf> {
+        engine::save_baseline::<TestAdapter>(&BaselineSlot::new(root, None), component_id, counts)
+    }
+
+    fn load_baseline(root: &Path) -> Option<TestBaseline> {
+        engine::load_baseline::<TestAdapter>(&BaselineSlot::new(root, None))
+    }
+
+    fn compare(current: &TestCounts, baseline: &TestBaseline) -> TestBaselineComparison {
+        TestAdapter::delta(&baseline.metadata, current, &())
+    }
 
     fn counts(total: u64, passed: u64, failed: u64, skipped: u64) -> TestCounts {
         TestCounts::new(total, passed, failed, skipped)

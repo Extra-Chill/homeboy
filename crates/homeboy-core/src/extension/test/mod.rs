@@ -25,10 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure};
-pub use baseline::{
-    compare as compare_baseline, load_baseline, load_baseline_from_ref, save_baseline,
-    TestBaseline, TestBaselineComparison, TestCounts,
-};
+pub use baseline::{TestBaselineComparison, TestCounts};
 pub use differential::{
     classify as classify_differential, classify_against_cache,
     measurement_from_terminal_test_evidence, measurement_from_test_output,

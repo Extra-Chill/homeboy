@@ -581,7 +581,7 @@ fn report_followup_lines(run: &Value, run_id: &str, kind: &str) -> Vec<String> {
         format!("  history: homeboy runs list {filter}"),
         format!("  distribution: homeboy runs distribution {filter} --field <metadata.path>"),
         format!(
-            "  compare: homeboy runs bench-compare --from-run <other-run-id> --to-run {run_id}"
+            "  compare: homeboy runs compare --kind bench --from-run <other-run-id> --to-run {run_id}"
         ),
     ]
 }
@@ -964,7 +964,7 @@ mod tests {
             "  distribution: homeboy runs distribution --kind bench --component homeboy --rig rtc --field <metadata.path>\n"
         ));
         assert!(summary.contains(
-            "  compare: homeboy runs bench-compare --from-run <other-run-id> --to-run bench-run-42\n"
+            "  compare: homeboy runs compare --kind bench --from-run <other-run-id> --to-run bench-run-42\n"
         ));
         assert!(summary.contains("full run: homeboy runs show bench-run-42 --json\n"));
         // URL artifacts are not fetchable via `runs artifact get`.

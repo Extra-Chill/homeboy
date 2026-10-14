@@ -123,7 +123,7 @@ evidence: `homeboy/fuzz-result-envelope/v1` becomes `fuzz_result_envelope`,
 summaries using `homeboy/performance-hotspots-summary/v1` are recorded as
 `performance_hotspots_summary`. Result envelopes with an embedded observation set
 also derive persisted observation and hotspot artifacts for `runs hotspots` and
-`runs fuzz-compare`.
+`runs compare --kind fuzz`.
 
 Runner-specific schemas such as mutation-isolation or delete-boundary reports are
 not Homeboy core schemas. Store them as generic artifacts, or wrap their neutral
@@ -720,7 +720,7 @@ hotspots. Individual `deltas.hotspot_deltas[]` entries include
 Persisted run artifacts can be compared without local artifact paths:
 
 ```bash
-homeboy runs fuzz-compare --from-run fuzz-baseline --to-run fuzz-candidate \
+homeboy runs compare --kind fuzz --from-run fuzz-baseline --to-run fuzz-candidate \
   --hotspot-policy advisory
 homeboy runs hotspots --baseline-run fuzz-baseline --candidate-run fuzz-candidate
 ```

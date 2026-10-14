@@ -291,7 +291,7 @@ Omit `--rig <rig>` from the list command for unpinned bench runs.
 ```bash
 homeboy runs list --kind bench --component <component> [--scenario <id>] [--rig <id>] [--limit 20]
 homeboy runs distribution --kind bench --component <component> --field <metadata.path> [--scenario <id>] [--rig <id>] [--status <status>] [--limit 20]
-homeboy runs bench-compare --from-run <baseline-run-id> --to-run <candidate-run-id> [--metric <name>]
+homeboy runs compare --kind bench --from-run <baseline-run-id> --to-run <candidate-run-id> [--metric <name>]
 ```
 
 Bench runners may attach generic tracker provenance to the top-level results

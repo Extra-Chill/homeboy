@@ -286,7 +286,7 @@ fn settings_matrix_parent_metadata(
                 .collect::<Vec<_>>(),
             "compare_children": if child_run_ids.len() >= 2 {
                 Some(format!(
-                    "homeboy runs bench-compare --from-run {} --to-run {}",
+                    "homeboy runs compare --kind bench --from-run {} --to-run {}",
                     child_run_ids[0], child_run_ids[1]
                 ))
             } else {
@@ -630,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             metadata["inspect"]["compare_children"],
-            "homeboy runs bench-compare --from-run run-a --to-run run-b"
+            "homeboy runs compare --kind bench --from-run run-a --to-run run-b"
         );
     }
 

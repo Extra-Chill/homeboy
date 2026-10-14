@@ -1,7 +1,14 @@
+//! `runs compare --kind bench --from-run .. --to-run ..`: the bench run
+//! adapter on the shared compare engine (#15840). Two exact bench runs are
+//! compared metric by metric (every shared numeric scenario metric, metric
+//! groups flattened as `group.metric`), provided they ran the same benchmark
+//! context. A run-to-run compare reports; it never gates.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::observation::{ObservationStore, RunRecord};
 use homeboy::core::Error;
+use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter, Verdict};
 use serde_json::Value;
 
 use crate::commands::escape_markdown_table_cell;
@@ -11,156 +18,174 @@ use super::{require_run, run_summary, CmdResult, RunSummary, RunsOutput};
 mod types;
 pub use types::*;
 
-pub(crate) fn bench_compare_from_args(args: RunsBenchCompareArgs) -> CmdResult<RunsOutput> {
-    bench_compare(&args.from_run, &args.to_run, &args.metrics)
-}
-
 pub(crate) fn bench_compare(
+    store: &ObservationStore,
     from_run_id: &str,
     to_run_id: &str,
     metrics: &[String],
 ) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    let from_run = require_run(&store, from_run_id)?;
-    let to_run = require_run(&store, to_run_id)?;
+    let from_run = require_run(store, from_run_id)?;
+    let to_run = require_run(store, to_run_id)?;
     require_kind(&from_run, "bench")?;
     require_kind(&to_run, "bench")?;
-    require_comparable_bench_runs(&from_run, &to_run)?;
 
-    let baseline = BenchComparisonSide {
+    let Compared {
+        baseline,
+        candidate,
+        delta,
+        ..
+    } = workload_compare::compare::<BenchRunAdapter>(&from_run, &to_run, metrics)?;
+    let baseline_side = BenchComparisonSide {
         label: "baseline",
-        component_state: component_state(&from_run),
-        run: run_summary(from_run.clone()),
+        run: baseline.run,
+        component_state: baseline.component_state,
     };
-    let candidate = BenchComparisonSide {
+    let candidate_side = BenchComparisonSide {
         label: "candidate",
-        component_state: component_state(&to_run),
-        run: run_summary(to_run.clone()),
+        run: candidate.run,
+        component_state: candidate.component_state,
     };
-    let shared = shared_context(&from_run.metadata_json);
-    let from_metrics = bench_numeric_metrics(&from_run.metadata_json);
-    let to_metrics = bench_numeric_metrics(&to_run.metadata_json);
-    let mut keys = BTreeSet::new();
-    keys.extend(from_metrics.keys().cloned());
-    keys.extend(to_metrics.keys().cloned());
-    if !metrics.is_empty() {
-        keys.retain(|(_, metric)| metrics.iter().any(|requested| requested == metric));
-    }
-
-    let mut comparisons = Vec::new();
-    let mut missing = Vec::new();
-    for key in keys {
-        match (from_metrics.get(&key), to_metrics.get(&key)) {
-            (Some(from), Some(to)) => comparisons.push(BenchMetricComparison {
-                scenario_id: key.0,
-                metric: key.1,
-                from_value: *from,
-                to_value: *to,
-                delta: to - from,
-                percent_change: if *from == 0.0 {
-                    None
-                } else {
-                    Some(((to - from) / from) * 100.0)
-                },
-            }),
-            (Some(_), None) => missing.push(BenchMissingMetric {
-                scenario_id: key.0,
-                metric: key.1,
-                missing_from: "to_run".to_string(),
-            }),
-            (None, Some(_)) => missing.push(BenchMissingMetric {
-                scenario_id: key.0,
-                metric: key.1,
-                missing_from: "from_run".to_string(),
-            }),
-            (None, None) => {}
-        }
-    }
-
     let reports = BenchCompareReports {
         markdown: render_bench_compare_markdown(
-            &baseline,
-            &candidate,
-            &shared,
-            &comparisons,
-            &missing,
+            &baseline_side,
+            &candidate_side,
+            &baseline.shared,
+            &delta.comparisons,
+            &delta.missing,
         ),
     };
 
     Ok((
         RunsOutput::BenchCompare(BenchCompareOutput {
-            command: "runs.bench-compare",
-            baseline,
-            candidate,
-            shared,
-            comparisons,
-            missing,
+            command: "runs.compare",
+            baseline: baseline_side,
+            candidate: candidate_side,
+            shared: baseline.shared,
+            comparisons: delta.comparisons,
+            missing: delta.missing,
             reports,
         }),
         0,
     ))
 }
 
-fn require_comparable_bench_runs(
-    from_run: &RunRecord,
-    to_run: &RunRecord,
-) -> homeboy::core::Result<()> {
-    let from = comparison_contract(&from_run.metadata_json);
-    let to = comparison_contract(&to_run.metadata_json);
-    let mut mismatches = Vec::new();
-    if from.settings != to.settings {
-        mismatches.push("settings".to_string());
-    }
-    if from.selected_scenarios != to.selected_scenarios {
-        mismatches.push("selected_scenarios".to_string());
-    }
-    if from.workloads != to.workloads {
-        mismatches.push("workloads".to_string());
-    }
-    if from.iterations != to.iterations {
-        mismatches.push("iterations".to_string());
-    }
-    if from.runs != to.runs {
-        mismatches.push("runs".to_string());
-    }
-    if from.concurrency != to.concurrency {
-        mismatches.push("concurrency".to_string());
-    }
-
-    if mismatches.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "run_id",
-        format!(
-            "bench runs are not comparable; mismatched shared benchmark context: {}",
-            mismatches.join(", ")
-        ),
-        Some(format!("{}..{}", from_run.id, to_run.id)),
-        None,
-    ))
+/// One persisted bench run as a run-to-run compare sees it.
+pub(crate) struct BenchRunSnapshot {
+    run: RunSummary,
+    component_state: BenchComponentState,
+    shared: BenchComparisonSharedContext,
+    metrics: BTreeMap<(String, String), f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct BenchComparisonContract {
-    settings: BTreeMap<String, Value>,
-    selected_scenarios: Vec<String>,
-    workloads: Vec<BenchWorkloadFingerprint>,
-    iterations: Option<u64>,
-    runs: Option<u64>,
-    concurrency: Option<u64>,
+pub(crate) struct BenchRunDelta {
+    comparisons: Vec<BenchMetricComparison>,
+    missing: Vec<BenchMissingMetric>,
 }
 
-fn comparison_contract(metadata: &Value) -> BenchComparisonContract {
-    let shared = shared_context(metadata);
-    BenchComparisonContract {
-        settings: shared.settings,
-        selected_scenarios: shared.selected_scenarios,
-        workloads: shared.workloads,
-        iterations: shared.iterations,
-        runs: shared.runs,
-        concurrency: shared.concurrency,
+/// The bench run-to-run [`KindAdapter`]. Options are the requested metric
+/// names; empty compares every metric either run recorded.
+pub(crate) struct BenchRunAdapter;
+
+impl KindAdapter for BenchRunAdapter {
+    const KIND: &'static str = "bench";
+    type Source = RunRecord;
+    type Snapshot = BenchRunSnapshot;
+    type Options = [String];
+    type Delta = BenchRunDelta;
+
+    fn snapshot(run: &RunRecord) -> BenchRunSnapshot {
+        BenchRunSnapshot {
+            component_state: component_state(run),
+            shared: shared_context(&run.metadata_json),
+            metrics: bench_numeric_metrics(&run.metadata_json),
+            run: run_summary(run.clone()),
+        }
+    }
+
+    /// Runs are comparable only under the same settings, scenarios,
+    /// workloads, iterations, runs and concurrency. Provenance and the
+    /// shared-state path may differ.
+    fn comparable(
+        baseline: &BenchRunSnapshot,
+        candidate: &BenchRunSnapshot,
+    ) -> homeboy::core::Result<()> {
+        let (from, to) = (&baseline.shared, &candidate.shared);
+        let mismatches = [
+            ("settings", from.settings != to.settings),
+            (
+                "selected_scenarios",
+                from.selected_scenarios != to.selected_scenarios,
+            ),
+            ("workloads", from.workloads != to.workloads),
+            ("iterations", from.iterations != to.iterations),
+            ("runs", from.runs != to.runs),
+            ("concurrency", from.concurrency != to.concurrency),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect::<Vec<_>>();
+
+        if mismatches.is_empty() {
+            return Ok(());
+        }
+        Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "bench runs are not comparable; mismatched shared benchmark context: {}",
+                mismatches.join(", ")
+            ),
+            Some(format!("{}..{}", baseline.run.id, candidate.run.id)),
+            None,
+        ))
+    }
+
+    fn delta(
+        baseline: &BenchRunSnapshot,
+        candidate: &BenchRunSnapshot,
+        metrics: &[String],
+    ) -> BenchRunDelta {
+        let (from_metrics, to_metrics) = (&baseline.metrics, &candidate.metrics);
+        let mut keys = BTreeSet::new();
+        keys.extend(from_metrics.keys().cloned());
+        keys.extend(to_metrics.keys().cloned());
+        if !metrics.is_empty() {
+            keys.retain(|(_, metric)| metrics.iter().any(|requested| requested == metric));
+        }
+
+        let mut comparisons = Vec::new();
+        let mut missing = Vec::new();
+        for key in keys {
+            let (from, to) = (from_metrics.get(&key), to_metrics.get(&key));
+            let (scenario_id, metric) = key;
+            let missing_from = match (from, to) {
+                (Some(from), Some(to)) => {
+                    comparisons.push(BenchMetricComparison {
+                        scenario_id,
+                        metric,
+                        from_value: *from,
+                        to_value: *to,
+                        delta: to - from,
+                        percent_change: (*from != 0.0).then(|| ((to - from) / from) * 100.0),
+                    });
+                    continue;
+                }
+                (Some(_), None) => "to_run",
+                (None, _) => "from_run",
+            };
+            missing.push(BenchMissingMetric {
+                scenario_id,
+                metric,
+                missing_from: missing_from.to_string(),
+            });
+        }
+        BenchRunDelta {
+            comparisons,
+            missing,
+        }
+    }
+
+    fn gate(_: &BenchRunDelta) -> Verdict {
+        Verdict::default()
     }
 }
 
@@ -628,7 +653,7 @@ mod tests {
                 ))
                 .expect("to");
 
-            let (output, _) = bench_compare(&from.id, &to.id, &[]).expect("compare");
+            let (output, _) = bench_compare(&store, &from.id, &to.id, &[]).expect("compare");
             let RunsOutput::BenchCompare(output) = output else {
                 panic!("expected compare output");
             };
@@ -673,8 +698,8 @@ mod tests {
                 "[WordPress.org support thread](https://wordpress.org/support/topic/checkout-is-very-slow/)"
             ));
 
-            let (filtered, _) =
-                bench_compare(&from.id, &to.id, &["p95_ms".to_string()]).expect("filtered compare");
+            let (filtered, _) = bench_compare(&store, &from.id, &to.id, &["p95_ms".to_string()])
+                .expect("filtered compare");
             let RunsOutput::BenchCompare(filtered) = filtered else {
                 panic!("expected filtered compare output");
             };
@@ -732,7 +757,7 @@ mod tests {
                 ))
                 .expect("to");
 
-            let err = bench_compare(&from.id, &to.id, &[])
+            let err = bench_compare(&store, &from.id, &to.id, &[])
                 .err()
                 .expect("compare should reject mismatched context");
             assert_eq!(err.code.as_str(), "validation.invalid_argument");

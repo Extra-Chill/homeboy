@@ -21,7 +21,7 @@ use homeboy::fuzz::FuzzResultEnvelopeArtifactInspection;
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::RunnerArtifactRef;
 
-use super::bench::{BenchCompareOutput, RunsBenchCompareArgs};
+use super::bench::BenchCompareOutput;
 use super::bundle::{RunsExportArgs, RunsExportOutput, RunsImportArgs, RunsImportOutput};
 use super::common::RunSummary;
 use super::compare::{RunsCompareArgs, RunsCompareOutput};
@@ -30,7 +30,6 @@ use super::dossier::RunsDossierOutput;
 use super::evidence::RunsEvidenceOutput;
 use super::findings;
 use super::findings::RunsFindingsOutput;
-use super::fuzz_compare::RunsFuzzCompareArgs;
 use super::gh_actions::GhActionsImportOutput;
 use super::hotspots::{RunsHotspotsArgs, RunsHotspotsOutput};
 use super::latest::{RunsLatestRunArgs, RunsLatestRunOutput};
@@ -74,12 +73,9 @@ pub(super) enum RunsCommand {
     Distribution(RunsDistributionArgs),
     /// Show the latest persisted observation run matching filters
     LatestRun(RunsLatestRunArgs),
-    /// Compare selected metrics across persisted run history
+    /// Compare selected metrics across persisted run history, or two exact
+    /// runs of one kind with `--from-run` / `--to-run`
     Compare(RunsCompareArgs),
-    /// Compare two persisted benchmark runs by exact run id
-    BenchCompare(RunsBenchCompareArgs),
-    /// Compare two persisted fuzz runs by exact run id
-    FuzzCompare(RunsFuzzCompareArgs),
     /// Aggregate hotspot rankings across persisted fuzz run artifacts
     Hotspots(RunsHotspotsArgs),
     /// Reconcile running observation records. `--dry-run` previews the bounded

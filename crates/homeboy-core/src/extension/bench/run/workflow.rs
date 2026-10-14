@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::extension::bench::baseline;
+use crate::extension::bench::baseline::BenchAdapter;
 use crate::extension::bench::diagnostic::{self, BenchDiagnostic};
 use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::extension::bench::parsing::{BenchRunMetadata, BenchRunnerMetadata};
@@ -13,6 +13,9 @@ use crate::extension::resolve::resolve_execution_context;
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
+use homeboy_engine_primitives::workload_compare::{
+    apply_baseline_flags, BaselineGate, BaselineSlot,
+};
 use homeboy_extension_contract::ExtensionCapability;
 
 use super::failure::classify_bench_failure;
@@ -363,30 +366,17 @@ pub fn run_main_bench_workflow(
 
     let rig_id = args.rig_id.as_deref();
 
-    if args.baseline_flags.baseline && gates_passed {
-        if let Some(ref r) = parsed {
-            let _ = baseline::save_baseline(source_path, &args.component_id, r, rig_id)?;
-        }
-    }
-
-    let mut baseline_comparison = None;
-    let mut baseline_exit_override = None;
-
-    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline {
-        if let Some(ref r) = parsed {
-            if let Some(existing) = baseline::load_baseline(source_path, rig_id) {
-                let comparison = baseline::compare(r, &existing, args.regression_threshold_percent);
-
-                if comparison.regression {
-                    baseline_exit_override = Some(1);
-                } else if comparison.has_improvements && args.baseline_flags.ratchet {
-                    let _ = baseline::save_baseline(source_path, &args.component_id, r, rig_id);
-                }
-
-                baseline_comparison = Some(comparison);
-            }
-        }
-    }
+    let BaselineGate {
+        comparison: baseline_comparison,
+        exit_override: baseline_exit_override,
+    } = apply_baseline_flags::<BenchAdapter>(
+        &BaselineSlot::new(source_path, rig_id),
+        &args.component_id,
+        &args.baseline_flags,
+        parsed.as_ref(),
+        gates_passed,
+        &args.regression_threshold_percent,
+    )?;
 
     let bench_invocation = match rig_id {
         Some(id) => format!("homeboy bench {} --rig {}", args.component_id, id),

@@ -189,8 +189,8 @@ pub fn save_baseline_for_scope(
     let metadata = LintBaselineMetadata {
         findings_count: findings.len(),
     };
-    let items: Vec<LintFingerprint> = findings.iter().map(LintFingerprint).collect();
-    generic::save(&config, component_id, &items, metadata)
+    let fingerprints = findings.iter().map(|f| LintFingerprint(f).fingerprint());
+    generic::save(&config, component_id, fingerprints, metadata)
 }
 
 pub fn load_baseline_for_scope(
