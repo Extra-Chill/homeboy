@@ -42,6 +42,7 @@ pub use cli_resolver::{
 mod command_path;
 mod connection;
 mod continuation_provider;
+mod control_plane_client;
 pub mod controller_fallback_projection;
 mod controller_identity;
 mod daemon_exec_driver;

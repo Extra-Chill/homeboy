@@ -7,7 +7,7 @@ on:
     branches: [main]
     paths:
       - 'crates/contracts/homeboy-control-plane-contract/**'
-      - 'crates/homeboy-control-plane-client/**'
+      - 'crates/homeboy-lab-runner/src/control_plane_client.rs'
       - 'crates/homeboy-core/src/observation/store/schema.rs'
       - 'crates/homeboy-core/tests/fixtures/observation-schema/**'
       - 'Cargo.lock'
@@ -26,5 +26,5 @@ jobs:
       - name: Verify v1 wire compatibility and the observation schema baseline
         run: |
           cargo test --locked -p homeboy-control-plane-contract --test v1_golden
-          cargo test --locked -p homeboy-control-plane-client
+          cargo test --locked -p homeboy-lab-runner control_plane_client::tests
           cargo test --locked -p homeboy-core --lib observation::store::schema::tests::

@@ -858,17 +858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "homeboy-control-plane-client"
-version = "0.1.0"
-dependencies = [
- "homeboy-control-plane-contract",
- "reqwest",
- "serde",
- "serde_json",
- "tiny_http",
-]
-
-[[package]]
 name = "homeboy-control-plane-contract"
 version = "0.1.0"
 dependencies = [
@@ -1047,7 +1036,6 @@ dependencies = [
  "glob-match",
  "homeboy-agents",
  "homeboy-artifact-ref-contract",
- "homeboy-control-plane-client",
  "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
@@ -1070,6 +1058,7 @@ dependencies = [
  "shellexpand",
  "shlex",
  "tempfile",
+ "tiny_http",
  "uuid",
  "zip",
 ]
