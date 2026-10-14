@@ -757,6 +757,27 @@ pub(super) fn terminal_controller_job(job_id: uuid::Uuid) -> Result<Option<crate
     Ok(None)
 }
 
+/// Job store paths of every registered generation plus every generation
+/// directory on disk. Retiring a generation removes its registry entry but
+/// keeps its directory, so retired generations are found by the disk scan.
+pub(super) fn generation_job_stores() -> Result<Vec<PathBuf>> {
+    let mut dirs: Vec<PathBuf> = generations()?
+        .into_iter()
+        .map(|generation| PathBuf::from(generation.state_dir))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(router_dir()?.join("generations")) {
+        dirs.extend(
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|dir| dir.is_dir()),
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
+    Ok(dirs.into_iter().map(|dir| dir.join("jobs.json")).collect())
+}
+
 pub(super) fn generation_state_dir() -> Result<PathBuf> {
     // A replacement inherits HOMEBOY_DAEMON_STATE_DIR from its generation. The
     // router location is stable across that handoff and therefore owns sibling

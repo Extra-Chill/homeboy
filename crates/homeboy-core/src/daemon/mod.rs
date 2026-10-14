@@ -635,6 +635,15 @@ impl LocalControllerJobClient {
                 Err(error) => last_error = Some(error),
             }
         }
+        for path in self.workflow_job_stores() {
+            let Ok(store) = JobStore::open_without_reconciliation(path) else {
+                continue;
+            };
+            if let Ok(mut view) = workflow_job::workflow_status(&store, instance) {
+                view["source"] = json!("retained_generation");
+                return Ok(view);
+            }
+        }
         Err(last_error.unwrap_or_else(|| {
             Error::validation_invalid_argument(
                 "instance",
@@ -660,7 +669,40 @@ impl LocalControllerJobClient {
                 entities.push(entity);
             }
         }
+        let mut seen = entities
+            .iter()
+            .filter_map(|entity| entity["instance"].as_str().map(str::to_string))
+            .collect::<std::collections::HashSet<_>>();
+        for path in self.workflow_job_stores() {
+            let Ok(store) = JobStore::open_without_reconciliation(path) else {
+                continue;
+            };
+            for mut entity in workflow_job::workflow_list(&store)["entities"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                let Some(instance) = entity["instance"].as_str().map(str::to_string) else {
+                    continue;
+                };
+                if seen.insert(instance) {
+                    entity["source"] = json!("retained_generation");
+                    entities.push(entity);
+                }
+            }
+        }
         Ok(json!({ "entities": entities }))
+    }
+
+    /// Job stores of every generation on disk, registered or retired. Retiring
+    /// a generation removes its registry entry but keeps its job store, which
+    /// still holds the workflow checkpoint; the retained-custody archive keeps
+    /// only terminal job summaries.
+    fn workflow_job_stores(&self) -> Vec<PathBuf> {
+        if generation_store::bypassed() {
+            return Vec::new();
+        }
+        generation_store::generation_job_stores().unwrap_or_default()
     }
 
     /// `POST /workflows/<instance>/approvals` on the generation that owns it.
