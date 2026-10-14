@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.426.0] - 2026-10-14
+
+### Added
+- kind-agnostic workload engine and `homeboy workload` command
+
 ## [0.425.2] - 2026-10-14
 
 ### Fixed
