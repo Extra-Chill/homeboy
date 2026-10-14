@@ -117,6 +117,13 @@ pub struct VerifyGateArgs {
     /// the immutable baseline. The gate remains reported as baseline-red.
     #[arg(long = "accept-inherited-failures")]
     pub accept_inherited_failures: bool,
+    /// Do not add the component's declared lint gate. By default, when the
+    /// Cook resolves to a registered component whose configuration declares
+    /// lint support (`scripts.lint` or a linked lint extension), Cook requires
+    /// `homeboy review lint <component> --path .` before promotion so a
+    /// candidate that fails the component's own CI lint cannot open a PR.
+    #[arg(long = "no-component-lint-gate")]
+    pub no_component_lint_gate: bool,
     /// Environment for gate commands: `inherit` (default) extends the current
     /// environment; `replace` starts from an empty environment plus `--gate-env`.
     #[arg(
@@ -183,6 +190,29 @@ impl VerifyGateArgs {
             || !self.verify_file.is_empty()
             || !self.private_verify.is_empty()
             || !self.private_verify_file.is_empty()
+    }
+
+    /// Whether this gate contract carries retained provenance from a
+    /// Homeboy-generated replay. Such a contract was already resolved by the
+    /// original controller, including component-declared gates or their
+    /// explicit opt-out, so it must not be widened again. Call before
+    /// [`Self::snapshot_file_inputs`], which records provenance for new inputs.
+    pub(crate) fn has_retained_contract(&self) -> bool {
+        !self.input_sources.is_empty()
+    }
+
+    /// Append a controller-derived public gate with inline provenance, unless
+    /// the identical program is already declared.
+    pub(crate) fn push_controller_verify(&mut self, program: String) {
+        if self.verify.contains(&program) || self.private_verify.contains(&program) {
+            return;
+        }
+        self.input_sources.push(inline_gate_source(
+            &program,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+        ));
+        self.verify.push(program);
     }
 
     /// Resolve file inputs while the controller invocation directory still owns

@@ -507,10 +507,10 @@ pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregat
 
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     snapshot_cook_prompt(&mut args)?;
+    let retained_gate_contract = args.gates.has_retained_contract();
     args.gates.snapshot_file_inputs()?;
-    let args = resolve_cook_destination(args)?;
-    let mut args = args;
-    apply_component_default_verify_gates(&mut args)?;
+    let mut args = resolve_cook_destination(args)?;
+    apply_component_verify_gates(&mut args, retained_gate_contract)?;
     validate_cook_request(&args)?;
     run_cook_with_executor(
         args,
@@ -518,34 +518,105 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     )
 }
 
-fn apply_component_default_verify_gates(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+/// Add the gates a registered component declares for every Cook: its
+/// `default_verify_gates` when the caller supplied none, and its lint gate when
+/// the component declares lint support (#15888). Explicit caller gates never
+/// suppress the lint gate; only `--no-component-lint-gate` does.
+fn apply_component_verify_gates(
+    args: &mut AgentTaskCookArgs,
+    retained_gate_contract: bool,
+) -> homeboy::core::Result<()> {
     let Some(component_id) = args
         .repository_identity
         .as_ref()
         .and_then(|identity| identity.get("component_id"))
         .and_then(Value::as_str)
+        .map(str::to_string)
     else {
         return Ok(());
     };
-    let Some(component) = cook_registered_component_by_id(component_id)? else {
+    let Some(component) = cook_registered_component_by_id(&component_id)? else {
         return Ok(());
     };
-    apply_default_verify_commands(
-        args.gates.has_deterministic_gate(),
-        &mut args.gates.verify,
-        component.default_verify_gates,
-    );
+    let gates = component_cook_gates(ComponentCookGateInputs {
+        component_id: &component_id,
+        has_explicit_gate: args.gates.has_deterministic_gate(),
+        retained_gate_contract,
+        lint_gate_opted_out: args.gates.no_component_lint_gate,
+        // Resolve extension metadata only when the lint gate can apply.
+        declares_lint: !retained_gate_contract
+            && !args.gates.no_component_lint_gate
+            && component_declares_lint(&component),
+        existing: args
+            .gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .map(String::as_str),
+        defaults: component.default_verify_gates,
+    });
+    for gate in gates {
+        args.gates.push_controller_verify(gate);
+    }
     Ok(())
 }
 
-fn apply_default_verify_commands(
+/// A component declares lint when it owns a `scripts.lint` command or links an
+/// extension that provides the lint capability. Unresolvable extension
+/// metadata is not treated as a declaration: the Cook stays admissible and the
+/// gate is simply not inferred.
+fn component_declares_lint(component: &homeboy::core::component::Component) -> bool {
+    use homeboy_extension_contract::ExtensionCapability;
+    component.has_script(ExtensionCapability::Lint)
+        || matches!(
+            homeboy_core::extension::resolve::resolve_execution_context_if_available(
+                component,
+                ExtensionCapability::Lint,
+            ),
+            Ok(Some(_))
+        )
+}
+
+/// The canonical lint gate for a component, run from the component workspace
+/// where Cook executes deterministic gates. It mirrors the component's CI
+/// `homeboy review lint`, including its declared baseline policy.
+fn component_lint_gate(component_id: &str) -> String {
+    format!(
+        "homeboy review lint {} --path .",
+        quote_args(&[component_id.to_string()])
+    )
+}
+
+struct ComponentCookGateInputs<'a, I> {
+    component_id: &'a str,
     has_explicit_gate: bool,
-    verify: &mut Vec<String>,
+    retained_gate_contract: bool,
+    lint_gate_opted_out: bool,
+    declares_lint: bool,
+    existing: I,
     defaults: Vec<String>,
-) {
-    if !has_explicit_gate {
-        *verify = defaults;
+}
+
+/// Pure gate-selection policy for [`apply_component_verify_gates`].
+fn component_cook_gates<'a, I: Iterator<Item = &'a str>>(
+    inputs: ComponentCookGateInputs<'a, I>,
+) -> Vec<String> {
+    let mut gates = Vec::new();
+    if !inputs.has_explicit_gate {
+        gates.extend(inputs.defaults);
     }
+    if inputs.retained_gate_contract || inputs.lint_gate_opted_out || !inputs.declares_lint {
+        return gates;
+    }
+    let mut existing = inputs.existing.map(str::to_string).collect::<Vec<_>>();
+    existing.extend(gates.iter().cloned());
+    let already_linted = existing
+        .iter()
+        .any(|program| program.contains("review lint") || program.contains("homeboy lint"));
+    if !already_linted {
+        gates.push(component_lint_gate(inputs.component_id));
+    }
+    gates
 }
 
 /// Resolve the same pre-provisioning Cook inputs used by execution. This path
@@ -575,6 +646,7 @@ pub(crate) fn preview_cook(
         );
     }
     record_preview_phase(&mut progress, "input_validation");
+    let retained_gate_contract = args.gates.has_retained_contract();
     args.gates.snapshot_file_inputs()?;
     // Authorization is a security boundary, not an unrelated task-input
     // validation, so preserve its precedence over backend guidance.
@@ -596,7 +668,7 @@ pub(crate) fn preview_cook(
         }
     }
     bind_cook_preview_lifecycle(&mut args);
-    apply_component_default_verify_gates(&mut args)?;
+    apply_component_verify_gates(&mut args, retained_gate_contract)?;
     if let Some((provider, replay)) = unresolved_cook_backend_preview(&args)? {
         return Ok((
             cook_preview_result(
@@ -11462,26 +11534,155 @@ pub(super) fn resolve_ai_tool_disclosure(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_default_verify_commands, apply_preview_worktree_capacity, cook_continuation_status,
-        cook_preview_result, cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
-        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
-        preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
+        apply_preview_worktree_capacity, component_cook_gates, component_lint_gate,
+        cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
+        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        cook_review_form_timeout_disclosure, detached_cook_route_less_warning,
+        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
+        project_preview_dirty_admission, ComponentCookGateInputs, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
 
+    fn parse_cook(argv: &[&str]) -> super::AgentTaskCookArgs {
+        let cli = Cli::try_parse_from(argv).expect("parse Cook");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        *cook
+    }
+
+    fn gates_for(
+        has_explicit_gate: bool,
+        existing: &[&str],
+        defaults: &[&str],
+        declares_lint: bool,
+        retained_gate_contract: bool,
+        lint_gate_opted_out: bool,
+    ) -> Vec<String> {
+        component_cook_gates(ComponentCookGateInputs {
+            component_id: "data-machine",
+            has_explicit_gate,
+            retained_gate_contract,
+            lint_gate_opted_out,
+            declares_lint,
+            existing: existing.iter().copied(),
+            defaults: defaults.iter().map(|gate| gate.to_string()).collect(),
+        })
+    }
+
     #[test]
     fn component_default_gates_fill_only_an_unconfigured_cook() {
-        let mut verify = Vec::new();
-        apply_default_verify_commands(false, &mut verify, vec!["cargo test".into()]);
-        assert_eq!(verify, ["cargo test"]);
+        assert_eq!(
+            gates_for(false, &[], &["cargo test"], false, false, false),
+            ["cargo test"]
+        );
+        assert!(gates_for(true, &["npm test"], &["cargo test"], false, false, false).is_empty());
+    }
 
-        let mut explicit = vec!["npm test".into()];
-        apply_default_verify_commands(true, &mut explicit, vec!["cargo test".into()]);
-        assert_eq!(explicit, ["npm test"]);
+    #[test]
+    fn component_lint_gate_is_added_beside_explicit_test_gate() {
+        // #15888: data-machine#3608 declared only `homeboy review test` and
+        // published a PR that failed the component's required CI lint.
+        assert_eq!(
+            gates_for(
+                true,
+                &["homeboy review test data-machine"],
+                &[],
+                true,
+                false,
+                false
+            ),
+            ["homeboy review lint data-machine --path ."]
+        );
+        assert_eq!(
+            gates_for(false, &[], &["cargo test"], true, false, false),
+            ["cargo test", "homeboy review lint data-machine --path ."]
+        );
+    }
+
+    #[test]
+    fn component_lint_gate_respects_opt_out_replay_and_existing_lint() {
+        let test_gate = ["homeboy review test data-machine"];
+        assert!(gates_for(true, &test_gate, &[], false, false, false).is_empty());
+        assert!(gates_for(true, &test_gate, &[], true, false, true).is_empty());
+        assert!(gates_for(true, &test_gate, &[], true, true, false).is_empty());
+        assert!(gates_for(
+            true,
+            &["homeboy review lint data-machine --changed-since origin/main"],
+            &[],
+            true,
+            false,
+            false
+        )
+        .is_empty());
+        assert_eq!(
+            gates_for(
+                false,
+                &[],
+                &["homeboy lint data-machine"],
+                true,
+                false,
+                false
+            ),
+            ["homeboy lint data-machine"]
+        );
+    }
+
+    #[test]
+    fn component_lint_gate_quotes_component_id() {
+        assert_eq!(
+            component_lint_gate("odd id"),
+            "homeboy review lint 'odd id' --path ."
+        );
+    }
+
+    #[test]
+    fn controller_lint_gate_records_provenance_and_dedupes() {
+        let mut args = parse_cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--verify",
+            "homeboy review test data-machine",
+        ]);
+        assert!(!args.gates.has_retained_contract());
+        args.gates
+            .snapshot_file_inputs()
+            .expect("snapshot inline gates");
+        args.gates
+            .push_controller_verify(component_lint_gate("data-machine"));
+        args.gates
+            .push_controller_verify(component_lint_gate("data-machine"));
+        assert_eq!(
+            args.gates.verify,
+            [
+                "homeboy review test data-machine",
+                "homeboy review lint data-machine --path ."
+            ]
+        );
+        assert_eq!(args.gates.input_sources.len(), 2);
+        assert_eq!(args.gates.input_sources[1].source_kind, "inline");
+        // A Homeboy-generated replay retains provenance and is not widened.
+        assert!(args.gates.has_retained_contract());
+    }
+
+    #[test]
+    fn no_component_lint_gate_flag_parses() {
+        let args = parse_cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--verify",
+            "true",
+            "--no-component-lint-gate",
+        ]);
+        assert!(args.gates.no_component_lint_gate);
     }
 
     #[test]
