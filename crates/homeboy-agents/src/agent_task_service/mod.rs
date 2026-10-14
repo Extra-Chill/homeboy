@@ -12,6 +12,7 @@ mod cook_baseline;
 mod cook_budget;
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
+mod cook_prior_candidate;
 mod cook_promotion;
 mod cook_recipe;
 /// Detached Cook execution as a daemon `step` with an admitted environment.
