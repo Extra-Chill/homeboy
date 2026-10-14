@@ -10,6 +10,29 @@
 use super::terminal_transition::TerminalRecordCommit;
 use super::*;
 
+/// Whether a verified runner execution context was dispatched for `run_id`.
+///
+/// Two dispatch shapes bind a controller record:
+/// - a child attempt, where the record *is* the attempt and the parent mission
+///   is the context's `controller_run_id`;
+/// - a direct dispatch of the record itself, where `controller_run_id` is the
+///   record and the attempt is the per-dispatch `{run_id}:{uuid}` minted by
+///   `runner_exec_request_metadata`.
+///
+/// The exact runner job id, compared separately, pins the specific attempt.
+fn context_binds_controller_run(
+    context: &homeboy_runner_contract::RunnerJobExecutionContextAssertion,
+    run_id: &str,
+) -> bool {
+    context.controller_attempt_id == run_id
+        || (context.controller_run_id == run_id
+            && context
+                .controller_attempt_id
+                .strip_prefix(run_id)
+                .and_then(|suffix| suffix.strip_prefix(':'))
+                .is_some_and(|attempt| !attempt.is_empty()))
+}
+
 /// Reconcile terminal history from the trusted runner's durable run resource.
 /// Exact accepted run/job/plan identity is required; missing transport logs are
 /// neither absence proof nor a reason to discard a retained provider result.
@@ -46,7 +69,7 @@ pub(crate) fn project_terminal_runner_record_in_store(
         && remote.plan_id == record.plan_id
         && remote.runner_id() == Some(runner_id)
         && remote.runner_job_id() == Some(job_id)
-        && context.controller_attempt_id == record.run_id
+        && context_binds_controller_run(&context, &record.run_id)
         && context.runner_id == runner_id
         && context.runner_job_id == job_id
         && context.verification.state == "verified";
