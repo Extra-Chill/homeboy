@@ -289,6 +289,74 @@ pub fn run_completed_payload(run: &crate::observation::RunRecord) -> NotifyPaylo
         )
 }
 
+/// How many run ids a stale-run summary lists before eliding the rest.
+const STALE_SUMMARY_RUN_ID_LIMIT: usize = 10;
+
+/// One notification for every run a single completion pass found reconciled
+/// to `stale` (#15853).
+///
+/// A sweep that reaps a wave's orphaned `gate-execute`/`run-plan` records
+/// moves them all to `stale` within milliseconds. Announcing each one repeats
+/// its full command line and buries the attention notifications of the live
+/// wave, while the operator needs only the size of the sweep, its time window,
+/// the owning runs, and one place to inspect it.
+///
+/// The route is the first one any member run persisted: the sweep's runs
+/// belong to the waves that recorded it.
+pub fn stale_runs_summary(runs: &[&crate::observation::RunRecord]) -> NotifyEvent {
+    let count = runs.len();
+    let mut finished: Vec<&str> = runs
+        .iter()
+        .filter_map(|run| run.finished_at.as_deref())
+        .collect();
+    finished.sort_unstable();
+    let mut owners: Vec<&str> = runs
+        .iter()
+        .filter_map(|run| run.metadata_json["parent_run_id"].as_str())
+        .filter(|owner| !owner.is_empty())
+        .collect();
+    owners.sort_unstable();
+    owners.dedup();
+    let mut run_ids: Vec<&str> = runs.iter().map(|run| run.id.as_str()).collect();
+    run_ids.sort_unstable();
+    let elided = count.saturating_sub(STALE_SUMMARY_RUN_ID_LIMIT);
+    run_ids.truncate(STALE_SUMMARY_RUN_ID_LIMIT);
+    let mut listed = run_ids.join(", ");
+    if elided > 0 {
+        listed.push_str(&format!(" … and {elided} more"));
+    }
+
+    let subject_id = format!("stale-runs-{count}");
+    let mut payload = NotifyPayload::new(
+        NotifyEventKind::NeedsAttention,
+        crate::notification_payload::NotifySubject::new("run", subject_id.clone()),
+    )
+    .with_fact("Status", "stale")
+    .with_fact("Runs", count.to_string());
+    if let (Some(oldest), Some(newest)) = (finished.first(), finished.last()) {
+        payload = payload
+            .with_fact("Oldest finished", (*oldest).to_string())
+            .with_fact("Newest finished", (*newest).to_string());
+    }
+    if !owners.is_empty() {
+        payload = payload.with_fact("Owners", owners.join(", "));
+    }
+    let mut inspect = "homeboy runs list --status stale".to_string();
+    if let Some(oldest) = runs.iter().map(|run| run.started_at.as_str()).min() {
+        inspect.push_str(&format!(" --since {oldest}"));
+    }
+    let payload = payload.with_fact("Run ids", listed).with_action(
+        crate::notification_payload::NotifyAction::new("inspect", inspect).with_kind("show"),
+    );
+
+    let route = runs
+        .iter()
+        .find_map(|run| NotificationRoute::from_metadata(&run.metadata_json));
+    NotifyEvent::run_completed_with_route(&subject_id, "stale", route.as_ref())
+        .with_title(format!("homeboy {count} runs stale"))
+        .with_payload(payload)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotifyDelivery {
