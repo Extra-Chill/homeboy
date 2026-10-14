@@ -2606,12 +2606,6 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
             .expect("open lifecycle database");
         connection
             .execute(
-                "DELETE FROM control_plane_mission_runs WHERE run_id = ?1",
-                ["tie-c"],
-            )
-            .expect("delete any mission link for boundary");
-        connection
-            .execute(
                 "DELETE FROM control_plane_event_appends WHERE run_id = ?1",
                 ["tie-c"],
             )

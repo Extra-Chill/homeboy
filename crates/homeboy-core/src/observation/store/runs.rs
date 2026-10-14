@@ -83,6 +83,21 @@ pub struct RunMetadataRevision<'a> {
     pub increment: bool,
 }
 
+/// Missions are derived from `runs.mission_id`. A mission's `created_at` is the
+/// `started_at` of its first recorded run (lowest rowid), not the minimum, so a
+/// late-imported older run never moves an existing mission's page key.
+const MISSIONS_SQL: &str = r#"
+    SELECT r.mission_id AS id,
+           (SELECT first.started_at FROM runs first
+             WHERE first.mission_id = r.mission_id
+             ORDER BY first.rowid LIMIT 1) AS created_at,
+           MAX(COALESCE(r.finished_at, r.started_at)) AS updated_at,
+           COUNT(*) AS run_count
+    FROM runs r
+    WHERE r.mission_id IS NOT NULL
+    GROUP BY r.mission_id
+"#;
+
 fn apply_imported_run_in_tx(
     transaction: &rusqlite::Transaction<'_>,
     run: &RunRecord,
@@ -173,22 +188,10 @@ fn apply_imported_run_in_tx(
         return Ok(false);
     }
     if let Some(mission_id) = mission_id {
-        let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
+        // `runs_mission_is_immutable` aborts the transaction if the run
+        // already belongs to a different mission.
         transaction.execute(
-            r#"
-                    INSERT INTO control_plane_missions(id, created_at, updated_at)
-                    VALUES (?1, ?2, ?3)
-                    ON CONFLICT(id) DO UPDATE SET
-                        updated_at = MAX(updated_at, excluded.updated_at)
-                    "#,
-            params![mission_id, run.started_at, updated_at],
-        )?;
-        transaction.execute(
-            r#"
-                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(mission_id, run_id) DO NOTHING
-                    "#,
+            "UPDATE runs SET mission_id = ?1 WHERE id = ?2",
             params![mission_id, run.id],
         )?;
     }
@@ -876,12 +879,7 @@ impl ObservationStore {
             )?;
             if let Some(mission_id) = mission_id {
                 transaction.execute(
-                    "INSERT INTO control_plane_missions(id, created_at, updated_at) VALUES (?1, ?2, ?2) \
-                     ON CONFLICT(id) DO UPDATE SET updated_at = MAX(updated_at, excluded.updated_at)",
-                    params![mission_id, started_at],
-                )?;
-                transaction.execute(
-                    "INSERT INTO control_plane_mission_runs(mission_id, run_id) VALUES (?1, ?2)",
+                    "UPDATE runs SET mission_id = ?1 WHERE id = ?2",
                     params![mission_id, id],
                 )?;
             }
@@ -1566,9 +1564,8 @@ impl ObservationStore {
                 r#"
                 SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
                        r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
-                FROM control_plane_mission_runs mr
-                INNER JOIN runs r ON r.id = mr.run_id
-                WHERE mr.mission_id = ?1
+                FROM runs r
+                WHERE r.mission_id = ?1
                   AND (?2 IS NULL OR r.started_at < ?2 OR (r.started_at = ?2 AND r.id < ?3))
                 ORDER BY r.started_at DESC, r.id DESC
                 LIMIT ?4
@@ -1607,8 +1604,7 @@ impl ObservationStore {
                 SELECT r.id, r.kind, r.component_id, r.started_at, r.finished_at, r.status,
                        r.command, r.cwd, r.homeboy_version, r.git_sha, r.rig_id, r.metadata_json
                 FROM runs r
-                LEFT JOIN control_plane_mission_runs mr ON mr.run_id = r.id
-                WHERE (mr.run_id IS NOT NULL OR r.kind = 'agent-task')
+                WHERE (r.mission_id IS NOT NULL OR r.kind = 'agent-task')
                   AND (?1 IS NULL OR r.started_at < ?1 OR (r.started_at = ?1 AND r.id < ?2))
                 ORDER BY r.started_at DESC, r.id DESC
                 LIMIT ?3
@@ -1774,7 +1770,19 @@ impl ObservationStore {
                 .map_err(sqlite_error("delete terminal run"))?;
         }
         tx.commit()
-            .map_err(sqlite_error("commit terminal run retention"))
+            .map_err(sqlite_error("commit terminal run retention"))?;
+        // The store uses incremental auto-vacuum: hand the pages retention just
+        // freed back to the filesystem. The pragma yields one row per freed
+        // page and frees only as many pages as are stepped, so drain it. A
+        // store created without incremental auto-vacuum treats this as a no-op.
+        const RECLAIM: &str = "reclaim space freed by terminal run retention";
+        let mut statement = self
+            .connection
+            .prepare("PRAGMA incremental_vacuum")
+            .map_err(sqlite_error(RECLAIM))?;
+        let mut rows = statement.query([]).map_err(sqlite_error(RECLAIM))?;
+        while rows.next().map_err(sqlite_error(RECLAIM))?.is_some() {}
+        Ok(())
     }
 
     /// Discard a run whose observation could not be completed. Terminal runs
@@ -2238,13 +2246,9 @@ impl ObservationStore {
         validate_required("mission_id", mission_id)?;
         self.connection
             .query_row(
-                r#"
-                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
-                FROM control_plane_missions m
-                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
-                WHERE m.id = ?1
-                GROUP BY m.id, m.created_at, m.updated_at
-                "#,
+                &format!(
+                    "SELECT id, created_at, updated_at, run_count FROM ({MISSIONS_SQL}) WHERE id = ?1"
+                ),
                 [mission_id],
                 |row| {
                     Ok(MissionRecord {
@@ -2263,11 +2267,12 @@ impl ObservationStore {
         validate_required("run_id", run_id)?;
         self.connection
             .query_row(
-                "SELECT mission_id FROM control_plane_mission_runs WHERE run_id = ?1",
+                "SELECT mission_id FROM runs WHERE id = ?1",
                 [run_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
+            .map(Option::flatten)
             .map_err(|error| self.read_error("read control-plane run mission", error))
     }
 
@@ -2280,17 +2285,11 @@ impl ObservationStore {
         let probe = i64::try_from(limit + 1).expect("bounded mission page");
         let mut statement = self
             .connection
-            .prepare(
-                r#"
-                SELECT m.id, m.created_at, m.updated_at, COUNT(mr.run_id)
-                FROM control_plane_missions m
-                LEFT JOIN control_plane_mission_runs mr ON mr.mission_id = m.id
-                WHERE (?1 IS NULL OR m.created_at < ?1 OR (m.created_at = ?1 AND m.id < ?2))
-                GROUP BY m.id, m.created_at, m.updated_at
-                ORDER BY m.created_at DESC, m.id DESC
-                LIMIT ?3
-                "#,
-            )
+            .prepare(&format!(
+                "SELECT id, created_at, updated_at, run_count FROM ({MISSIONS_SQL}) \
+                 WHERE (?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND id < ?2)) \
+                 ORDER BY created_at DESC, id DESC LIMIT ?3"
+            ))
             .map_err(sqlite_error("prepare control-plane mission page"))?;
         let started_at = after.map(|cursor| cursor.created_at.as_str());
         let id = after.map(|cursor| cursor.id.as_str());
@@ -2844,6 +2843,46 @@ mod tests {
             assert_eq!(
                 current.metadata_json["homeboy_ownership_handoff"]["state"],
                 "transferring"
+            );
+        });
+    }
+
+    #[test]
+    fn retention_returns_freed_pages_to_the_filesystem() {
+        with_isolated_home(|_| {
+            let mut store = ObservationStore::open_initialized().expect("store");
+            let pragma = |store: &ObservationStore, name: &str| -> i64 {
+                store
+                    .connection
+                    .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+                    .unwrap()
+            };
+            assert_eq!(pragma(&store, "auto_vacuum"), 2, "incremental auto-vacuum");
+            let padding = "x".repeat(64 * 1024);
+            let ids: Vec<String> = (0..32).map(|index| format!("retained-{index}")).collect();
+            for id in &ids {
+                store
+                    .upsert_imported_run(&RunRecord {
+                        id: id.clone(),
+                        kind: "test".to_string(),
+                        started_at: "2026-01-01T00:00:00Z".to_string(),
+                        finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+                        status: "pass".to_string(),
+                        metadata_json: serde_json::json!({ "padding": padding }),
+                        ..Default::default()
+                    })
+                    .expect("seed run");
+            }
+            let before = pragma(&store, "page_count");
+            store.delete_terminal_runs(&ids).expect("retention");
+            assert_eq!(
+                pragma(&store, "freelist_count"),
+                0,
+                "no free pages left behind"
+            );
+            assert!(
+                pragma(&store, "page_count") < before / 2,
+                "the file shrinks after retention"
             );
         });
     }

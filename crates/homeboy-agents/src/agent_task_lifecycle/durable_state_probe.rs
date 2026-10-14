@@ -18,8 +18,6 @@ const TABLES: &[(&str, &str)] = &[
     ("control_plane_resources", "rowid"),
     ("control_plane_resource_aliases", "rowid"),
     ("control_plane_action_claims", "rowid"),
-    ("control_plane_missions", "rowid"),
-    ("control_plane_mission_runs", "rowid"),
     ("artifacts", "rowid"),
 ];
 
