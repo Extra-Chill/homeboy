@@ -423,6 +423,12 @@ fn compact_control_plane_status(value: Value) -> Value {
         },
         "presentation": "compact",
     });
+    // The bound model the run executes with (or its latest executor recorded)
+    // belongs next to the state, so operators plan rotations on facts (#15854).
+    if let Some(provider) = value.get("provider").filter(|provider| !provider.is_null()) {
+        compact["provider"] = bounded_control_plane_value(provider);
+    }
+
     for key in ["artifacts", "evidence"] {
         if let Some(items) = value.get(key).and_then(Value::as_array) {
             let mut seen = HashSet::new();
@@ -562,6 +568,36 @@ fn deduplicate_control_plane_evidence(value: &mut Value) {
 mod compact_status_tests {
     use super::{compact_control_plane_status, deduplicate_control_plane_evidence};
     use serde_json::json;
+
+    #[test]
+    fn compact_status_names_the_bound_model_next_to_the_state() {
+        let value = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "retry-1",
+            "state": "failed",
+            "provider": {
+                "id": "anthropic",
+                "model": "airline/claude-sonnet-5"
+            },
+            "action_eligibility": { "actions": [] }
+        });
+        let compact = compact_control_plane_status(value);
+        assert_eq!(
+            compact["provider"]["model"],
+            json!("airline/claude-sonnet-5")
+        );
+
+        // No provider summary yet means no invented projection: the compact
+        // output stays without a provider field (#15854).
+        let value = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "retry-1",
+            "state": "pending",
+            "action_eligibility": { "actions": [] }
+        });
+        let compact = compact_control_plane_status(value);
+        assert!(compact.get("provider").is_none());
+    }
 
     #[test]
     fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {

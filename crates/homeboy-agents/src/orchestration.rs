@@ -4739,6 +4739,7 @@ fn runtime(record: &AgentTaskRunRecord) -> Option<ControlPlaneRuntime> {
 }
 
 fn assigned_provider(record: &AgentTaskRunRecord) -> Option<ControlPlaneProviderSummary> {
+    let model = executed_provider_model(record);
     if let Some(evidence) = record.latest_executor_evidence.as_ref() {
         return Some(ControlPlaneProviderSummary {
             id: bounded(&evidence.backend, ID_BOUND),
@@ -4747,6 +4748,7 @@ fn assigned_provider(record: &AgentTaskRunRecord) -> Option<ControlPlaneProvider
                 .provider_run_id
                 .as_deref()
                 .and_then(|id| ProviderSessionId::new(id).ok()),
+            model,
         });
     }
     if let Some(handle) = record.provider_handles.first() {
@@ -4762,6 +4764,7 @@ fn assigned_provider(record: &AgentTaskRunRecord) -> Option<ControlPlaneProvider
                 )
             }),
             session: ProviderSessionId::new(&handle.provider_run_id).ok(),
+            model,
         });
     }
     record
@@ -4782,6 +4785,40 @@ fn assigned_provider(record: &AgentTaskRunRecord) -> Option<ControlPlaneProvider
                     .get("provider_run_id")
                     .and_then(|value| value.as_str())
                     .and_then(|id| ProviderSessionId::new(id).ok()),
+                model,
+            })
+        })
+}
+
+/// The model this run's provider actually dispatched with (#15854).
+///
+/// The durable execution ledger records the admitted route at reservation, so
+/// its latest entry names the readiness-bound model, not rotation entry 0.
+/// Planned routes and executor evidence fall back to the compiled request's
+/// configured primary when nothing ran, so they are not execution facts and a
+/// run that never dispatched names no model.
+fn executed_provider_model(record: &AgentTaskRunRecord) -> Option<String> {
+    let non_empty = |model: &str| (!model.trim().is_empty()).then(|| bounded(model, ID_BOUND));
+    record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find_map(|execution| {
+            execution
+                .get("model")
+                .and_then(Value::as_str)
+                .and_then(non_empty)
+        })
+        .or_else(|| {
+            record.provider_handles.iter().find_map(|handle| {
+                handle
+                    .metadata
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .and_then(non_empty)
             })
         })
 }
@@ -6217,6 +6254,90 @@ mod tests {
         let projected = project_record(&record, None).expect("project run");
         assert_eq!(projected.state, ControlPlaneRunState::CandidateRecoverable);
         assert_ne!(projected.state, ControlPlaneRunState::Succeeded);
+    }
+
+    /// Status projection names the model the provider actually dispatched
+    /// with: the readiness-bound route from the durable execution ledger, not
+    /// the configured primary the plan and evidence fall back to (#15854).
+    #[test]
+    fn provider_summary_names_the_bound_model() {
+        // Evidence falls back to the configured primary; nothing dispatched,
+        // so status names no model rather than the unready primary.
+        let mut bound = record_with_bound_executor_evidence(
+            "bound-model-provider-summary",
+            Some("anthropic/claude-sonnet-5".to_string()),
+        );
+        let projected = project_record(&bound, None).expect("project run");
+        let provider = projected.provider.as_ref().expect("provider summary");
+        assert_eq!(provider.id, "anthropic");
+        assert_eq!(provider.model, None);
+
+        // Readiness skipped the primary and the ledger reserved the fallback.
+        bound.metadata["provider_executions"] = json!([{
+            "key": "review:1",
+            "task_id": "review",
+            "attempt": 1,
+            "backend": "opencode",
+            "model": "openai/gpt-6-luna",
+            "state": "failed",
+        }]);
+        let projected = project_record(&bound, None).expect("project run");
+        assert_eq!(
+            projected.provider.as_ref().expect("provider summary").model,
+            Some("openai/gpt-6-luna".to_string())
+        );
+
+        // A running execution without executor evidence names its own model.
+        let mut running = record("bound-model-running-execution");
+        running.provider_handles.clear();
+        running.metadata["provider_executions"] = json!([{
+            "key": "review:1",
+            "task_id": "review",
+            "attempt": 1,
+            "backend": "opencode",
+            "model": "openai/gpt-6-luna",
+            "state": "running",
+        }]);
+        let projected = project_record(&running, None).expect("project run");
+        let provider = projected.provider.as_ref().expect("provider summary");
+        assert_eq!(provider.state.as_deref(), Some("running"));
+        assert_eq!(provider.model.as_deref(), Some("openai/gpt-6-luna"));
+    }
+
+    fn record_with_bound_executor_evidence(
+        run_id: &str,
+        executed_model: Option<String>,
+    ) -> AgentTaskRunRecord {
+        let mut bound = record(run_id);
+        bound.latest_executor_evidence = Some(
+            crate::agent_task_lifecycle::AgentTaskLatestExecutorEvidence {
+                task_id: "review".to_string(),
+                backend: "anthropic".to_string(),
+                selector: None,
+                model: executed_model,
+                input_ref: crate::agent_task::AgentTaskEvidenceRef {
+                    kind: "executor-input".to_string(),
+                    uri: "homeboy://artifact/input".to_string(),
+                    label: None,
+                },
+                normalized_output_ref: crate::agent_task::AgentTaskEvidenceRef {
+                    kind: "executor-normalized-output".to_string(),
+                    uri: "homeboy://artifact/output".to_string(),
+                    label: None,
+                },
+                outcome_ref: crate::agent_task::AgentTaskEvidenceRef {
+                    kind: "executor-outcome".to_string(),
+                    uri: "homeboy://artifact/outcome".to_string(),
+                    label: None,
+                },
+                provider_run_id: None,
+                component_contracts: Vec::new(),
+                runtime_component_paths: Vec::new(),
+                expected_artifacts: Vec::new(),
+                typed_artifact_expectations: Vec::new(),
+            },
+        );
+        bound
     }
 
     fn runner_placement_decision(
