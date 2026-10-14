@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.52.0] - 2026-10-14
+
+### Added
+- declare workloads.fuzz for the generic homeboy workload command (Extra-Chill/homeboy#15840)
+
 ## [3.51.4] - 2026-10-13
 
 ### Fixed
