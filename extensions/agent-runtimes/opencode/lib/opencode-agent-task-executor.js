@@ -241,6 +241,10 @@ const OPENCODE_PROVIDER_DEFAULTS = {
 	// controller_refresh on the controller before Lab delivery, then delivers
 	// only access + expiry: the runner can use the login but never rotate it.
 	[ANTHROPIC_OAUTH_ACCOUNT]: {
+		// A plain anthropic/<model> route inherits this OAuth account when its
+		// controller-side store credentials are available. Core then runs this
+		// refresh hook and delivers only access + expiry.
+		model_providers: ['anthropic'],
 		secret_env: [...OPENCODE_ANTHROPIC_STORE_SECRET_ENV],
 		secret_env_sources: { ...OPENCODE_ANTHROPIC_STORE_SECRET_ENV_SOURCES },
 		controller_refresh: {

@@ -328,6 +328,9 @@
           }
         },
         "anthropic-oauth": {
+          "model_providers": [
+            "anthropic"
+          ],
           "secret_env": [
             "AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS",
             "AI_PROVIDER_OPENCODE_ANTHROPIC_EXPIRES"

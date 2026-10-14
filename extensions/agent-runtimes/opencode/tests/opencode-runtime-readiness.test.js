@@ -163,6 +163,14 @@ try {
 	const nativeProvider = openCodeRuntimeReadiness(request({ model: 'anthropic/claude-sonnet' }), { env: env(), spawnSync: probe(readyResponses(fixtures.success, 'claude-sonnet', 'anthropic')) });
 	assert.equal(nativeProvider.ready, true);
 	assert.equal(nativeProvider.identity.provider, 'anthropic');
+	fs.writeFileSync(path.join(authStore, 'auth.json'), JSON.stringify({ anthropic: { type: 'oauth', access: 'expired', expires: Date.now() - 1 } }));
+	const expiredAnthropic = openCodeRuntimeReadiness(request({ model: 'anthropic/claude-sonnet' }), {
+		env: env(),
+		spawnSync: () => { throw new Error('expired handed-off credentials must fail before probing'); },
+	});
+	assert.equal(expiredAnthropic.classification, 'auth_failure');
+	assert.equal(expiredAnthropic.reason, 'selected_auth_unavailable');
+	assert.match(expiredAnthropic.remediation, /re-login Anthropic on the controller/);
 	const explicitProvider = openCodeRuntimeReadiness(request({ provider: 'codex', model: 'openai/gpt-5.6-terra' }), { env: env({ AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'codex-secret-must-not-leak' }), spawnSync: probe(readyResponses(fixtures.success, 'gpt-5.6-terra', 'codex')) });
 	assert.equal(explicitProvider.ready, true);
 	assert.equal(explicitProvider.identity.provider, 'codex');

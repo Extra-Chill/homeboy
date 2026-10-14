@@ -148,12 +148,31 @@ const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 		assert.equal(plan.secret_env_sources.AI_PROVIDER_OPENCODE_ANTHROPIC_ACCESS.field, 'anthropic.access');
 
 		const account = providerContract().provider_defaults[ANTHROPIC_OAUTH_ACCOUNT];
+		assert.deepEqual(account.model_providers, ['anthropic']);
 		assert.deepEqual(account.secret_env, plan.secret_env);
 		assert.equal(Object.values(account.secret_env_sources).some((source) => source.field === 'anthropic.refresh'), false);
 		assert.deepEqual(account.controller_refresh.argv, ['node', '{{runtime_path}}/scripts/agent/homeboy-opencode-anthropic-refresh.cjs']);
 		assert.ok(fs.existsSync(path.join(__dirname, '..', 'scripts', 'agent', 'homeboy-opencode-anthropic-refresh.cjs')));
-		// A plain `anthropic` route is not opted in.
-		assert.equal(providerContract().provider_defaults.anthropic, undefined);
+		// Plain Anthropic OAuth routes resolve to the same controller-owned
+		// credential account; there is no second runner-owned OAuth path.
+		const plainPlan = resolveOpenCodeAuthPlan(
+			{ model: 'anthropic/claude-sonnet-5-5' },
+			{ env: f.env },
+		);
+		assert.equal(plainPlan.account_kind, ANTHROPIC_OAUTH_ACCOUNT);
+		assert.deepEqual(plainPlan.secret_env, plan.secret_env);
+		assert.deepEqual(plainPlan.secret_env_sources, plan.secret_env_sources);
+		assert.equal(providerContract().provider_defaults[ANTHROPIC_OAUTH_ACCOUNT].controller_refresh.argv[0], 'node');
+
+		// An expired runner-side access-only handoff is an explicit operator
+		// action, not a generic provider authentication rejection.
+		const expired = fixture({ anthropic: { type: 'oauth', access: 'expired', expires: NOW - HOUR } });
+		const expiredPlan = resolveOpenCodeAuthPlan({ model: 'anthropic/claude-sonnet-5-5' }, { env: expired.env });
+		const { openCodeAuthPlanError } = require('../lib/opencode-auth-plan');
+		assert.match(openCodeAuthPlanError(expiredPlan, expired.env), /re-login Anthropic on the controller/);
+		const refreshable = fixture({ anthropic: { type: 'oauth', access: 'expired', refresh: 'still-valid', expires: NOW - HOUR } });
+		const refreshablePlan = resolveOpenCodeAuthPlan({ model: 'anthropic/claude-sonnet-5-5' }, { env: refreshable.env });
+		assert.equal(openCodeAuthPlanError(refreshablePlan, refreshable.env), null);
 	}
 
 	process.stdout.write('opencode anthropic refresh tests passed\n');

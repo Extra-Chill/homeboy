@@ -14,9 +14,8 @@ const OPENCODE_STORE_SECRET_ENV_NAME_PATTERN = /^AI_PROVIDER_OPENCODE_[A-Z0-9]+_
 // Explicit legacy file-handoff selector. Native provider names do not select an
 // auth kind: the runtime resolves that from the selected account and environment.
 const OPENAI_OAUTH_ACCOUNT = 'openai-oauth';
-// Explicit controller-refreshed Anthropic OAuth account (homeboy#15783). A route
-// opts in with provider_config {"provider":"anthropic-oauth"}; a plain
-// `anthropic` route (API key or runner-owned login) is unaffected.
+// Controller-refreshed Anthropic OAuth credential (homeboy#15783/#15874).
+// The account selector is internal; Anthropic routes keep their native provider.
 const ANTHROPIC_OAUTH_ACCOUNT = 'anthropic-oauth';
 // Credential-selector accounts and the OpenCode provider each one routes to.
 const STORE_OAUTH_ACCOUNT_PROVIDERS = {
@@ -73,8 +72,11 @@ function resolveOpenCodeAuthPlan(config = {}, options = {}) {
 		...(incompatibleSelection ? { reason: 'The selected OpenAI authentication does not match the native account. Select a matching native account before running OpenCode.' } : {}),
 		provider: route.provider,
 		model: route.model,
-		account_kind: accountKind(route.provider, authKind),
+		account_kind: route.provider === 'anthropic' && authKind === 'oauth'
+			? ANTHROPIC_OAUTH_ACCOUNT
+			: accountKind(route.provider, authKind),
 		auth_kind: authKind,
+		...(route.provider === 'anthropic' && authKind === 'oauth' && metadata.credential_expired ? { credential_expired: true } : {}),
 		secret_env: secretEnv,
 		secret_env_sources: storeHandoff ? openCodeStoreSecretEnvSources(route.provider)
 			: source.kind === 'opencode_auth_store' && authKind === 'api_key' ? {} : secretSources(route.provider, authKind),
@@ -89,6 +91,9 @@ function resolveOpenCodeAuthPlan(config = {}, options = {}) {
 // native request path; OAuth file-handoff env names are not API-key requirements.
 function openCodeAuthPlanError(plan, env) {
 	if (!plan.supported) return plan.reason;
+	if (plan.provider === 'anthropic' && plan.auth_kind === 'oauth' && plan.credential_expired) {
+		return 'The handed-off Anthropic OAuth credential has expired; re-login Anthropic on the controller and retry.';
+	}
 	if (plan.auth_kind === 'api_key' && plan.secret_env.includes('OPENAI_API_KEY') && !hasValue(env.OPENAI_API_KEY)) {
 		return 'Selected OpenAI API-key authentication requires OPENAI_API_KEY.';
 	}
@@ -146,6 +151,9 @@ function authMetadata(provider, env, options = {}) {
 		if (authKind) {
 			return {
 				auth_kind: authKind,
+				credential_expired: typeof entry.expires === 'number'
+					&& entry.expires <= Date.now()
+					&& !(typeof entry.refresh === 'string' && entry.refresh !== ''),
 				source: { kind: 'opencode_auth_store', location: OPENCODE_AUTH_STORE_PATH, handoff_supported: true },
 			};
 		}
