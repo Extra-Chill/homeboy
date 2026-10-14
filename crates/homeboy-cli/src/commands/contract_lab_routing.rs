@@ -222,6 +222,9 @@ impl Commands {
             Commands::Fuzz(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract())
             }
+            Commands::Workload(args) => {
+                return CommandPortabilityContract::lab_optional(args.lab_contract())
+            }
             Commands::Extension(args) if args.is_update_command() => {
                 LabCommandContract::explicit_runner_simple(args.update_command_label())
             }
@@ -280,6 +283,9 @@ impl Commands {
         let mut extension_ids = BTreeSet::new();
         match self {
             Commands::Fuzz(args) => extension_ids.extend(args.lab_route_required_extension_ids()),
+            Commands::Workload(args) => {
+                extension_ids.extend(args.lab_route_required_extension_ids())
+            }
             Commands::Review(args) => {
                 extension_ids.extend(args.effective_extension_override_ids().iter().cloned());
                 extension_ids.extend(review_lab_extension_ids(args)?);

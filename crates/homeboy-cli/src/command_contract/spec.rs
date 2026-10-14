@@ -86,7 +86,7 @@ pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth statu
 pub(crate) use homeboy_lab_contract::lab::labels::{
     BENCH_LAB_LABEL, FUZZ_DOCTOR_LAB_LABEL, FUZZ_LAB_LABEL, LINT_LAB_LABEL, REVIEW_LAB_LABEL,
     RIG_CHECK_LAB_LABEL, RIG_RUN_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL, TEST_LAB_LABEL,
-    TRACE_LAB_LABEL,
+    TRACE_LAB_LABEL, WORKLOAD_LAB_LABEL,
 };
 
 pub(crate) const RIG_SOURCE_MANAGEMENT_LAB_LABEL: &str = "rig source management";
@@ -284,6 +284,12 @@ const FUZZ_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary
     hint_label: "fuzz run/doctor",
 }];
 
+const WORKLOAD_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
+    contract_labels: &[WORKLOAD_LAB_LABEL],
+    message_label: "workload run",
+    hint_label: "workload run",
+}];
+
 const TRACE_LAB_SUPPORT: &[CommandLabSupportSummary] = &[CommandLabSupportSummary {
     contract_labels: &[TRACE_LAB_LABEL],
     message_label: TRACE_LAB_LABEL,
@@ -363,6 +369,7 @@ const RELEASE_DANGEROUS_FLAGS: &[&str] = &[
 ];
 const UPGRADE_DANGEROUS_FLAGS: &[&str] = &["--force", "--upgrade-runner"];
 const FUZZ_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
+const WORKLOAD_DANGEROUS_FLAGS: &[&str] = &["--allow-destructive"];
 const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
@@ -587,6 +594,19 @@ const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         FUZZ_MEASUREMENT_PATHS,
         guarded_safety(FUZZ_DANGEROUS_FLAGS),
         "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied",
+    ),
+];
+
+const WORKLOAD_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["run", "replay", "minimize"],
+        guarded_safety(WORKLOAD_DANGEROUS_FLAGS),
+        "executes an extension-declared workload kind and persists run evidence; a kind declared safety_class destructive is refused unless --allow-destructive is passed with an explicit homeboy/isolation-proof/v1",
+    ),
+    paths_safety(
+        &["list", "compare", "inspect"],
+        guarded_safety(&[]),
+        "reads declared workloads or persisted run evidence",
     ),
 ];
 

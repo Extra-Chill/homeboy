@@ -62,7 +62,8 @@ pub struct CaseOutcome {
     pub kind: String,
     pub source_run_id: String,
     pub case_id: String,
-    pub command: String,
+    /// The declared command, with any extra args appended.
+    pub case_command: String,
     pub env: Vec<CaseEnv>,
     /// `dry_run`, `passed` or `failed`.
     pub status: String,
@@ -173,7 +174,7 @@ pub fn execute(request: CaseRequest<'_>) -> Result<CaseOutcome> {
         kind: resolved.kind.clone(),
         source_run_id: request.source.run.id.clone(),
         case_id: request.case_id.to_string(),
-        command: command.clone(),
+        case_command: command.clone(),
         env: case_env
             .iter()
             .map(|(name, value)| CaseEnv {

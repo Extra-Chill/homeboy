@@ -12,6 +12,7 @@ pub const BENCH_LAB_LABEL: &str = "bench";
 pub const FUZZ_LAB_LABEL: &str = "fuzz";
 pub const FUZZ_DOCTOR_LAB_LABEL: &str = "fuzz doctor";
 pub const TRACE_LAB_LABEL: &str = "trace";
+pub const WORKLOAD_LAB_LABEL: &str = "workload";
 pub const RIG_CHECK_LAB_LABEL: &str = "rig check";
 pub const RIG_RUN_LAB_LABEL: &str = "rig run";
 pub const RUNTIME_REFRESH_LAB_LABEL: &str = "runtime refresh";
