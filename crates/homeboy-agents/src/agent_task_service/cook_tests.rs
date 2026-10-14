@@ -788,6 +788,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
             terminal_failure_classification: None,
             primary_failure: None,
             moving_base_recovery: None,
+            provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 cook_id: "timeout-report".to_string(),
                 latest_run_id: "timeout-run".to_string(),
@@ -1275,6 +1276,7 @@ fn provider_rotation_terminal_projection_retains_heterogeneous_route_causes() {
             terminal_failure_classification: None,
             primary_failure: None,
             moving_base_recovery: None,
+            provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 cook_id: "rotation-projection".to_string(),
                 latest_run_id: "rotation-run".to_string(),
@@ -1421,6 +1423,7 @@ fn review_form_timeout_after_selected_candidate_is_not_a_provider_timeout() {
             terminal_failure_classification: None,
             primary_failure: None,
             moving_base_recovery: None,
+            provider_route_notes: Vec::new(),
             failure_context: Some(AgentTaskCookFailureContext {
                 cook_id: "review-form-timeout-report".to_string(),
                 latest_run_id: "review-form-timeout-report-attempt-2".to_string(),
@@ -17476,6 +17479,429 @@ fn cook_remediation_classifies_verified_unchanged_attempt_without_provider_ident
         silent.ends_with("the provider returned no final message"),
         "{silent}"
     );
+}
+
+/// #15881: a verified no-change attempt on one rotation route hands the next
+/// attempt to the following configured route instead of repeating the
+/// abstaining model.
+#[test]
+fn no_change_follow_up_rotates_to_the_next_provider_route() {
+    let options = compile_options("no-change-rotation-route");
+    let mut plan = options.identity.initial_plan;
+    plan.options.rotation = Some(
+        crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+            entries: vec![
+                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                    model: Some("fixture-primary".to_string()),
+                    ..Default::default()
+                },
+                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                    model: Some("fixture-fallback".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: true,
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "fixture",
+                "model": "fixture-primary",
+                "status": "succeeded",
+                "summary": null
+            }]
+        }
+    });
+    let mut promotion = promotion("no-change-rotation-route-run");
+    promotion.status = AgentTaskPromotionStatus::NoChanges;
+    promotion.source.task_id = aggregate.outcomes[0].task_id.clone();
+    promotion.changed_files.clear();
+    promotion.deterministic_gates.clear();
+    promotion.gate_results.clear();
+
+    assert!(no_change_remediation(&promotion, &aggregate));
+    let (policy, entry_index) =
+        no_change_rotation_route(&promotion, &plan, &aggregate, None).expect("next route");
+    assert_eq!(entry_index, 1);
+    assert_eq!(
+        policy.entries[entry_index].model.as_deref(),
+        Some("fixture-fallback")
+    );
+
+    // A chain exhausted past the terminal route keeps the existing
+    // same-provider behaviour.
+    let exhausted = no_change_rotation_route(
+        &promotion,
+        &plan_with_terminal_at_last_entry("fixture-fallback"),
+        &aggregate_on_last_route(),
+        None,
+    );
+    assert_eq!(exhausted, None, "no further route means no rotation");
+}
+
+fn plan_with_terminal_at_last_entry(fallback: &str) -> crate::agent_task_schedule::AgentTaskPlan {
+    let options = compile_options("no-change-chain-exhausted");
+    let mut plan = options.identity.initial_plan;
+    plan.options.rotation = Some(
+        crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+            entries: vec![
+                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                    model: Some(fallback.to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    plan
+}
+
+fn aggregate_on_last_route() -> crate::agent_task_scheduler::AgentTaskAggregate {
+    let options = compile_options("no-change-chain-exhausted");
+    let plan = options.identity.initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: true,
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "fixture",
+                "model": "fixture-fallback",
+                "status": "succeeded",
+                "summary": null
+            }]
+        }
+    });
+    aggregate
+}
+
+/// #15881: a timed-out attempt is a transient failure, so its follow-up keeps
+/// the existing same-provider retry instead of consuming a provider rotation.
+#[test]
+fn timed_out_attempt_follow_up_retries_the_same_provider_instead_of_rotating() {
+    let options = compile_options("timeout-rotation-remediation");
+    let mut plan = options.identity.initial_plan;
+    plan.options.rotation = Some(
+        crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+            entries: vec![
+                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                    model: Some("fixture-primary".to_string()),
+                    ..Default::default()
+                },
+                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                    model: Some("fixture-fallback".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        "executor": {
+            "backend": "fixture",
+            "selector": null,
+            "model": "fixture-primary"
+        },
+        "provider_rotation": {
+            "attempts": [{
+                "attempt": 1,
+                "rotation_index": 0,
+                "backend": "fixture",
+                "model": "fixture-primary",
+                "status": "timed_out",
+                "failure_classification": "timeout",
+                "summary": null
+            }]
+        }
+    });
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    let mut promotion = promotion("timeout-rotation-remediation-run");
+    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.deterministic_gates.clear();
+    promotion.gate_results.clear();
+
+    assert!(
+        !no_change_remediation(&promotion, &aggregate),
+        "a timed-out attempt is not a verified no-change"
+    );
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a timed-out route still retries itself"
+    );
+}
+
+/// #15881, acceptance 2: a Cook run whose primary route was skipped as
+/// unready carries the bounded skip line in its report.
+#[test]
+fn cook_report_surfaces_skipped_provider_routes_in_its_status_summary() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = compile_options("skipped-route-report");
+        let run_id = "skipped-route-report-run";
+        let mut plan = options.identity.initial_plan;
+        plan.tasks[0].metadata = serde_json::json!({
+            "provider_readiness_routing": {
+                "skipped": [{
+                    "backend": "fixture",
+                    "selector": null,
+                    "model": "anthropic/claude-sonnet-5-5",
+                    "state": "credentials_unusable",
+                    "reason": "OPENCODE_API_KEY is missing",
+                    "reset_at": null,
+                    "classification": "credentials",
+                    "retryable": true,
+                    "remediation": "Refresh the provider-owned OpenCode credentials, then retry.",
+                    "cache_identity": null,
+                    "provider_identity": null
+                }]
+            }
+        });
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit durable plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "task_id": plan.tasks[0].task_id,
+                "attempt": 1,
+                "backend": "fixture",
+                "model": "openai/gpt-6-luna",
+                "state": "succeeded"
+            }]);
+        })
+        .expect("record provider execution");
+
+        let recipe_store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
+            .expect("recipe store");
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let report = cook_report_with_stores(
+            Some(&recipe_store),
+            Some(&lifecycle_store),
+            CookReportInput {
+                cook_id: "skipped-route-report".to_string(),
+                status: "failed",
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some("attempt 1 of 1 produced no change".to_string()),
+                exit_code: 1,
+                invocation_latest_run_id: Some(run_id),
+            },
+        );
+        let serialized = serde_json::to_value(&report.value).expect("report wire");
+        let notes = serialized["provider_route_notes"]
+            .as_array()
+            .expect("notes");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let note = notes[0].as_str().expect("note text");
+        assert!(
+            note.contains("anthropic/claude-sonnet-5-5 skipped: credentials_unusable"),
+            "{note}"
+        );
+        assert!(
+            note.contains("Refresh the provider-owned OpenCode credentials"),
+            "{note}"
+        );
+        assert!(note.starts_with("Ran on openai/gpt-6-luna; "), "{note}");
+    });
+}
+
+/// #15881: the follow-up Cook attempt an abstaining model's verified empty
+/// attempt dispatches actually carries the next configured rotation route,
+/// with the durable routing state advanced for the runner.
+#[test]
+fn verified_empty_attempt_dispatches_the_next_rotation_route() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-15881-rotate";
+        let run_id = format!("{cook_id}-attempt-1");
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.identity.initial_run_id = run_id.clone();
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.options.rotation = Some(
+            crate::agent_task_scheduler::AgentTaskProviderRotationPolicy {
+                entries: vec![
+                    crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        model: Some("fixture-primary".to_string()),
+                        ..Default::default()
+                    },
+                    crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                        model: Some("fixture-fallback".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut task = options.identity.initial_plan.tasks[0].clone();
+        task.policy.write = "patch".to_string();
+        task.policy.apply = "manual".to_string();
+        task.expected_artifacts = vec!["patch".to_string()];
+        options.identity.initial_plan.tasks[0] = task.clone();
+        persist_initial_recipe(&options).expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+            .expect("submit Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            &run_id,
+        )
+        .expect("record Cook attempt");
+
+        // Attempt 1 ran the first configured route and was proved unchanged.
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].metadata = serde_json::json!({
+            crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: true,
+            "provider_rotation": {
+                "attempts": [{
+                    "attempt": 1,
+                    "rotation_index": 0,
+                    "backend": "fixture",
+                    "model": "fixture-primary",
+                    "status": "succeeded",
+                    "summary": null
+                }]
+            }
+        });
+        agent_task_lifecycle::record_run_aggregate(
+            &run_id,
+            &options.identity.initial_plan,
+            &aggregate,
+        )
+        .expect("persist verified-empty aggregate");
+
+        // The promotion fixture must be durable enough for the follow-up
+        // baseline to measure: a real Git worktree whose HEAD is unchanged by
+        // the (empty) promoted patch — exactly what a verified no-change
+        // attempt leaves behind.
+        let temp = tempfile::tempdir().expect("follow-up baseline repo");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create fixture repo");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .expect("git init")
+                .success());
+        }
+        std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "base"])
+            .current_dir(&repo)
+            .status()
+            .expect("git commit")
+            .success());
+        let target_head = git_output(&repo, &["rev-parse", "HEAD"])
+            .expect("fixture HEAD")
+            .trim()
+            .to_string();
+        let patch_path = temp.path().join("empty.patch");
+        std::fs::write(&patch_path, "").expect("empty patch");
+        let patch_sha256 = homeboy_engine_primitives::content_hash::sha256_hex(&[]);
+        let provenance_worktree = repo.display().to_string();
+        let patch_display = patch_path.display().to_string();
+        let finalizations = Arc::new(AtomicUsize::new(0));
+        let finalize_count = Arc::clone(&finalizations);
+        let side_effects = CookSideEffects::for_test(
+            move |lifecycle_store, _, run_id| {
+                let report: crate::agent_task_promotion::AgentTaskPromotionReport =
+                    serde_json::from_value(serde_json::json!({
+                        "schema": "homeboy/agent-task-promotion-report/v1",
+                        "status": "no_changes",
+                        "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
+                        "to_worktree": "fixture@target",
+                        "target": {"worktree": "fixture@target", "head": target_head},
+                        "patch_artifact": {
+                            "id": "patch",
+                            "kind": "patch",
+                            "path": patch_display,
+                            "sha256": patch_sha256
+                        },
+                        "changed_files": [],
+                        "deterministic_gates": [],
+                        "gate_results": [],
+                        "operator_notification": {"status": "completed", "message": "complete"},
+                        "verified_base": {"base": "main", "sha": target_head},
+                        "provenance": {"worktree_path": provenance_worktree}
+                    }))
+                    .expect("no-change promotion fixture");
+                lifecycle_store.record_promotion(
+                    run_id,
+                    serde_json::to_value(&report).expect("serialize promotion"),
+                )?;
+                Ok(report)
+            },
+            |_, _, _| unreachable!("an unchanged attempt cannot enter moving-base recovery"),
+            move |_, _, _, _| {
+                finalize_count.fetch_add(1, Ordering::SeqCst);
+                unreachable!("an unchanged attempt must not finalize")
+            },
+        );
+        let result = run_cook(CookContext {
+            side_effects: Some(side_effects),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        });
+        let report = result.expect("run_cook report");
+        assert_eq!(
+            report.value.status, "in_flight",
+            "the detached follow-up is accepted"
+        );
+
+        assert_eq!(
+            dispatches.load(Ordering::SeqCst),
+            1,
+            "only the no-change follow-up dispatches through the detached transport"
+        );
+        let recipe = load_recipe(cook_id).expect("durable recipe");
+        let follow_up = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt == 2)
+            .expect("persisted follow-up attempt");
+        let follow_up_task = &follow_up.plan.tasks[0];
+        assert_eq!(
+            follow_up_task.executor.model(),
+            Some("fixture-fallback"),
+            "the follow-up runs the next configured route, not the abstaining model"
+        );
+        let routing = &follow_up_task.metadata["provider_readiness_routing"];
+        assert_eq!(routing["next_rotation_index"], 2);
+        assert_eq!(routing["provider_rotations_used"], 1);
+        assert!(
+            follow_up_task.instructions.contains("attempt 2 of 2"),
+            "the retry is still the same task: {}",
+            follow_up_task.instructions
+        );
+    });
 }
 
 #[test]

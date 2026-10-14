@@ -32,7 +32,8 @@ use crate::agent_task_promotion::{
     AgentTaskPromotionStatus,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
+    AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy, AgentTaskScheduleSupport, SharedAgentTaskExecutor,
 };
 use crate::agent_task_timeout::{
     capture_cook_deadline, current_cook_deadline, expired_cook_deadline, CookDeadline,
@@ -61,7 +62,8 @@ use super::cook_pre_execution::{
     materialize_cook_attempt_with_stores, materialize_initial_cook_attempt_with_stores_outcome,
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     provider_rotation_attempts, record_pre_execution_failure, retryable_pre_execution_failure,
-    terminal_executor_matches, with_pre_execution_phase, CookExecutionPreparation,
+    terminal_executor_identity, terminal_executor_matches, with_pre_execution_phase,
+    CookExecutionPreparation,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, cook_report, cook_report_with_stores,
@@ -1610,6 +1612,11 @@ pub struct AgentTaskCookReport {
     /// command evidence remains in the durable run named by `evidence_ref`.
     pub primary_failure: Option<AgentTaskCookPrimaryFailure>,
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
+    /// One bounded, operator-facing line per provider route this run skipped
+    /// as unready before dispatch, prefixed once with the route that actually
+    /// ran (#15881). A credentials-dead primary is an operator-visible
+    /// condition, not just an event-log line.
+    pub provider_route_notes: Vec<String>,
     /// Generic durable recovery coordinates for a Cook that stopped after its
     /// recipe was materialized. It may contain a bounded causal provider-command
     /// projection; expanded evidence remains available through `diagnose`.
@@ -1742,6 +1749,8 @@ impl serde::Serialize for AgentTaskCookReport {
             primary_failure: Option<&'a AgentTaskCookPrimaryFailure>,
             #[serde(skip_serializing_if = "Option::is_none")]
             moving_base_recovery: Option<&'a MovingBaseCookRecovery>,
+            #[serde(skip_serializing_if = "slice_is_empty")]
+            provider_route_notes: &'a [String],
             #[serde(skip_serializing_if = "Option::is_none")]
             failure_context: Option<&'a AgentTaskCookFailureContext>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -1766,6 +1775,7 @@ impl serde::Serialize for AgentTaskCookReport {
             terminal_failure_classification: self.terminal_failure_classification.as_ref(),
             primary_failure: self.primary_failure.as_ref(),
             moving_base_recovery: self.moving_base_recovery.as_ref(),
+            provider_route_notes: &self.provider_route_notes,
             failure_context: self.failure_context.as_ref(),
             completion,
         };
@@ -2457,6 +2467,7 @@ mod run_lifecycle_projection_tests {
             terminal_failure_classification: None,
             primary_failure: None,
             moving_base_recovery: None,
+            provider_route_notes: Vec::new(),
             failure_context: None,
             report_stores: None,
         }
@@ -2997,12 +3008,65 @@ fn cook_remediation_same_provider(
     // same-provider gate remediation, even when a timed-out provider omitted
     // its terminal executor identity. A Homeboy-verified unchanged attempt is
     // likewise authenticated by Homeboy's own checkout proof: its follow-up
-    // re-runs the same task, so it is a same-provider retry (#15294).
+    // re-runs the same task, so it is a same-provider retry unless a rotation
+    // route is available (`no_change_rotation_route`, #15881).
     (promotion.status.gate_failed() || no_change_remediation(promotion, aggregate))
         .then_some(true)
         .or_else(|| {
             terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
         })
+}
+
+/// The provider rotation entry a verified no-change follow-up runs next
+/// (#15881): one past the last configured entry whose route the terminal
+/// attempt actually ran. A model that abstained almost always abstains again,
+/// so the retry budget has to offer the miss to a different provider instead
+/// of repeating the route. An explicitly pinned route that no entry describes
+/// rotates to the first configured entry. Candidate-adoption review never
+/// reaches this decision: its caller pins the adopted route and reports a
+/// known same executor. `None` keeps the existing same-provider behaviour: no
+/// configured chain, the attempted route is unknown, or every configured
+/// entry was already behind the terminal route.
+pub(crate) fn no_change_rotation_route(
+    promotion: &AgentTaskPromotionReport,
+    plan: &AgentTaskPlan,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    durable_provider_executions: Option<&Value>,
+) -> Option<(AgentTaskProviderRotationPolicy, usize)> {
+    let source = plan.tasks.first()?;
+    let policy =
+        crate::agent_task_scheduler::AgentTaskScheduleSupport::rotation_policy_for_request(
+            source,
+            plan.options.rotation.as_ref(),
+        )?;
+    if policy.entries.is_empty() {
+        return None;
+    }
+    let outcome = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id == promotion.source.task_id)?;
+    let terminal = terminal_executor_identity(outcome, plan, durable_provider_executions)?;
+    let entry_matches_route = |entry: &AgentTaskProviderRotationEntry| {
+        entry
+            .backend
+            .as_deref()
+            .is_none_or(|entry_backend| Some(entry_backend) == Some(terminal.backend.as_str()))
+            && entry
+                .selector
+                .as_deref()
+                .is_none_or(|entry_selector| Some(entry_selector) == terminal.selector.as_deref())
+            && entry
+                .model
+                .as_deref()
+                .is_none_or(|entry_model| Some(entry_model) == terminal.model.as_deref())
+    };
+    let next = policy
+        .entries
+        .iter()
+        .rposition(entry_matches_route)
+        .map_or(0, |matched| matched + 1);
+    (next < policy.entries.len()).then_some((policy, next))
 }
 
 const NO_CHANGE_PROVIDER_MESSAGE_LIMIT: usize = 1_000;
@@ -3236,6 +3300,67 @@ pub(crate) fn dispatch_cook_follow_up(
             reason: "a gate-fix intent requires an authenticated source patch digest".to_string(),
         });
     }
+    // A verified no-change attempt consumes a provider rotation, not a
+    // same-provider retry (#15881): an abstaining model almost always abstains
+    // again, so repeating its route spends the retry budget on the same miss.
+    // Only a change task rotates; investigation and form-only follow-ups change
+    // nothing by design, and an explicitly pinned adoption route never reaches
+    // this decision (`known_same_executor`). The route must be reconstructable
+    // from durable evidence (terminal executor identity), otherwise the follow
+    // -up keeps the existing same-provider behaviour.
+    //
+    // The reroute is applied before the durable replay comparison below so a
+    // replayed follow-up re-derives exactly the intent that was persisted. When
+    // the rotation budget is spent, the budget block below restores the
+    // unrotated request and falls back to the same-provider behaviour.
+    let unrotated_follow_up_request = follow_up_request.clone();
+    let no_change_rotation = (!known_same_executor
+        && follow_up_request.inputs["cook_loop"]["review_form_required"] != true
+        && no_change_remediation(promotion, aggregate)
+        && request_requires_substantive_candidate(&follow_up_request))
+    .then(|| {
+        let durable_provider_executions = lifecycle_store
+            .read_record(source_run_id)
+            .ok()
+            .and_then(|record| record.metadata.get("provider_executions").cloned())
+            .filter(|executions| {
+                executions
+                    .as_array()
+                    .is_some_and(|executions| !executions.is_empty())
+            });
+        no_change_rotation_route(
+            promotion,
+            plan,
+            aggregate,
+            durable_provider_executions.as_ref(),
+        )
+    })
+    .flatten();
+    if let Some((policy, entry_index)) = no_change_rotation.as_ref() {
+        // Hand the follow-up the next configured rotation route and advance the
+        // durable routing state so the runner keeps rotating from the right
+        // entry, and carries the routes already skipped as unready.
+        AgentTaskScheduleSupport::apply_rotation_entry(
+            &mut follow_up_request,
+            &policy.entries[*entry_index],
+            policy,
+        );
+        if !follow_up_request.metadata.is_object() {
+            follow_up_request.metadata = serde_json::json!({});
+        }
+        follow_up_request.metadata["provider_readiness_routing"] = serde_json::json!({
+            "next_rotation_index": entry_index + 1,
+            "provider_rotations_used": 1,
+        });
+        if let Some(skipped) = plan
+            .tasks
+            .first()
+            .and_then(|task| task.metadata.pointer("/provider_readiness_routing/skipped"))
+            .cloned()
+        {
+            follow_up_request.metadata["provider_readiness_routing"]["skipped"] = skipped;
+        }
+    }
     let mut execution_recovery = None;
     if let Some(bound) = recipe.attempts.iter().rev().find(|bound| {
         bound.attempt > attempt
@@ -3377,18 +3502,43 @@ pub(crate) fn dispatch_cook_follow_up(
                 .as_array()
                 .is_some_and(|executions| !executions.is_empty())
         });
-    let same_provider = (known_same_executor
-        || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
-        .then_some(true)
-        .or_else(|| {
-            cook_remediation_same_provider(
-                promotion,
-                aggregate,
-                plan,
-                durable_provider_executions.as_ref(),
-                &follow_up_request.executor,
-            )
-        });
+    let review_form_only_follow_up =
+        follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
+    let mut reserved_no_change_rotation = None;
+    let same_provider = if no_change_rotation.is_some() {
+        // When the rotation budget is spent, restore the unrotated request and
+        // fall back to the existing same-provider retry: an exhausted route
+        // chain must never fail the cook by itself when the provider that
+        // abstained is still available.
+        match reserve_remediation_budget(&remaining_budget, false) {
+            Ok(reservation) => {
+                reserved_no_change_rotation = Some(reservation);
+                Some(true)
+            }
+            Err(_) => {
+                follow_up_request = unrotated_follow_up_request;
+                cook_remediation_same_provider(
+                    promotion,
+                    aggregate,
+                    plan,
+                    durable_provider_executions.as_ref(),
+                    &follow_up_request.executor,
+                )
+            }
+        }
+    } else {
+        (known_same_executor || review_form_only_follow_up)
+            .then_some(true)
+            .or_else(|| {
+                cook_remediation_same_provider(
+                    promotion,
+                    aggregate,
+                    plan,
+                    durable_provider_executions.as_ref(),
+                    &follow_up_request.executor,
+                )
+            })
+    };
     let Some(same_provider) = same_provider else {
         return Ok(CookFollowUpDispatch::PolicyFailure {
             reason: "cannot classify Cook remediation without terminal executor identity"
@@ -3397,6 +3547,10 @@ pub(crate) fn dispatch_cook_follow_up(
     };
     let reservation = if execution_recovery.is_some() {
         ExecutionBudgetUsage::default()
+    } else if let Some(reservation) = reserved_no_change_rotation {
+        // The reroute was applied before the durable replay comparison; this
+        // only commits the already-reserved rotation budget.
+        reservation
     } else {
         match reserve_remediation_budget(&remaining_budget, same_provider) {
             Ok(reservation) => reservation,

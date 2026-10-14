@@ -385,6 +385,11 @@ fn terminal_payload(
             "Failure classification",
             report.terminal_failure_classification.clone(),
         );
+    // A primary route skipped before dispatch is an operator-visible condition,
+    // not just an event-log line (#15881): one bounded line per skipped route.
+    for note in &report.provider_route_notes {
+        payload = payload.with_fact("Skipped route", note.clone());
+    }
 
     if let Some(completion) = report.completion() {
         payload = payload.with_fact("Completion", completion.state);
@@ -585,6 +590,7 @@ pub(crate) fn cook_terminal_for_attempt(
         terminal_failure_classification: None,
         primary_failure: None,
         moving_base_recovery: None,
+        provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,
     };

@@ -157,6 +157,12 @@ pub struct ControlPlaneRun {
     pub runtime: Option<ControlPlaneRuntime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ControlPlaneProviderSummary>,
+    /// One bounded line per deduped provider route this run skipped as unready
+    /// before dispatch, prefixed once with the route that actually ran
+    /// (#15881). A primary skipped for credentials is an operator-visible
+    /// condition, not just an event-log line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_route_notes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +200,7 @@ impl ControlPlaneRun {
             owner: None,
             runtime: None,
             provider: None,
+            provider_route_notes: Vec::new(),
             heartbeat_at: None,
             liveness: None,
             candidate: None,
