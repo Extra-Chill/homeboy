@@ -312,7 +312,28 @@ impl worktree::WorktreeReconciliationAuthority for AgentTaskAuthority {
         &self,
         record: &worktree::TaskWorktreeRecord,
     ) -> Option<worktree::WorktreeAuthorityRefusal> {
-        homeboy::agents::agent_task_lifecycle::local_terminal_workspace_authority(record).err()
+        // At mutation time this adapter holds the record's reconciliation
+        // claim; its own acquisition intent is not a foreign claim.
+        let held = record
+            .effective_workspace_identity()
+            .ok()
+            .and_then(|workspace| {
+                self.0.lock().ok().and_then(|claims| {
+                    claims
+                        .values()
+                        .find(|claim| claim.workspace == workspace)
+                        .cloned()
+                })
+            });
+        match held {
+            Some(claim) => {
+                homeboy::agents::agent_task_lifecycle::local_terminal_workspace_authority_under_claim(
+                    record, &claim,
+                )
+            }
+            None => homeboy::agents::agent_task_lifecycle::local_terminal_workspace_authority(record),
+        }
+        .err()
     }
 
     fn acquire(
