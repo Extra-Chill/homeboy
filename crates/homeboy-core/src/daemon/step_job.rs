@@ -463,8 +463,33 @@ pub fn step_child_authorization(
     })
 }
 
+/// The direct parent of this process, when its kernel identity is readable.
+///
+/// An authorized step child may re-execute itself (a Cook delegates to its
+/// pinned controller runtime) and wait for that process. The re-executed
+/// process inherits the step environment, so it reaches the start gate too;
+/// its parent is the child the checkpoint names, proven by PID and start
+/// identity, not by an inheritable value.
+fn parent_step_child() -> Option<StepChild> {
+    #[cfg(unix)]
+    {
+        let pid = std::os::unix::process::parent_id();
+        let start_identity = crate::process::process_start_identity(pid).ok()??;
+        Some(StepChild {
+            pid,
+            start_identity,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// Called at child entry before side effects. Foreground invocations pass;
 /// a step child waits for Running, or returns false to exit without work.
+/// A process whose parent is the authorized child is that child's own
+/// re-execution and passes as well.
 pub fn await_step_child_start() -> Result<bool> {
     let Some(job_id) = std::env::var_os(STEP_JOB_ID_ENV) else {
         return Ok(true);
@@ -484,7 +509,13 @@ pub fn await_step_child_start() -> Result<bool> {
     loop {
         match step_child_authorization(Path::new(&path), job_id, &child)? {
             StepChildAuthorization::Authorized => return Ok(true),
-            StepChildAuthorization::Inert => return Ok(false),
+            StepChildAuthorization::Inert => {
+                let Some(parent) = parent_step_child() else {
+                    return Ok(false);
+                };
+                return Ok(step_child_authorization(Path::new(&path), job_id, &parent)?
+                    == StepChildAuthorization::Authorized);
+            }
             StepChildAuthorization::Waiting => std::thread::sleep(SUPERVISE_POLL),
         }
     }
@@ -1601,6 +1632,74 @@ mod tests {
             assert_eq!(
                 step_child_authorization(&path, id, &child).unwrap(),
                 StepChildAuthorization::Inert
+            );
+        });
+    }
+
+    /// A Cook step child re-executes itself into its pinned controller runtime
+    /// and waits for it. That process inherits the step environment, so it
+    /// passes the gate because its parent is the authorized child, and only
+    /// then: a process whose parent is not the named child stays inert.
+    #[test]
+    fn child_gate_admits_the_authorized_childs_own_reexecution() {
+        with_isolated_home(|home| {
+            register_step_job_driver();
+            let path = home.path().join("reexec-jobs.json");
+            let request = request("true", Default::default());
+            let harness = ControllerJobHarness::durable(
+                Arc::new(StepJobDriver),
+                to_value(&request).unwrap(),
+                &path,
+                "reexec",
+            )
+            .unwrap();
+            let pid = std::process::id();
+            let this_process = StepChild {
+                pid,
+                start_identity: crate::process::process_start_identity(pid)
+                    .unwrap()
+                    .unwrap(),
+            };
+            let run_gated_child = |marker: &Path| {
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "daemon::step_job::tests::gated_child_entry",
+                        "--nocapture",
+                    ])
+                    .env(STEP_JOB_ID_ENV, harness.job().unwrap().id.to_string())
+                    .env(STEP_JOB_STORE_ENV, &path)
+                    .env("STEP_GATE_TEST_MARKER", marker)
+                    .status()
+                    .unwrap()
+            };
+
+            let mut checkpoint = StepJobCheckpoint::waiting(request);
+            checkpoint.phase = StepPhase::Running;
+            checkpoint.child = Some(this_process.clone());
+            harness
+                .handle()
+                .checkpoint(to_value(&checkpoint).unwrap())
+                .unwrap();
+            let reexecuted = home.path().join("reexecuted");
+            assert!(run_gated_child(&reexecuted).success());
+            assert!(
+                reexecuted.exists(),
+                "the authorized child's re-execution must act"
+            );
+
+            let mut unrelated = this_process;
+            unrelated.pid += 1;
+            checkpoint.child = Some(unrelated);
+            harness
+                .handle()
+                .checkpoint(to_value(&checkpoint).unwrap())
+                .unwrap();
+            let stranger = home.path().join("stranger");
+            assert!(run_gated_child(&stranger).success());
+            assert!(
+                !stranger.exists(),
+                "a process whose parent is not the named child must stay inert"
             );
         });
     }
