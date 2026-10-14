@@ -122,6 +122,36 @@ fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
 }
 
 #[test]
+fn executor_failure_code_overrides_successful_wrapper_and_preserves_terminal_identity() {
+    let mut outcome = outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded);
+    outcome.metadata = json!({ "model": "openai/gpt-6-luna" });
+    outcome.outputs = json!({
+        "provider_run_result": {
+            "status": "completed",
+            "model": "anthropic/skipped-model",
+            "failure_code": "agent_task.opencode_required_outputs_missing",
+            "opencode_session": { "model": "openai/gpt-6-luna" },
+            "final_message": "Tests could not be validated; serialization tooling was unavailable."
+        }
+    });
+
+    AgentTaskScheduleSupport::classify_failed_nested_executor_status(&mut outcome);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    let diagnostic = &outcome.diagnostics[0];
+    assert_eq!(diagnostic.class, "agent_task.nested_executor_failed_status");
+    assert_eq!(
+        diagnostic.data["failure_code"],
+        "agent_task.opencode_required_outputs_missing"
+    );
+    assert_eq!(diagnostic.data["executed_model"], "openai/gpt-6-luna");
+    assert_eq!(
+        diagnostic.data["final_message_excerpt"],
+        "Tests could not be validated; serialization tooling was unavailable."
+    );
+}
+
+#[test]
 fn nested_terminal_state_failure_fails_succeeded_wrapper_outcome() {
     let scheduler = AgentTaskScheduler::new(Arc::new(NestedTerminalStateFailedExecutor));
 

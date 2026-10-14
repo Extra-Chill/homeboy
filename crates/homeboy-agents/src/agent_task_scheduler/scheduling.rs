@@ -1047,8 +1047,61 @@ impl AgentTaskScheduleSupport {
                 "key": failed_status.key,
                 "value": failed_status.value,
                 "provider_run_result": outcome.outputs.get("provider_run_result").cloned(),
+                "failure_code": if matches!(failed_status.key.as_str(), "failure_code" | "failureCode") {
+                    Some(failed_status.value.clone())
+                } else {
+                    None
+                },
+                "executed_model": outcome.outputs.get("provider_run_result")
+                    .and_then(Self::executed_model_from_result)
+                    .or_else(|| outcome.selected_model().map(str::to_string)),
+                "final_message_excerpt": outcome.outputs.get("provider_run_result")
+                    .and_then(|result| Self::nested_string_field(result, &["final_message", "finalMessage", "assistant_message", "assistantMessage"]))
+                    .map(|message| message.chars().take(1_000).collect::<String>()),
             }),
         });
+    }
+
+    fn nested_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+        match value {
+            Value::Object(object) => {
+                for key in keys {
+                    if let Some(text) = object.get(*key).and_then(Value::as_str) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            return Some(text.to_string());
+                        }
+                    }
+                }
+                object
+                    .values()
+                    .find_map(|child| Self::nested_string_field(child, keys))
+            }
+            Value::Array(items) => items
+                .iter()
+                .find_map(|child| Self::nested_string_field(child, keys)),
+            _ => None,
+        }
+    }
+
+    fn executed_model_from_result(result: &Value) -> Option<String> {
+        [
+            "/opencode_session/model",
+            "/metadata/model_identity/actual",
+            "/model_identity/actual",
+            "/metadata/model",
+            "/model",
+        ]
+        .iter()
+        .find_map(|pointer| {
+            result
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| Self::nested_string_field(result, &["actual_model", "executed_model"]))
     }
 
     /// A provider that finished its work but omitted only the reviewer-facing

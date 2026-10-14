@@ -48,7 +48,10 @@ pub(super) fn nested_failed_executor_status(
     if let Some(found) = outcome
         .outputs
         .get("provider_run_result")
-        .and_then(|result| find_failed_status_value(result, "outputs.provider_run_result"))
+        .and_then(|result| {
+            find_failed_status_value(result, "outputs.provider_run_result")
+                .or_else(|| find_executor_failure_code(result, "outputs.provider_run_result"))
+        })
     {
         return Some(found);
     }
@@ -71,6 +74,37 @@ pub(super) fn nested_failed_executor_status(
                 &format!("typed_artifacts.{}.payload", artifact.name),
             )
         })
+}
+
+/// Executor adapters can report a failed terminal result through a structured
+/// failure code even when their wrapper's status says `completed`. Preserve
+/// that authoritative failure instead of treating the wrapper success as the
+/// task result.
+fn find_executor_failure_code(value: &Value, path: &str) -> Option<NestedFailedExecutorStatus> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let child_path = format!("{path}.{key}");
+                if matches!(key.as_str(), "failure_code" | "failureCode") {
+                    if let Some(raw) = child.as_str().map(str::trim).filter(|raw| !raw.is_empty()) {
+                        return Some(NestedFailedExecutorStatus {
+                            path: child_path,
+                            key: key.clone(),
+                            value: raw.to_string(),
+                        });
+                    }
+                }
+                if let Some(found) = find_executor_failure_code(child, &child_path) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            find_executor_failure_code(child, &format!("{path}.{index}"))
+        }),
+        _ => None,
+    }
 }
 
 pub(super) fn find_failed_status_value(
