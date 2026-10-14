@@ -168,6 +168,19 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 		assert.equal(record.agentDir, path.join(os.homedir(), 'cook-agent'));
 	}
 
+	// A long session's event stream is not capped by an output buffer: per-token
+	// message_update events push stdout far past spawnSync's 10 MiB default.
+	{
+		const delta = { type: 'message_update', message: assistant({ content: [{ type: 'text', text: 'x'.repeat(4096) }] }) };
+		const events = Array.from({ length: 3000 }, () => delta);
+		events.push({ type: 'message_end', message: assistant() }, { type: 'agent_settled' });
+		const { result } = run({ events });
+		assert.equal(result.status, 'succeeded', JSON.stringify(result).slice(0, 500));
+		assert.equal(result.summary, 'Fixed the bug.');
+		const stdoutArtifact = result.artifacts.find((artifact) => artifact.name === 'pi-stdout');
+		assert.ok(stdoutArtifact.size_bytes > 10 * 1024 * 1024, String(stdoutArtifact.size_bytes));
+	}
+
 	// No artifacts dir: no session file is written.
 	{
 		const { record } = run({ events: okStream, request: { artifacts_path: undefined } });

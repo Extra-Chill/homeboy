@@ -179,9 +179,36 @@ function createCliAgentTaskExecutor(spec) {
 		return null;
 	}
 
+	function processStreamPath(request, config, stream) {
+		const artifactDir = artifactDirectory(request, config);
+		return artifactDir ? path.join(artifactDir, `${safeFileSegment(request.task_id)}-${artifactProvider}-${stream}.txt`) : '';
+	}
+
+	/**
+	 * Run the provider. When its process streams are collected as artifacts,
+	 * stdout goes straight to the artifact file rather than an in-memory pipe:
+	 * a long session's event stream outgrows any fixed maxBuffer (Pi's JSON
+	 * mode emits an event per streamed token), and a file that grows while the
+	 * provider works is also visible to Homeboy as liveness.
+	 */
+	function spawnProvider(request, config, command, args, spawnOptions) {
+		const stdoutFile = collectArtifacts ? processStreamPath(request, config, 'stdout') : '';
+		if (!stdoutFile) {
+			return spawnSync(command, args, spawnOptions);
+		}
+		fs.mkdirSync(path.dirname(stdoutFile), { recursive: true });
+		const stdoutFd = fs.openSync(stdoutFile, 'w');
+		let spawnResult;
+		try {
+			spawnResult = spawnSync(command, args, { ...spawnOptions, stdio: ['pipe', stdoutFd, 'pipe'] });
+		} finally {
+			fs.closeSync(stdoutFd);
+		}
+		return { ...spawnResult, stdout: fs.readFileSync(stdoutFile, 'utf8') };
+	}
+
 	function processArtifacts(request, config, spawnResult, redactedEnv = secretEnv) {
-		const artifactDir = config.artifacts_path || config.artifactsPath || request.artifacts_path || process.env.HOMEBOY_AGENT_TASK_ARTIFACTS_DIR || process.env.HOMEBOY_RUNTIME_AGENT_ARTIFACTS_DIR || '';
-		if (!artifactDir) {
+		if (!artifactDirectory(request, config)) {
 			return {};
 		}
 		const artifacts = [];
@@ -191,7 +218,7 @@ function createCliAgentTaskExecutor(spec) {
 			if (!content) {
 				continue;
 			}
-			const filePath = path.join(artifactDir, `${safeFileSegment(request.task_id)}-${artifactProvider}-${stream}.txt`);
+			const filePath = processStreamPath(request, config, stream);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			fs.writeFileSync(filePath, content);
 			const artifact = {
@@ -240,7 +267,7 @@ function createCliAgentTaskExecutor(spec) {
 		const args = buildArgs(request, config, commandSpec, options);
 		const timeoutSeconds = timeoutSecondsFromLimits(request.limits, timeoutFallback(config));
 		const spawnExtra = buildSpawn(request, config, options);
-		const spawnResult = spawnSync(commandSpec.command, args, {
+		const spawnResult = spawnProvider(request, config, commandSpec.command, args, {
 			cwd,
 			encoding: 'utf8',
 			maxBuffer: options.maxBuffer || DEFAULT_MAX_BUFFER,
