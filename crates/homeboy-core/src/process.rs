@@ -1687,6 +1687,48 @@ fn ensure_sigkill_reaped(scope: &str, owner_pid: u32, survivors: &[u32]) -> Resu
     )))
 }
 
+/// The ancestors of `pid`, nearest first, stopping before PID 1.
+#[cfg(unix)]
+pub fn ancestor_pids(pid: u32) -> Result<Vec<u32>> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("failed to inspect process tree with ps: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "failed to inspect process tree with ps: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(ancestor_pids_from_ps(
+        &String::from_utf8_lossy(&output.stdout),
+        pid,
+    ))
+}
+
+#[cfg(unix)]
+fn ancestor_pids_from_ps(ps_output: &str, pid: u32) -> Vec<u32> {
+    let parents: std::collections::HashMap<u32, u32> = ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut ancestors = Vec::new();
+    let mut current = pid;
+    while let Some(&parent) = parents.get(&current) {
+        if parent <= 1 || ancestors.contains(&parent) {
+            break;
+        }
+        ancestors.push(parent);
+        current = parent;
+    }
+    ancestors
+}
+
 #[cfg(unix)]
 fn unix_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
     let output = Command::new("ps")
@@ -2303,6 +2345,15 @@ mod process_tree_tests {
         descendants.sort_unstable();
 
         assert_eq!(descendants, vec![11, 12, 13]);
+    }
+
+    #[test]
+    fn ancestor_pids_from_ps_walks_up_to_init() {
+        let ps = "10 1\n11 10\n12 11\n13 10\n20 1\n";
+
+        assert_eq!(ancestor_pids_from_ps(ps, 12), vec![11, 10]);
+        assert!(ancestor_pids_from_ps(ps, 20).is_empty());
+        assert!(ancestor_pids_from_ps(ps, 99).is_empty());
     }
 
     #[test]
