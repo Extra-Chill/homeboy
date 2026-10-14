@@ -9,6 +9,16 @@ pub const CARGO_TARGETS_STORE: &str = "cargo-targets";
 pub const CONTROLLER_RUNTIMES_STORE: &str = "controller-runtimes";
 pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 
+/// Observation-store file name, scoped to its schema version.
+///
+/// Homeboy never migrates the observation store across schema versions, so a
+/// store is only usable by binaries on its own schema. Naming the file by
+/// version lets binaries on different schemas share one data root — a runner
+/// serving controllers that upgrade at different times — each with its own
+/// store, instead of recreating a store the other refuses to open (#15944).
+/// The observation schema pins this name to its `SCHEMA_VERSION`.
+pub const OBSERVATION_DB_FILENAME: &str = "homeboy-v29.sqlite";
+
 /// Immutable filesystem roots resolved at an application boundary.
 ///
 /// Stateful services receive this value instead of repeatedly consulting
@@ -346,7 +356,7 @@ pub fn homeboy_data() -> Result<PathBuf> {
 
 /// Local SQLite observation-store path below an already-resolved data root.
 pub fn observation_db_in_root(data_root: &Path) -> PathBuf {
-    data_root.join("homeboy.sqlite")
+    data_root.join(OBSERVATION_DB_FILENAME)
 }
 
 /// Local SQLite observation-store path.

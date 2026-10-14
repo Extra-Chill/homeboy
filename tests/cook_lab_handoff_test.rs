@@ -1204,7 +1204,7 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
         r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
     )
     .expect("disable host-capacity admission for fixture worktree");
-    let database = context.data_dir().join("homeboy.sqlite");
+    let database = homeboy_core::paths::observation_db_in_root(&context.data_dir());
     let store = ObservationStore::open_initialized_at(&database).expect("open fixture store");
     for index in 0..100 {
         store

@@ -1199,10 +1199,15 @@ fn filesystem_entry_with_budget(
             "managed",
             "homeboy cleanup --include controller-scratch",
         ),
-        "homeboy.sqlite" => (
+        homeboy::core::paths::OBSERVATION_DB_FILENAME => (
             "sqlite_observation_store",
             "managed",
             "operator-managed SQLite VACUUM",
+        ),
+        name if is_superseded_observation_store(name) => (
+            "superseded_observation_store",
+            "superseded",
+            "remove once no Homeboy binary on that schema uses this data root",
         ),
         _ => (
             "unknown_storage",
@@ -1211,6 +1216,18 @@ fn filesystem_entry_with_budget(
         ),
     };
     filesystem_entry_with_category(path, category, classification, command, budget)
+}
+
+/// Observation stores from other schema versions: the unversioned
+/// `homeboy.sqlite` (schema 28 and older) and `homeboy-v<N>.sqlite`.
+fn is_superseded_observation_store(name: &str) -> bool {
+    name == "homeboy.sqlite"
+        || name
+            .strip_prefix("homeboy-v")
+            .and_then(|rest| rest.strip_suffix(".sqlite"))
+            .is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+            })
 }
 
 fn filesystem_entry_with_category(
@@ -5184,6 +5201,27 @@ mod tests {
             unknown_entry.cleanup_or_status_command,
             "inspect path ownership before removal"
         );
+    }
+
+    #[test]
+    fn filesystem_inventory_separates_current_and_superseded_observation_stores() {
+        let root = TempDir::new().expect("storage root");
+        let category = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::write(&path, b"sqlite").expect("store file");
+            filesystem_entry(path).expect("store inventory").category
+        };
+
+        assert_eq!(
+            category(homeboy::core::paths::OBSERVATION_DB_FILENAME),
+            "sqlite_observation_store"
+        );
+        assert_eq!(category("homeboy.sqlite"), "superseded_observation_store");
+        assert_eq!(
+            category("homeboy-v28.sqlite"),
+            "superseded_observation_store"
+        );
+        assert_eq!(category("homeboy-vx.sqlite"), "unknown_storage");
     }
 
     #[test]
