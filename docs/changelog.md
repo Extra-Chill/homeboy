@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.424.1] - 2026-10-14
+
+### Changed
+- strip the scheduler's in-plan output dependency graph
+
+### Fixed
+- continue failed terminal continuations instead of stopping silently
+- bound runner transport in control-plane progress events
+
 ## [0.424.0] - 2026-10-14
 
 ### Added
