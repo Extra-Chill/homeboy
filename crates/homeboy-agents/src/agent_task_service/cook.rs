@@ -7347,6 +7347,31 @@ fn run_cook_spine(
                 &record.run_id,
                 record.runner_id(),
             );
+            if let Some(failure) = aggregate.outcomes.iter().find_map(|outcome| {
+                outcome.diagnostics.iter().find_map(|diagnostic| {
+                    let code = diagnostic.data.get("failure_code")?.as_str()?;
+                    Some((
+                        code,
+                        diagnostic
+                            .data
+                            .get("executed_model")
+                            .and_then(Value::as_str),
+                        diagnostic
+                            .data
+                            .get("final_message_excerpt")
+                            .and_then(Value::as_str),
+                    ))
+                })
+            }) {
+                report.value.terminal_phase = Some("provider".to_string());
+                report.value.terminal_failure_classification = Some(failure.0.to_string());
+                report.value.stop_reason = Some(format!(
+                    "provider finished without acceptable output (failure_code: {}; executed_model: {}; final_message: {})",
+                    failure.0,
+                    failure.1.unwrap_or("unknown"),
+                    failure.2.unwrap_or("no final message")
+                ));
+            }
             return Ok(report);
         }
 

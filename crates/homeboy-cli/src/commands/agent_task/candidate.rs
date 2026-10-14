@@ -195,6 +195,7 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
     for artifacts in by_identity.into_values() {
         let artifact = artifacts[0];
         let size = artifact.get("size_bytes").and_then(Value::as_u64);
+        let changed_files = changed_files_for_artifact(artifact);
         let conflicting = artifacts.iter().skip(1).any(|other| {
             other.get("size_bytes") != artifact.get("size_bytes")
                 || other.get("sha256") != artifact.get("sha256")
@@ -210,6 +211,10 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
         } else {
             match size {
                 Some(0) => CandidateState::Empty,
+                // A provider may leave a non-empty serialized artifact whose
+                // patch contains no changed paths. Such an artifact is not an
+                // available candidate.
+                Some(_) if changed_files == Some(0) => CandidateState::Empty,
                 // Finalization records the immutable aggregate only after Homeboy
                 // owns the artifact. Status must trust that durable fact rather
                 // than probing a possibly remote or evicted path.
@@ -224,7 +229,7 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateResult {
                 None => CandidateState::Unknown,
             }
         };
-        counts.record(state, size, changed_files_for_artifact(artifact));
+        counts.record(state, size, changed_files);
     }
     counts.no_changes_produced = counts.available == 0
         && counts.empty == 0
@@ -944,6 +949,27 @@ mod tests {
             classify_candidates(&lab_fixture(vec![first, second])).state(),
             CandidateState::Conflicting
         );
+    }
+
+    #[test]
+    fn nonempty_serialized_artifact_with_empty_patch_is_not_candidate_available() {
+        let payload = lab_fixture(vec![json!({
+            "id": "empty-diff",
+            "kind": "patch",
+            "size_bytes": 42,
+            "sha256": "f".repeat(64),
+            "url": "homeboy://agent-task/run/lab/artifacts#task=cook-intelligence&artifact=empty-diff",
+            "metadata": {
+                "executor_artifact_finalized": true,
+                "source_provenance": { "runner_id": "runner" },
+                "changed_files": []
+            }
+        })]);
+
+        let result = classify_candidates(&payload);
+        assert_eq!(result.state(), CandidateState::Empty);
+        assert_eq!(result.available, 0);
+        assert_eq!(result.empty, 1);
     }
 
     #[test]
