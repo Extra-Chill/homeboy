@@ -46,5 +46,8 @@
       "file": "Cargo.toml",
       "pattern": "(?m)^version\\s*=\\s*\"([0-9.]+)\""
     }
-  ]
+  ],
+  "release": {
+    "owner": "ci"
+  }
 }
