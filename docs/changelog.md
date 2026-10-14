@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.426.2] - 2026-10-14
+
+### Changed
+- stop scanning Cook index files on every lifecycle store open
+- serve run list rows without action eligibility
+
+### Fixed
+- pass the contribution chain through verified no-change attempts
+- stop interrupts in-flight work and restarts in place to resume it
+- never let a review-form no-change verdict decide the gated candidate
+- admit a Cook step's pinned-runtime re-exec and fail Cook steps that never record a run
+- one Cook verdict across runs show/dossier and agent-task status/diagnose
+- recover terminal custody for direct runner dispatch attempts
+
 ## [0.426.1] - 2026-10-14
 
 ### Fixed
