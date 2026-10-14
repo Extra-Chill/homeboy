@@ -70,6 +70,40 @@ kind, ownership follows the usual rule:
 `capability_extensions."workload.<kind>"`, then `composition.includes`.
 Unknown keys are refused.
 
+## Rig workloads
+
+A rig can own out-of-tree workload files for any declared kind, keyed by kind
+slug and then by extension id:
+
+```jsonc
+{
+  "workloads": {
+    "wordpress-fuzz": {
+      "wordpress": [{ "path": "fuzz/checkout-create-order.json" }]
+    }
+  }
+}
+```
+
+The three legacy rig fields keep working unchanged and read as the kinds
+`bench`, `trace`, and `fuzz`: `bench_workloads`, `trace_workloads`, and
+`fuzz_workloads`. A kind's entries are the legacy field's entries merged with
+`workloads.<kind>`'s. Entries support the same path expansion as every rig
+path field (`~`, `${env.NAME}`, `${components.<id>.path}`, `${package.root}`);
+see the rig spec reference's [`workloads`](rig-spec.md#workloads).
+
+With `--rig <id>`:
+
+- `list --kind <k>` includes each rig workload file for the kind's owning
+  extension, id = file stem, source `rig:<rig-id>`; duplicate ids across
+  sources are reported as diagnostics as usual.
+- `run --kind <k> --workload <id>` exports the selected file's absolute path
+  as `HOMEBOY_WORKLOAD_PATH` and every rig workload path for the kind as
+  `HOMEBOY_WORKLOAD_EXTRA_PATHS` (a manifest workload exports neither).
+  `replay` and `minimize` reuse the source run's recorded workload path.
+- The run metadata records the workload path and the effective safety class
+  (see below), so replay/minimize inherit both.
+
 ## Runner environment
 
 | Variable | Meaning |
@@ -79,6 +113,8 @@ Unknown keys are refused.
 | `HOMEBOY_WORKLOAD_ARTIFACT_DIR` | Where the runner writes artifacts; envelope artifact paths are relative to it. |
 | `HOMEBOY_WORKLOAD_LIST_ONLY` | `1` for the script list probe, else `0`. |
 | `HOMEBOY_WORKLOAD_ID` | Selected workload id. |
+| `HOMEBOY_WORKLOAD_PATH` | Absolute path of the selected rig-owned workload file, when the selected workload is one. |
+| `HOMEBOY_WORKLOAD_EXTRA_PATHS` | Every rig-owned workload path declared for the kind, joined like `HOMEBOY_BENCH_EXTRA_WORKLOADS`. |
 | `HOMEBOY_WORKLOAD_RUN_ID` | This run's id; for replay/minimize, the source run's id. |
 | `HOMEBOY_WORKLOAD_SEED` | Requested seed, or the replayed case's seed. |
 | `HOMEBOY_WORKLOAD_CASE_ID` | Replayed or minimized case. |
@@ -139,3 +175,16 @@ proof must declare a disposable runtime that is torn down, a mutation boundary,
 who verified it, and at least one proof artifact. Nothing is generated on the
 operator's behalf. The proof is recorded as the run's `isolation_proof`
 artifact.
+
+### Per-workload escalation
+
+A selected rig workload file can raise the kind's safety class, never lower
+it. When the selected `--workload <id>` names a rig workload file whose JSON
+has a top-level `"safety_class": "destructive"`, the run is destructive even
+if the kind declares `read_only`: `run`, `replay` and `minimize` then require
+`--allow-destructive` and `--isolation-proof` exactly as for a destructive
+kind. A destructive kind stays destructive no matter what the file declares,
+and files that are missing, not JSON, or declare no known class keep the
+kind's class. The run metadata records the effective class under
+`safety_class` and where it came from under `safety_class_source`
+(`kind` or `workload_file`).

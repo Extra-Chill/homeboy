@@ -27,8 +27,10 @@ use super::compare::{WorkloadAdapter, WorkloadComparison};
 use super::resolve::ResolvedWorkloadKind;
 use super::safety::DestructiveAuthorization;
 use super::{
-    baseline_key, env, safety, WORKLOAD_ARTIFACT_KIND, WORKLOAD_COMPARE_METADATA_KEY,
-    WORKLOAD_ISOLATION_PROOF_ARTIFACT_KIND, WORKLOAD_RESULT_ARTIFACT_KIND,
+    absolute_workload_path, baseline_key, env, safety, RigWorkloadFile,
+    SAFETY_CLASS_SOURCE_METADATA_KEY, WORKLOAD_ARTIFACT_KIND, WORKLOAD_COMPARE_METADATA_KEY,
+    WORKLOAD_ISOLATION_PROOF_ARTIFACT_KIND, WORKLOAD_PATH_METADATA_KEY,
+    WORKLOAD_RESULT_ARTIFACT_KIND,
 };
 
 pub struct WorkloadRunRequest<'a> {
@@ -38,6 +40,10 @@ pub struct WorkloadRunRequest<'a> {
     pub run_id: Option<&'a str>,
     pub seed: Option<&'a str>,
     pub rig_id: Option<&'a str>,
+    /// Rig-owned workload files for the kind's owning extension, resolved by
+    /// the caller. The selected one is exported as `HOMEBOY_WORKLOAD_PATH`
+    /// and all of them as `HOMEBOY_WORKLOAD_EXTRA_PATHS`.
+    pub rig_workloads: &'a [RigWorkloadFile],
     pub settings: &'a [(String, String)],
     pub settings_json: &'a [(String, serde_json::Value)],
     pub script_args: &'a [String],
@@ -207,6 +213,14 @@ pub fn run(request: WorkloadRunRequest<'_>) -> Result<WorkloadRunOutcome> {
     let source_path = resolved.context.source_path.to_string_lossy().to_string();
     let component_revision = crate::git::short_head_revision_at(&resolved.context.source_path);
     let cwd = std::env::current_dir().ok();
+    // The selected rig workload raises the kind's safety class when its file
+    // declares destructive; the caller authorized the effective class.
+    let selected_rig_workload =
+        super::selected_rig_workload(request.rig_workloads, request.workload_id);
+    let effective_safety = safety::effective_safety_class(
+        resolved.config.safety_class,
+        selected_rig_workload.map(|file| file.path.as_path()),
+    );
     let mut metadata = serde_json::json!({
         "source": "homeboy workload run",
         "status": "running",
@@ -215,10 +229,16 @@ pub fn run(request: WorkloadRunRequest<'_>) -> Result<WorkloadRunOutcome> {
         "extension_id": resolved.extension_id(),
         "source_path": source_path,
         "seed": request.seed,
-        "safety_class": resolved.config.safety_class.as_str(),
+        "safety_class": effective_safety.class.as_str(),
         "destructive_authorized": request.authorization.is_some(),
         "component_revision": component_revision,
     });
+    metadata[SAFETY_CLASS_SOURCE_METADATA_KEY] = serde_json::json!(effective_safety.source);
+    if let Some(file) = selected_rig_workload {
+        let workload_path = absolute_workload_path(&file.path);
+        metadata[WORKLOAD_PATH_METADATA_KEY] =
+            serde_json::json!(workload_path.to_string_lossy().to_string());
+    }
     metadata[WORKLOAD_COMPARE_METADATA_KEY] =
         serde_json::to_value(&resolved.config.compare).unwrap_or_default();
     let observation = ActiveObservation::start_with_stable_id(
@@ -245,6 +265,11 @@ pub fn run(request: WorkloadRunRequest<'_>) -> Result<WorkloadRunOutcome> {
 
     let helpers =
         provision_declared_helpers(&resolved.config.runtime_helpers).map_err(&interrupted)?;
+    let rig_workload_paths = request
+        .rig_workloads
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     let mut runner = build_scenario_runner(ScenarioRunnerOptions {
         execution_context: &resolved.extension,
         component: &resolved.context.component,
@@ -256,7 +281,7 @@ pub fn run(request: WorkloadRunRequest<'_>) -> Result<WorkloadRunOutcome> {
         scenario_env: request.workload_id.map(|id| (env::ID, id)),
         artifact_env: Some((env::ARTIFACT_DIR, &artifact_dir)),
         list_only_env: Some((env::LIST_ONLY, false)),
-        extra_workloads_env: None,
+        extra_workloads_env: Some((env::EXTRA_PATHS, &rig_workload_paths, "workloads")),
         env_provider_extensions: &[],
         invocation_requirements: Default::default(),
     })
@@ -264,6 +289,14 @@ pub fn run(request: WorkloadRunRequest<'_>) -> Result<WorkloadRunOutcome> {
     .env(env::KIND, kind)
     .env(env::RUN_ID, &run_id)
     .env_opt(env::SEED, &request.seed.map(str::to_string))
+    .env_opt(
+        env::PATH,
+        &selected_rig_workload.map(|file| {
+            absolute_workload_path(&file.path)
+                .to_string_lossy()
+                .to_string()
+        }),
+    )
     .timeout(request.timeout)
     .script_args(request.script_args)
     .passthrough(false);

@@ -46,6 +46,7 @@ touching component checkouts.
 | `bench_workloads` | object | No | Rig-owned out-of-tree benchmark workloads keyed by extension ID. |
 | `trace_workloads` | object | No | Rig-owned out-of-tree trace workloads keyed by extension ID. |
 | `fuzz_workloads` | object | No | Rig-owned out-of-tree fuzz workloads keyed by extension ID. |
+| `workloads` | object | No | Rig-owned out-of-tree workloads for any extension-declared workload kind, keyed by kind slug and then by extension ID. See [`workloads`](#workloads). |
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
 
@@ -83,6 +84,37 @@ step that references it:
 One declaration on the workload, every op the rig runs against it. The step can
 also carry the contract inline — see [contract source](#lifecycle) — but two
 copies of the same contract in `up` and `down` is the drift a reference avoids.
+
+## Workloads
+
+`workloads` is the kind-generic form of `bench_workloads` /
+`trace_workloads` / `fuzz_workloads`: out-of-tree rig-owned workload files
+for **any** extension-declared workload kind, keyed by kind slug and then by
+extension ID:
+
+```jsonc
+{
+  "workloads": {
+    "wordpress-fuzz": {
+      "wordpress": [{ "path": "fuzz/checkout-create-order.json" }]
+    }
+  }
+}
+```
+
+Kind keys follow the same rule as manifest workload kinds: a lowercase slug of
+`[a-z0-9_-]` starting with a letter. Entries are the same `WorkloadSpec`
+objects the legacy fields take and support the same path expansion
+(`~`, `${env.NAME}`, `${components.<id>.path}`, `${package.root}`).
+
+The three legacy fields keep working unchanged and read as the kinds `bench`,
+`trace`, and `fuzz`: a kind's entries are the legacy field's entries merged
+with `workloads.<kind>`'s. `homeboy workload list --kind <k> --rig <r>` lists
+each file for the kind's owning extension with id = file stem and source
+`rig:<rig-id>`; `homeboy workload run --kind <k> --rig <r> --workload <id>`
+exports the selected file's absolute path as `HOMEBOY_WORKLOAD_PATH` and all
+of them as `HOMEBOY_WORKLOAD_EXTRA_PATHS`. See
+[`homeboy workload`](workload.md#rig-workloads).
 
 ## Templates And Variants
 
@@ -543,8 +575,9 @@ Package manifest rewrites operate on JSON package manifests and update common de
 ```
 
 Executes one phase of the generic `homeboy/lifecycle-contract/v1` contract — the
-same contract `bench_workloads` / `trace_workloads` / `fuzz_workloads` already
-declare (see [Workload Lifecycle Contracts](#workload-lifecycle-contracts)).
+same contract `bench_workloads` / `trace_workloads` / `fuzz_workloads` (and
+their generic [`workloads`](#workloads) form) already declare (see
+[Workload Lifecycle Contracts](#workload-lifecycle-contracts)).
 
 This is the disposable-workload primitive. Homeboy owns the vocabulary
 (`prepare`, `seed`, `snapshot`, `reset`, `rollback`, `teardown`) and the handle

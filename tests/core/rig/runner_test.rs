@@ -46,6 +46,7 @@ fn empty_pipeline(name: &str) -> PipelineOutcome {
 
 fn minimal_spec(id: &str) -> RigSpec {
     RigSpec {
+        workloads: Default::default(),
         id: id.to_string(),
         description: format!("{} fixture", id),
         components: HashMap::new(),
@@ -75,6 +76,7 @@ fn minimal_spec(id: &str) -> RigSpec {
 
 fn symlink_spec(id: &str, link: String, target: String) -> RigSpec {
     RigSpec {
+        workloads: Default::default(),
         symlinks: vec![SymlinkSpec { link, target }],
         ..minimal_spec(id)
     }
@@ -674,6 +676,7 @@ fn test_run_repair_does_not_run_pipeline_commands() {
 
 fn shared_path_spec(id: &str, link: &std::path::Path, target: &std::path::Path) -> RigSpec {
     RigSpec {
+        workloads: Default::default(),
         shared_paths: vec![SharedPathSpec {
             link: link.to_string_lossy().into_owned(),
             target: target.to_string_lossy().into_owned(),
@@ -873,6 +876,7 @@ fn service_rig(id: &str, kind: ServiceKind) -> RigSpec {
         },
     );
     RigSpec {
+        workloads: Default::default(),
         services,
         ..minimal_spec(id)
     }
@@ -1036,6 +1040,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             }],
         );
         let rig = RigSpec {
+            workloads: Default::default(),
             id: "run-down-shared-path-fixture".to_string(),
             description: String::new(),
             components: HashMap::new(),
@@ -1112,6 +1117,7 @@ fn test_run_status() {
             },
         );
         let rig = RigSpec {
+            workloads: Default::default(),
             id: "run-status-service-fixture".to_string(),
             description: "service status".to_string(),
             components: HashMap::new(),
@@ -1288,6 +1294,7 @@ fn test_snapshot_state() {
         },
     );
     let rig = RigSpec {
+        workloads: Default::default(),
         id: "snapshot-fixture".to_string(),
         description: String::new(),
         components,
@@ -1649,6 +1656,7 @@ fn dependency_materialization_cache_key_includes_resolved_tool_version() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
         let rig = RigSpec {
+            workloads: Default::default(),
             id: "dependency-cache-tool-version".to_string(),
             requirements: RigRequirementsSpec {
                 dependency_materialization: vec![DependencyMaterializationStepSpec {
@@ -1721,6 +1729,7 @@ fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entrie
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
         let rig = RigSpec {
+            workloads: Default::default(),
             id: "dependency-cache-path-noise".to_string(),
             requirements: RigRequirementsSpec {
                 dependency_materialization: vec![DependencyMaterializationStepSpec {
@@ -1800,6 +1809,7 @@ fn dependency_materialization_cache_rejects_output_symlink_escapes() {
         unix_symlink(&outside, &workspace.join("output"));
 
         let rig = RigSpec {
+            workloads: Default::default(),
             id: "dependency-cache-symlink-escape".to_string(),
             requirements: RigRequirementsSpec {
                 dependency_materialization: vec![DependencyMaterializationStepSpec {

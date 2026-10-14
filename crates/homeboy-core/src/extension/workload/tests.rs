@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::workload_compare::{
@@ -16,7 +16,10 @@ use super::resolve::{resolve_kind, WorkloadTarget};
 use super::run::{self as workload_run, outcome_status, read_envelope, WorkloadRunRequest};
 use super::safety::{self, DestructiveRequest};
 use super::stored;
-use super::{baseline_key, env, WORKLOAD_ARTIFACT_KIND, WORKLOAD_RESULT_ARTIFACT_KIND};
+use super::{
+    baseline_key, env, selected_rig_workload, RigWorkloadFile, WORKLOAD_ARTIFACT_KIND,
+    WORKLOAD_RESULT_ARTIFACT_KIND,
+};
 use crate::observation::{ObservationStore, RunStatus};
 
 fn result(value: Value) -> WorkloadResult {
@@ -498,6 +501,7 @@ fn declared_kind_lists_runs_persists_compares_and_replays_end_to_end() {
                 run_id: Some(run_id),
                 seed: Some("42"),
                 rig_id: None,
+                rig_workloads: &[],
                 settings: &[],
                 settings_json: &[],
                 script_args: &[],
@@ -564,6 +568,7 @@ fn declared_kind_lists_runs_persists_compares_and_replays_end_to_end() {
                 resolved: &resolved,
                 source: &a,
                 case_id: "c2",
+                rig_workloads: &[],
                 settings: &[],
                 settings_json: &[],
                 script_args: &[],
@@ -590,6 +595,7 @@ fn declared_kind_lists_runs_persists_compares_and_replays_end_to_end() {
             resolved: &resolved,
             source: &a,
             case_id: "nope",
+            rig_workloads: &[],
             settings: &[],
             settings_json: &[],
             script_args: &[],
@@ -604,6 +610,7 @@ fn declared_kind_lists_runs_persists_compares_and_replays_end_to_end() {
             resolved: &resolved,
             source: &a,
             case_id: "c2",
+            rig_workloads: &[],
             settings: &[],
             settings_json: &[],
             script_args: &[],
@@ -633,6 +640,7 @@ fn an_invalid_envelope_terminalizes_the_run_as_error_without_findings() {
             run_id: Some("demo-bad"),
             seed: None,
             rig_id: None,
+            rig_workloads: &[],
             settings: &[],
             settings_json: &[],
             script_args: &[],
@@ -652,5 +660,276 @@ fn an_invalid_envelope_terminalizes_the_run_as_error_without_findings() {
             stored::load(&store, "demo-bad", None).is_err(),
             "invalid envelope is not loadable"
         );
+    });
+}
+
+// --- rig workloads ----------------------------------------------------------
+
+const PATH_RUNNER: &str = r#"#!/bin/sh
+cat > "$HOMEBOY_WORKLOAD_RESULTS_FILE" <<EOF
+{"schema":"homeboy/workload-result/v1","kind":"$HOMEBOY_WORKLOAD_KIND","workload_id":"$HOMEBOY_WORKLOAD_ID","status":"pass","cases":[],"metrics":{},
+ "payload":{"workload_path":"$HOMEBOY_WORKLOAD_PATH","extra_paths":"$HOMEBOY_WORKLOAD_EXTRA_PATHS"}}
+EOF
+"#;
+
+fn install_rig_fixture(home: &Path, safety_class: &str) -> std::path::PathBuf {
+    let extension_dir = crate::paths::extensions()
+        .expect("extensions")
+        .join("rigkinds");
+    std::fs::create_dir_all(&extension_dir).unwrap();
+    std::fs::write(
+        extension_dir.join("rigkinds.json"),
+        json!({
+            "name": "Rig kinds",
+            "version": "1.0.0",
+            "workloads": {
+                "demo": {
+                    "script": "demo.sh",
+                    "workloads": [{ "id": "w", "label": "Declared" }],
+                    "replay_command": "printf ok",
+                    "safety_class": safety_class
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = extension_dir.join("demo.sh");
+    std::fs::write(&script, PATH_RUNNER).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let component = home.join("rigsite");
+    std::fs::create_dir_all(&component).unwrap();
+    std::fs::write(
+        component.join("homeboy.json"),
+        r#"{"id":"consumer","extensions":{"rigkinds":{}}}"#,
+    )
+    .unwrap();
+    component
+}
+
+#[test]
+fn rig_workload_listings_carry_the_rig_source_and_file_stem_id() {
+    let files = vec![RigWorkloadFile {
+        id: "checkout-create-order".to_string(),
+        path: PathBuf::from("/tmp/rig/checkout-create-order.json"),
+    }];
+
+    let listings = list::rig_workloads(&files, "studio");
+
+    assert_eq!(listings[0].id, "checkout-create-order");
+    assert_eq!(listings[0].source, "rig:studio");
+    assert_eq!(
+        listings[0].label.as_deref(),
+        Some("checkout-create-order.json")
+    );
+    let mut merged = listings;
+    merged.extend(list::rig_workloads(&files, "studio"));
+    assert_eq!(
+        list::duplicate_ids(&merged),
+        vec!["checkout-create-order".to_string()]
+    );
+}
+
+#[test]
+fn a_workload_file_can_only_raise_a_kinds_safety_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("workload.json");
+
+    std::fs::write(&file, r#"{"safety_class":"read_only"}"#).unwrap();
+    let lowered = safety::effective_safety_class(WorkloadSafetyClass::Destructive, Some(&file));
+    assert_eq!(lowered.class, WorkloadSafetyClass::Destructive);
+    assert_eq!(lowered.source, safety::SAFETY_SOURCE_KIND);
+    let confirmed = safety::effective_safety_class(WorkloadSafetyClass::ReadOnly, Some(&file));
+    assert_eq!(confirmed.class, WorkloadSafetyClass::ReadOnly);
+    assert_eq!(confirmed.source, safety::SAFETY_SOURCE_WORKLOAD_FILE);
+
+    std::fs::write(&file, r#"{"safety_class":"destructive"}"#).unwrap();
+    let raised = safety::effective_safety_class(WorkloadSafetyClass::ReadOnly, Some(&file));
+    assert_eq!(raised.class, WorkloadSafetyClass::Destructive);
+    assert_eq!(raised.source, safety::SAFETY_SOURCE_WORKLOAD_FILE);
+
+    std::fs::write(&file, "not json").unwrap();
+    let unparseable = safety::effective_safety_class(WorkloadSafetyClass::ReadOnly, Some(&file));
+    assert_eq!(unparseable.class, WorkloadSafetyClass::ReadOnly);
+    assert_eq!(unparseable.source, safety::SAFETY_SOURCE_KIND);
+
+    let absent = safety::effective_safety_class(
+        WorkloadSafetyClass::ReadOnly,
+        Some(&dir.path().join("absent.json")),
+    );
+    assert_eq!(absent.class, WorkloadSafetyClass::ReadOnly);
+    assert_eq!(absent.source, safety::SAFETY_SOURCE_KIND);
+}
+
+#[test]
+fn run_exports_rig_workload_paths_and_a_file_can_escalate_safety() {
+    crate::test_support::with_isolated_home(|home| {
+        let component = install_rig_fixture(home.path(), "read_only");
+        let resolved = resolve_kind("demo", target(&component)).unwrap();
+
+        let workload_file = home.path().join("workloads/checkout.json");
+        std::fs::create_dir_all(workload_file.parent().unwrap()).unwrap();
+        std::fs::write(&workload_file, r#"{"safety_class":"destructive"}"#).unwrap();
+        let rig_files = vec![RigWorkloadFile {
+            id: "checkout".to_string(),
+            path: workload_file.clone(),
+        }];
+
+        let mut listings = list::declared_workloads(&resolved);
+        listings.extend(list::rig_workloads(&rig_files, "studio"));
+        assert_eq!(
+            listings
+                .iter()
+                .map(|listing| (listing.id.as_str(), listing.source.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("w", "manifest"), ("checkout", "rig:studio")]
+        );
+        assert!(list::duplicate_ids(&listings).is_empty());
+
+        let effective = safety::effective_safety_class(
+            resolved.config.safety_class,
+            selected_rig_workload(&rig_files, Some("checkout")).map(|file| file.path.as_path()),
+        );
+        assert_eq!(effective.class, WorkloadSafetyClass::Destructive);
+        assert_eq!(effective.source, safety::SAFETY_SOURCE_WORKLOAD_FILE);
+        let proof_file = home.path().join("proof.json");
+        std::fs::write(&proof_file, proof().to_string()).unwrap();
+        let request = |allow: bool, proof_path: Option<&Path>| DestructiveRequest {
+            allow_destructive: allow,
+            isolation_proof: proof_path.map(Path::to_path_buf),
+        };
+        let refused =
+            safety::authorize("demo", effective.class, &request(false, Some(&proof_file)))
+                .unwrap_err();
+        assert!(refused.message.contains("--allow-destructive"));
+        let authorization =
+            safety::authorize("demo", effective.class, &request(true, Some(&proof_file)))
+                .unwrap()
+                .expect("authorized");
+
+        let workload_path = workload_file.to_string_lossy().to_string();
+        let execute =
+            |workload_id: &'static str,
+             run_id: &'static str,
+             authorization: Option<&super::safety::DestructiveAuthorization>| {
+                workload_run::run(WorkloadRunRequest {
+                    resolved: &resolved,
+                    workload_id: Some(workload_id),
+                    run_id: Some(run_id),
+                    seed: None,
+                    rig_id: Some("studio"),
+                    rig_workloads: &rig_files,
+                    settings: &[],
+                    settings_json: &[],
+                    script_args: &[],
+                    timeout: None,
+                    authorization,
+                    baseline: BaselineFlags {
+                        baseline: false,
+                        ignore_baseline: true,
+                        ratchet: false,
+                    },
+                    command: "homeboy workload run --kind demo --rig studio".to_string(),
+                })
+                .unwrap()
+            };
+        let escalated = execute("checkout", "rig-run-a", Some(&authorization));
+        let payload = &escalated.result.as_ref().unwrap().payload;
+        assert_eq!(payload["workload_path"], workload_path);
+        assert_eq!(payload["extra_paths"], workload_path);
+        let store = ObservationStore::open_initialized().unwrap();
+        let run = store.get_run("rig-run-a").unwrap().unwrap();
+        assert_eq!(run.metadata_json["safety_class"], "destructive");
+        assert_eq!(run.metadata_json["safety_class_source"], "workload_file");
+        assert_eq!(run.metadata_json["workload_path"], workload_path);
+
+        let manifest = execute("w", "rig-run-b", None);
+        let payload = &manifest.result.as_ref().unwrap().payload;
+        assert_eq!(payload["workload_path"], "");
+        assert_eq!(payload["extra_paths"], workload_path);
+        let run = store.get_run("rig-run-b").unwrap().unwrap();
+        assert_eq!(run.metadata_json["safety_class"], "read_only");
+        assert_eq!(run.metadata_json["safety_class_source"], "kind");
+        assert!(run.metadata_json.get("workload_path").is_none());
+    });
+}
+
+#[test]
+fn replay_reuses_the_recorded_rig_workload_path() {
+    crate::test_support::with_isolated_home(|home| {
+        let component = install_rig_fixture(home.path(), "read_only");
+        let resolved = resolve_kind("demo", target(&component)).unwrap();
+        let workload_file = home.path().join("workloads/checkout.json");
+        std::fs::create_dir_all(workload_file.parent().unwrap()).unwrap();
+        std::fs::write(&workload_file, "{}").unwrap();
+        let rig_files = vec![RigWorkloadFile {
+            id: "checkout".to_string(),
+            path: workload_file.clone(),
+        }];
+        workload_run::run(WorkloadRunRequest {
+            resolved: &resolved,
+            workload_id: Some("checkout"),
+            run_id: Some("rig-run-src"),
+            seed: None,
+            rig_id: Some("studio"),
+            rig_workloads: &rig_files,
+            settings: &[],
+            settings_json: &[],
+            script_args: &[],
+            timeout: None,
+            authorization: None,
+            baseline: BaselineFlags {
+                baseline: false,
+                ignore_baseline: true,
+                ratchet: false,
+            },
+            command: "homeboy workload run --kind demo --rig studio".to_string(),
+        })
+        .unwrap();
+
+        // The replayed kind declares no replay_command, so only the planned
+        // env is observable: it must carry the source run's recorded
+        // workload path as HOMEBOY_WORKLOAD_PATH.
+        let store = ObservationStore::open_initialized().unwrap();
+        let mut source = stored::load(&store, "rig-run-src", Some("demo")).unwrap();
+        assert_eq!(
+            source.workload_path().map(str::to_string),
+            Some(workload_file.to_string_lossy().to_string())
+        );
+        source.result = WorkloadResult::parse(
+            serde_json::to_vec(&json!({
+                "schema": WORKLOAD_RESULT_SCHEMA,
+                "kind": "demo",
+                "workload_id": "checkout",
+                "status": "pass",
+                "cases": [{ "case_id": "c1", "status": "pass" }],
+            }))
+            .unwrap()
+            .as_slice(),
+            "demo",
+            None,
+        )
+        .unwrap();
+        let planned = case::execute(CaseRequest {
+            mode: CaseMode::Replay,
+            resolved: &resolved,
+            source: &source,
+            case_id: "c1",
+            rig_workloads: &[],
+            settings: &[],
+            settings_json: &[],
+            script_args: &[],
+            timeout: None,
+            authorization: None,
+            dry_run: true,
+        })
+        .unwrap();
+        assert!(planned.env.iter().any(|item| {
+            item.name == env::PATH && item.value == workload_file.to_string_lossy()
+        }));
     });
 }

@@ -1,6 +1,6 @@
 //! Rig-owned extension workload resolution.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use homeboy_core::engine::invocation::InvocationRequirements;
@@ -16,6 +16,17 @@ pub enum RigWorkloadKind {
     Bench,
     Fuzz,
     Trace,
+}
+
+impl RigWorkloadKind {
+    /// The kind slug this legacy workload kind reads as.
+    pub fn as_slug(self) -> &'static str {
+        match self {
+            RigWorkloadKind::Bench => "bench",
+            RigWorkloadKind::Fuzz => "fuzz",
+            RigWorkloadKind::Trace => "trace",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,13 +124,12 @@ pub(crate) fn workload_lifecycle_contract<'a>(
     let setting = format!("pipeline.lifecycle.workload.{kind_label}");
     let extension = reference.extension.as_str();
     let rig_id = rig_spec.id.as_str();
-    let workloads = workload_map(rig_spec, RigWorkloadKind::from(reference.kind));
+    let workloads = workloads_for_kind(rig_spec, kind_label);
 
-    let entries: &[WorkloadSpec] = match workloads.get(extension) {
-        Some(entries) => entries.as_slice(),
+    let entries: Vec<&WorkloadSpec> = match workloads.get(extension) {
+        Some(entries) => entries.clone(),
         None => {
-            let mut declared = workloads.keys().cloned().collect::<Vec<String>>();
-            declared.sort();
+            let declared = workloads.keys().cloned().collect::<Vec<String>>();
             return Err(workload_ref_error(
                 &setting,
                 format!(
@@ -149,7 +159,7 @@ pub(crate) fn workload_lifecycle_contract<'a>(
         },
         None => {
             let mut candidates = entries
-                .iter()
+                .into_iter()
                 .filter(|entry| entry.lifecycle().is_some())
                 .collect::<Vec<&WorkloadSpec>>();
             if candidates.len() != 1 {
@@ -198,25 +208,57 @@ fn declared_suffix(label: &str, values: &[String]) -> String {
     }
 }
 
-fn workload_map(
-    rig_spec: &RigSpec,
-    kind: RigWorkloadKind,
-) -> &std::collections::HashMap<String, Vec<WorkloadSpec>> {
+/// The legacy per-kind workload field for a kind slug, when the kind has
+/// one: `bench_workloads`, `fuzz_workloads`, or `trace_workloads`.
+///
+/// This is the only place workload kind names are branched on.
+fn legacy_workload_map<'a>(
+    rig_spec: &'a RigSpec,
+    kind: &str,
+) -> Option<&'a std::collections::HashMap<String, Vec<WorkloadSpec>>> {
     match kind {
-        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
-        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
-        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
+        "bench" => Some(&rig_spec.bench_workloads),
+        "fuzz" => Some(&rig_spec.fuzz_workloads),
+        "trace" => Some(&rig_spec.trace_workloads),
+        _ => None,
     }
 }
 
+/// Rig workload entries for an arbitrary kind slug, keyed by extension id.
+///
+/// The generic `workloads` map is the source for every kind; the three
+/// legacy per-kind fields additionally read as the kinds `bench`, `fuzz`,
+/// and `trace`, and both sources merge (legacy entries first).
+pub fn workloads_for_kind<'a>(
+    rig_spec: &'a RigSpec,
+    kind: &str,
+) -> BTreeMap<String, Vec<&'a WorkloadSpec>> {
+    let mut merged: BTreeMap<String, Vec<&'a WorkloadSpec>> = BTreeMap::new();
+    if let Some(legacy) = legacy_workload_map(rig_spec, kind) {
+        for (extension_id, entries) in legacy {
+            merged
+                .entry(extension_id.clone())
+                .or_default()
+                .extend(entries.iter());
+        }
+    }
+    if let Some(generic) = rig_spec.workloads.get(kind) {
+        for (extension_id, entries) in generic {
+            merged
+                .entry(extension_id.clone())
+                .or_default()
+                .extend(entries.iter());
+        }
+    }
+    merged
+}
+
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
-    let mut ids: Vec<String> = match kind {
-        RigWorkloadKind::Bench => rig_spec.bench_workloads.keys().cloned().collect(),
-        RigWorkloadKind::Fuzz => rig_spec.fuzz_workloads.keys().cloned().collect(),
-        RigWorkloadKind::Trace => rig_spec.trace_workloads.keys().cloned().collect(),
-    };
-    ids.sort();
-    ids
+    extension_ids_for_kind(rig_spec, kind.as_slug())
+}
+
+pub fn extension_ids_for_kind(rig_spec: &RigSpec, kind: &str) -> Vec<String> {
+    workloads_for_kind(rig_spec, kind).into_keys().collect()
 }
 
 pub fn required_extension_ids_for_workload(
@@ -292,22 +334,18 @@ pub fn extension_workload_inputs(
     }
 }
 
-pub fn workload_path_expansions_for_extension(
+/// Expanded workload paths for an arbitrary kind slug and extension id,
+/// reusing the same path expansion as the legacy per-kind readers.
+pub fn workload_path_expansions_for_kind(
     rig_spec: &RigSpec,
-    kind: RigWorkloadKind,
+    kind: &str,
     package_root: Option<&Path>,
     extension_id: &str,
 ) -> Vec<RigWorkloadPathExpansion> {
-    let workloads = match kind {
-        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
-        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
-        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
-    };
-
-    workloads
-        .get(extension_id)
-        .into_iter()
-        .flat_map(|paths| paths.iter())
+    workloads_for_kind(rig_spec, kind)
+        .remove(extension_id)
+        .unwrap_or_default()
+        .iter()
         .map(|workload| RigWorkloadPathExpansion {
             declared_path: workload.path().to_string(),
             expanded_path: expand_workload_path(rig_spec, package_root, workload.path()),
@@ -315,19 +353,23 @@ pub fn workload_path_expansions_for_extension(
         .collect()
 }
 
+pub fn workload_path_expansions_for_extension(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+    package_root: Option<&Path>,
+    extension_id: &str,
+) -> Vec<RigWorkloadPathExpansion> {
+    workload_path_expansions_for_kind(rig_spec, kind.as_slug(), package_root, extension_id)
+}
+
 pub fn env_provider_extensions_for_extension_workloads(
     rig_spec: &RigSpec,
     kind: RigWorkloadKind,
     extension_id: &str,
 ) -> Vec<String> {
-    let workloads = match kind {
-        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
-        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
-        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
-    };
-    let Some(entries) = workloads.get(extension_id) else {
-        return Vec::new();
-    };
+    let entries = workloads_for_kind(rig_spec, kind.as_slug())
+        .remove(extension_id)
+        .unwrap_or_default();
 
     let mut extensions = BTreeSet::new();
     for entry in entries {
@@ -400,12 +442,7 @@ pub fn check_groups_for_extension_workloads(
     kind: RigWorkloadKind,
     extension_id: &str,
 ) -> Option<Vec<String>> {
-    let workloads = match kind {
-        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
-        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
-        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
-    };
-    let entries = workloads.get(extension_id)?;
+    let entries = workloads_for_kind(rig_spec, kind.as_slug()).remove(extension_id)?;
 
     let mut groups = BTreeSet::new();
     for workload in entries {
@@ -456,14 +493,9 @@ pub fn invocation_requirements_for_extension_workloads(
     kind: RigWorkloadKind,
     extension_id: &str,
 ) -> InvocationRequirements {
-    let workloads = match kind {
-        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
-        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
-        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
-    };
-    let Some(entries) = workloads.get(extension_id) else {
-        return InvocationRequirements::default();
-    };
+    let entries = workloads_for_kind(rig_spec, kind.as_slug())
+        .remove(extension_id)
+        .unwrap_or_default();
 
     let port_range_size = entries
         .iter()

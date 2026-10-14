@@ -15,6 +15,12 @@ pub const ARTIFACT_DIR: &str = "HOMEBOY_WORKLOAD_ARTIFACT_DIR";
 pub const LIST_ONLY: &str = "HOMEBOY_WORKLOAD_LIST_ONLY";
 /// Selected workload id, when one was selected.
 pub const ID: &str = "HOMEBOY_WORKLOAD_ID";
+/// Absolute path of the selected rig-owned workload file, when the selected
+/// workload is one.
+pub const PATH: &str = "HOMEBOY_WORKLOAD_PATH";
+/// Every rig-owned workload path declared for the kind, in the same joined
+/// path-list format as `HOMEBOY_BENCH_EXTRA_WORKLOADS`.
+pub const EXTRA_PATHS: &str = "HOMEBOY_WORKLOAD_EXTRA_PATHS";
 /// Homeboy run id of this execution (run) or of the source run (replay).
 pub const RUN_ID: &str = "HOMEBOY_WORKLOAD_RUN_ID";
 /// Deterministic seed requested for a run, or the seed of a replayed case.

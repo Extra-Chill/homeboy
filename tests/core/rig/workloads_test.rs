@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use crate::spec::{LifecycleWorkloadKind, LifecycleWorkloadRef, RigSpec};
 use crate::{
     check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
-    extension_ids_for_workloads, extension_workload_inputs, required_component_id_for_workload,
-    required_extension_ids_for_workload, runner_capabilities_for_extension,
-    trace_dependencies_for_extension, workload_lifecycle_contract,
-    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
+    extension_ids_for_kind, extension_ids_for_workloads, extension_workload_inputs,
+    required_component_id_for_workload, required_extension_ids_for_workload,
+    runner_capabilities_for_extension, trace_dependencies_for_extension,
+    workload_lifecycle_contract, workload_path_expansions_for_extension,
+    workload_path_expansions_for_kind, workloads_for_extension, workloads_for_kind,
+    RigWorkloadKind,
 };
 
 #[test]
@@ -726,4 +728,122 @@ fn workload_lifecycle_contract_reports_an_empty_map_without_panicking() {
     .expect_err("no trace_workloads at all");
 
     assert!(error.to_string().contains("trace_workloads"), "{error}");
+}
+
+// ------------------------------------------------------------------
+// The generic `workloads` kind map (#15840)
+// ------------------------------------------------------------------
+
+#[test]
+fn generic_workloads_resolve_for_an_arbitrary_kind_and_merge_with_legacy() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "wordpress-e2e",
+            "components": {
+                "woocommerce": { "path": "/tmp/woocommerce" }
+            },
+            "fuzz_workloads": {
+                "wordpress": [{ "path": "${components.woocommerce.path}/fuzz/legacy.json" }]
+            },
+            "workloads": {
+                "wordpress-fuzz": {
+                    "wordpress": [{ "path": "${package.root}/fuzz/out-of-tree.json" }]
+                },
+                "fuzz": {
+                    "wordpress": [{ "path": "/tmp/generic-fuzz.json" }]
+                },
+                "db-perf": {
+                    "wordpress": [{ "path": "/tmp/db-perf.json" }]
+                }
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+    let package = PathBuf::from("/tmp/homeboy-rigs/wordpress-e2e");
+
+    // An arbitrary kind resolves from the generic map alone.
+    assert_eq!(
+        workload_path_expansions_for_kind(&rig_spec, "wordpress-fuzz", Some(&package), "wordpress"),
+        vec![crate::RigWorkloadPathExpansion {
+            declared_path: "${package.root}/fuzz/out-of-tree.json".to_string(),
+            expanded_path: PathBuf::from("/tmp/homeboy-rigs/wordpress-e2e/fuzz/out-of-tree.json"),
+        }]
+    );
+    assert!(
+        workload_path_expansions_for_kind(&rig_spec, "db-perf", None, "missing").is_empty(),
+        "an unknown extension resolves no paths"
+    );
+
+    // The legacy fuzz field reads as kind `fuzz`, merged with the generic
+    // map's `fuzz` entries (legacy first).
+    assert_eq!(
+        workload_path_expansions_for_kind(&rig_spec, "fuzz", None, "wordpress")
+            .into_iter()
+            .map(|expansion| expansion.expanded_path)
+            .collect::<Vec<_>>(),
+        vec![
+            PathBuf::from("/tmp/woocommerce/fuzz/legacy.json"),
+            PathBuf::from("/tmp/generic-fuzz.json"),
+        ]
+    );
+
+    // The merged map carries every extension for the kind.
+    let extensions = extension_ids_for_kind(&rig_spec, "fuzz");
+    assert_eq!(extensions, vec!["wordpress".to_string()]);
+    assert_eq!(
+        workloads_for_kind(&rig_spec, "wordpress-fuzz")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["wordpress".to_string()]
+    );
+    assert!(workloads_for_kind(&rig_spec, "undeclared").is_empty());
+}
+
+#[test]
+fn legacy_fuzz_workloads_still_resolve_as_kind_fuzz() {
+    let rig_spec: RigSpec = serde_json::from_str(
+        r#"{
+            "id": "legacy-fuzz",
+            "fuzz_workloads": {
+                "wordpress": [{ "path": "/tmp/legacy.json" }]
+            }
+        }"#,
+    )
+    .expect("parse rig spec");
+
+    assert_eq!(
+        workloads_for_extension(&rig_spec, RigWorkloadKind::Fuzz, None, "wordpress"),
+        vec![PathBuf::from("/tmp/legacy.json")]
+    );
+    assert_eq!(
+        workload_path_expansions_for_kind(&rig_spec, "fuzz", None, "wordpress")
+            .into_iter()
+            .map(|expansion| expansion.expanded_path)
+            .collect::<Vec<_>>(),
+        vec![PathBuf::from("/tmp/legacy.json")]
+    );
+    // Legacy readers that never touched the generic map keep their answers.
+    assert_eq!(
+        extension_ids_for_workloads(&rig_spec, RigWorkloadKind::Fuzz),
+        vec!["wordpress".to_string()]
+    );
+}
+
+#[test]
+fn generic_workloads_keys_must_be_valid_kind_slugs() {
+    let bad: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "bad-kind",
+        "workloads": { "Fuzz": { "wordpress": [{ "path": "/tmp/x.json" }] } }
+    }))
+    .expect("parse rig spec");
+    let error = crate::validate_rig_spec(&bad).expect_err("invalid kind slug refused");
+    assert!(error.message.contains("lowercase slug"), "{error}");
+
+    let good: RigSpec = serde_json::from_value(serde_json::json!({
+        "id": "good-kind",
+        "workloads": { "db-perf_2": { "wordpress": [{ "path": "/tmp/x.json" }] } }
+    }))
+    .expect("parse rig spec");
+    crate::validate_rig_spec(&good).expect("valid kind slug accepted");
 }
