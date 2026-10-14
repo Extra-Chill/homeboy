@@ -25,14 +25,10 @@ fn job(n: u128, custody: JobCustody) -> JobCustodyView {
 }
 
 fn generation(lease: &str, lifecycle: GenerationLifecycle) -> GenerationView {
-    let live = matches!(
-        lifecycle,
-        GenerationLifecycle::Admitting | GenerationLifecycle::Draining
-    );
+    let live = lifecycle == GenerationLifecycle::Admitting;
     GenerationView {
         lease_id: Some(lease.to_string()),
-        state_dir: PathBuf::from(format!("/daemon/{lease}")),
-        registered: true,
+        state_dir: PathBuf::from("/daemon"),
         lifecycle,
         process: ProcessObservation {
             pid: Some(100),
@@ -54,15 +50,9 @@ fn dead() -> GenerationLifecycle {
     }
 }
 
-fn view(admission_owner: Option<&str>, generations: Vec<GenerationView>) -> DaemonView {
+fn view(generations: Vec<GenerationView>) -> DaemonView {
     DaemonView {
-        router_dir: PathBuf::from("/daemon"),
-        registry: if admission_owner.is_some() {
-            RegistryObservation::Present
-        } else {
-            RegistryObservation::Absent
-        },
-        admission_owner: admission_owner.map(str::to_string),
+        state_dir: PathBuf::from("/daemon"),
         generations,
         unleased_candidates: Vec::new(),
     }
@@ -77,45 +67,13 @@ fn step(plan: &Plan) -> &Step {
 
 #[test]
 fn a_healthy_admitting_daemon_is_converged() {
-    let v = view(
-        Some("LIVE"),
-        vec![generation("LIVE", GenerationLifecycle::Admitting)],
-    );
+    let v = view(vec![generation("LIVE", GenerationLifecycle::Admitting)]);
     assert_eq!(plan(&v), Plan::Converged);
 }
 
 #[test]
 fn no_daemon_at_all_is_converged() {
-    assert_eq!(plan(&view(None, Vec::new())), Plan::Converged);
-}
-
-/// Chaos case 7 (#15456): the registry still routes to the dead lease while
-/// its directory serves the in-place restart.
-#[test]
-fn in_place_restart_claims_admission_for_the_live_lease() {
-    let mut restarted = generation("LIVE", GenerationLifecycle::Admitting);
-    restarted.registered = false;
-    let v = view(
-        Some("DEAD"),
-        vec![
-            generation(
-                "DEAD",
-                GenerationLifecycle::Dead {
-                    proof: DeathProof::SameDirReplaced {
-                        current_lease_id: "LIVE".to_string(),
-                    },
-                },
-            ),
-            restarted,
-        ],
-    );
-    assert_eq!(
-        step(&plan(&v)),
-        &Step::ClaimAdmission {
-            from_lease_id: "DEAD".to_string(),
-            to_lease_id: "LIVE".to_string(),
-        }
-    );
+    assert_eq!(plan(&view(Vec::new())), Plan::Converged);
 }
 
 /// Chaos case 2 (#15556): uncheckpointed work of a killed daemon needs exactly
@@ -132,22 +90,22 @@ fn unproven_orphans_need_one_attestation_over_the_whole_job_set() {
             },
         ),
     ];
-    let v = view(Some("KILLED"), vec![killed]);
+    let v = view(vec![killed]);
     assert_eq!(
         plan(&v),
         Plan::NeedsAttestation(Attestation {
             lease_id: "KILLED".to_string(),
-            state_dir: PathBuf::from("/daemon/KILLED"),
+            state_dir: PathBuf::from("/daemon"),
             job_ids: vec![Uuid::from_u128(1), Uuid::from_u128(2)],
             confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
         })
     );
 }
 
-/// Chaos case 8: a dead draining generation's proven-dead job reconciles,
-/// then the empty generation retires.
+/// Chaos case 8: a dead daemon's proven-dead job reconciles, then the empty
+/// directory restarts.
 #[test]
-fn dead_draining_generation_reconciles_proven_jobs_then_retires() {
+fn a_dead_daemon_reconciles_proven_jobs_then_restarts() {
     let mut old = generation("OLD", dead());
     old.jobs = vec![job(
         3,
@@ -155,23 +113,15 @@ fn dead_draining_generation_reconciles_proven_jobs_then_retires() {
             proof: Some(DeathProof::PidDead),
         },
     )];
-    let live = generation("LIVE", GenerationLifecycle::Admitting);
-    let v = view(Some("LIVE"), vec![live.clone(), old.clone()]);
     assert_eq!(
-        step(&plan(&v)),
+        step(&plan(&view(vec![old.clone()]))),
         &Step::ReconcileProvenJobs {
             lease_id: "OLD".to_string(),
             job_ids: vec![Uuid::from_u128(3)],
         }
     );
     old.jobs.clear();
-    let after = view(Some("LIVE"), vec![live, old]);
-    assert_eq!(
-        step(&plan(&after)),
-        &Step::RetireGeneration {
-            lease_id: "OLD".to_string()
-        }
-    );
+    assert_eq!(step(&plan(&view(vec![old]))), &Step::StartDaemon);
 }
 
 /// #15420/#15426: checkpointed driver work resumes without attestation.
@@ -179,7 +129,7 @@ fn dead_draining_generation_reconciles_proven_jobs_then_retires() {
 fn checkpointed_driver_work_resumes_without_attestation() {
     let mut killed = generation("KILLED", dead());
     killed.jobs = vec![job(4, JobCustody::Resumable)];
-    let v = view(Some("KILLED"), vec![killed]);
+    let v = view(vec![killed]);
     assert_eq!(
         step(&plan(&v)),
         &Step::ResumeDriverWork {
@@ -196,67 +146,8 @@ fn a_live_child_of_a_dead_generation_is_waited_for() {
         job(5, JobCustody::Running),
         job(6, JobCustody::Orphaned { proof: None }),
     ];
-    let v = view(Some("KILLED"), vec![killed]);
+    let v = view(vec![killed]);
     assert!(matches!(plan(&v), Plan::Wait { .. }));
-}
-
-/// #15830: every dead generation whose own plan is reconciliation or driver
-/// resumption is adoptable at once, even beside another dead generation that
-/// waits for live workload or an attestation. Live, unregistered, and
-/// restarted-in-place generations are never adopted.
-#[test]
-fn adoptable_dead_generations_are_exactly_those_restartable_in_place() {
-    let with_jobs = |lease: &str, lifecycle, jobs| {
-        let mut generation = generation(lease, lifecycle);
-        generation.jobs = jobs;
-        generation
-    };
-    let mut unregistered = with_jobs("UNREGISTERED", dead(), vec![job(1, JobCustody::Resumable)]);
-    unregistered.registered = false;
-    let v = view(
-        Some("LIVE"),
-        vec![
-            with_jobs(
-                "LIVE",
-                GenerationLifecycle::Admitting,
-                vec![job(2, JobCustody::Resumable)],
-            ),
-            with_jobs("BUSY", dead(), vec![job(3, JobCustody::Running)]),
-            with_jobs("RESUME", dead(), vec![job(4, JobCustody::Resumable)]),
-            with_jobs(
-                "ATTEST",
-                dead(),
-                vec![job(5, JobCustody::Orphaned { proof: None })],
-            ),
-            with_jobs(
-                "PROVEN",
-                GenerationLifecycle::Dead {
-                    proof: DeathProof::TerminationEvidence,
-                },
-                vec![
-                    job(
-                        6,
-                        JobCustody::Orphaned {
-                            proof: Some(DeathProof::PidDead),
-                        },
-                    ),
-                    job(7, JobCustody::Resumable),
-                ],
-            ),
-            with_jobs(
-                "REPLACED",
-                GenerationLifecycle::Dead {
-                    proof: DeathProof::SameDirReplaced {
-                        current_lease_id: "OCCUPANT".to_string(),
-                    },
-                },
-                vec![job(8, JobCustody::Resumable)],
-            ),
-            with_jobs("IDLE", dead(), Vec::new()),
-            unregistered,
-        ],
-    );
-    assert_eq!(adoptable_dead_generations(&v), ["RESUME", "PROVEN"]);
 }
 
 /// Chaos case 9: the whole process group died, nothing is left serving.
@@ -264,27 +155,8 @@ fn adoptable_dead_generations_are_exactly_those_restartable_in_place() {
 fn a_dead_owner_with_nothing_live_starts_a_daemon() {
     let mut killed = generation("KILLED", dead());
     killed.process.liveness = Liveness::Zombie;
-    let v = view(Some("KILLED"), vec![killed]);
+    let v = view(vec![killed]);
     assert_eq!(step(&plan(&v)), &Step::StartDaemon);
-}
-
-#[test]
-fn a_dead_owner_beside_only_draining_generations_starts_a_daemon() {
-    let v = view(
-        Some("KILLED"),
-        vec![
-            generation("KILLED", dead()),
-            generation("OLD", GenerationLifecycle::Draining),
-        ],
-    );
-    assert_eq!(step(&plan(&v)), &Step::StartDaemon);
-}
-
-#[test]
-fn an_unregistered_dead_lease_restarts() {
-    let mut legacy = generation("LEGACY", dead());
-    legacy.registered = false;
-    assert_eq!(step(&plan(&view(None, vec![legacy]))), &Step::StartDaemon);
 }
 
 /// Chaos case 5 (#15437): a stale `daemon serve` is stopped through its
@@ -295,7 +167,7 @@ fn a_stale_external_daemon_stops_through_its_lifecycle_endpoint() {
     serve.supervision = Supervision::External;
     serve.binary = BinaryFreshness::Replaced;
     assert_eq!(
-        step(&plan(&view(Some("SERVE"), vec![serve]))),
+        step(&plan(&view(vec![serve]))),
         &Step::StopViaLifecycleEndpoint {
             lease_id: "SERVE".to_string()
         }
@@ -309,43 +181,32 @@ fn a_replaced_binary_stops_when_idle_and_waits_when_busy() {
     let mut idle = generation("UPGRADED", GenerationLifecycle::Admitting);
     idle.binary = BinaryFreshness::Replaced;
     assert_eq!(
-        step(&plan(&view(Some("UPGRADED"), vec![idle.clone()]))),
+        step(&plan(&view(vec![idle.clone()]))),
         &Step::StopByLease {
             lease_id: "UPGRADED".to_string()
         }
     );
     let mut busy = idle;
     busy.jobs = vec![job(7, JobCustody::Running)];
-    assert!(matches!(
-        plan(&view(Some("UPGRADED"), vec![busy])),
-        Plan::Wait { .. }
-    ));
+    assert!(matches!(plan(&view(vec![busy])), Plan::Wait { .. }));
 }
 
 #[test]
 fn unreadable_state_blocks_instead_of_guessing() {
-    let v = view(
-        Some("X"),
-        vec![generation(
-            "X",
-            GenerationLifecycle::Unreadable {
-                reason: "lease is corrupt".to_string(),
-            },
-        )],
-    );
+    let v = view(vec![generation(
+        "X",
+        GenerationLifecycle::Unreadable {
+            reason: "lease is corrupt".to_string(),
+        },
+    )]);
     assert!(
         matches!(plan(&v), Plan::Blocked { cause: BlockCause::Unreadable, reason } if reason.contains("lease is corrupt"))
     );
-    let mut unreadable_registry = view(None, Vec::new());
-    unreadable_registry.registry = RegistryObservation::Unreadable {
-        reason: "truncated".to_string(),
-    };
-    assert!(matches!(plan(&unreadable_registry), Plan::Blocked { .. }));
 }
 
 #[test]
 fn an_unleased_live_daemon_blocks_any_start() {
-    let mut v = view(Some("KILLED"), vec![generation("KILLED", dead())]);
+    let mut v = view(vec![generation("KILLED", dead())]);
     v.unleased_candidates = vec![UnleasedCandidate {
         pid: 4242,
         ownership: DaemonProcessOwnership::Ambiguous,
@@ -358,20 +219,14 @@ fn an_unleased_live_daemon_blocks_any_start() {
 
 // ---------------------------------------------------------------------------
 // Exhaustive invariants over every lifecycle × supervision × binary × custody
-// × admission combination, alone and beside a healthy admitting generation.
+// combination.
 // ---------------------------------------------------------------------------
 
 fn lifecycles() -> Vec<GenerationLifecycle> {
     vec![
         GenerationLifecycle::Admitting,
-        GenerationLifecycle::Draining,
         GenerationLifecycle::Stopped,
         dead(),
-        GenerationLifecycle::Dead {
-            proof: DeathProof::SameDirReplaced {
-                current_lease_id: "OTHER".to_string(),
-            },
-        },
         GenerationLifecycle::Dead {
             proof: DeathProof::TerminationEvidence,
         },
@@ -418,15 +273,7 @@ fn all_views() -> Vec<DaemonView> {
                     target.supervision = supervision;
                     target.binary = binary;
                     target.jobs = jobs;
-                    for owner in [Some("T"), Some("H"), None] {
-                        for with_healthy in [false, true] {
-                            let mut generations = vec![target.clone()];
-                            if with_healthy {
-                                generations.push(generation("H", GenerationLifecycle::Admitting));
-                            }
-                            views.push(view(owner, generations));
-                        }
-                    }
+                    views.push(view(vec![target]));
                 }
             }
         }
@@ -439,18 +286,15 @@ fn step_lease(step: &Step) -> Option<&str> {
         Step::ReconcileProvenJobs { lease_id, .. }
         | Step::ResumeDriverWork { lease_id, .. }
         | Step::StopByLease { lease_id }
-        | Step::StopViaLifecycleEndpoint { lease_id }
-        | Step::RetireGeneration { lease_id } => Some(lease_id),
-        // The old owner may be missing from the view entirely; the new owner
-        // is checked separately below.
-        Step::ClaimAdmission { .. } | Step::StartDaemon => None,
+        | Step::StopViaLifecycleEndpoint { lease_id } => Some(lease_id),
+        Step::StartDaemon => None,
     }
 }
 
 #[test]
 fn every_plan_satisfies_the_planner_invariants() {
     let views = all_views();
-    assert!(views.len() > 1000, "the table covers {} views", views.len());
+    assert!(views.len() > 200, "the table covers {} views", views.len());
     for v in &views {
         let result = plan(v);
         let context = || format!("view: {v:#?}\nplan: {result:?}");
@@ -493,12 +337,6 @@ fn every_plan_satisfies_the_planner_invariants() {
                         generation_of(lease_id).supervision,
                         Supervision::External,
                         "{}",
-                        context()
-                    ),
-                    Step::ClaimAdmission { to_lease_id, .. } => assert_eq!(
-                        generation_of(to_lease_id).lifecycle,
-                        GenerationLifecycle::Admitting,
-                        "admission only moves to a live admitting generation\n{}",
                         context()
                     ),
                     Step::StartDaemon => assert!(
@@ -547,18 +385,6 @@ fn every_plan_satisfies_the_planner_invariants() {
                             context()
                         );
                     }
-                }
-                if let Some(owner) = v.admission_owner.as_deref() {
-                    assert!(
-                        v.generations
-                            .iter()
-                            .any(|g| g.lease_id.as_deref() == Some(owner)
-                                && g.lifecycle == GenerationLifecycle::Admitting
-                                || g.lease_id.as_deref() == Some(owner)
-                                    && g.lifecycle == GenerationLifecycle::Draining),
-                        "converged means the admission owner serves\n{}",
-                        context()
-                    );
                 }
             }
             Plan::Wait { .. } | Plan::Blocked { .. } => {}

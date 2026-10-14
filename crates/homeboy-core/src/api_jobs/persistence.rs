@@ -374,57 +374,6 @@ pub(super) fn validate_terminal_controller_identity(job: &Job, job_id: Uuid) -> 
     Ok(())
 }
 
-/// Transfer existing replay custody before retiring a generation. Stream the
-/// pruned index rather than loading historical request/event payloads in memory.
-pub(super) fn archive_controller_tombstones(
-    source: &Path,
-    target: &Path,
-    resident: impl IntoIterator<Item = ReplayTombstone>,
-) -> Result<()> {
-    prepare_tombstone_store(source)?;
-    let connection = open_tombstone_store(target)?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| tombstone_error(target, "begin terminal custody transfer", error))?;
-    for tombstone in resident {
-        if let Some(job) = &tombstone.terminal_job {
-            validate_terminal_controller_identity(job, tombstone.job_id)?;
-            insert_tombstone(&transaction, target, &tombstone)?;
-        }
-    }
-    if tombstone_path(source).exists() {
-        let source_connection = open_tombstone_store(source)?;
-        let mut statement = source_connection.prepare(
-            "SELECT key FROM replay_tombstones WHERE kind = 'controller' AND terminal_job IS NOT NULL",
-        ).map_err(|error| tombstone_error(source, "read retired controller custody", error))?;
-        let keys = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| tombstone_error(source, "read retired controller keys", error))?;
-        for key in keys {
-            let key =
-                key.map_err(|error| tombstone_error(source, "read retired controller key", error))?;
-            let tombstone = lookup_tombstone_in_connection(
-                &source_connection,
-                source,
-                ReplayTombstoneKind::Controller,
-                &key,
-            )?
-            .ok_or_else(|| Error::internal_unexpected("retired controller custody disappeared"))?;
-            validate_terminal_controller_identity(
-                tombstone
-                    .terminal_job
-                    .as_ref()
-                    .expect("selected terminal custody"),
-                tombstone.job_id,
-            )?;
-            insert_tombstone(&transaction, target, &tombstone)?;
-        }
-    }
-    transaction
-        .commit()
-        .map_err(|error| tombstone_error(target, "commit terminal custody transfer", error))
-}
-
 pub(super) fn tombstone_store_report(path: &Path) -> Result<(usize, u64)> {
     prepare_tombstone_store(path)?;
     let journal = tombstone_path(path);

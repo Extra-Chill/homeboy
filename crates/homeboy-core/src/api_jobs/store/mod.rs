@@ -1683,64 +1683,6 @@ impl JobStore {
         Ok(stored.job.clone())
     }
 
-    /// Read an immutable terminal controller projection, including configured
-    /// pruning's replay tombstones. `None` is unknown custody, never terminality.
-    pub fn terminal_controller_job_at(path: &Path, job_id: Uuid) -> Result<Option<Job>> {
-        if let Some((stored, submissions)) =
-            sql_store::read_job_and_controller_submissions(path, job_id)?
-        {
-            if let Some(stored) = stored {
-                if stored.controller_job.is_some() && stored.job.status.is_terminal() {
-                    super::persistence::validate_terminal_controller_identity(&stored.job, job_id)?;
-                    return Ok(Some(stored.job));
-                }
-                return Ok(None);
-            }
-            for submission in submissions {
-                if let Some(job) = &submission.terminal_job {
-                    super::persistence::validate_terminal_controller_identity(job, job_id)?;
-                    return Ok(Some(job.clone()));
-                }
-            }
-            return super::persistence::lookup_terminal_controller_job(path, job_id);
-        }
-        // Not yet migrated: read the legacy document without importing it.
-        let raw = match fs::read(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return super::persistence::lookup_terminal_controller_job(path, job_id);
-            }
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(path.display().to_string()),
-                ))
-            }
-        };
-        let durable: DurableJobStore = serde_json::from_slice(&raw)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if let Some(stored) = durable.jobs.iter().find(|stored| stored.job.id == job_id) {
-            if stored.controller_job.is_some() && stored.job.status.is_terminal() {
-                super::persistence::validate_terminal_controller_identity(&stored.job, job_id)?;
-                return Ok(Some(stored.job.clone()));
-            }
-            return Ok(None);
-        }
-        for submission in durable
-            .controller_submissions
-            .values()
-            .chain(durable.expired_controller_submissions.values())
-        {
-            if submission.job_id == job_id {
-                if let Some(job) = &submission.terminal_job {
-                    super::persistence::validate_terminal_controller_identity(job, job_id)?;
-                    return Ok(Some(job.clone()));
-                }
-            }
-        }
-        super::persistence::lookup_terminal_controller_job(path, job_id)
-    }
-
     pub fn terminal_controller_job(&self, job_id: Uuid) -> Result<Option<Job>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         if let Some(stored) = inner.jobs.get(&job_id) {
@@ -1769,41 +1711,6 @@ impl JobStore {
             }
             None => Ok(None),
         }
-    }
-
-    /// Preserve terminal custody in the existing replay index before generation
-    /// ownership is retired. Active jobs and pending completions are not archived.
-    pub fn archive_terminal_controller_jobs(&self, target: &Path) -> Result<()> {
-        let Some(persistence) = &self.persistence else {
-            return Err(Error::internal_unexpected(
-                "terminal custody transfer requires a durable source",
-            ));
-        };
-        let _transaction = self.begin_durable_transaction()?;
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        self.reload_durable_snapshot_already_locked(&persistence.path, &mut inner)?;
-        let resident = inner
-            .controller_submissions
-            .iter()
-            .chain(inner.expired_controller_submissions.iter())
-            .filter_map(|(key, submission)| {
-                let job = inner
-                    .jobs
-                    .get(&submission.job_id)
-                    .filter(|stored| {
-                        stored.controller_job.is_some() && stored.job.status.is_terminal()
-                    })
-                    .map(|stored| stored.job.clone())
-                    .or_else(|| submission.terminal_job.clone())?;
-                Some(super::persistence::ReplayTombstone {
-                    kind: super::persistence::ReplayTombstoneKind::Controller,
-                    key: key.clone(),
-                    fingerprint: submission.fingerprint.clone(),
-                    job_id: submission.job_id,
-                    terminal_job: Some(job),
-                })
-            });
-        super::persistence::archive_controller_tombstones(&persistence.path, target, resident)
     }
 
     pub(crate) fn handle(&self, job_id: Uuid) -> JobHandle {

@@ -1,14 +1,13 @@
 //! Daemon lifecycle observation (#15557, slice C1).
 //!
-//! [`observe`] reads every daemon generation recorded in one router directory
-//! and returns a [`DaemonView`]: one value that states, for each generation,
-//! whether it is admitting, draining, stopped, or dead (and the proof), who
-//! supervises it, whether its binary is current, and who holds custody of each
-//! active job.
+//! [`observe`] reads the daemon of one state directory and returns a
+//! [`DaemonView`]: one value that states whether it is admitting, stopped, or
+//! dead (and the proof), who supervises it, whether its binary is current, and
+//! who holds custody of each active job.
 //!
 //! The view is built only from the readers the recovery commands already use
-//! (`read_status_for_state_path`, the generation registry, the job store's
-//! recovery evidence, the process table). It does not parse any file format
+//! (`read_status_for_state_path`, the job store's recovery evidence, the
+//! process table). It does not parse any file format
 //! itself, and it never mutates state. It is total: missing, unreadable, or
 //! corrupt inputs become explicit variants instead of errors or panics.
 //!
@@ -19,28 +18,21 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use homeboy_engine_primitives::rolling_generation::RollingDrainState;
 use serde::Serialize;
 use uuid::Uuid;
 
 use super::{
-    generation_store, read_status_for_state_path, DaemonProcessOwnership, DaemonStaleReasonCode,
-    DaemonStatus,
+    read_status_for_state_path, DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStatus,
 };
 use crate::api_jobs::{
     DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, JobStatus,
 };
 
-/// Everything known about the daemons of one router directory.
+/// Everything known about the daemon of one state directory.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonView {
-    pub router_dir: PathBuf,
-    pub registry: RegistryObservation,
-    /// The generation the registry routes new work to, when a registry exists.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admission_owner: Option<String>,
-    /// Registered generations in registry order, then any lease found in a
-    /// generation directory that the registry does not list.
+    pub state_dir: PathBuf,
+    /// The directory's daemon: its lease, a dead lease, or no lease.
     pub generations: Vec<GenerationView>,
     /// Live daemon processes that may own one of these stores but match no
     /// generation lease. Zombies are excluded: they cannot serve.
@@ -48,24 +40,10 @@ pub struct DaemonView {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum RegistryObservation {
-    Present,
-    /// No `generations.json`: a daemon that never handed off. The router
-    /// directory's own lease, if any, is reported as an unregistered generation.
-    Absent,
-    Unreadable {
-        reason: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GenerationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_id: Option<String>,
     pub state_dir: PathBuf,
-    /// Whether the generation registry lists this lease.
-    pub registered: bool,
     pub lifecycle: GenerationLifecycle,
     pub process: ProcessObservation,
     pub supervision: Supervision,
@@ -77,8 +55,7 @@ pub struct GenerationView {
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum GenerationLifecycle {
     Admitting,
-    Draining,
-    /// The generation directory holds no lease.
+    /// The directory holds no lease.
     Stopped,
     Dead {
         proof: DeathProof,
@@ -95,10 +72,6 @@ pub enum GenerationLifecycle {
 pub enum DeathProof {
     /// The kernel reports the lease PID gone (or a zombie).
     PidDead,
-    /// The generation's directory now holds a different lease. The owner lock
-    /// of a directory is exclusive, so the registered lease was restarted in
-    /// place and cannot still be serving (#15558).
-    SameDirReplaced { current_lease_id: String },
     /// The supervisor recorded termination evidence for this exact lease.
     TerminationEvidence,
 }
@@ -184,167 +157,59 @@ pub struct UnleasedCandidate {
     pub bind_endpoint: Option<String>,
 }
 
-/// Observe every generation of the daemon router rooted at `router_dir`.
+/// Observe the daemon of `state_dir`.
 ///
 /// Never panics and never fails: each unreadable input is reported in the view.
-pub fn observe(router_dir: &Path) -> DaemonView {
-    let (registry, admission_owner, registered) = match generation_store::generations_at(router_dir)
-    {
-        Ok(Some(generations)) => (
-            RegistryObservation::Present,
-            Some(generations.admission_owner),
-            generations
-                .generations
-                .into_iter()
-                .map(|(lease_id, generation)| Registered {
-                    lease_id,
-                    state_dir: PathBuf::from(generation.endpoint.state_dir),
-                    drain_state: generation.drain_state,
-                })
-                .collect::<Vec<_>>(),
-        ),
-        Ok(None) => (RegistryObservation::Absent, None, Vec::new()),
-        Err(error) => (
-            RegistryObservation::Unreadable {
-                reason: error.to_string(),
-            },
-            None,
-            Vec::new(),
-        ),
-    };
-
-    // Every directory that can hold a lease: each registered generation's, and
-    // the router directory itself (the first generation's home, or the only
-    // one when no registry exists). Each is read once.
-    let mut directories: Vec<PathBuf> = Vec::new();
-    for generation in &registered {
-        push_unique(&mut directories, &generation.state_dir);
-    }
-    push_unique(&mut directories, router_dir);
-    let statuses: Vec<(PathBuf, StatusRead)> = directories
-        .iter()
-        .map(|dir| {
-            (
-                dir.clone(),
-                read_status_for_state_path(dir.join("state.json")).map_err(|e| e.to_string()),
-            )
-        })
-        .collect();
-    // Every registered directory was read above. The fallback only covers a
-    // directory whose canonical path changed between the two comparisons.
-    let unobserved: StatusRead = Err("generation directory changed while it was observed".into());
-    let status_of = |dir: &Path| -> &StatusRead {
-        statuses
-            .iter()
-            .find(|(known, _)| super::same_directory(known, dir))
-            .map_or(&unobserved, |(_, status)| status)
-    };
-
-    let registered_leases: BTreeSet<&str> =
-        registered.iter().map(|g| g.lease_id.as_str()).collect();
-    let mut generations = Vec::new();
-    for generation in &registered {
-        generations.push(generation_view(
-            Some(&generation.lease_id),
-            &generation.state_dir,
-            true,
-            Some(generation.drain_state),
-            status_of(&generation.state_dir),
-        ));
-    }
-    // A directory can also hold something the registry does not list: the
-    // lease of an in-place restart that has not claimed admission yet, the
-    // only lease of a daemon that never handed off, or an unreadable lease in
-    // a directory no registered generation covers.
-    for (dir, status) in &statuses {
-        let covered = registered
-            .iter()
-            .any(|g| super::same_directory(&g.state_dir, dir));
-        let unlisted_view = match status {
-            Ok(status) => match status.state.as_ref() {
-                Some(state) => !registered_leases.contains(state.lease_id.as_str()),
-                None => {
-                    !covered
-                        && status.freshness.stale_reason_code
-                            == Some(DaemonStaleReasonCode::LeaseCorrupt)
-                }
-            },
-            Err(_) => !covered,
-        };
-        if unlisted_view {
-            let occupant = status
-                .as_ref()
-                .ok()
-                .and_then(|status| status.state.as_ref())
-                .map(|state| state.lease_id.clone());
-            generations.push(generation_view(
-                occupant.as_deref(),
-                dir,
-                false,
-                None,
-                status,
-            ));
-        }
-    }
-
-    let unleased_candidates =
-        unleased_candidates(&generations, statuses.iter().map(|(_, status)| status));
+pub fn observe(state_dir: &Path) -> DaemonView {
+    let status: StatusRead =
+        read_status_for_state_path(state_dir.join("state.json")).map_err(|e| e.to_string());
+    let occupant = status
+        .as_ref()
+        .ok()
+        .and_then(|status| status.state.as_ref())
+        .map(|state| state.lease_id.clone());
+    // A directory with no lease and no jobs has no daemon to describe.
+    let generations: Vec<GenerationView> =
+        std::iter::once(generation_view(occupant.as_deref(), state_dir, &status))
+            .filter(|generation| {
+                generation.lease_id.is_some()
+                    || generation.lifecycle != GenerationLifecycle::Stopped
+                    || !generation.jobs.is_empty()
+            })
+            .collect();
+    let unleased_candidates = unleased_candidates(&generations, std::iter::once(&status));
     DaemonView {
-        router_dir: router_dir.to_path_buf(),
-        registry,
-        admission_owner,
+        state_dir: state_dir.to_path_buf(),
         generations,
         unleased_candidates,
     }
 }
 
-/// Observe this process's own daemon router directory.
-///
-/// An unresolvable router location is reported in the view, not raised.
+/// Observe this process's own daemon state directory.
 pub fn observe_local() -> DaemonView {
-    match generation_store::router_dir() {
-        Ok(router_dir) => observe(&router_dir),
+    match crate::paths::daemon_state_file() {
+        Ok(state_file) => observe(state_file.parent().unwrap_or_else(|| Path::new(""))),
         Err(error) => DaemonView {
-            router_dir: PathBuf::new(),
-            registry: RegistryObservation::Unreadable {
-                reason: format!("daemon router directory is unresolvable: {error}"),
-            },
-            admission_owner: None,
-            generations: Vec::new(),
+            state_dir: PathBuf::new(),
+            generations: vec![generation_view(
+                None,
+                Path::new(""),
+                &Err(format!("daemon state directory is unresolvable: {error}")),
+            )],
             unleased_candidates: Vec::new(),
         },
     }
 }
 
-struct Registered {
-    lease_id: String,
-    state_dir: PathBuf,
-    drain_state: RollingDrainState,
-}
-
 /// One directory's status, or why it could not be read.
 type StatusRead = std::result::Result<DaemonStatus, String>;
 
-fn push_unique(directories: &mut Vec<PathBuf>, dir: &Path) {
-    if !directories
-        .iter()
-        .any(|known| super::same_directory(known, dir))
-    {
-        directories.push(dir.to_path_buf());
-    }
-}
-
-/// Build one generation's view from the status of its directory.
-///
-/// `lease_id` is the registered lease (or the directory's occupant for an
-/// unregistered generation). When the directory holds a different lease, the
-/// registered one was replaced in place and its process facts are unknown.
+/// Build the daemon's view from the status of its directory. `lease_id` is
+/// the directory's occupant.
 fn generation_view(
     lease_id: Option<&str>,
     state_dir: &Path,
-    registered: bool,
-    drain_state: Option<RollingDrainState>,
-    status: &std::result::Result<DaemonStatus, String>,
+    status: &StatusRead,
 ) -> GenerationView {
     let unknown_process = ProcessObservation {
         pid: None,
@@ -356,7 +221,6 @@ fn generation_view(
             return GenerationView {
                 lease_id: lease_id.map(str::to_string),
                 state_dir: state_dir.to_path_buf(),
-                registered,
                 lifecycle: GenerationLifecycle::Unreadable {
                     reason: reason.clone(),
                 },
@@ -368,25 +232,6 @@ fn generation_view(
         }
     };
     let occupant = status.state.as_ref();
-    let replaced_by = match (lease_id, occupant) {
-        (Some(lease), Some(state)) if state.lease_id != lease => Some(state.lease_id.clone()),
-        _ => None,
-    };
-    if let Some(current_lease_id) = replaced_by {
-        return GenerationView {
-            lease_id: lease_id.map(str::to_string),
-            state_dir: state_dir.to_path_buf(),
-            registered,
-            lifecycle: GenerationLifecycle::Dead {
-                proof: DeathProof::SameDirReplaced { current_lease_id },
-            },
-            process: unknown_process,
-            supervision: Supervision::Unknown,
-            binary: BinaryFreshness::Unknown,
-            jobs: jobs_for(status, lease_id, false),
-        };
-    }
-
     let Some(state) = occupant else {
         let lifecycle = match status.freshness.stale_reason_code {
             Some(DaemonStaleReasonCode::LeaseCorrupt) => GenerationLifecycle::Unreadable {
@@ -400,21 +245,17 @@ fn generation_view(
         return GenerationView {
             lease_id: lease_id.map(str::to_string),
             state_dir: state_dir.to_path_buf(),
-            registered,
             lifecycle,
             process: unknown_process,
             supervision: Supervision::Unknown,
             binary: BinaryFreshness::Unknown,
-            jobs: jobs_for(status, lease_id, true),
+            jobs: jobs_for(status),
         };
     };
 
     let liveness = process_liveness(state.pid);
     let lifecycle = if status.running {
-        match drain_state {
-            Some(RollingDrainState::Draining) => GenerationLifecycle::Draining,
-            Some(RollingDrainState::Admitting) | None => GenerationLifecycle::Admitting,
-        }
+        GenerationLifecycle::Admitting
     } else {
         let terminated = status
             .termination_evidence
@@ -447,7 +288,6 @@ fn generation_view(
     GenerationView {
         lease_id: Some(state.lease_id.clone()),
         state_dir: state_dir.to_path_buf(),
-        registered,
         lifecycle,
         process: ProcessObservation {
             pid: Some(state.pid),
@@ -455,21 +295,15 @@ fn generation_view(
         },
         supervision,
         binary,
-        jobs: jobs_for(status, Some(&state.lease_id), true),
+        jobs: jobs_for(status),
     }
 }
 
-/// Jobs of one directory's store that belong to `lease_id`. The directory's
-/// current occupant also takes jobs that record no lease, since the store is
-/// its own.
-fn jobs_for(status: &DaemonStatus, lease_id: Option<&str>, occupant: bool) -> Vec<JobCustodyView> {
+/// Every active job of the directory's store: the store is its daemon's own.
+fn jobs_for(status: &DaemonStatus) -> Vec<JobCustodyView> {
     status
         .active_job_recovery_evidence
         .iter()
-        .filter(|evidence| match evidence.daemon_lease_id.as_deref() {
-            Some(owner) => Some(owner) == lease_id,
-            None => occupant,
-        })
         .map(|evidence| JobCustodyView {
             job_id: evidence.job_id,
             operation: evidence.operation.clone(),

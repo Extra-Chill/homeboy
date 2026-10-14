@@ -4,26 +4,23 @@
 //! carried out by the existing recovery executor. This module applies the
 //! outcomes that executor has no step for, so a plan never dead-ends:
 //!
-//! - [`Step::StartDaemon`] and [`Step::ClaimAdmission`] when the direct recovery
-//!   plan authorizes nothing;
+//! - [`Step::StartDaemon`] when the direct recovery plan authorizes nothing;
 //! - [`Step::ReconcileProvenJobs`] and [`Step::ResumeDriverWork`]: the dead
-//!   generation is adopted in its own frame and restarted in place (#15830);
+//!   lease is adopted and the daemon restarted in place (#15830);
 //! - [`Plan::NeedsAttestation`]: the one operator confirmation, applied to
-//!   the generation's complete job set.
+//!   the dead lease's complete job set.
 //!
 //! Every apply re-observes and re-plans first, and refuses unless the fresh
 //! plan equals the one the operator reviewed. The precondition checked at
 //! apply time is therefore the same predicate the planner used.
 
-use std::path::Path;
-
 use serde_json::json;
 
 use super::lifecycle::observe_local;
-use super::lifecycle_plan::{adoptable_dead_generations, plan, BlockCause, Plan, Step, WaitCause};
+use super::lifecycle_plan::{plan, BlockCause, Plan, Step, WaitCause};
 use crate::error::{Error, Result};
 
-/// Plan for this process's own daemon router.
+/// Plan for this process's own daemon state directory.
 pub fn plan_local() -> Plan {
     plan(&observe_local())
 }
@@ -77,28 +74,10 @@ pub fn applies(planned: &Plan) -> bool {
         Plan::NeedsAttestation(_)
             | Plan::Transition {
                 step: Step::StartDaemon
-                    | Step::ClaimAdmission { .. }
                     | Step::ReconcileProvenJobs { .. }
                     | Step::ResumeDriverWork { .. }
             }
     )
-}
-
-/// Adopt every dead generation whose own plan is an adoption: its jobs are
-/// proven gone or are checkpointed driver work (#15830).
-///
-/// The admission owner runs this on its orchestration tick, so durable driver
-/// work survives a daemon's death without an operator. Each adoption runs in
-/// the dead generation's own frame and restarts it in place; that directory's
-/// exclusive owner lock admits one adopter, so concurrent callers converge on
-/// one replacement. A generation that still has live workload, needs an
-/// operator attestation, or was already restarted in place is left alone.
-/// Returns the adopted leases.
-pub fn adopt_dead_generations(addr: &str) -> Vec<String> {
-    adoptable_dead_generations(&observe_local())
-        .into_iter()
-        .filter(|lease_id| super::adopt_orphaned_lease(lease_id, &[], addr).is_ok())
-        .collect()
 }
 
 /// Apply `planned` after proving it is still the current plan.
@@ -166,19 +145,9 @@ fn execute(planned: &Plan, addr: &str) -> Result<Vec<String>> {
             super::ensure_running(addr)?;
             Ok(vec!["daemon.ensure_running".to_string()])
         }
-        Plan::Transition {
-            step:
-                Step::ClaimAdmission {
-                    from_lease_id,
-                    to_lease_id,
-                },
-        } => {
-            claim_admission(from_lease_id, to_lease_id)?;
-            Ok(vec!["daemon.claim_admission".to_string()])
-        }
-        // Both restart the dead generation in place, in its own frame: the
-        // adoption terminalizes jobs proven gone, and the replacement's startup
-        // recovery resumes checkpointed driver work.
+        // Both restart the daemon in place: the adoption terminalizes jobs
+        // proven gone, and the replacement's startup recovery resumes
+        // checkpointed driver work.
         Plan::Transition {
             step:
                 Step::ReconcileProvenJobs { lease_id, .. } | Step::ResumeDriverWork { lease_id, .. },
@@ -189,31 +158,6 @@ fn execute(planned: &Plan, addr: &str) -> Result<Vec<String>> {
             ])
         }
         Plan::NeedsAttestation(attestation) => {
-            let local_dir = crate::paths::daemon_state_file()?
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
-            if !super::same_directory(&attestation.state_dir, &local_dir) {
-                // The executor's store is this process's state directory. A
-                // sibling generation is reconciled in its own frame.
-                return Err(Error::validation_invalid_argument(
-                    "state_dir",
-                    format!(
-                        "the attestation targets generation {} in {}; run it in that directory: HOMEBOY_DAEMON_ROUTER_BYPASS=1 HOMEBOY_DAEMON_STATE_DIR={} homeboy daemon reconcile-dead-lease-orphans --lease-id {}{} --confirm-workload-processes-absent --no-replacement",
-                        attestation.lease_id,
-                        attestation.state_dir.display(),
-                        attestation.state_dir.display(),
-                        attestation.lease_id,
-                        attestation
-                            .job_ids
-                            .iter()
-                            .map(|id| format!(" --job-id {id}"))
-                            .collect::<String>(),
-                    ),
-                    Some(attestation.state_dir.display().to_string()),
-                    None,
-                ));
-            }
             super::reconcile_dead_lease_orphans(
                 &attestation.lease_id,
                 &attestation.job_ids,
@@ -232,44 +176,6 @@ fn execute(planned: &Plan, addr: &str) -> Result<Vec<String>> {
             None,
         )),
     }
-}
-
-/// Move admission from a dead owner to the exact live generation `to`.
-///
-/// Re-proves both sides under the registry lock through the same predicate
-/// daemon startup uses (#15456): `to` must hold a live lease in its own
-/// directory, and `from` must be dead or replaced in place.
-fn claim_admission(from_lease_id: &str, to_lease_id: &str) -> Result<()> {
-    let view = observe_local();
-    let target = view
-        .generations
-        .iter()
-        .find(|generation| generation.lease_id.as_deref() == Some(to_lease_id))
-        .ok_or_else(|| claim_refused(to_lease_id, "the target generation is no longer observed"))?;
-    let validation = super::validate_lease_file(&target.state_dir.join("state.json"))?;
-    let state = validation
-        .state
-        .filter(|state| validation.running && state.lease_id == to_lease_id)
-        .ok_or_else(|| claim_refused(to_lease_id, "the target lease is not live"))?;
-    let moved = super::generation_store::claim_admission_from_dead_owner(&state, |endpoint| {
-        endpoint.lease_id == from_lease_id && super::admission_owner_is_dead(endpoint)
-    })?;
-    if !moved {
-        return Err(claim_refused(
-            to_lease_id,
-            "admission did not move: the recorded owner is not proven dead",
-        ));
-    }
-    Ok(())
-}
-
-fn claim_refused(to_lease_id: &str, problem: &str) -> Error {
-    Error::validation_invalid_argument(
-        "lease_id",
-        format!("refusing to move admission to {to_lease_id}: {problem}"),
-        Some(to_lease_id.to_string()),
-        None,
-    )
 }
 
 #[cfg(test)]
@@ -313,10 +219,7 @@ mod tests {
     #[test]
     fn an_unchanged_plan_executes_once() {
         let planned = Plan::Transition {
-            step: Step::ClaimAdmission {
-                from_lease_id: "DEAD".to_string(),
-                to_lease_id: "LIVE".to_string(),
-            },
+            step: Step::StartDaemon,
         };
         let runs = Cell::new(0);
         let applied = apply_with(
@@ -325,11 +228,11 @@ mod tests {
             || planned.clone(),
             |_| {
                 runs.set(runs.get() + 1);
-                Ok(vec!["daemon.claim_admission".to_string()])
+                Ok(vec!["daemon.ensure_running".to_string()])
             },
         )
         .expect("applied");
-        assert_eq!(applied, vec!["daemon.claim_admission".to_string()]);
+        assert_eq!(applied, vec!["daemon.ensure_running".to_string()]);
         assert_eq!(runs.get(), 1);
     }
 

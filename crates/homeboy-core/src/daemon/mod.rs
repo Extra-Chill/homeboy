@@ -42,7 +42,6 @@ pub mod controller_job_driver;
 #[cfg(test)]
 mod controller_terminal_regression;
 mod daemon_lease;
-mod generation_store;
 pub mod lifecycle;
 pub mod lifecycle_apply;
 pub mod lifecycle_plan;
@@ -189,7 +188,6 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
 pub struct LocalControllerJobClient {
     endpoint: String,
-    job_router_dir: Option<PathBuf>,
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
@@ -212,7 +210,6 @@ impl DaemonControllerJobService {
 
     pub fn admit(&self, request: ControllerJobRequest) -> Result<ControllerJobSubmission> {
         let admission = admit_controller_job(request, &self.job_store)?;
-        record_controller_job_generation(&admission.job)?;
         Ok(ControllerJobSubmission {
             job: admission.job,
             disposition: admission.disposition,
@@ -248,21 +245,12 @@ impl DaemonControllerJobService {
         if let Some(job) = self.job_store.terminal_controller_job(id)? {
             return Ok(job);
         }
-        match self.job_store.get(id) {
-            Ok(job) => Ok(job),
-            Err(error) => retained_controller_job(job_id)?.ok_or(error),
-        }
+        self.job_store.get(id)
     }
 
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
         cancel_controller_job(parse_controller_job_id(job_id)?, reason, &self.job_store)
     }
-}
-
-/// Bounded, non-reconciling access to exact controller terminal custody. Does
-/// not connect, rotate a daemon, recover a driver, or infer absence from a PID.
-pub fn retained_controller_job(job_id: &str) -> Result<Option<crate::api_jobs::Job>> {
-    generation_store::terminal_controller_job(parse_controller_job_id(job_id)?)
 }
 
 /// The durable admission result for a typed controller job submission.
@@ -363,44 +351,33 @@ impl LocalControllerJobClient {
         Self::connect_with_admission_guard(None)
     }
 
-    /// Connect to the daemon generation that already owns `job_id`.
+    /// Connect to the daemon serving the store that holds `job_id`.
     ///
-    /// Observation and cancellation must retain the job's original generation.
-    /// In particular, they must not call `ensure_running`, which can rotate a
-    /// stale admission daemon to the caller's build.
+    /// Observation and cancellation read the serving lease rather than calling
+    /// `ensure_running`: looking at a job never starts or restarts a daemon.
     pub fn connect_existing_job(job_id: &str) -> Result<Self> {
-        let endpoint = generation_store::endpoint_for_job(job_id)?.ok_or_else(|| {
+        Self::connect_to_serving_lease(job_id, state_path()?)
+    }
+
+    /// Connect to an existing controller job served from `config_root`. This
+    /// is the lifecycle-store transport: an injected lifecycle root cannot
+    /// route by consulting ambient HOME.
+    pub fn connect_existing_job_in_root(job_id: &str, config_root: &Path) -> Result<Self> {
+        Self::connect_to_serving_lease(job_id, config_root.join("daemon").join("state.json"))
+    }
+
+    fn connect_to_serving_lease(job_id: &str, state_path: PathBuf) -> Result<Self> {
+        let state = validate_lease_file(&state_path)?.state.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "controller_job_id",
-                "controller job has no recorded daemon generation",
+                format!(
+                    "no daemon is serving {}; start it with `homeboy daemon ensure-running`",
+                    state_path.display()
+                ),
                 Some(job_id.to_string()),
                 None,
             )
         })?;
-        Self::connect_to_existing_endpoint(endpoint, None)
-    }
-
-    /// Connect to an existing controller job using the daemon-generation
-    /// registry rooted at `config_root`. This is the lifecycle-store transport:
-    /// an injected lifecycle root cannot route by consulting ambient HOME.
-    pub fn connect_existing_job_in_root(job_id: &str, config_root: &Path) -> Result<Self> {
-        let endpoint =
-            generation_store::endpoint_for_job_in_router_dir(job_id, &config_root.join("daemon"))?
-                .ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                "controller_job_id",
-                "controller job has no recorded daemon generation in the selected lifecycle root",
-                Some(job_id.to_string()),
-                None,
-            )
-                })?;
-        Self::connect_to_existing_endpoint(endpoint, Some(config_root.join("daemon")))
-    }
-
-    fn connect_to_existing_endpoint(
-        endpoint: generation_store::LocalDaemonEndpoint,
-        job_router_dir: Option<PathBuf>,
-    ) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -409,8 +386,7 @@ impl LocalControllerJobClient {
                 Error::internal_unexpected(format!("build local controller-job client: {error}"))
             })?;
         Ok(Self {
-            endpoint: format!("http://{}", endpoint.address),
-            job_router_dir,
+            endpoint: format!("http://{}", state.address),
             client,
             _admission_guard: None,
         })
@@ -427,28 +403,15 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
-            job_router_dir: None,
             client,
             _admission_guard: admission_guard,
         })
     }
 
-    fn endpoint_for_job(&self, job_id: &str) -> Result<String> {
-        let endpoint = match self.job_router_dir.as_deref() {
-            Some(router_dir) => {
-                generation_store::endpoint_for_job_in_router_dir(job_id, router_dir)?
-            }
-            None => generation_store::endpoint_for_job(job_id)?,
-        };
-        Ok(endpoint
-            .map(|endpoint| format!("http://{}", endpoint.address))
-            .unwrap_or_else(|| self.endpoint.clone()))
-    }
-
     /// Persist a cancellation request and return the daemon's current job
     /// projection. The controller continues provider shutdown asynchronously.
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
-        let endpoint = self.endpoint_for_job(job_id)?;
+        let endpoint = &self.endpoint;
         let response = self
             .client
             .post(format!("{endpoint}/controller/jobs/{job_id}/cancel"))
@@ -583,7 +546,7 @@ impl LocalControllerJobClient {
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        let endpoint = self.endpoint_for_job(job_id)?;
+        let endpoint = &self.endpoint;
         let response = self
             .client
             .get(format!("{endpoint}/jobs/{job_id}"))
@@ -619,132 +582,38 @@ impl LocalControllerJobClient {
     }
 
     /// `GET /workflows/<instance>`: the daemon's pure projection of one
-    /// workflow instance from its job ledger. An instance lives in the daemon
-    /// generation that admitted it, so every live generation is asked.
+    /// workflow instance from its job ledger.
     pub fn workflow(&self, instance: &str) -> Result<serde_json::Value> {
         let path = format!("/workflows/{instance}");
-        let mut last_error = None;
-        for endpoint in self.workflow_endpoints() {
-            match self
-                .client
-                .get(format!("{endpoint}{path}"))
-                .send()
-                .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))
-                .and_then(|response| self.workflow_payload(response, &path))
-            {
-                Ok(mut view) => {
-                    view["daemon_endpoint"] = json!(endpoint);
-                    return Ok(view);
-                }
-                Err(error) => last_error = Some(error),
-            }
-        }
-        for path in self.workflow_job_stores() {
-            let Ok(store) = JobStore::open_without_reconciliation(path) else {
-                continue;
-            };
-            if let Ok(mut view) = workflow_job::workflow_status(&store, instance) {
-                view["source"] = json!("retained_generation");
-                return Ok(view);
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            Error::validation_invalid_argument(
-                "instance",
-                format!("no workflow instance `{instance}` in any live daemon generation"),
-                Some(instance.to_string()),
-                None,
-            )
-        }))
+        let response = self
+            .client
+            .get(format!("{}{path}", self.endpoint))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
+        self.workflow_payload(response, &path)
     }
 
-    /// `GET /workflows` across every live daemon generation.
+    /// `GET /workflows`.
     pub fn workflow_list(&self) -> Result<serde_json::Value> {
-        let mut entities = Vec::new();
-        for endpoint in self.workflow_endpoints() {
-            let Ok(response) = self.client.get(format!("{endpoint}/workflows")).send() else {
-                continue;
-            };
-            let Ok(list) = self.workflow_payload(response, "/workflows") else {
-                continue;
-            };
-            for mut entity in list["entities"].as_array().cloned().unwrap_or_default() {
-                entity["daemon_endpoint"] = json!(endpoint);
-                entities.push(entity);
-            }
-        }
-        let mut seen = entities
-            .iter()
-            .filter_map(|entity| entity["instance"].as_str().map(str::to_string))
-            .collect::<std::collections::HashSet<_>>();
-        for path in self.workflow_job_stores() {
-            let Ok(store) = JobStore::open_without_reconciliation(path) else {
-                continue;
-            };
-            for mut entity in workflow_job::workflow_list(&store)["entities"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-            {
-                let Some(instance) = entity["instance"].as_str().map(str::to_string) else {
-                    continue;
-                };
-                if seen.insert(instance) {
-                    entity["source"] = json!("retained_generation");
-                    entities.push(entity);
-                }
-            }
-        }
-        Ok(json!({ "entities": entities }))
+        let path = "/workflows";
+        let response = self
+            .client
+            .get(format!("{}{path}", self.endpoint))
+            .send()
+            .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
+        self.workflow_payload(response, path)
     }
 
-    /// Job stores of every generation on disk, registered or retired. Retiring
-    /// a generation removes its registry entry but keeps its job store, which
-    /// still holds the workflow checkpoint; the retained-custody archive keeps
-    /// only terminal job summaries.
-    fn workflow_job_stores(&self) -> Vec<PathBuf> {
-        if generation_store::bypassed() {
-            return Vec::new();
-        }
-        generation_store::generation_job_stores().unwrap_or_default()
-    }
-
-    /// `POST /workflows/<instance>/approvals` on the generation that owns it.
+    /// `POST /workflows/<instance>/approvals`.
     pub fn approve_workflow_step(&self, instance: &str, step: &str) -> Result<serde_json::Value> {
-        let endpoint = self.workflow(instance)?["daemon_endpoint"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| self.endpoint.clone());
         let path = format!("/workflows/{instance}/approvals");
         let response = self
             .client
-            .post(format!("{endpoint}{path}"))
+            .post(format!("{}{path}", self.endpoint))
             .json(&json!({ "step": step }))
             .send()
             .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
         self.workflow_payload(response, &path)
-    }
-
-    /// This client's daemon first, then every other registered generation.
-    fn workflow_endpoints(&self) -> Vec<String> {
-        let mut endpoints = vec![self.endpoint.clone()];
-        if !generation_store::bypassed() {
-            for generation in generation_store::generations().unwrap_or_default() {
-                // A generation replaced in place serves at the address its
-                // own lease file records, which the registry may predate.
-                let address =
-                    validate_lease_file(&Path::new(&generation.state_dir).join("state.json"))
-                        .ok()
-                        .and_then(|validation| validation.state)
-                        .map(|state| state.address)
-                        .unwrap_or(generation.address);
-                let endpoint = format!("http://{address}");
-                if !endpoints.contains(&endpoint) {
-                    endpoints.push(endpoint);
-                }
-            }
-        }
-        endpoints
     }
 
     /// `GET /workflows/cadences`: every registered workflow cadence.
@@ -811,7 +680,7 @@ impl LocalControllerJobClient {
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        let endpoint = self.endpoint_for_job(job_id)?;
+        let endpoint = &self.endpoint;
         let response = self
             .client
             .post(format!("{endpoint}/controller/jobs/{job_id}/start"))
@@ -944,7 +813,7 @@ fn controller_job_runtimes(
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
+pub const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
 const DAEMON_ENDPOINT_IDENTITY_PROTOCOL: &str = "homeboy.daemon.endpoint-identity.v1";
 // Shared with non-daemon launchers (the lab-runner systemd unit renderer) that
 // must set this exact variable without depending on this module tree (#15087).
@@ -1568,15 +1437,7 @@ pub(super) fn state_path() -> Result<PathBuf> {
 }
 
 pub fn read_status() -> Result<DaemonStatus> {
-    // The stable registry is the admission authority after a blue-green
-    // handoff. Status reports B while retaining A's route in the registry.
-    let path = (!generation_store::bypassed())
-        .then(generation_store::admitting)
-        .transpose()?
-        .flatten()
-        .map(|endpoint| PathBuf::from(endpoint.state_dir).join("state.json"))
-        .unwrap_or(state_path()?);
-    read_status_for_state_path(path)
+    read_status_for_state_path(state_path()?)
 }
 
 /// Startup observes the exact candidate store before moving admission. Normal
@@ -1848,25 +1709,6 @@ pub fn serve_listener_until_shutdown(
     )
 }
 
-/// Whether a registered admission owner in another state directory can no
-/// longer be serving: its own lease file proves the PID dead. An owner in this
-/// daemon's own directory was already succeeded in place (#15830).
-fn admission_owner_is_dead(endpoint: &generation_store::LocalDaemonEndpoint) -> bool {
-    validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))
-        .map(|validation| {
-            !validation.running
-                && validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
-        })
-        .unwrap_or(false)
-}
-
-fn same_directory(left: &Path, right: &Path) -> bool {
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
 /// The shutdown flag of the daemon served by this process, if any. A foreground
 /// `daemon serve` records no startup token, so no other process may signal it
 /// by PID; a lease-bound lifecycle stop instead asks the daemon to stop itself
@@ -1936,29 +1778,14 @@ where
         None
     };
     let state = write_state(local_addr)?;
-    generation_store::seed(&state)?;
-    // This process holds the directory's owner lock: a generation registered
-    // here under another lease was restarted in place, and this daemon is it
-    // now. Taking over its routing keeps its work addressable (#15830).
-    generation_store::succeed_in_place(&state)?;
-    // A daemon restarted in place must not leave admission with a dead
-    // generation, or every status probe reports this live daemon as not
-    // ready (#15456). A live previous owner (blue-green) keeps admission.
-    if !generation_store::bypassed() {
-        generation_store::claim_admission_from_dead_owner(&state, admission_owner_is_dead)?;
-    }
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
-    // If this process died after the durable job-store admission but before its
-    // registry write or HTTP response, rebuild the binding from the job's
-    // lease. Replays remain idempotent and retain the original owner.
-    rebuild_generation_job_ownership(&job_store)?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
     if let Some(prior) = proven_dead {
-        recover_staged_direct_jobs_after_owner_death(&job_store, &prior.lease_id, &state)?;
+        recover_staged_direct_jobs_after_owner_death(&job_store, &prior.lease_id)?;
     }
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
@@ -1988,13 +1815,9 @@ where
     let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
-    let completion_notifier =
-        spawn_completion_notifier_for_lease(state.lease_id.clone(), completion_shutdown_rx);
-    let orchestration_reconciler = spawn_orchestration_reconciler(
-        job_store.clone(),
-        state.lease_id.clone(),
-        orchestration_shutdown_rx,
-    );
+    let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
+    let orchestration_reconciler =
+        spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     const CONNECTION_WORKERS: usize = 16;
@@ -2182,22 +2005,6 @@ mod helper_drain_tests {
     }
 }
 
-fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
-    for job in job_store.list() {
-        // Only a live job needs its owner rebuilt. A terminal job has no work
-        // left to route, and generation retirement prunes its bookkeeping
-        // anyway, so recording it just to mark it terminal is pure churn.
-        if job.status.is_terminal() {
-            continue;
-        }
-        let Some(lease_id) = job.daemon_lease_id.as_deref() else {
-            continue;
-        };
-        generation_store::rebuild_job_owner(&job.id.to_string(), lease_id)?;
-    }
-    Ok(())
-}
-
 /// Environment variable overriding the completion-notifier poll interval in
 /// seconds. Defaults to [`COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS`].
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
@@ -2260,7 +2067,6 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 /// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(
     job_store: JobStore,
-    serving_lease_id: String,
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     // The tick invokes registered CLI-owned orchestration drivers. The Cook
@@ -2278,7 +2084,7 @@ fn spawn_orchestration_reconciler(
                 let _ = shutdown.recv();
                 return;
             };
-            orchestration_tick_loop(job_store, serving_lease_id, interval, shutdown)
+            orchestration_tick_loop(job_store, interval, shutdown)
         })
         .expect("spawn orchestration reconciler")
 }
@@ -2287,45 +2093,40 @@ fn spawn_orchestration_reconciler(
 ///
 /// The mechanisms are isolated from each other and from the loop: a
 /// reconcile that panics costs one pass, not the tick and not the daemon.
-/// Overlap is impossible by construction — the sleep happens after all
-/// passes return — and across
-/// generations only the admission owner drives global work.
+/// Overlap is impossible by construction: the sleep happens after all
+/// passes return.
 fn orchestration_tick_loop(
     job_store: JobStore,
-    serving_lease_id: String,
     interval: std::time::Duration,
     shutdown: mpsc::Receiver<()>,
 ) {
     loop {
-        if lifetime::owns_global_work(&serving_lease_id) {
-            isolated_tick(|| {
-                let _ = orchestration::reconcile_stale_active_runs();
-            });
-            isolated_tick(|| {
-                let _ = orchestration::reconcile_unmaterialized_cook_admissions();
-            });
-            isolated_tick(|| {
-                let _ = orchestration::reconcile_queued_retries();
-            });
-            isolated_tick(|| {
-                let _ = orchestration::drain_work_intents();
-            });
-            // Registered workflow cadences admit one instance per due slot.
-            isolated_tick(|| {
-                let _ = workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
-            });
-            // Observation runs (`runs` table) are reconciled here — one rule,
-            // one cadence — not as a side effect of reads. HTTP GETs on runs
-            // only read; stale-running settlement belongs to this pass.
-            isolated_tick(|| {
-                let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
-                    return;
-                };
-                let _ = crate::observation::runs_service::reconcile_owned_stale_running_runs(
-                    &store, 1000,
-                );
-            });
-        }
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_stale_active_runs();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_unmaterialized_cook_admissions();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_queued_retries();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::drain_work_intents();
+        });
+        // Registered workflow cadences admit one instance per due slot.
+        isolated_tick(|| {
+            let _ = workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
+        });
+        // Observation runs (`runs` table) are reconciled here — one rule,
+        // one cadence — not as a side effect of reads. HTTP GETs on runs
+        // only read; stale-running settlement belongs to this pass.
+        isolated_tick(|| {
+            let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
+                return;
+            };
+            let _ =
+                crate::observation::runs_service::reconcile_owned_stale_running_runs(&store, 1000);
+        });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
@@ -2335,28 +2136,6 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = job_store.reconcile_controller_completions();
             let _ = job_store.deliver_pending_step_terminals();
-        });
-        // Generation retirement is lifecycle work, not a read-side effect.
-        // Drain decisions derive each generation's active-job count from its
-        // own jobs.json, so a terminal job releases its generation without a
-        // registry sweep. A failed lease stop leaves its identity durable so
-        // this existing reconciliation loop can retry on the next pass.
-        isolated_tick(|| {
-            if lifetime::owns_global_work(&serving_lease_id) {
-                let _ = generation_store::reconcile_drained_generations(
-                    &serving_lease_id,
-                    control::stop_drained_generation,
-                );
-            }
-        });
-        // A dead generation's checkpointed driver work resumes without an
-        // operator: its directory is restarted in place (#15830).
-        isolated_tick(|| {
-            if lifetime::owns_global_work(&serving_lease_id)
-                && generation_store::has_dead_generation(&serving_lease_id)
-            {
-                lifecycle_apply::adopt_dead_generations(DEFAULT_ADDR);
-            }
         });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
@@ -2390,21 +2169,14 @@ fn spawn_local_child_reservation_reconciler(
 ///
 /// Delivery is route-driven. Route-less completions are considered only when an
 /// explicit operations default transport is configured.
-fn spawn_completion_notifier_for_lease(
-    lease_id: String,
-    shutdown: mpsc::Receiver<()>,
-) -> std::thread::JoinHandle<()> {
+fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
     let interval = std::env::var(COMPLETION_NOTIFY_INTERVAL_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS);
     std::thread::spawn(move || {
-        completion_notify_loop_for_lease(
-            std::time::Duration::from_secs(interval),
-            Some(&lease_id),
-            shutdown,
-        )
+        completion_notify_loop(std::time::Duration::from_secs(interval), shutdown)
     })
 }
 
@@ -2437,28 +2209,22 @@ fn isolated_tick(body: impl FnOnce()) {
 /// attempt failed is retried on the very next tick. The two mechanisms are
 /// individually isolated — an outbox drain that panics does not stop
 /// completion notification, and vice versa.
-fn completion_notify_loop_for_lease(
-    interval: Duration,
-    lease_id: Option<&str>,
-    shutdown: mpsc::Receiver<()>,
-) {
+fn completion_notify_loop(interval: Duration, shutdown: mpsc::Receiver<()>) {
     let mut tracker = completion_tracker::CompletionTracker::default();
     loop {
-        if lease_id.is_none_or(lifetime::owns_global_work) {
-            let mut shutdown_requested = false;
-            isolated_tick(|| {
-                completion_notify_pass(&mut tracker, || {
-                    shutdown_requested = shutdown.try_recv() != Err(mpsc::TryRecvError::Empty);
-                    shutdown_requested
-                })
-            });
-            if shutdown_requested {
-                return;
-            }
-            isolated_tick(|| {
-                let _ = crate::notify_outbox::drain(chrono::Utc::now());
-            });
+        let mut shutdown_requested = false;
+        isolated_tick(|| {
+            completion_notify_pass(&mut tracker, || {
+                shutdown_requested = shutdown.try_recv() != Err(mpsc::TryRecvError::Empty);
+                shutdown_requested
+            })
+        });
+        if shutdown_requested {
+            return;
         }
+        isolated_tick(|| {
+            let _ = crate::notify_outbox::drain(chrono::Utc::now());
+        });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
         }
@@ -2784,7 +2550,6 @@ where
             match with_daemon_job_admission(|| {
                 let request = parse_controller_job_request(body)?;
                 let admission = admit_controller_job(request, job_store)?;
-                record_controller_job_generation(&admission.job)?;
                 Ok(controller_job_admission_response(&admission))
             }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
@@ -4023,7 +3788,6 @@ fn enqueue_exec_job(
 fn recover_staged_direct_jobs_after_owner_death(
     job_store: &JobStore,
     proven_dead_lease: &str,
-    replacement: &DaemonState,
 ) -> Result<()> {
     for job in job_store.list().into_iter().filter(|job| {
         job.status == JobStatus::Queued
@@ -4043,13 +3807,6 @@ fn recover_staged_direct_jobs_after_owner_death(
             raw_exec: false,
             workspace_owner_request: None,
         };
-        // Rebind before preparation, so a terminal preparation failure and any
-        // later result both route through the replacement generation.
-        generation_store::transfer_proven_dead_job(
-            &job.id.to_string(),
-            proven_dead_lease,
-            replacement,
-        )?;
         if let Err(error) = enqueue_exec_request(
             request,
             job_store,
@@ -4876,18 +4633,6 @@ fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serd
     })
 }
 
-pub(crate) fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
-    let lease_id = job
-        .daemon_lease_id
-        .as_deref()
-        .filter(|lease_id| !lease_id.is_empty())
-        .ok_or_else(|| {
-            Error::internal_unexpected("controller admission has no daemon lease owner")
-        })?;
-    let serving = heartbeat_lease()?;
-    generation_store::record_job_for_admission(&job.id.to_string(), lease_id, &serving)
-}
-
 pub(crate) fn start_controller_job(
     job_id: Uuid,
     job_store: &JobStore,
@@ -5399,7 +5144,6 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("jobs.json");
             let old_state = write_state("127.0.0.1:31001".parse().unwrap()).unwrap();
-            generation_store::seed(&old_state).unwrap();
             let old = JobStore::open_without_reconciliation(&path)
                 .unwrap()
                 .with_daemon_lease(old_state.lease_id.clone());
@@ -5444,38 +5188,20 @@ mod tests {
                 None,
             )
             .unwrap();
-            generation_store::record_job(&job.id.to_string(), &old_state.lease_id).unwrap();
             drop(old);
             let replacement = write_state("127.0.0.1:31002".parse().unwrap()).unwrap();
             let reopened = JobStore::open_without_reconciliation(&path)
                 .unwrap()
                 .with_daemon_lease(replacement.lease_id.clone());
-            recover_staged_direct_jobs_after_owner_death(
-                &reopened,
-                "different-lease",
-                &replacement,
-            )
-            .unwrap();
+            recover_staged_direct_jobs_after_owner_death(&reopened, "different-lease").unwrap();
             assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Queued);
-            recover_staged_direct_jobs_after_owner_death(
-                &reopened,
-                &old_state.lease_id,
-                &replacement,
-            )
-            .unwrap();
+            recover_staged_direct_jobs_after_owner_death(&reopened, &old_state.lease_id).unwrap();
             assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Failed);
             assert!(reopened.events(job.id).unwrap().iter().any(|event| {
                 event.data.as_ref().is_some_and(|data| {
                     data["phase"] == "staged_direct_recovery_preparation_failed"
                 })
             }));
-            assert_eq!(
-                generation_store::endpoint_for_job(&job.id.to_string())
-                    .unwrap()
-                    .unwrap()
-                    .lease_id,
-                replacement.lease_id
-            );
         });
     }
 
@@ -5614,7 +5340,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_job_connection_uses_the_draining_generation_for_status_and_cancellation() {
+    fn existing_job_connection_uses_the_serving_lease_for_status_and_cancellation() {
         crate::test_support::with_isolated_home(|_| {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
             let owner_address = listener
@@ -5643,7 +5369,7 @@ mod tests {
                         "updated_at_ms": 1,
                         "event_count": 0,
                         "artifacts": [],
-                        "daemon_lease_id": "draining",
+                        "daemon_lease_id": "serving",
                     });
                     let body = json!({
                         "success": true,
@@ -5660,47 +5386,8 @@ mod tests {
                     stream.flush().expect("flush fake daemon response");
                 }
             });
-            let state =
-                |lease_id: &str,
-                 address: &str,
-                 build_identity: crate::build_identity::BuildIdentity| {
-                    DaemonState {
-                        schema: DAEMON_LEASE_SCHEMA.to_string(),
-                        lease_id: lease_id.to_string(),
-                        startup_token: "test".to_string(),
-                        address: address.to_string(),
-                        pid: 1,
-                        state_path: crate::paths::daemon_state_file()
-                            .expect("state path")
-                            .display()
-                            .to_string(),
-                        started_at: "now".to_string(),
-                        last_seen_at: "now".to_string(),
-                        build_identity,
-                        binary_sha256: None,
-                        runtime_paths: DaemonRuntimeSnapshot {
-                            loaded_at: "now".to_string(),
-                            paths: Vec::new(),
-                        },
-                    }
-                };
-            let draining_identity = crate::build_identity::BuildIdentity {
-                version: "0.370.0".to_string(),
-                git_commit: Some("old".to_string()),
-                git_dirty: None,
-                display: "homeboy 0.370.0+old".to_string(),
-            };
-            let admission_identity = crate::build_identity::BuildIdentity {
-                version: "0.370.1".to_string(),
-                git_commit: Some("new".to_string()),
-                git_dirty: None,
-                display: "homeboy 0.370.1+new".to_string(),
-            };
-            let draining = state("draining", &owner_address, draining_identity.clone());
-            generation_store::seed(&draining).expect("seed draining generation");
-            generation_store::record_job(&job_id.to_string(), "draining").expect("record job");
-            let admission = state("admission", "127.0.0.1:1002", admission_identity.clone());
-            generation_store::activate(&admission).expect("activate new generation");
+            write_state(owner_address.parse().expect("fake daemon address"))
+                .expect("write serving lease");
 
             let client = LocalControllerJobClient::connect_existing_job(&job_id.to_string())
                 .expect("connect existing job");
@@ -5726,33 +5413,10 @@ mod tests {
                 requests_rx.recv().expect("cancellation request"),
                 format!("POST /controller/jobs/{job_id}/cancel HTTP/1.1")
             );
-            assert_eq!(
-                generation_store::admitting()
-                    .expect("read admission generation")
-                    .expect("admission generation")
-                    .lease_id,
-                "admission"
-            );
-            assert_eq!(
-                generation_store::generations()
-                    .expect("read generations")
-                    .into_iter()
-                    .find(|endpoint| endpoint.lease_id == "draining")
-                    .expect("draining generation")
-                    .build_identity,
-                draining_identity.display
-            );
-            assert_eq!(
-                generation_store::admitting()
-                    .expect("read admission generation")
-                    .expect("admission generation")
-                    .build_identity,
-                admission_identity.display
-            );
             let state_path = crate::paths::daemon_state_file().expect("state path");
-            assert!(!state_path.exists());
+            fs::remove_file(&state_path).expect("stop serving");
             let error = match LocalControllerJobClient::connect_existing_job("missing-job") {
-                Ok(_) => panic!("missing job owner must fail closed"),
+                Ok(_) => panic!("a job with no serving daemon must fail closed"),
                 Err(error) => error,
             };
             assert_eq!(
@@ -5821,11 +5485,7 @@ mod tests {
             drop(shutdown);
             let (done, finished) = std::sync::mpsc::channel();
             let handle = std::thread::spawn(move || {
-                super::completion_notify_loop_for_lease(
-                    Duration::from_secs(300),
-                    Some("not-the-admission-owner"),
-                    receiver,
-                );
+                super::completion_notify_loop(Duration::from_secs(300), receiver);
                 done.send(()).unwrap();
             });
             finished
@@ -5870,12 +5530,7 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let job_store = JobStore::default();
             let handle = std::thread::spawn(move || {
-                super::orchestration_tick_loop(
-                    job_store,
-                    "test-serving-lease".to_string(),
-                    Duration::from_secs(300),
-                    rx,
-                );
+                super::orchestration_tick_loop(job_store, Duration::from_secs(300), rx);
             });
 
             std::thread::sleep(Duration::from_millis(50));
@@ -5887,50 +5542,6 @@ mod tests {
                 start.elapsed() < Duration::from_secs(10),
                 "shutdown must not wait out the poll interval, took {:?}",
                 start.elapsed()
-            );
-        });
-    }
-
-    #[test]
-    fn restart_rebuilds_existing_job_ownership_from_the_durable_lease() {
-        crate::test_support::with_isolated_home(|_| {
-            let old = DaemonState {
-                schema: DAEMON_LEASE_SCHEMA.to_string(),
-                lease_id: "old-lease".to_string(),
-                startup_token: "old".to_string(),
-                address: "127.0.0.1:1001".to_string(),
-                pid: 1,
-                state_path: paths::daemon_state_file()
-                    .expect("state path")
-                    .display()
-                    .to_string(),
-                started_at: "now".to_string(),
-                last_seen_at: "now".to_string(),
-                build_identity: build_identity::current(),
-                binary_sha256: None,
-                runtime_paths: DaemonRuntimeSnapshot {
-                    loaded_at: "now".to_string(),
-                    paths: Vec::new(),
-                },
-            };
-            let replacement = DaemonState {
-                lease_id: "replacement-lease".to_string(),
-                address: "127.0.0.1:1002".to_string(),
-                ..old.clone()
-            };
-            generation_store::seed(&old).expect("seed old generation");
-            generation_store::activate(&replacement).expect("activate replacement");
-
-            let store = JobStore::default().with_daemon_lease(old.lease_id.clone());
-            let job = store.create("restart-recovery");
-            rebuild_generation_job_ownership(&store).expect("rebuild durable ownership");
-
-            assert_eq!(
-                generation_store::endpoint_for_job(&job.id.to_string())
-                    .expect("route job")
-                    .expect("old owner")
-                    .lease_id,
-                old.lease_id
             );
         });
     }
@@ -7109,76 +6720,6 @@ mod tests {
                     .status
                     .is_terminal()
             }));
-        });
-    }
-
-    #[test]
-    fn restarted_daemon_takes_admission_from_a_dead_generation() {
-        // #15456: a service-restarted daemon left admission with a dead
-        // generation, so status followed the dead lease and the live daemon
-        // was reported as not ready.
-        with_isolated_home(|home| {
-            let dead_pid = {
-                let mut child = std::process::Command::new("true")
-                    .spawn()
-                    .expect("spawn short-lived process");
-                let pid = child.id();
-                child.wait().expect("reap short-lived process");
-                pid
-            };
-            let dead_dir = home.path().join("dead-generation");
-            std::fs::create_dir_all(&dead_dir).expect("dead generation dir");
-            let dead = DaemonState {
-                schema: DAEMON_LEASE_SCHEMA.to_string(),
-                lease_id: "dead-lease".to_string(),
-                startup_token: "dead".to_string(),
-                address: "127.0.0.1:1".to_string(),
-                pid: dead_pid,
-                state_path: dead_dir.join("state.json").display().to_string(),
-                started_at: "then".to_string(),
-                last_seen_at: "then".to_string(),
-                build_identity: crate::build_identity::current(),
-                binary_sha256: None,
-                runtime_paths: DaemonRuntimeSnapshot {
-                    loaded_at: "then".to_string(),
-                    paths: Vec::new(),
-                },
-            };
-            std::fs::write(
-                dead_dir.join("state.json"),
-                serde_json::to_vec(&dead).expect("serialize dead lease"),
-            )
-            .expect("write dead lease");
-            generation_store::seed(&dead).expect("seed dead admission owner");
-            assert_eq!(
-                generation_store::admitting()
-                    .expect("admitting")
-                    .expect("owner")
-                    .lease_id,
-                "dead-lease"
-            );
-
-            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-            let address = listener.local_addr().expect("listener address");
-            let server = std::thread::spawn(move || serve_listener_for_requests(listener, 1));
-            let response =
-                reqwest::blocking::get(format!("http://{address}/health")).expect("health request");
-            assert!(response.status().is_success());
-            let served = server.join().expect("join daemon").expect("daemon served");
-
-            let owner = generation_store::admitting()
-                .expect("admitting")
-                .expect("owner");
-            assert_eq!(
-                owner.lease_id, served.lease_id,
-                "the serving daemon owns admission"
-            );
-            assert!(
-                generation_store::endpoint_for_lease("dead-lease")
-                    .expect("lookup")
-                    .is_some(),
-                "the dead generation stays registered for recovery"
-            );
         });
     }
 

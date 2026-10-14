@@ -300,9 +300,8 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
     panic!("timed out waiting for {label}");
 }
 
-fn serving_daemon_generation() -> (DaemonState, JobStore) {
+fn serving_daemon() -> (DaemonState, JobStore) {
     let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
-    generation_store::seed(&state).expect("seed generation");
     let store = JobStore::open_without_reconciliation(
         &crate::paths::daemon_jobs_file().expect("jobs path"),
     )
@@ -314,7 +313,7 @@ fn serving_daemon_generation() -> (DaemonState, JobStore) {
 #[test]
 fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     let _home = HomeGuard::new();
-    let (old, store) = serving_daemon_generation();
+    let (old, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -542,7 +541,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
             .expect("unresolved ID"),
     )
     .expect("valid unresolved ID");
-    let (current, restarted) = serving_daemon_generation();
+    let (current, restarted) = serving_daemon();
     assert_ne!(old.lease_id, current.lease_id);
     recover_controller_jobs(&restarted);
     started_rx
@@ -573,7 +572,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
 #[test]
 fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
     let _home = HomeGuard::new();
-    let (old, store) = serving_daemon_generation();
+    let (old, store) = serving_daemon();
     let (cancelled_checkpoint_tx, cancelled_checkpoint_rx) = mpsc::channel();
     let (release_cancel_tx, release_cancel_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -617,7 +616,7 @@ fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
         .request_controller_cancellation(job_id, "daemon crashed".to_string())
         .expect("persist cancellation intent");
 
-    let (current, restarted) = serving_daemon_generation();
+    let (current, restarted) = serving_daemon();
     assert_ne!(old.lease_id, current.lease_id);
     recover_controller_jobs(&restarted);
     assert_eq!(
@@ -656,7 +655,7 @@ fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
 #[test]
 fn cancelling_queued_controller_job_before_start_is_terminal_and_blocks_execution() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (_release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -736,7 +735,7 @@ fn cancelling_queued_controller_job_before_start_is_terminal_and_blocks_executio
 #[test]
 fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -809,7 +808,7 @@ fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() 
 #[test]
 fn cancelling_running_controller_job_acknowledges_before_blocked_shutdown_finishes() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (cancellation_release, cancellation_rx) = mpsc::channel();
@@ -1039,7 +1038,7 @@ fn controller_job_created_by_disconnected_tcp_client_stays_queued_and_cancellabl
 #[test]
 fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(
@@ -1103,7 +1102,7 @@ fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
 #[test]
 fn controller_job_errors_use_driver_safe_public_projection() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(SecretErrorControllerDriver {
@@ -2618,8 +2617,10 @@ fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
     assert_eq!(forced.pid, None);
 }
 
+/// An absent lease has nothing to signal: the stop converges as absent and
+/// leaves the active job for the in-place replacement to resume (#15936).
 #[test]
-fn lease_bound_stop_keeps_active_jobs_protected_when_lease_is_absent() {
+fn lease_bound_stop_with_an_absent_lease_leaves_active_jobs_to_resume() {
     let _home = HomeGuard::new();
     let store = JobStore::open_without_reconciliation(
         &crate::paths::daemon_jobs_file().expect("jobs path"),
@@ -2633,9 +2634,18 @@ fn lease_bound_stop_keeps_active_jobs_protected_when_lease_is_absent() {
         stop_for_lease("stale-lease"),
         force_stop_for_lease("stale-lease"),
     ] {
-        let error = result.expect_err("active job blocks missing-lease reconciliation");
-        assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+        let result = result.expect("absent lease converges");
+        assert!(result.already_absent);
+        assert!(!result.stopped);
     }
+    let reopened = JobStore::open_without_reconciliation(
+        &crate::paths::daemon_jobs_file().expect("jobs path"),
+    )
+    .expect("store");
+    assert_eq!(
+        reopened.get(job.id).expect("job").status,
+        JobStatus::Running
+    );
 }
 
 #[test]
@@ -3372,7 +3382,7 @@ fn destructive_recovery_bounds_admission_contention_before_mutating() {
 #[test]
 fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
     let _home = HomeGuard::new();
-    let (_current, store) = serving_daemon_generation();
+    let (_current, store) = serving_daemon();
     let (started_tx, _started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {

@@ -2,7 +2,6 @@
 
 use std::time::{Duration, Instant};
 
-use super::generation_store;
 use crate::error::Result;
 
 pub const IDLE_TIMEOUT_ENV: &str = "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS";
@@ -79,13 +78,6 @@ pub(super) fn configured_idle_timeout() -> Result<Option<Duration>> {
                 .filter(|seconds| *seconds > 0)
                 .map(Duration::from_secs)
         })
-}
-
-/// Workflow cadences, mirrored observations, and orchestration belong to the
-/// admission owner. Draining generations only maintain their own durable work.
-pub(super) fn owns_global_work(lease_id: &str) -> bool {
-    generation_store::admitting()
-        .is_ok_and(|endpoint| endpoint.is_some_and(|endpoint| endpoint.lease_id == lease_id))
 }
 
 /// Suffix Linux appends to `/proc/self/exe` (and `std::env::current_exe()`)
@@ -175,17 +167,9 @@ impl IdleLifetime {
         replaced && self.last_activity.elapsed() >= REPLACED_BINARY_STOP_AFTER
     }
 
-    pub(super) fn expired(&self, draining: bool) -> bool {
-        // Even an explicitly resident generation becomes bounded once replaced.
-        let timeout = if draining {
-            Some(
-                self.timeout
-                    .unwrap_or(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
-            )
-        } else {
-            self.timeout
-        };
-        timeout.is_some_and(|timeout| self.last_activity.elapsed() >= timeout)
+    pub(super) fn expired(&self) -> bool {
+        self.timeout
+            .is_some_and(|timeout| self.last_activity.elapsed() >= timeout)
     }
 }
 

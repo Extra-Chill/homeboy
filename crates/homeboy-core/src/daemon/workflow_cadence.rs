@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::workflow_job::WorkflowJobRequest;
-use super::{generation_store, JobStore};
+use super::JobStore;
 use crate::error::{Error, Result};
 use crate::workflow::WorkflowDefinition;
 
@@ -176,7 +176,7 @@ pub fn slot_request(template: &WorkflowJobRequest, instance_name: &str) -> Workf
 // ---------------------------------------------------------------------------
 
 fn store_path() -> Result<PathBuf> {
-    Ok(generation_store::router_dir()?.join(STORE_FILE))
+    Ok(crate::paths::daemon_state_file()?.with_file_name(STORE_FILE))
 }
 
 fn open() -> Result<Connection> {
@@ -479,7 +479,6 @@ fn admit_slot(store: &JobStore, request: &WorkflowJobRequest) -> Admission {
         })?;
     let admission =
         super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
-    let _ = super::record_controller_job_generation(&admission.job);
     super::start_controller_job(admission.job.id, store)?;
     Ok((store.persistence_path(), admission.disposition.as_str()))
 }

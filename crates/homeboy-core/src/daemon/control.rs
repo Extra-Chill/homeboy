@@ -30,7 +30,6 @@ use crate::process::{
 };
 
 use super::acquire_daemon_job_admission_fence;
-use super::generation_store::{self, DAEMON_ROUTER_BYPASS_ENV, DAEMON_ROUTER_DIR_ENV};
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
     read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonCandidateReconciliationResult,
@@ -401,16 +400,12 @@ fn wait_for_daemon_with_lifetime(
             .and_then(|validation| validation.state)
             .filter(|state| state.pid == child.id());
         if let Some(state) = state {
-            let draining = generation_store::admitting()
-                .ok()
-                .flatten()
-                .is_some_and(|endpoint| endpoint.lease_id != state.lease_id);
             let idle_jobs =
                 super::JobStore::active_count_at_path(state_path.with_file_name("jobs.json"))
                     .is_ok_and(|count| count == 0);
             if !idle_jobs || launcher.as_ref().is_some_and(|launcher| launcher.is_live()) {
                 idle.touch();
-            } else if idle.expired(draining)
+            } else if idle.expired()
                 || idle.replaced_and_settled(super::lifetime::running_executable_replaced())
             {
                 // An idle daemon whose binary was replaced stops now instead of
@@ -432,7 +427,6 @@ fn wait_for_daemon_with_lifetime(
                             crate::paths::DAEMON_STATE_DIR_ENV,
                             state_path.parent().expect("state parent"),
                         )
-                        .env(DAEMON_ROUTER_BYPASS_ENV, "1")
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -1770,293 +1764,45 @@ fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryRece
 /// process publishes its address (or a timeout elapses).
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
-    // Once admission is generation-routed, startup must use that same route.
-    // The router's original store may still have a live draining owner; its
-    // process and owner.lock are not evidence about the selected generation.
-    if !generation_store::bypassed() && generation_store::admitting()?.is_some() {
-        return ensure_running_with_idle_timeout(addr, 0);
-    }
     let _lock = acquire_daemon_operation_lock()?;
     start_or_return_live_unlocked_with_idle_timeout(addr, &uuid::Uuid::new_v4().to_string(), 0)
 }
 
 /// Return a live daemon under the lifecycle lock, or start one when its lease
-/// is absent or its recorded PID is dead.
+/// is absent or its recorded PID is dead. A live daemon on another build is
+/// restarted in place: the stop interrupts its in-flight work and the
+/// replacement resumes that work from the same store (#15936).
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
-    ensure_running_with_idle_timeout(addr, super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)
-}
-
-fn ensure_running_with_idle_timeout(
-    addr: &str,
-    default_idle_timeout: u64,
-) -> Result<DaemonStartResult> {
-    if let Some(endpoint) = (!generation_store::bypassed())
-        .then(generation_store::admitting)
-        .transpose()?
-        .flatten()
-    {
-        let state_path = Path::new(&endpoint.state_dir).join("state.json");
-        let validation = super::validate_lease_file(&state_path)?;
-        if validation.fresh && validation.running && validation.reachable {
-            let state = validation.state.expect("fresh lease has state");
-            return Ok(DaemonStartResult {
-                pid: state.pid,
-                address: state.address,
-                state_path: state.state_path,
-                lease_id: state.lease_id,
-            });
-        }
-        if validation.invalid_pid.is_some()
-            || (validation.state.is_none()
-                && validation.stale_reason.is_some()
-                && state_path.exists())
-        {
-            return Err(super::corrupt_daemon_lease_error(
-                &state_path,
-                validation.stale_reason,
-            ));
-        }
-        if !validation.running && super::try_acquire_daemon_owner_lock_at(&state_path)?.is_none() {
-            let mut error = Error::internal_unexpected(
-                "selected daemon generation has a live or starting owner without a valid lease; refusing replacement",
-            );
-            error.details = serde_json::json!({
-                "classification": "daemon_generation_owner_unverified",
-                "state_path": state_path,
-                "lease_id": endpoint.lease_id,
-            });
-            return Err(error);
-        }
-        // A dead admission owner is restarted in place: its store, lease and
-        // owner lock stay authoritative, and the successor's startup takes
-        // admission and resumes its in-flight work (#15830, #15936). Only a
-        // live owner is replaced through a new generation.
-        let in_place = (!validation.running).then(|| PathBuf::from(&endpoint.state_dir));
-        return start_admission_generation(
-            addr,
-            validation.state.as_ref(),
-            default_idle_timeout,
-            in_place,
-        );
-    }
     let status = read_status()?;
-    if status.running && !status.fresh {
-        return start_admission_generation(addr, status.state.as_ref(), default_idle_timeout, None);
+    if let Some(lease_id) = status
+        .state
+        .as_ref()
+        .filter(|_| status.running && !status.fresh)
+        .map(|state| state.lease_id.clone())
+    {
+        restart_in_place(&lease_id)?;
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
 }
 
-/// Start B in an isolated state directory, then publish it as the admission
-/// owner. A remains untouched: its lease, job store, and endpoint continue to
-/// own all work admitted before this atomic registry update. `in_place` names
-/// a dead owner's own state directory to restart instead.
-fn start_admission_generation(
-    addr: &str,
-    current: Option<&super::DaemonState>,
-    default_idle_timeout: u64,
-    in_place: Option<PathBuf>,
-) -> Result<DaemonStartResult> {
-    parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
-    if let Some(current) = current {
-        generation_store::seed(current)?;
-    }
-    if let Some(endpoint) = generation_store::admitting()? {
-        let validation =
-            super::validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))?;
-        if validation.fresh && validation.running && validation.reachable {
-            let state = validation.state.expect("fresh lease has state");
-            return Ok(DaemonStartResult {
-                pid: state.pid,
-                address: state.address,
-                state_path: state.state_path,
-                lease_id: state.lease_id,
-            });
-        }
-    }
-
-    let state_dir = match in_place {
-        Some(state_dir) => state_dir,
-        None => generation_store::generation_state_dir()?,
-    };
-    let router_dir = generation_store::router_dir()?;
-    std::fs::create_dir_all(&state_dir).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", state_dir.display())),
-        )
-    })?;
-    let startup_token = uuid::Uuid::new_v4().to_string();
-    let exe = std::env::current_exe().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable".to_string()),
-        )
-    })?;
-    let mut command = Command::new(exe);
-    command
-        .args([
-            "daemon",
-            "supervise",
-            "--addr",
-            addr,
-            "--startup-token",
-            &startup_token,
-            "--state-dir",
-        ])
-        .arg(&state_dir)
-        .env(crate::paths::DAEMON_STATE_DIR_ENV, &state_dir)
-        .env(DAEMON_ROUTER_DIR_ENV, &router_dir)
-        .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
-        .env(
-            super::lifetime::IDLE_TIMEOUT_ENV,
-            super::lifetime::launch_idle_timeout(default_idle_timeout)?.to_string(),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    super::lifetime::LauncherIdentity::configure(&mut command);
-    detach_from_launcher_session(&mut command);
-    let child = command.spawn().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("spawn daemon generation".to_string()),
-        )
-    })?;
-    let state_path = state_dir.join("state.json");
-    let mut attempt = StartupAttempt::new(child, &startup_token, &state_path);
-    let result = (|| {
-        for _ in 0..STARTUP_LEASE_OBSERVATIONS {
-            let validation = super::validate_lease_file(&state_path)?;
-            if validation.fresh && validation.running && validation.reachable {
-                let state = validation.state.expect("fresh lease has state");
-                if state.startup_token != startup_token {
-                    return Err(Error::internal_unexpected(
-                        "replacement daemon published a mismatched startup token",
-                    ));
-                }
-                generation_store::activate(&state)?;
-                return Ok(DaemonStartResult {
-                    pid: state.pid,
-                    address: state.address,
-                    state_path: state.state_path,
-                    lease_id: state.lease_id,
-                });
+/// Stop the exact stale lease. A concurrent caller may already have replaced
+/// it; only a stop failure that leaves this same lease serving is an error.
+fn restart_in_place(lease_id: &str) -> Result<()> {
+    match super::stop_for_lease(lease_id) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let current = read_status()?;
+            if current.running
+                && current
+                    .state
+                    .is_some_and(|state| state.lease_id == lease_id)
+            {
+                Err(error)
+            } else {
+                Ok(())
             }
-            thread::sleep(STARTUP_LEASE_POLL);
         }
-        Err(Error::internal_unexpected(
-            "replacement daemon did not publish a fresh isolated lease",
-        ))
-    })();
-    attempt.finish(result)
-}
-
-/// Retire only a registry-authorized drained generation through its own
-/// lease-scoped stop gate. The child command repeats the exact state directory
-/// and lease rather than signaling a PID selected by the newer generation.
-pub(super) fn stop_drained_generation(
-    endpoint: &generation_store::LocalDaemonEndpoint,
-) -> Result<()> {
-    stop_registered_generation(endpoint, false).map(|_| ())
-}
-
-/// Execute the existing lease stop in the exact registered generation frame.
-/// Status, job checks, locks and termination all address that same store; the
-/// invoking process's inherited state directory cannot select another owner.
-pub(super) fn stop_registered_generation(
-    endpoint: &generation_store::LocalDaemonEndpoint,
-    force: bool,
-) -> Result<super::DaemonStopResult> {
-    let mut args = vec!["daemon", "stop", "--lease-id", endpoint.lease_id.as_str()];
-    if force {
-        args.push("--force");
     }
-    run_in_generation_frame(endpoint, &args, "daemon stop")
-}
-
-/// Adopt a registered generation's proven-dead lease in that generation's own
-/// frame (#15830). Its lease, owner lock, job store, and replacement daemon all
-/// live in its state directory, so the adoption runs there: it re-proves the
-/// lease dead, reconciles the jobs proven absent, and restarts the generation
-/// in place. The replacement's startup recovery resumes checkpointed driver
-/// work, and the directory's exclusive owner lock admits exactly one adopter.
-fn adopt_registered_generation(
-    endpoint: &generation_store::LocalDaemonEndpoint,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-    addr: &str,
-) -> Result<DaemonOrphanAdoptionResult> {
-    let confirmed = confirmed_no_pid_job_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let mut args = vec![
-        "daemon",
-        "adopt-orphan",
-        "--lease-id",
-        endpoint.lease_id.as_str(),
-        "--addr",
-        addr,
-    ];
-    for job_id in &confirmed {
-        args.extend(["--confirm-untracked-child-dead", job_id.as_str()]);
-    }
-    run_in_generation_frame(endpoint, &args, "daemon adopt-orphan")
-}
-
-/// Run one lease-scoped daemon lifecycle command in the exact registered
-/// generation frame. Status, job checks, locks, and any replacement all address
-/// that generation's store; the invoking process's inherited state directory
-/// cannot select another owner.
-fn run_in_generation_frame<T: serde::de::DeserializeOwned>(
-    endpoint: &generation_store::LocalDaemonEndpoint,
-    args: &[&str],
-    operation: &str,
-) -> Result<T> {
-    let exe = super::lifetime::launchable_executable().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable".to_string()),
-        )
-    })?;
-    let output = Command::new(exe)
-        .args(args)
-        .env(crate::paths::DAEMON_STATE_DIR_ENV, &endpoint.state_dir)
-        .env(DAEMON_ROUTER_DIR_ENV, generation_store::router_dir()?)
-        .env(DAEMON_ROUTER_BYPASS_ENV, "1")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("run generation-bound {operation}")),
-            )
-        })?;
-    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!(
-                "read generation-bound {operation} (exit {}; stderr: {})",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
-        )
-    })?;
-    if !output.status.success() {
-        let diagnostics = &envelope["diagnostics"];
-        let fallback = format!("generation-bound {operation} failed");
-        return Err(Error::new(
-            crate::error::ErrorCode::InternalUnexpected,
-            diagnostics["message"].as_str().unwrap_or(&fallback),
-            diagnostics["details"].clone(),
-        ));
-    }
-    serde_json::from_value(envelope["data"].clone()).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some(format!("decode generation-bound {operation}")),
-        )
-    })
 }
 
 /// The optional controller operation id is intentionally additive. Existing
@@ -2104,15 +1850,6 @@ pub fn adopt_orphaned_lease(
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
     parse_bind_addr(addr)?;
-    // A registered lease is adopted in its own generation frame, wherever this
-    // process's inherited state directory points (#15830).
-    if let Some(endpoint) = (!generation_store::bypassed())
-        .then(|| generation_store::endpoint_for_lease(lease_id))
-        .transpose()?
-        .flatten()
-    {
-        return adopt_registered_generation(&endpoint, confirmed_no_pid_job_ids, addr);
-    }
     let _lock = acquire_daemon_operation_lock()?;
     adopt_orphaned_lease_with_operations(
         lease_id,
@@ -3649,32 +3386,7 @@ fn spawn_and_wait_for_lease_attempt(
             || super::read_status_for_state_path(state_path.clone()),
             || thread::sleep(STARTUP_LEASE_POLL),
         )? {
-            Ok(result) => {
-                let validation = super::validate_lease_file(Path::new(&result.state_path))?;
-                let state = validation
-                    .state
-                    .filter(|state| {
-                        validation.fresh
-                            && validation.running
-                            && validation.reachable
-                            && state.lease_id == result.lease_id
-                            && state.startup_token == startup_token
-                    })
-                    .ok_or_else(|| {
-                        Error::internal_unexpected(
-                            "daemon startup lease changed before generation activation",
-                        )
-                    })?;
-                // A restart can leave a registry naming the dead generation. Publish
-                // the verified replacement before accepting controller submissions.
-                // A frame-pinned start restarts that one generation in place; it
-                // inherits the generation's drain state rather than taking
-                // admission from a live owner (#15830).
-                if !generation_store::bypassed() {
-                    generation_store::activate(&state)?;
-                }
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(observation) => {
                 // Cleanup is evidence about the failed attempt, not a replacement
                 // for the startup failure that caused this control path.
@@ -3727,9 +3439,6 @@ fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
     if let Some(url) = daemon_url.filter(|url| !url.trim().is_empty()) {
         return Ok(url);
     }
-    if let Some(endpoint) = generation_store::admitting()? {
-        return Ok(format!("http://{}", endpoint.address));
-    }
     let status = read_status()?;
     let admits_work = status.admits_work();
     let Some(state) = status.state.filter(|_| admits_work) else {
@@ -3773,32 +3482,6 @@ pub fn fetch_artifact_to_path(
     daemon_url: Option<String>,
     output: Option<PathBuf>,
 ) -> Result<ArtifactFetchOutcome> {
-    if daemon_url.is_none() {
-        let mut endpoints = generation_store::admitting()?
-            .into_iter()
-            .collect::<Vec<_>>();
-        endpoints.extend(generation_store::generations()?);
-        let mut last_error = None;
-        for endpoint in endpoints {
-            match fetch_artifact_to_path(
-                run_id,
-                artifact_id,
-                Some(format!("http://{}", endpoint.address)),
-                output.clone(),
-            ) {
-                Ok(outcome) => return Ok(outcome),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        return Err(last_error.unwrap_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                "no local daemon generation is available for artifact routing",
-                Some(artifact_id.to_string()),
-                None,
-            )
-        }));
-    }
     let daemon_url = resolve_daemon_url(daemon_url)?;
     let content_url = artifact_content_url(&daemon_url, run_id, artifact_id)?;
     let output_path = output.unwrap_or_else(|| default_artifact_output_path(artifact_id));
