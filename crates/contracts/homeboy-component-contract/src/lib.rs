@@ -21,7 +21,7 @@ pub use config::{
     ComponentScriptsConfig, DependencyStackEdge, DependencyStackEdgeSource,
     DeploymentProviderAttachment, GitDeployConfig, GithubConfig, GithubHostConfig,
     GithubReleaseOwner, PackageArtifact, PackageCoverageArtifactMatch, PackageCoverageConfig,
-    ScopeConfig, ScopedExtensionConfig, VersionTarget,
+    ReleaseOwner, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
 pub use model::{
     render_remote_path_template, Component, ComponentLifecycle, ComponentManagedExecution,

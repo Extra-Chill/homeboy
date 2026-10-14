@@ -791,6 +791,38 @@ pub struct ReleaseCommandResult {
     pub changelog_history_recovery: Option<ChangelogHistoryRecoveryReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<ReleaseReadinessEnvelope>,
+    /// Present when the component declares `release.owner: "ci"` and this
+    /// invocation is not the CI release caller: the command deferred to CI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_release: Option<CiReleaseOwnership>,
+}
+
+/// Structured report for a release deferred to the component's CI owner.
+///
+/// Built only from local repository state (no fetch, no gate, no mutation).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CiReleaseOwnership {
+    /// Declared owner (`release.owner`), always `ci` here.
+    pub owner: String,
+    /// Newest local release tag for this component, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_tag: Option<String>,
+    /// Commit the latest release tag points at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_tag_commit: Option<String>,
+    /// Local HEAD commit of the component checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    /// Whether the latest release tag points at HEAD.
+    pub head_released: bool,
+    /// Where the CI release for this component runs (GitHub Actions URL when
+    /// the remote resolves to GitHub).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_release_url: Option<String>,
+    /// Command an operator or agent can run to follow the CI release.
+    pub next_action: String,
+    /// How the CI release caller is recognized, so it is not deferred.
+    pub ci_caller_marker: String,
 }
 
 /// Immutable tag evidence and the exact post-release entries it proves were
@@ -841,6 +873,10 @@ pub struct BatchReleaseSummary {
     pub released: u32,
     pub skipped: u32,
     pub failed: u32,
+    /// Components deferred because their CI owns releases (`release.owner: ci`).
+    /// Not a failure and not a skip: a batch of only CI-owned components exits 0.
+    #[serde(default)]
+    pub ci_owned: u32,
 }
 
 #[cfg(test)]

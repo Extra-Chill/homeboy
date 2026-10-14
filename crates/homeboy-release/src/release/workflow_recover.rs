@@ -120,6 +120,7 @@ pub(super) fn run_recover(
                 release_summary,
                 changelog_history_recovery: Some(report),
                 readiness: None,
+                ci_release: None,
             },
             None,
             0,
@@ -136,6 +137,7 @@ pub(super) fn run_recover(
             release_summary: vec![format!("Reconciled provider workspace `{}` without replaying release mutation or push.", record.owner_run_ref)],
             changelog_history_recovery: None,
             readiness: None,
+            ci_release: None,
         }, Some(super::workspace::output_from_record(&record)), 0));
     }
     if let Some(deployment) = super::deployment::resume_deployment(roots, &input.component_id)? {
@@ -158,6 +160,7 @@ pub(super) fn run_recover(
                 release_summary: vec!["Resumed only incomplete release deployment targets; publication steps were not replayed.".to_string()],
                 changelog_history_recovery: None,
                 readiness: None,
+                ci_release: None,
             },
             None,
             if failed { 1 } else { 0 },
@@ -455,6 +458,7 @@ pub(super) fn run_recover(
                 .concat(),
                 changelog_history_recovery: None,
                 readiness: None,
+                ci_release: None,
             },
             None,
             RECOVERY_INCOMPLETE_EXIT_CODE,
@@ -638,6 +642,7 @@ pub(super) fn run_recover(
             .concat(),
             changelog_history_recovery: None,
             readiness: None,
+            ci_release: None,
         },
         None,
         RECOVERY_INCOMPLETE_EXIT_CODE,
@@ -909,6 +914,7 @@ where
         .concat(),
         changelog_history_recovery: None,
         readiness: None,
+        ci_release: None,
     }))
 }
 
@@ -1058,6 +1064,7 @@ fn recovery_dry_run_result(
         release_summary: actions,
         changelog_history_recovery: None,
         readiness: None,
+        ci_release: None,
     }
 }
 

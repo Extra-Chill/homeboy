@@ -1,6 +1,7 @@
 mod advanced_remote;
 mod cascade;
 mod checkout_guard;
+mod ci_ownership;
 // "Is my fix released yet?" — commit→release containment and the inverse
 // installed-versus-latest gap (#11754). Public because the CLI surfaces it
 // directly and it is pure git plus release metadata.
@@ -64,6 +65,9 @@ pub mod version {
 // Public API — every item below is reached from `homeboy-cli`. Anything the CLI
 // does not name stays `pub(crate)` so `dead_code` can see it.
 pub use cascade::{run_cascade, CascadeResult, ReleasedCoordinates};
+pub use ci_ownership::{
+    ci_owned_release_result, CI_OWNED_REASON, CI_OWNED_STATUS, RELEASE_CALLER_ENV,
+};
 pub use containment::{ContainsQuery, ReleaseContainsReport, ReleaseGapReport};
 pub use context::readiness_provenance;
 pub use control_plane::register_action_delegate;
@@ -77,8 +81,8 @@ pub use package_recovery::{package_existing_tag, ReleasePackageResult};
 pub use pipeline::run;
 pub use types::readiness_is_valid;
 pub use types::{
-    BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
-    ReleasePhase, ReleasePipelineOptions, ReleasePreflightPlacement,
+    BatchReleaseResult, CiReleaseOwnership, ReleaseCommandInput, ReleaseCommandResult,
+    ReleaseExecutionPlan, ReleasePhase, ReleasePipelineOptions, ReleasePreflightPlacement,
     ReleasePreflightPlacementPolicy, ReleasePreflightSourceIdentity, ReleaseReadinessEnvelope,
     ReleaseReadinessGateResult, ReleaseReadinessLocalOnly, ReleaseReadinessProvenance,
     ReleaseWorkspaceOutput,

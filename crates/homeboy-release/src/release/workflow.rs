@@ -51,6 +51,19 @@ pub fn run_command_with_workspace(
     mut input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
+    // A component whose CI owns its releases is reported, not released, before
+    // any readiness record, planning, or gate runs (#15896). The CI release
+    // caller itself is recognized by its environment and proceeds normally.
+    if let Some(result) = super::ci_ownership::ci_owned_release_result(&input)? {
+        display_release_outcome_summary(&result.release_summary);
+        return Ok((
+            ReleaseWorkspaceCommandResult {
+                result,
+                workspace: None,
+            },
+            0,
+        ));
+    }
     // One resolution for an entire release command. The readiness operation
     // record, the dry-run preflight plan, recovery reconciliation, and the
     // release pipeline itself all receive it, so a single invocation cannot
@@ -405,6 +418,7 @@ fn run_command_with_workspace_inner(
                         release_summary: summary,
                         changelog_history_recovery: None,
                         readiness: None,
+                        ci_release: None,
                     },
                     workspace: None,
                 },
@@ -440,6 +454,7 @@ fn run_command_with_workspace_inner(
                         release_summary: release_summary_for_skipped_plan(),
                         changelog_history_recovery: None,
                         readiness: None,
+                        ci_release: None,
                     },
                     workspace: None,
                 },
@@ -470,6 +485,7 @@ fn run_command_with_workspace_inner(
                         release_summary,
                         changelog_history_recovery: None,
                         readiness: None,
+                        ci_release: None,
                     },
                     workspace: None,
                 },
@@ -510,6 +526,7 @@ fn run_command_with_workspace_inner(
                     release_summary: release_summary_for_skipped_plan(),
                     changelog_history_recovery: None,
                     readiness: None,
+                    ci_release: None,
                 },
                 workspace: None,
             },
@@ -627,6 +644,7 @@ fn run_command_with_workspace_inner(
                 release_summary,
                 changelog_history_recovery: None,
                 readiness: None,
+                ci_release: None,
             },
             workspace,
         },
@@ -707,6 +725,7 @@ fn prepared_tag_publish_recovery_decision(
             )],
             changelog_history_recovery: None,
             readiness: None,
+            ci_release: None,
         }),
         Some(true) | None => None,
     }
@@ -1258,6 +1277,7 @@ fn release_command_exit_code(
 enum BatchStatusBucket {
     Released,
     Skipped,
+    CiOwned,
     Failed,
 }
 
@@ -1269,6 +1289,7 @@ fn batch_status_bucket(status: &str) -> BatchStatusBucket {
     match status {
         "released" => BatchStatusBucket::Released,
         "skipped" => BatchStatusBucket::Skipped,
+        super::ci_ownership::CI_OWNED_STATUS => BatchStatusBucket::CiOwned,
         _ => BatchStatusBucket::Failed,
     }
 }
@@ -1285,6 +1306,7 @@ pub fn run_batch(
     let mut released: u32 = 0;
     let mut skipped: u32 = 0;
     let mut failed: u32 = 0;
+    let mut ci_owned: u32 = 0;
 
     for component_id in component_ids {
         homeboy_core::log_status!(
@@ -1327,6 +1349,7 @@ pub fn run_batch(
                 match batch_status_bucket(&status) {
                     BatchStatusBucket::Skipped => skipped += 1,
                     BatchStatusBucket::Released => released += 1,
+                    BatchStatusBucket::CiOwned => ci_owned += 1,
                     BatchStatusBucket::Failed => failed += 1,
                 }
 
@@ -1357,10 +1380,11 @@ pub fn run_batch(
         homeboy_core::log_status!("release", "--- Batch summary ---");
         homeboy_core::log_status!(
             "release",
-            "{} component(s): {} released, {} skipped, {} failed",
+            "{} component(s): {} released, {} skipped, {} ci-owned, {} failed",
             total,
             released,
             skipped,
+            ci_owned,
             failed
         );
     }
@@ -1372,6 +1396,7 @@ pub fn run_batch(
             released,
             skipped,
             failed,
+            ci_owned,
         },
     }
 }
@@ -1446,6 +1471,8 @@ mod tests {
         assert_eq!(batch_status_bucket("missing"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("partial"), BatchStatusBucket::Failed);
         assert_eq!(batch_status_bucket("unknown"), BatchStatusBucket::Failed);
+        // #15896: a CI-owned deferral is neither a release, a skip, nor a failure.
+        assert_eq!(batch_status_bucket("ci_owned"), BatchStatusBucket::CiOwned);
     }
 
     #[test]
@@ -2863,6 +2890,238 @@ mod tests {
         assert_eq!(result.bump_type, "minor");
         assert_eq!(result.new_version.as_deref(), Some("1.1.0"));
         assert_eq!(result.tag.as_deref(), Some("v1.1.0"));
+    }
+
+    /// #15896 fixture: a remote with `v1.0.0` plus one unreleased `fix:`
+    /// commit, cloned into `local`. `release_json` is the component's
+    /// `release` config object.
+    fn setup_release_owner_fixture(
+        remote: &std::path::Path,
+        local: &std::path::Path,
+        release_json: &str,
+    ) {
+        run_in(remote, &["git", "init", "-q", "--bare", "-b", "main"]);
+        let seed = tempfile::tempdir().expect("seed tempdir");
+        let seed = seed.path();
+        run_in(
+            seed,
+            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
+        );
+        run_in(seed, &["git", "config", "user.email", "test@example.com"]);
+        run_in(seed, &["git", "config", "user.name", "Test"]);
+        run_in(seed, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            seed.join("homeboy.json"),
+            format!(
+                r#"{{
+                "id": "fixture",
+                "changelog_target": "CHANGELOG.md",
+                "release": {release_json},
+                "version_targets": [
+                    {{ "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }}
+                ]
+            }}"#
+            ),
+        )
+        .expect("write homeboy config");
+        std::fs::write(seed.join("VERSION"), "1.0.0\n").expect("write version");
+        std::fs::write(seed.join("CHANGELOG.md"), "# Changelog\n").expect("write changelog");
+        run_in(seed, &["git", "add", "."]);
+        run_in(seed, &["git", "commit", "-q", "-m", "chore: initial"]);
+        run_in(seed, &["git", "tag", "v1.0.0"]);
+        std::fs::write(seed.join("fix.txt"), "fixed\n").expect("write fix");
+        run_in(seed, &["git", "add", "."]);
+        run_in(seed, &["git", "commit", "-q", "-m", "fix: repair widget"]);
+        run_in(seed, &["git", "push", "-q", "origin", "main", "--tags"]);
+
+        run_in(
+            local,
+            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
+        );
+        run_in(local, &["git", "config", "user.email", "test@example.com"]);
+        run_in(local, &["git", "config", "user.name", "Test"]);
+        run_in(local, &["git", "config", "commit.gpgsign", "false"]);
+    }
+
+    fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        String::from_utf8_lossy(&run_in(dir, args).stdout)
+            .trim()
+            .to_string()
+    }
+
+    fn remote_tags(remote: &std::path::Path) -> String {
+        git_stdout(
+            remote,
+            &["git", "for-each-ref", "refs/tags", "--format=%(refname)"],
+        )
+    }
+
+    #[test]
+    fn ci_owned_component_defers_before_planning_gates_or_tagging() {
+        with_isolated_home(|_| {
+            let _caller = homeboy_core::test_support::EnvVarGuard::set(
+                super::super::ci_ownership::RELEASE_CALLER_ENV,
+                "local",
+            );
+            let remote = tempfile::tempdir().expect("remote tempdir");
+            let local = tempfile::tempdir().expect("local tempdir");
+            setup_release_owner_fixture(remote.path(), local.path(), r#"{ "owner": "ci" }"#);
+            let head_before = git_stdout(local.path(), &["git", "rev-parse", "HEAD"]);
+            let tags_before = remote_tags(remote.path());
+
+            // A real (non-dry-run) release carrying gate evidence: the CI-owned
+            // short-circuit must win before readiness is recorded or validated.
+            let (output, exit_code) = run_command_with_workspace(
+                ReleaseCommandInput {
+                    component_id: "fixture".to_string(),
+                    path_override: Some(local.path().to_string_lossy().to_string()),
+                    git_identity: Some("Homeboy Test <homeboy@example.test>".to_string()),
+                    readiness: Some(failed_readiness(&head_before)),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("CI-owned release should return a structured deferral");
+            let result = output.result;
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(result.status, "ci_owned");
+            assert_eq!(
+                result.skipped_reason.as_deref(),
+                Some("release-owned-by-ci")
+            );
+            assert!(result.plan.is_none(), "no release plan may be built");
+            assert!(result.run.is_none(), "no gate or mutation step may run");
+            assert!(result.readiness.is_none(), "no gate evidence is reported");
+            assert!(output.workspace.is_none());
+            assert_eq!(result.tag.as_deref(), Some("v1.0.0"));
+            let ci = result.ci_release.expect("ci ownership report");
+            assert_eq!(ci.owner, "ci");
+            assert_eq!(ci.latest_tag.as_deref(), Some("v1.0.0"));
+            assert_eq!(ci.head_commit.as_deref(), Some(head_before.as_str()));
+            assert!(!ci.head_released, "the fix commit is not released yet");
+            assert!(!ci.next_action.is_empty());
+
+            assert!(test_store()
+                .for_subject("release_readiness", "fixture", false)
+                .expect("list readiness records")
+                .is_empty());
+            assert_eq!(
+                head_before,
+                git_stdout(local.path(), &["git", "rev-parse", "HEAD"])
+            );
+            assert_eq!(
+                git_stdout(local.path(), &["git", "tag", "--list"]),
+                "v1.0.0"
+            );
+            assert_eq!(tags_before, remote_tags(remote.path()));
+            assert!(git_stdout(local.path(), &["git", "status", "--porcelain"]).is_empty());
+
+            // Dry run defers identically.
+            let (preview, exit_code) = run_command(ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(local.path().to_string_lossy().to_string()),
+                dry_run: true,
+                ..Default::default()
+            })
+            .expect("CI-owned preview should defer");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview.status, "ci_owned");
+            assert!(preview.dry_run);
+            assert!(preview.plan.is_none());
+        });
+    }
+
+    #[test]
+    fn ci_owned_component_reports_head_already_released() {
+        with_isolated_home(|_| {
+            let _caller = homeboy_core::test_support::EnvVarGuard::set(
+                super::super::ci_ownership::RELEASE_CALLER_ENV,
+                "local",
+            );
+            let remote = tempfile::tempdir().expect("remote tempdir");
+            let local = tempfile::tempdir().expect("local tempdir");
+            setup_release_owner_fixture(remote.path(), local.path(), r#"{ "owner": "ci" }"#);
+            run_in(local.path(), &["git", "tag", "v1.0.1"]);
+
+            let (result, exit_code) = run_command(ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(local.path().to_string_lossy().to_string()),
+                ..Default::default()
+            })
+            .expect("CI-owned release should defer");
+
+            assert_eq!(exit_code, 0);
+            let ci = result.ci_release.expect("ci ownership report");
+            assert_eq!(ci.latest_tag.as_deref(), Some("v1.0.1"));
+            assert!(ci.head_released);
+            assert_eq!(ci.latest_tag_commit, ci.head_commit);
+        });
+    }
+
+    #[test]
+    fn ci_release_caller_still_plans_and_releases_a_ci_owned_component() {
+        with_isolated_home(|_| {
+            let _caller = homeboy_core::test_support::EnvVarGuard::set(
+                super::super::ci_ownership::RELEASE_CALLER_ENV,
+                "ci",
+            );
+            let remote = tempfile::tempdir().expect("remote tempdir");
+            let local = tempfile::tempdir().expect("local tempdir");
+            setup_release_owner_fixture(remote.path(), local.path(), r#"{ "owner": "ci" }"#);
+
+            let (preview, exit_code) = run_command(ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(local.path().to_string_lossy().to_string()),
+                dry_run: true,
+                ..Default::default()
+            })
+            .expect("CI caller preview should plan");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview.status, "planned");
+            assert_eq!(preview.new_version.as_deref(), Some("1.0.1"));
+            assert!(preview.plan.is_some());
+            assert!(preview.ci_release.is_none());
+
+            let (result, exit_code) = run_command(ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(local.path().to_string_lossy().to_string()),
+                git_identity: Some("Homeboy Test <homeboy@example.test>".to_string()),
+                ..Default::default()
+            })
+            .expect("CI caller should release");
+            assert_eq!(exit_code, 0, "{result:#?}");
+            assert_eq!(result.status, "released");
+            assert_eq!(result.tag.as_deref(), Some("v1.0.1"));
+            assert!(result.ci_release.is_none());
+            assert!(remote_tags(remote.path()).contains("refs/tags/v1.0.1"));
+        });
+    }
+
+    #[test]
+    fn component_without_release_owner_keeps_local_release_behaviour() {
+        with_isolated_home(|_| {
+            let _caller = homeboy_core::test_support::EnvVarGuard::set(
+                super::super::ci_ownership::RELEASE_CALLER_ENV,
+                "local",
+            );
+            let remote = tempfile::tempdir().expect("remote tempdir");
+            let local = tempfile::tempdir().expect("local tempdir");
+            setup_release_owner_fixture(remote.path(), local.path(), r#"{ "publish": false }"#);
+
+            let (result, exit_code) = run_command(ReleaseCommandInput {
+                component_id: "fixture".to_string(),
+                path_override: Some(local.path().to_string_lossy().to_string()),
+                dry_run: true,
+                ..Default::default()
+            })
+            .expect("default-owner preview should plan");
+            assert_eq!(exit_code, 0);
+            assert_eq!(result.status, "planned");
+            assert_eq!(result.new_version.as_deref(), Some("1.0.1"));
+            assert!(result.plan.is_some());
+            assert!(result.ci_release.is_none());
+        });
     }
 }
 #[test]

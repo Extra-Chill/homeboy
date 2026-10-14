@@ -1113,6 +1113,30 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             None,
         ));
     }
+    // A component whose CI owns its releases (`release.owner: ci`) is reported
+    // before portable preflight dispatches any gate (#15896). The release
+    // crate repeats this check, so batch and library callers defer as well.
+    if component_ids.len() == 1 && !args.recover && !args.package_only {
+        let probe = ReleaseCommandInput {
+            component_id: component_ids[0].clone(),
+            path_override: args.path.clone(),
+            dry_run: args.dry_run_args.dry_run,
+            execution: Some(execution.clone()),
+            ..Default::default()
+        };
+        if let Some(result) = release::ci_owned_release_result(&probe)? {
+            return Ok((
+                ReleaseCommandOutput::Single(Box::new(ReleaseOutput {
+                    variant: "single",
+                    actionable: release_actionable_metadata(&result),
+                    result,
+                    workspace: None,
+                    cascade: None,
+                })),
+                0,
+            ));
+        }
+    }
     let readiness = if component_ids.len() == 1 {
         run_portable_preflight(&args, &component_ids[0], skip_checks, &skip_checks_granular)?
     } else {
@@ -1295,6 +1319,12 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
 
 fn release_actionable_metadata(result: &ReleaseCommandResult) -> Option<CommandActionableMetadata> {
     let mut metadata = CommandActionableMetadata::default();
+    if let Some(ci) = result.ci_release.as_ref() {
+        metadata = metadata.with_next_action(
+            CommandNextAction::new("follow the CI-owned release", &ci.next_action)
+                .with_kind(CommandNextActionKind::Watch),
+        );
+    }
     if let Some(command) = result.continuation_command.as_ref() {
         metadata = metadata.with_next_action(
             CommandNextAction::new("finish release publication", command)
@@ -2343,6 +2373,7 @@ jobs:
             release_summary: vec!["Git state recovered; publication is incomplete".to_string()],
             changelog_history_recovery: None,
             readiness: None,
+            ci_release: None,
         };
         let output = ReleaseOutput {
             variant: "single",
