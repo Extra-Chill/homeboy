@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.422.1] - 2026-10-14
+
+### Changed
+- Read workflow instances from retained daemon generations
+
+### Fixed
+- cook homeboy
+- size the sealed staging request deadline to its payload
+
 ## [0.422.0] - 2026-10-13
 
 ### Added
