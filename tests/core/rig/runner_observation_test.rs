@@ -19,6 +19,7 @@ use homeboy_core::test_support::with_isolated_home;
 
 fn observation_spec(id: &str) -> RigSpec {
     RigSpec {
+        workloads: Default::default(),
         id: id.to_string(),
         description: "observation persistence fixture".to_string(),
         components: HashMap::new(),

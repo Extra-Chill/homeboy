@@ -19,7 +19,7 @@ use homeboy_core::extension::workload::{
     resolve::{resolve_kind, validate_kind, ResolvedWorkloadKind, WorkloadTarget},
     run::WorkloadRunRequest,
     safety::{self, DestructiveRequest},
-    stored,
+    stored, RigWorkloadFile,
 };
 use homeboy_core::observation::ObservationStore;
 use homeboy_engine_primitives::workload_compare::compare;
@@ -63,11 +63,18 @@ pub fn run(args: WorkloadArgs) -> CmdResult<WorkloadOutput> {
     }
 }
 
+/// A resolved kind plus the rig context it resolved against, when one was
+/// given: the rig owns out-of-tree workload files the engine reads as data.
+struct ResolvedTarget {
+    kind: ResolvedWorkloadKind,
+    rig: Option<homeboy::rig::RigSourceContext>,
+}
+
 /// Resolve the kind's provider for a component or a rig component.
 fn resolve_target(
     kind: &str,
     target: &WorkloadTargetArgs,
-) -> homeboy::core::Result<ResolvedWorkloadKind> {
+) -> homeboy::core::Result<ResolvedTarget> {
     validate_kind(kind)?;
     let mut resolved_target = WorkloadTarget {
         component_id: target.comp.component.clone(),
@@ -75,6 +82,7 @@ fn resolve_target(
         extension_overrides: target.extension_override.extensions.clone(),
         component_override: None,
     };
+    let mut rig = None;
     if let Some(rig_id) = target.rig.as_deref() {
         let context =
             homeboy::rig::RigSourceContext::load(&homeboy::core::paths::homeboy()?, rig_id)?;
@@ -111,8 +119,41 @@ fn resolve_target(
         }
         resolved_target.component_id = Some(component_id);
         resolved_target.component_override = Some(component);
+        rig = Some(context);
     }
-    resolve_kind(kind, resolved_target)
+    Ok(ResolvedTarget {
+        kind: resolve_kind(kind, resolved_target)?,
+        rig,
+    })
+}
+
+/// The rig's out-of-tree workload files for this kind and its owning
+/// extension: id = file stem, the rule the legacy fuzz command uses.
+///
+/// Resolved here, in the CLI, because `homeboy-rig` depends on
+/// `homeboy-core` and the engine must stay rig-agnostic.
+fn rig_workload_files(resolved: &ResolvedTarget) -> Vec<RigWorkloadFile> {
+    let Some(rig) = resolved.rig.as_ref() else {
+        return Vec::new();
+    };
+    homeboy::rig::workload_path_expansions_for_kind(
+        &rig.spec,
+        &resolved.kind.kind,
+        rig.package_root.as_deref(),
+        resolved.kind.extension_id(),
+    )
+    .into_iter()
+    .map(|expansion| RigWorkloadFile {
+        id: expansion
+            .expanded_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .unwrap_or("rig-workload")
+            .to_string(),
+        path: expansion.expanded_path,
+    })
+    .collect()
 }
 
 fn json_settings(
@@ -132,14 +173,18 @@ fn destructive_request(allow: bool, proof: Option<&std::path::Path>) -> Destruct
 
 fn run_list(args: WorkloadListArgs) -> homeboy::core::Result<WorkloadListOutput> {
     let resolved = resolve_target(&args.kind, &args.target)?;
-    let mut workloads = list::declared_workloads(&resolved);
+    let rig_files = rig_workload_files(&resolved);
+    let mut workloads = list::declared_workloads(&resolved.kind);
+    if let Some(rig) = resolved.rig.as_ref() {
+        workloads.extend(list::rig_workloads(&rig_files, &rig.spec.id));
+    }
     let mut diagnostics = Vec::new();
-    if list::has_script_probe(&resolved) {
+    if list::has_script_probe(&resolved.kind) {
         if args.no_script_probe {
             diagnostics.push("script list probe skipped (--no-script-probe)".to_string());
         } else {
             workloads.extend(list::script_workloads(
-                &resolved,
+                &resolved.kind,
                 &args.target.setting_args.setting,
                 &json_settings(&args.target)?,
             )?);
@@ -153,12 +198,12 @@ fn run_list(args: WorkloadListArgs) -> homeboy::core::Result<WorkloadListOutput>
     );
     Ok(WorkloadListOutput {
         command: "workload.list".to_string(),
-        kind: resolved.kind.clone(),
-        component: resolved.context.component_id.clone(),
-        extension_id: resolved.extension_id().to_string(),
+        kind: resolved.kind.kind.clone(),
+        component: resolved.kind.context.component_id.clone(),
+        extension_id: resolved.kind.extension_id().to_string(),
         count: workloads.len(),
         workloads,
-        capabilities: output::capabilities(&resolved.config),
+        capabilities: output::capabilities(&resolved.kind.config),
         diagnostics,
     })
 }
@@ -185,10 +230,17 @@ fn run_command_label(args: &WorkloadRunArgs) -> String {
 
 fn run_run(args: WorkloadRunArgs) -> homeboy::core::Result<(WorkloadRunOutput, i32)> {
     let resolved = resolve_target(&args.kind, &args.target)?;
-    // The gate refuses before any run row exists.
+    let rig_files = rig_workload_files(&resolved);
+    // The selected rig workload file can raise the kind's safety class; the
+    // gate refuses before any run row exists.
+    let effective_safety = engine::safety::effective_safety_class(
+        resolved.kind.config.safety_class,
+        engine::selected_rig_workload(&rig_files, args.workload.as_deref())
+            .map(|file| file.path.as_path()),
+    );
     let authorization = safety::authorize(
-        &resolved.kind,
-        resolved.config.safety_class,
+        &resolved.kind.kind,
+        effective_safety.class,
         &destructive_request(args.allow_destructive, args.isolation_proof.as_deref()),
     )?;
     let timeout = args
@@ -198,11 +250,12 @@ fn run_run(args: WorkloadRunArgs) -> homeboy::core::Result<(WorkloadRunOutput, i
         .transpose()?;
     let settings_json = json_settings(&args.target)?;
     let outcome = engine::run::run(WorkloadRunRequest {
-        resolved: &resolved,
+        resolved: &resolved.kind,
         workload_id: args.workload.as_deref(),
         run_id: args.run_id.as_deref(),
         seed: args.seed.as_deref(),
         rig_id: args.target.rig.as_deref(),
+        rig_workloads: &rig_files,
         settings: &args.target.setting_args.setting,
         settings_json: &settings_json,
         script_args: &args.args,
@@ -219,12 +272,12 @@ fn run_run(args: WorkloadRunArgs) -> homeboy::core::Result<(WorkloadRunOutput, i
     Ok((
         WorkloadRunOutput {
             command: "workload.run".to_string(),
-            kind: resolved.kind.clone(),
-            component: resolved.context.component_id.clone(),
-            extension_id: resolved.extension_id().to_string(),
-            safety_class: resolved.config.safety_class.as_str().to_string(),
-            hints: output::run_hints(&resolved.kind, &outcome),
-            failure: output::run_failure(&resolved.kind, &outcome),
+            kind: resolved.kind.kind.clone(),
+            component: resolved.kind.context.component_id.clone(),
+            extension_id: resolved.kind.extension_id().to_string(),
+            safety_class: effective_safety.class.as_str().to_string(),
+            hints: output::run_hints(&resolved.kind.kind, &outcome),
+            failure: output::run_failure(&resolved.kind.kind, &outcome),
             outcome,
         },
         exit,
@@ -278,12 +331,16 @@ fn run_case(args: WorkloadCaseArgs, mode: CaseMode) -> homeboy::core::Result<Wor
         }
     }
     let resolved = resolve_target(&args.kind, &target)?;
+    let rig_files = rig_workload_files(&resolved);
+    // Reuse the source run's recorded effective safety class: a workload
+    // file that raised it at run time keeps the gate engaged here.
+    let effective_safety = source.recorded_safety_class(resolved.kind.config.safety_class);
     let authorization = if args.dry_run {
         None
     } else {
         safety::authorize(
-            &resolved.kind,
-            resolved.config.safety_class,
+            &resolved.kind.kind,
+            effective_safety,
             &destructive_request(args.allow_destructive, args.isolation_proof.as_deref()),
         )?
     };
@@ -295,9 +352,10 @@ fn run_case(args: WorkloadCaseArgs, mode: CaseMode) -> homeboy::core::Result<Wor
         .transpose()?;
     let outcome = engine::case::execute(CaseRequest {
         mode,
-        resolved: &resolved,
+        resolved: &resolved.kind,
         source: &source,
         case_id: &args.case_id,
+        rig_workloads: &rig_files,
         settings: &target.setting_args.setting,
         settings_json: &settings_json,
         script_args: &args.args,
@@ -328,7 +386,7 @@ fn run_case(args: WorkloadCaseArgs, mode: CaseMode) -> homeboy::core::Result<Wor
     });
     Ok(WorkloadCaseOutput {
         command: format!("workload.{}", mode.as_str()),
-        extension_id: resolved.extension_id().to_string(),
+        extension_id: resolved.kind.extension_id().to_string(),
         outcome,
         failure,
     })

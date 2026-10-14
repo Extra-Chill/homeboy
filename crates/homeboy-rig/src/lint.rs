@@ -145,6 +145,7 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "trace_variants",
     "trace_workload_defaults",
     "trace_workloads",
+    "workloads",
 ];
 
 /// One rig, resolved through its `extends` chain.
@@ -1195,6 +1196,19 @@ fn workload_import_failures(root: &Path, rigs: &[MaterializedRig]) -> Vec<String
                 }
             }
         }
+        if let Some(kinds) = rig
+            .value
+            .get("workloads")
+            .and_then(|value| value.as_object())
+        {
+            for workloads in kinds.values().filter_map(|value| value.as_object()) {
+                for declaration in declared_workload_map_paths(workloads) {
+                    if let Some(resolved) = resolve_package_path(&declaration, &rig.package_root) {
+                        queue.push(resolved);
+                    }
+                }
+            }
+        }
 
         while let Some(file) = queue.pop() {
             if !is_module_source(&file) || !file.is_file() {
@@ -1227,10 +1241,16 @@ fn workload_import_failures(root: &Path, rigs: &[MaterializedRig]) -> Vec<String
 }
 
 fn declared_workload_paths(rig: &serde_json::Value, key: &str) -> Vec<String> {
+    rig.get(key)
+        .and_then(|value| value.as_object())
+        .map(declared_workload_map_paths)
+        .unwrap_or_default()
+}
+
+fn declared_workload_map_paths(
+    workloads: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
     let mut paths = Vec::new();
-    let Some(workloads) = rig.get(key).and_then(|value| value.as_object()) else {
-        return paths;
-    };
     for declarations in workloads.values().filter_map(|value| value.as_array()) {
         for declaration in declarations {
             let path = declaration

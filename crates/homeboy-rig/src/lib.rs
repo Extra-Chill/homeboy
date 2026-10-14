@@ -126,12 +126,13 @@ pub use workloads::RigWorkloadPathExpansion;
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,
     component_extension_ids_for_workload, component_ids_for_workload,
-    env_provider_extensions_for_extension_workloads, extension_ids_for_workloads,
-    extension_workload_inputs, invocation_requirements_for_extension_workloads,
-    required_component_id_for_workload, required_extension_ids_for_workload,
-    runner_capabilities_for_extension, trace_dependencies_for_extension,
-    workload_path_expansions_for_extension, workloads_for_extension, RigExtensionWorkloadInputs,
-    RigWorkloadKind,
+    env_provider_extensions_for_extension_workloads, extension_ids_for_kind,
+    extension_ids_for_workloads, extension_workload_inputs,
+    invocation_requirements_for_extension_workloads, required_component_id_for_workload,
+    required_extension_ids_for_workload, runner_capabilities_for_extension,
+    trace_dependencies_for_extension, workload_path_expansions_for_extension,
+    workload_path_expansions_for_kind, workloads_for_extension, workloads_for_kind,
+    RigExtensionWorkloadInputs, RigWorkloadKind,
 };
 
 use discovery::discover_rigs_for_install;
@@ -391,15 +392,42 @@ fn read_spec_from_path(
 }
 
 pub(crate) fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
-    let errors = validate_dependency_materialization_steps(spec);
-    if errors.is_empty() {
-        return Ok(());
+    let mut errors = validate_dependency_materialization_steps(spec);
+    // Generic `workloads` keys name extension-declared workload kinds, so a
+    // key must satisfy the same slug rule as a manifest `workloads.<kind>`.
+    let invalid_workload_kinds: Vec<String> = spec
+        .workloads
+        .keys()
+        .filter(|kind| {
+            !homeboy_extension_contract::workload_kind::is_valid_workload_kind(kind)
+        })
+        .map(|kind| {
+            format!(
+                "workloads kind '{kind}' must be a lowercase slug of [a-z0-9_-] starting with a letter"
+            )
+        })
+        .collect();
+    if invalid_workload_kinds.is_empty() {
+        if errors.is_empty() {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "rig",
+            format!(
+                "Rig `{}` has invalid dependency materialization configuration: {}",
+                spec.id,
+                errors.join("; ")
+            ),
+            Some(spec.id.clone()),
+            Some(errors),
+        ));
     }
 
+    errors.extend(invalid_workload_kinds);
     Err(Error::validation_invalid_argument(
         "rig",
         format!(
-            "Rig `{}` has invalid dependency materialization configuration: {}",
+            "Rig `{}` has invalid rig configuration: {}",
             spec.id,
             errors.join("; ")
         ),

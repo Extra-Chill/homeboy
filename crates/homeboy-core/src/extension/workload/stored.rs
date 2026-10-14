@@ -3,12 +3,15 @@
 
 use std::path::PathBuf;
 
-use homeboy_extension_contract::{WorkloadCompareConfig, WorkloadResult};
+use homeboy_extension_contract::{WorkloadCompareConfig, WorkloadResult, WorkloadSafetyClass};
 
 use crate::error::{Error, Result};
 use crate::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
 
-use super::{WORKLOAD_ARTIFACT_KIND, WORKLOAD_COMPARE_METADATA_KEY, WORKLOAD_RESULT_ARTIFACT_KIND};
+use super::{
+    WORKLOAD_ARTIFACT_KIND, WORKLOAD_COMPARE_METADATA_KEY, WORKLOAD_PATH_METADATA_KEY,
+    WORKLOAD_RESULT_ARTIFACT_KIND,
+};
 
 /// A persisted workload run with its parsed envelope.
 #[derive(Debug, Clone)]
@@ -43,6 +46,25 @@ impl StoredWorkloadRun {
             .metadata_json
             .get("source_path")
             .and_then(serde_json::Value::as_str)
+    }
+
+    /// The selected rig workload file's absolute path, recorded at run time.
+    pub fn workload_path(&self) -> Option<&str> {
+        self.run
+            .metadata_json
+            .get(WORKLOAD_PATH_METADATA_KEY)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    /// The effective safety class recorded at run time, falling back to the
+    /// kind's declared class for runs that predate the recording.
+    pub fn recorded_safety_class(&self, kind_class: WorkloadSafetyClass) -> WorkloadSafetyClass {
+        self.run
+            .metadata_json
+            .get("safety_class")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or(kind_class)
     }
 
     /// The persisted file for an envelope artifact name, when its bytes are

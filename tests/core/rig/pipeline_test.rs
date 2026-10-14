@@ -880,6 +880,7 @@ mod dag {
         let mut pipeline = HashMap::new();
         pipeline.insert("up".to_string(), steps);
         RigSpec {
+            workloads: Default::default(),
             id: "dag-test".to_string(),
             description: String::new(),
             components,
@@ -1160,6 +1161,7 @@ mod git_steps {
         );
 
         RigSpec {
+            workloads: Default::default(),
             id: "git-step-test".to_string(),
             description: String::new(),
             components,
@@ -1279,6 +1281,7 @@ mod extension_lifecycle {
         pipeline.insert("up".to_string(), vec![step]);
 
         RigSpec {
+            workloads: Default::default(),
             id: "extension-step-test".to_string(),
             description: String::new(),
             components,
@@ -1419,6 +1422,7 @@ mod command_env {
         );
 
         RigSpec {
+            workloads: Default::default(),
             id: "command-env-test".to_string(),
             description: String::new(),
             components: Default::default(),

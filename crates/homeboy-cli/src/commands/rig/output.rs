@@ -226,6 +226,7 @@ mod tests {
                 bench_workloads: Default::default(),
                 trace_workloads: Default::default(),
                 fuzz_workloads: Default::default(),
+                workloads: Default::default(),
                 trace_workload_defaults: Default::default(),
                 trace_variants: Default::default(),
                 trace_profiles: Default::default(),

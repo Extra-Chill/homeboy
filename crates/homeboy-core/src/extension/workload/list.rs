@@ -13,6 +13,7 @@ use crate::extension::invoke::{build_scenario_runner, ScenarioRunnerOptions};
 
 use super::env;
 use super::resolve::ResolvedWorkloadKind;
+use super::RigWorkloadFile;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadListing {
@@ -79,6 +80,24 @@ pub fn declared_workloads(resolved: &ResolvedWorkloadKind) -> Vec<WorkloadListin
         }
     }
     listings
+}
+
+/// Rig-owned workload files for the kind's owning extension, resolved above
+/// this crate: id = file stem, source = `rig:<rig-id>`.
+pub fn rig_workloads(files: &[RigWorkloadFile], rig_id: &str) -> Vec<WorkloadListing> {
+    files
+        .iter()
+        .map(|file| WorkloadListing {
+            id: file.id.clone(),
+            label: file
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
+            description: None,
+            source: format!("rig:{rig_id}"),
+        })
+        .collect()
 }
 
 /// Whether the kind declares a script probe.

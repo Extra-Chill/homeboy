@@ -148,3 +148,64 @@ pub fn env(authorization: Option<&DestructiveAuthorization>) -> Vec<(String, Str
     }
     env
 }
+
+/// Where an effective safety class came from.
+pub const SAFETY_SOURCE_KIND: &str = "kind";
+/// The selected workload file declared a class.
+pub const SAFETY_SOURCE_WORKLOAD_FILE: &str = "workload_file";
+
+/// The safety class an execution actually runs under: the kind's declared
+/// class, possibly raised by the selected workload file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveSafetyClass {
+    pub class: WorkloadSafetyClass,
+    /// [`SAFETY_SOURCE_KIND`] or [`SAFETY_SOURCE_WORKLOAD_FILE`].
+    pub source: &'static str,
+}
+
+/// The `safety_class` a workload file declares, when the file is JSON with a
+/// top-level class this build knows.
+///
+/// Unknown, unreadable or unparseable files declare nothing; the caller keeps
+/// the kind's class.
+pub fn workload_file_safety_class(path: &Path) -> Option<WorkloadSafetyClass> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    match value.get("safety_class")?.as_str()? {
+        "destructive" => Some(WorkloadSafetyClass::Destructive),
+        "read_only" => Some(WorkloadSafetyClass::ReadOnly),
+        _ => None,
+    }
+}
+
+/// Effective safety class of one execution.
+///
+/// A workload file can only raise the kind's class, never lower it: a
+/// `read_only` kind whose selected workload file declares
+/// `"safety_class": "destructive"` runs destructive and needs the same
+/// authorization a destructive kind needs, while a destructive kind stays
+/// destructive no matter what the file declares. Files that declare nothing
+/// readable keep the kind's class.
+pub fn effective_safety_class(
+    kind_class: WorkloadSafetyClass,
+    workload_file: Option<&Path>,
+) -> EffectiveSafetyClass {
+    let kind = EffectiveSafetyClass {
+        class: kind_class,
+        source: SAFETY_SOURCE_KIND,
+    };
+    let Some(path) = workload_file else {
+        return kind;
+    };
+    match workload_file_safety_class(path) {
+        Some(WorkloadSafetyClass::Destructive) => EffectiveSafetyClass {
+            class: WorkloadSafetyClass::Destructive,
+            source: SAFETY_SOURCE_WORKLOAD_FILE,
+        },
+        Some(WorkloadSafetyClass::ReadOnly) if kind_class.is_read_only() => EffectiveSafetyClass {
+            class: WorkloadSafetyClass::ReadOnly,
+            source: SAFETY_SOURCE_WORKLOAD_FILE,
+        },
+        _ => kind,
+    }
+}

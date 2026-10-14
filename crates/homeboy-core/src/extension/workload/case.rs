@@ -11,7 +11,7 @@ use crate::extension::invoke::{build_scenario_runner, ScenarioRunnerOptions};
 use super::resolve::ResolvedWorkloadKind;
 use super::safety::DestructiveAuthorization;
 use super::stored::StoredWorkloadRun;
-use super::{env, safety};
+use super::{env, safety, RigWorkloadFile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +41,11 @@ pub struct CaseRequest<'a> {
     pub resolved: &'a ResolvedWorkloadKind,
     pub source: &'a StoredWorkloadRun,
     pub case_id: &'a str,
+    /// Rig-owned workload files for the kind's owning extension, resolved by
+    /// the caller. All paths are exported as `HOMEBOY_WORKLOAD_EXTRA_PATHS`;
+    /// the source run's own workload path is reused as
+    /// `HOMEBOY_WORKLOAD_PATH`.
+    pub rig_workloads: &'a [RigWorkloadFile],
     pub settings: &'a [(String, String)],
     pub settings_json: &'a [(String, serde_json::Value)],
     pub script_args: &'a [String],
@@ -117,6 +122,9 @@ pub fn case_env(
     }
     if let Some(seed) = &case.seed {
         env.push((env::SEED.to_string(), seed.clone()));
+    }
+    if let Some(workload_path) = source.workload_path() {
+        env.push((env::PATH.to_string(), workload_path.to_string()));
     }
     if let Some(reference) = &case.artifact_ref {
         env.push((env::CASE_ARTIFACT_REF.to_string(), reference.clone()));
@@ -198,6 +206,11 @@ pub fn execute(request: CaseRequest<'_>) -> Result<CaseOutcome> {
     std::fs::create_dir_all(&artifact_dir).map_err(|error| {
         Error::internal_io(error.to_string(), Some(artifact_dir.display().to_string()))
     })?;
+    let rig_workload_paths = request
+        .rig_workloads
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
     let mut runner = build_scenario_runner(ScenarioRunnerOptions {
         execution_context: &resolved.extension,
         component: &resolved.context.component,
@@ -209,7 +222,7 @@ pub fn execute(request: CaseRequest<'_>) -> Result<CaseOutcome> {
         scenario_env: None,
         artifact_env: Some((env::ARTIFACT_DIR, &artifact_dir)),
         list_only_env: None,
-        extra_workloads_env: None,
+        extra_workloads_env: Some((env::EXTRA_PATHS, &rig_workload_paths, "workloads")),
         env_provider_extensions: &[],
         invocation_requirements: Default::default(),
     })?

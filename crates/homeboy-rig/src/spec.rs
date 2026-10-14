@@ -142,6 +142,17 @@ pub struct RigSpec {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub fuzz_workloads: HashMap<String, Vec<WorkloadSpec>>,
 
+    /// Out-of-tree workloads for any extension-declared workload kind,
+    /// keyed by kind slug and then by extension id.
+    ///
+    /// This is the generic counterpart of `bench_workloads`,
+    /// `trace_workloads`, and `fuzz_workloads`: the three legacy fields
+    /// keep working unchanged and read as the kinds `bench`, `trace`, and
+    /// `fuzz`. Values support the same expansion rules, including
+    /// `${package.root}` for package-installed rigs.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub workloads: HashMap<String, HashMap<String, Vec<WorkloadSpec>>>,
+
     /// Extension-scoped defaults applied to every trace workload entry for the
     /// same extension id. Defaults only fill omitted scalar fields and prepend
     /// collection/map fields so per-workload declarations remain authoritative.

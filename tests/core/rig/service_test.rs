@@ -31,6 +31,7 @@ mod lifecycle {
             },
         );
         RigSpec {
+            workloads: Default::default(),
             id: id.to_string(),
             description: String::new(),
             components: HashMap::new(),
@@ -62,6 +63,7 @@ mod lifecycle {
         let mut services = HashMap::new();
         services.insert("svc".to_string(), service);
         RigSpec {
+            workloads: Default::default(),
             id: id.to_string(),
             description: String::new(),
             components: HashMap::new(),
