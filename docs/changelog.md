@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.422.7] - 2026-10-14
+
+### Changed
+- schema v29 drops derivable mission tables and the triage table, compacts the store
+
+### Fixed
+- classify failed executor results in Cook
+
 ## [0.422.6] - 2026-10-14
 
 ### Fixed
