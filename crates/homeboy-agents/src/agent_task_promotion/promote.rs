@@ -2447,14 +2447,7 @@ fn run_promotion_gates(
     // setup is intentionally destination-only: gates must consume the exact
     // executable projection this report describes.
     let candidate_setup = Vec::new();
-    let gate_workspace = gate_workspace
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
-    let gate_workspace = if options.gates.gate_environment.lab_runner.is_some() {
-        worktree_path.to_path_buf()
-    } else {
-        gate_workspace
-    };
+    let gate_workspace = promotion_gate_workspace(options, worktree_path, gate_workspace);
     let destination_gate_setup = if gate_workspace.is_dir() {
         let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
             timeout: options.gates.gate_timeout(),
@@ -2859,6 +2852,20 @@ fn gate_workspace_path(options: &AgentTaskPromotionRequest, worktree_path: &Path
         .unwrap_or_else(|| worktree_path.to_path_buf())
 }
 
+fn promotion_gate_workspace(
+    options: &AgentTaskPromotionRequest,
+    worktree_path: &Path,
+    gate_workspace: Option<&Path>,
+) -> PathBuf {
+    // The caller's admitted component workspace is authoritative for both
+    // dependency hydration and deterministic gates, regardless of execution
+    // placement. Falling back to the candidate root is only for callers that
+    // have no component-scoped workspace.
+    gate_workspace
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| gate_workspace_path(options, worktree_path))
+}
+
 fn bounded_setup_error_text(value: &str) -> String {
     const MAX_BYTES: usize = 4096;
     let mut result = String::new();
@@ -2980,13 +2987,23 @@ fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationO
             }
         }
     };
-    let first_stderr_line = stderr_error_line(&outcome.stderr);
-    match first_stderr_line {
-        Some(line) => format!(
-            "{summary}; stderr: {}",
-            bounded_setup_error_text(&homeboy_core::redaction::redact_string(line))
+    let last_output = stderr_error_line(&outcome.stderr)
+        .map(|line| format!("stderr: {line}"))
+        .or_else(|| {
+            outcome
+                .stdout
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| format!("stdout: {}", line.trim()))
+        });
+    let cwd = bounded_setup_error_text(&homeboy_core::redaction::redact_string(&outcome.cwd));
+    match last_output {
+        Some(output) => format!(
+            "{summary}; cwd: {cwd}; last output: {}",
+            bounded_setup_error_text(&homeboy_core::redaction::redact_string(&output))
         ),
-        None => summary,
+        None => format!("{summary}; cwd: {cwd}"),
     }
 }
 
@@ -4496,6 +4513,45 @@ mod gate_setup_message_tests {
         assert!(error.message.contains("stderr: No such file or directory"));
         // Structured details are unchanged.
         assert_eq!(error.details["component_id"], "pnpm");
+    }
+
+    #[test]
+    fn stalled_dependency_diagnostic_includes_command_cwd_and_last_output() {
+        let mut stalled = outcome(DependencyHydrationTermination::NoProgress, None, "");
+        stalled.cwd = "/workspace/packages/api".to_string();
+        stalled.stdout = "installing packages\nwaiting for input".to_string();
+        let error = gate_setup_outcome_failure("destination_gate_setup", &stalled);
+        assert!(error.message.contains("`pnpm install --frozen-lockfile`"));
+        assert!(error.message.contains("cwd: /workspace/packages/api"));
+        assert!(error
+            .message
+            .contains("last output: stdout: waiting for input"));
+    }
+
+    #[test]
+    fn explicit_component_gate_workspace_is_preserved_for_remote_execution() {
+        let options = AgentTaskPromotionRequest {
+            source: String::new(),
+            source_run_id: None,
+            source_path: None,
+            source_worktree_path: None,
+            to_worktree: String::new(),
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: Default::default(),
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        };
+        let candidate = Path::new("/workspace");
+        let component = Path::new("/workspace/packages/api");
+        assert_eq!(
+            promotion_gate_workspace(&options, candidate, Some(component)),
+            component
+        );
     }
 
     #[test]

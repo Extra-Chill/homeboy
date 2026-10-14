@@ -456,6 +456,11 @@ fn run_hydration_command(
     process
         .args(&command.args)
         .current_dir(&command.cwd)
+        // Declared dependency setup is automation, never an interactive shell
+        // session. Null stdin prevents prompts from blocking; CI is the
+        // conventional signal for package managers that offer non-interactive
+        // behavior when running under automation.
+        .env("CI", "true")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1987,7 +1992,7 @@ mod tests {
             let root = tempfile::tempdir().expect("provider workspace");
             std::fs::write(
                 root.path().join("install-fixture"),
-                "#!/bin/sh\nprintf '%s' \"$*\" > invoked-argv\nprintf ready > prepared.state\n",
+                "#!/bin/sh\nprintf '%s' \"$*\" > invoked-argv\nprintf '%s|%s' \"$CI\" \"$PWD\" > execution-context\nprintf ready > prepared.state\n",
             )
             .expect("fixture installer");
             use std::os::unix::fs::PermissionsExt;
@@ -2028,6 +2033,10 @@ mod tests {
                     )
                 ),
                 "--mode declared"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("execution-context")).unwrap(),
+                format!("true|{}", root.path().display())
             );
             assert_eq!(
                 outcomes[0].status,
