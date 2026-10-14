@@ -290,6 +290,52 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
 }
 
+/// #15855: the audited-candidate requirement is not weakened for a no_op claim
+/// without a patch artifact unless Homeboy verified the checkout unchanged.
+#[test]
+fn no_op_without_patch_artifact_still_requires_an_audited_candidate_without_verification() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_path = temp.path().join("outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task-1",
+        "status": "no_op",
+        "summary": "executor finished without changes",
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionRequest {
+            source,
+            source_run_id: Some("run-no-op".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "homeboy@no-op-attempt".to_string(),
+            task_id: Some("task-1".to_string()),
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        },
+        &mut provider,
+    )
+    .expect_err("unverified no-op stays unaudited");
+
+    assert!(error
+        .message
+        .contains("no-op promotion requires an audited committed candidate"));
+    assert!(provider.apply_calls.is_empty());
+}
+
 #[test]
 fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     let temp = tempfile::tempdir().expect("tempdir");

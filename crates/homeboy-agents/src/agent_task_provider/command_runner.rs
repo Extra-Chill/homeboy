@@ -1635,6 +1635,25 @@ fn run_materialized_provider_command_once_contained(
                 outcome.schema = AGENT_TASK_OUTCOME_SCHEMA.to_string();
             }
             normalize_provider_outcome_roles(&mut outcome, provider);
+            let workspace_root = request
+                .request
+                .workspace
+                .root
+                .as_deref()
+                .map(std::path::Path::new);
+            let attempt_base = request
+                .request
+                .workspace
+                .attempt
+                .as_ref()
+                .map(|attempt| attempt.base_ref.as_str());
+            super::outcome_normalization::materialize_verified_no_op_change_set(
+                &mut outcome,
+                &request.artifacts_path,
+                &request.artifacts_path_provenance,
+                workspace_root,
+                attempt_base,
+            );
             if let Err(error) =
                 finalize_provider_file_artifacts(&mut outcome, &request.artifacts_root_identity)
             {
@@ -1651,27 +1670,12 @@ fn run_materialized_provider_command_once_contained(
                 &mut outcome,
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
-                request
-                    .request
-                    .workspace
-                    .root
-                    .as_deref()
-                    .map(std::path::Path::new),
+                workspace_root,
             );
             super::outcome_normalization::accept_verified_unchanged_empty_attempt(
                 &mut outcome,
-                request
-                    .request
-                    .workspace
-                    .root
-                    .as_deref()
-                    .map(std::path::Path::new),
-                request
-                    .request
-                    .workspace
-                    .attempt
-                    .as_ref()
-                    .map(|attempt| attempt.base_ref.as_str()),
+                workspace_root,
+                attempt_base,
             );
             validate_declared_outputs(&mut outcome, request);
             describe_controller_owned_publication(request, &mut outcome);
