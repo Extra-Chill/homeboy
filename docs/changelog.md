@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.422.0] - 2026-10-13
+
+### Added
+- foreach fan-out; cook-batch compiles to a workflow; delete batch storage
+
+### Changed
+- size the oversize staging fixture from the source package bound
+- delete the Linux-only fanout batch continuation test left behind by S6
+
+### Fixed
+- keep run records that own active worktrees; reconcile orphans from their terminal aggregate
+- run replacement gates under declared supervision
+
 ## [0.421.0] - 2026-10-13
 
 ### Added

@@ -110,18 +110,45 @@ pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -
 
 /// Post to a direct runner daemon with the paired broker token when the caller
 /// is crossing the same broker-auth trust boundary as a reverse transport.
+/// Total deadline for small control-plane daemon calls (status, capabilities,
+/// job queries). Payload-carrying requests such as sealed source staging must
+/// not use it; see [`daemon_api_post_json_for_session_with_timeout`].
+pub(super) const DAEMON_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub(crate) fn daemon_api_post_json_for_session_with_broker_token(
     session: &RunnerSession,
     path: &str,
     payload: &Value,
     broker_token: Option<&str>,
 ) -> Result<Value> {
+    daemon_api_post_json_for_session_with_timeout(
+        session,
+        path,
+        payload,
+        broker_token,
+        DAEMON_CONTROL_REQUEST_TIMEOUT,
+    )
+}
+
+/// POST a JSON payload to a direct daemon session with an explicit total
+/// deadline. Callers that upload large bodies (sealed source staging) pass a
+/// deadline sized to the payload; a fixed 10s deadline made every Lab Cook for
+/// a mid-size repository time out before the provider started
+/// (Extra-Chill/homeboy#15863).
+pub(crate) fn daemon_api_post_json_for_session_with_timeout(
+    session: &RunnerSession,
+    path: &str,
+    payload: &Value,
+    broker_token: Option<&str>,
+    timeout: Duration,
+) -> Result<Value> {
     let local_url = session.local_url.as_deref().ok_or_else(|| {
         Error::internal_unexpected("known daemon generation has no direct local endpoint")
     })?;
     let client = Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(10))
+        .connect_timeout(DAEMON_CONTROL_REQUEST_TIMEOUT.min(timeout))
+        .timeout(timeout)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
     let request = broker_http::with_broker_token(

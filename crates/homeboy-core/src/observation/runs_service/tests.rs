@@ -188,6 +188,59 @@ fn terminal_retention_counts_only_the_runs_it_actually_deleted() {
 }
 
 #[test]
+fn terminal_retention_keeps_runs_that_own_an_active_task_worktree() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let owner = store.start_run(sample_run("agent-task")).expect("owner");
+        let released = store.start_run(sample_run("agent-task")).expect("released");
+        for run in [&owner, &released] {
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+        }
+        // The owner's worktree is still active; the other run's was removed.
+        crate::worktree::record_for_run_for_test(
+            "fixture@owned",
+            &owner.id,
+            crate::worktree::TaskWorktreeState::Active,
+        );
+        crate::worktree::record_for_run_for_test(
+            "fixture@released",
+            &released.id,
+            crate::worktree::TaskWorktreeState::Removed,
+        );
+        let path = store.status().expect("status").path;
+        drop(store);
+        let db = rusqlite::Connection::open(path).expect("raw db");
+        for id in [&owner.id, &released.id] {
+            db.execute(
+                "UPDATE runs SET finished_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                [id],
+            )
+            .expect("age terminal run");
+        }
+        drop(db);
+
+        let applied = retain_terminal_runs(TerminalRunRetentionOptions {
+            apply: true,
+            older_than_days: 1,
+            limit: 10,
+        })
+        .expect("apply");
+
+        assert_eq!(applied.skipped_run_ids, vec![owner.id.clone()]);
+        assert_eq!(applied.removed_run_count, 1);
+        let store = ObservationStore::open_initialized().expect("reopen");
+        assert!(store.get_run(&owner.id).expect("owner read").is_some());
+        assert!(store
+            .get_run(&released.id)
+            .expect("released read")
+            .is_none());
+    });
+}
+
+#[test]
 fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
     let hints = missing_run_guidance_for_runner_ids("run-123", vec!["homeboy-lab".to_string()]);
     assert_eq!(

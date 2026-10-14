@@ -75,6 +75,25 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+/// Run ids that own an active task-worktree record below `data_root`.
+///
+/// An owning run's lifecycle record is the terminal authority its worktree is
+/// reconciled against, so run retention keeps these runs until their worktrees
+/// are resolved (#15844). Unreadable manifests are quarantined by registry
+/// repair and never reconciled, so they hold no run.
+pub fn run_ids_owning_active_worktrees_in_root(
+    data_root: &Path,
+) -> Result<std::collections::HashSet<String>> {
+    with_task_worktree_registry_read_lock(|| {
+        let (records, _) = store_ops::scan_registry(&metadata_dir_in_root(data_root))?;
+        Ok(records
+            .into_iter()
+            .filter(|record| record.state == TaskWorktreeState::Active)
+            .filter_map(|record| record.run_id)
+            .collect())
+    })
+}
+
 /// Verify that a path is Git's registered linked-worktree root, rather than a
 /// primary checkout or a directory containing an untrusted `.git` file.
 pub fn verify_linked_worktree_root(path: &Path) -> Result<PathBuf> {
@@ -800,30 +819,30 @@ pub fn publish_task_worktree_reaping_audit_in_root(
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn record_active_for_test(id: &str, worktree_path: &Path) {
-    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Active);
+    record_for_test(id, worktree_path, TaskWorktreeState::Active, None);
 }
 
 #[cfg(test)]
 pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
-    record_for_test(id, worktree_path, worktree_path, TaskWorktreeState::Removed);
+    record_for_test(id, worktree_path, TaskWorktreeState::Removed, None);
+}
+
+#[cfg(test)]
+pub(crate) fn record_for_run_for_test(id: &str, run_id: &str, state: TaskWorktreeState) {
+    record_for_test(id, Path::new("/tmp/missing-fixture"), state, Some(run_id));
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn record_for_test(
-    id: &str,
-    source_checkout: &Path,
-    worktree_path: &Path,
-    state: TaskWorktreeState,
-) {
+fn record_for_test(id: &str, worktree_path: &Path, state: TaskWorktreeState, run_id: Option<&str>) {
     let record = TaskWorktreeRecord {
         id: id.to_string(),
         component_id: "fixture".to_string(),
-        source_checkout: source_checkout.to_string_lossy().to_string(),
+        source_checkout: worktree_path.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),
         task_url: None,
-        run_id: None,
+        run_id: run_id.map(str::to_string),
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
         terminal_disposition: None,
         branch_cleanup_intent: BranchCleanupIntent::default(),
