@@ -2326,6 +2326,7 @@ fn orchestration_tick_loop(
         });
         isolated_tick(|| {
             let _ = job_store.reconcile_controller_completions();
+            let _ = job_store.deliver_pending_step_terminals();
         });
         // Generation retirement is lifecycle work, not a read-side effect.
         // Drain decisions derive each generation's active-job count from its
@@ -5252,6 +5253,7 @@ fn persist_controller_failure(
 
 pub(crate) fn recover_controller_jobs(job_store: &JobStore) {
     let _ = job_store.reconcile_controller_completions();
+    let _ = job_store.deliver_pending_step_terminals();
     for (job_id, state) in job_store.active_controller_jobs() {
         recover_controller_job(job_store, job_id, state);
     }

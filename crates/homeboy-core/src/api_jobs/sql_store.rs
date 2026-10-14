@@ -531,6 +531,20 @@ fn write_changes(
         let prior = baseline.jobs.get(&id);
         let id_text = id.to_string();
         if prior.map(|prior| prior.body_digest) != Some(body_digest) {
+            if let Some(controller) = &stored.controller_job {
+                if controller.job_type == crate::daemon::step_job::STEP_JOB_TYPE {
+                    if let Some(delivery) = crate::daemon::step_job::terminal_delivery(
+                        &id.to_string(),
+                        &controller.request,
+                        controller.checkpoint.as_ref(),
+                        stored.job.status.is_terminal().then_some(stored.job.status),
+                        None,
+                        controller.cancellation_requested,
+                    )? {
+                        super::store::terminal_delivery::retain_on(transaction, &delivery, false)?;
+                    }
+                }
+            }
             changed = true;
             transaction
                 .prepare_cached(
@@ -699,6 +713,7 @@ pub(super) fn commit_sql_store(
     path: &Path,
     durable: &mut DurableJobStore,
     synced: &std::sync::Mutex<SqlSyncState>,
+    terminal_deliveries: &[crate::daemon::step_job::StepTerminalDelivery],
 ) -> Result<()> {
     let known = std::mem::take(&mut *synced.lock().expect("store sync mutex poisoned"));
     let mut connection = open_sql_store(path)?;
@@ -712,6 +727,9 @@ pub(super) fn commit_sql_store(
     } else {
         load_sql_store(&transaction, path)?.1
     };
+    for delivery in terminal_deliveries {
+        super::store::terminal_delivery::retain_on(&transaction, delivery, false)?;
+    }
     let next = write_changes(&transaction, path, durable, &baseline)?;
     transaction
         .commit()
@@ -848,6 +866,26 @@ pub(super) fn read_job_and_controller_submissions(
         submissions.push(serde_json::from_str(&body).map_err(invalid)?);
     }
     Ok(Some((stored, submissions)))
+}
+
+pub(super) fn pending_step_delivery_count_readonly(path: &Path) -> Result<usize> {
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(0);
+    };
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'step_terminal_deliveries')",
+        [], |row| row.get(0),
+    ).map_err(|error| store_error(path, "inspect terminal delivery table", error))?;
+    if !exists {
+        return Ok(0);
+    }
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| store_error(path, "count pending terminal deliveries", error))
 }
 
 /// The durable store in its legacy document shape, for operator evidence

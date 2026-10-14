@@ -288,6 +288,7 @@ fn native_private_daemon_pending_action_terminal_owner_and_fence() {
                 ],
                 std::env::temp_dir().display().to_string(),
                 Default::default(),
+                homeboy_core::daemon::step_job::STEP_RECEIPT_CONSUMER,
             ))
             .expect("serialize controlled owner step");
         let response = daemon_request(

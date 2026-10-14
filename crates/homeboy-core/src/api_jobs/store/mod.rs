@@ -32,6 +32,7 @@ use crate::source_snapshot::SourceSnapshot;
 
 mod controller_completion;
 mod reconciliation;
+pub(super) mod terminal_delivery;
 
 /// A reservation bounds the interval between durable admission and persisting a
 /// child identity. The child is normally spawned immediately after admission;
@@ -598,6 +599,36 @@ impl JobStore {
         // Move the view out instead of cloning it: compaction and the commit
         // work on the owned snapshot, and it is moved back whatever happens.
         // Callers restore their pre-mutation copy when this returns an error.
+        // Capture terminal evidence before compaction can remove a newly
+        // reconciled row. It commits in the same transaction as that removal.
+        let mut terminal_deliveries = Vec::new();
+        for stored in inner
+            .jobs
+            .values()
+            .filter(|stored| stored.job.status.is_terminal())
+        {
+            let Some(controller) = &stored.controller_job else {
+                continue;
+            };
+            if controller.job_type != crate::daemon::step_job::STEP_JOB_TYPE {
+                continue;
+            }
+            let error = (stored.job.status == JobStatus::Failed).then(|| {
+                stored.events.iter().rev().find(|event| event.kind == JobEventKind::Error)
+                    .map(|event| serde_json::json!({"message": event.message, "data": event.data}))
+                    .unwrap_or_else(|| serde_json::json!({"message": "step failed during recovery", "stale_reason": stored.job.stale_reason}))
+            });
+            if let Some(delivery) = crate::daemon::step_job::terminal_delivery(
+                &stored.job.id.to_string(),
+                &controller.request,
+                controller.checkpoint.as_ref(),
+                Some(stored.job.status),
+                error,
+                controller.cancellation_requested || stored.job.status == JobStatus::Cancelled,
+            )? {
+                terminal_deliveries.push(delivery);
+            }
+        }
         let mut durable = DurableJobStore {
             jobs: std::mem::take(&mut inner.jobs).into_values().collect(),
             submission_keys: std::mem::take(&mut inner.submission_keys),
@@ -614,8 +645,12 @@ impl JobStore {
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
         );
-        let committed =
-            sql_store::commit_sql_store(&persistence.path, &mut durable, &persistence.synced);
+        let committed = sql_store::commit_sql_store(
+            &persistence.path,
+            &mut durable,
+            &persistence.synced,
+            &terminal_deliveries,
+        );
         inner.jobs = durable
             .jobs
             .into_iter()
@@ -650,6 +685,27 @@ impl JobStore {
         path.exists() || sql_store::sql_store_initialized(path).unwrap_or(false)
     }
 
+    /// Exact private controller authorization, read without migration or writes.
+    pub fn controller_checkpoint_at_path(
+        path: &Path,
+        job_id: Uuid,
+    ) -> Result<Option<(JobStatus, bool, Value)>> {
+        let Some((Some(stored), _)) = sql_store::read_job_and_controller_submissions(path, job_id)?
+        else {
+            return Ok(None);
+        };
+        let Some(controller) = stored.controller_job else {
+            return Ok(None);
+        };
+        Ok(controller.checkpoint.map(|checkpoint| {
+            (
+                stored.job.status,
+                controller.cancellation_requested,
+                checkpoint,
+            )
+        }))
+    }
+
     /// Commit counter of the SQL job store at `path`: it advances on every
     /// committed mutation and is `None` before the store has been migrated.
     pub(crate) fn store_generation_at_path(path: &Path) -> Result<Option<i64>> {
@@ -670,7 +726,12 @@ impl JobStore {
     pub(crate) fn replace_with_legacy_snapshot_at_path(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut durable: DurableJobStore = serde_json::from_slice(bytes)
             .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        sql_store::commit_sql_store(path, &mut durable, &Mutex::new(SqlSyncState::default()))
+        sql_store::commit_sql_store(
+            path,
+            &mut durable,
+            &Mutex::new(SqlSyncState::default()),
+            &[],
+        )
     }
 
     /// Count non-terminal jobs without opening or reconciling the durable store.
@@ -683,6 +744,7 @@ impl JobStore {
             return Ok(0);
         };
         let now = timestamp_ms();
+        let pending_deliveries = sql_store::pending_step_delivery_count_readonly(&path)?;
         Ok(active
             .into_iter()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
@@ -697,7 +759,8 @@ impl JobStore {
                         .as_ref()
                         .is_none_or(|lease| lease.expires_at_ms > now)
             })
-            .count())
+            .count()
+            + pending_deliveries)
     }
 
     /// Report the durable owners that a daemon would retain after opening this
@@ -2418,6 +2481,13 @@ impl JobStore {
                     None,
                 )
             })?;
+            // Startup recovery can race a queued job started by another driver
+            // before that worker publishes its process-local runtime entry.
+            // A durable claim by this lease is already a live execution fence.
+            if recovery && controller.execution_claim_id.is_some()
+                && self.daemon_lease_id.as_ref().is_some_and(|lease| stored.job.daemon_lease_id.as_ref() == Some(lease)) {
+                return Err(Error::validation_invalid_argument("job_id", "current daemon already owns controller execution", Some(job_id.to_string()), None));
+            }
             if stored.job.status.is_terminal()
                 || (!recovery && controller.execution_claim_id.is_some())
             {
