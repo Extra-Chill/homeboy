@@ -224,6 +224,7 @@ fn run_run(args: WorkloadRunArgs) -> homeboy::core::Result<(WorkloadRunOutput, i
             extension_id: resolved.extension_id().to_string(),
             safety_class: resolved.config.safety_class.as_str().to_string(),
             hints: output::run_hints(&resolved.kind, &outcome),
+            failure: output::run_failure(&resolved.kind, &outcome),
             outcome,
         },
         exit,
@@ -237,13 +238,25 @@ fn run_compare(args: WorkloadCompareArgs) -> homeboy::core::Result<WorkloadCompa
     let to = stored::load(&store, &args.to_run, Some(&args.kind))?;
     let config = to.compare_config();
     let compared = compare::<WorkloadAdapter>(&from.result, &to.result, &config)?;
+    let comparison = WorkloadComparison::new(compared.delta);
+    let failure = comparison.regressed().then(|| output::WorkloadFailure {
+        code: "workload.compare_regressed",
+        message: format!(
+            "`{}` run {} regressed against {}: {}",
+            args.kind,
+            to.run.id,
+            from.run.id,
+            comparison.regressions.join("; ")
+        ),
+    });
     Ok(WorkloadCompareOutput {
         command: "workload.compare".to_string(),
         kind: args.kind,
         from_run: from.run.id,
         to_run: to.run.id,
         compare: config,
-        comparison: WorkloadComparison::new(compared.delta),
+        comparison,
+        failure,
     })
 }
 
@@ -292,10 +305,32 @@ fn run_case(args: WorkloadCaseArgs, mode: CaseMode) -> homeboy::core::Result<Wor
         authorization: authorization.as_ref(),
         dry_run: args.dry_run,
     })?;
+    let failure = (outcome.exit_code != 0).then(|| output::WorkloadFailure {
+        code: "workload.case_failed",
+        message: {
+            let mut message = format!(
+                "{} of case {} from run {} exited {}",
+                mode.as_str(),
+                outcome.case_id,
+                outcome.source_run_id,
+                outcome.exit_code
+            );
+            if let Some(line) = outcome
+                .stderr_tail
+                .as_deref()
+                .and_then(|stderr| stderr.lines().rev().find(|line| !line.trim().is_empty()))
+            {
+                message.push_str(": ");
+                message.push_str(line.trim());
+            }
+            message
+        },
+    });
     Ok(WorkloadCaseOutput {
         command: format!("workload.{}", mode.as_str()),
         extension_id: resolved.extension_id().to_string(),
         outcome,
+        failure,
     })
 }
 

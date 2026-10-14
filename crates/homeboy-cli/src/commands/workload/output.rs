@@ -21,6 +21,61 @@ pub enum WorkloadOutput {
     Inspect(WorkloadInspectOutput),
 }
 
+/// The cause of a nonzero exit, lifted into the command envelope's
+/// diagnostics so `success: false` always names why.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkloadFailure {
+    pub code: &'static str,
+    pub message: String,
+}
+
+pub(super) fn run_failure(kind: &str, outcome: &WorkloadRunOutcome) -> Option<WorkloadFailure> {
+    if outcome.exit_code == 0 {
+        return None;
+    }
+    if let Some(error) = &outcome.result_error {
+        return Some(WorkloadFailure {
+            code: "workload.result_invalid",
+            message: format!("`{kind}` run {} errored: {error}", outcome.run_id),
+        });
+    }
+    if let Some(comparison) = outcome
+        .baseline_comparison
+        .as_ref()
+        .filter(|comparison| comparison.regressed())
+    {
+        return Some(WorkloadFailure {
+            code: "workload.baseline_regressed",
+            message: format!(
+                "`{kind}` run {} regressed against its baseline: {}",
+                outcome.run_id,
+                comparison.regressions.join("; ")
+            ),
+        });
+    }
+    let (failed_cases, findings) = outcome
+        .result
+        .as_ref()
+        .map(|result| {
+            (
+                result
+                    .cases
+                    .iter()
+                    .filter(|case| !case.status.is_pass())
+                    .count(),
+                result.findings.len(),
+            )
+        })
+        .unwrap_or_default();
+    Some(WorkloadFailure {
+        code: "workload.failed",
+        message: format!(
+            "`{kind}` run {} reported {}: {failed_cases} failing case(s), {findings} finding(s)",
+            outcome.run_id, outcome.status
+        ),
+    })
+}
+
 /// What a declared kind supports, read from its declaration.
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkloadCapabilities {
@@ -73,6 +128,8 @@ pub struct WorkloadRunOutput {
     #[serde(flatten)]
     pub outcome: WorkloadRunOutcome,
     pub hints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorkloadFailure>,
 }
 
 pub(super) fn run_hints(kind: &str, outcome: &WorkloadRunOutcome) -> Vec<String> {
@@ -103,6 +160,8 @@ pub struct WorkloadCompareOutput {
     /// The candidate run's declared compare semantics the gate applied.
     pub compare: WorkloadCompareConfig,
     pub comparison: WorkloadComparison,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorkloadFailure>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +170,8 @@ pub struct WorkloadCaseOutput {
     pub extension_id: String,
     #[serde(flatten)]
     pub outcome: CaseOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<WorkloadFailure>,
 }
 
 #[derive(Serialize)]

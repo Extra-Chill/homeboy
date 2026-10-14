@@ -296,6 +296,11 @@ fn destructive_kind_is_refused_without_authorization_then_runs_compares_and_repl
             "metric `p95_ms` regressed"
         );
         assert_eq!(compared["comparison"]["delta"]["findings"]["persisting"], 1);
+        assert_eq!(compared["failure"]["code"], "workload.compare_regressed");
+        assert!(
+            first.get("failure").is_none(),
+            "a passing run names no failure"
+        );
 
         let (_, exit) = run(parse(&[
             "compare",
