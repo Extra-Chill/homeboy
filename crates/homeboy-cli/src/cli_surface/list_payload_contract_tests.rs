@@ -103,6 +103,10 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
         "nested action-tagged payload under data.preview_ingress",
     ),
     (
+        "workload list",
+        "per-kind workload discovery report with declared capabilities and diagnostics",
+    ),
+    (
         "worktree list",
         "keyset-paged report (cursor, next_cursor, diagnostics); follow-up candidate",
     ),
