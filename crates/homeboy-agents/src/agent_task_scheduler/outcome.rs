@@ -1,8 +1,7 @@
-//! Outcome helpers grouped by normalization, provider-status, and rendering concern.
+//! Outcome helpers grouped by normalization and provider-status concern.
 
 pub(super) use super::outcome_artifacts::*;
 pub(super) use super::outcome_status::*;
-pub(super) use super::outcome_templates::*;
 
 use super::*;
 

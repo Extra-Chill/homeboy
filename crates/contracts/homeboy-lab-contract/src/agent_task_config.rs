@@ -240,46 +240,9 @@ fn default_task_resource_units() -> u32 {
     1
 }
 
-fn default_required_output() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskOutputDependencies {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub bindings: HashMap<String, AgentTaskOutputBinding>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskOutputBinding {
-    pub task_id: String,
-    /// JSON Pointer into the prior `homeboy/agent-task-outcome/v1` object.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact: Option<AgentTaskArtifactBinding>,
-    #[serde(default = "default_required_output")]
-    pub required: bool,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub default: Value,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskArtifactOutputDeclaration {
     pub name: String,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schema: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskArtifactBinding {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,

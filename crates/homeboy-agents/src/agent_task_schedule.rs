@@ -25,7 +25,6 @@ mod plan {
         pub group_key: Option<String>,
         pub tasks: Vec<AgentTaskRequest>,
         pub component_contracts: Vec<AgentTaskComponentContract>,
-        pub output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
         pub artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         pub postprocess_steps: Vec<AgentTaskArtifactPostprocessStep>,
         pub services: Vec<AgentTaskManagedService>,
@@ -45,7 +44,6 @@ mod plan {
                 group_key: None,
                 tasks,
                 component_contracts: Vec::new(),
-                output_dependencies: HashMap::new(),
                 artifact_outputs: HashMap::new(),
                 postprocess_steps: Vec::new(),
                 services: Vec::new(),
@@ -76,22 +74,6 @@ mod plan {
                 .get("component_contracts")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default();
-            let output_dependencies = homeboy_plan
-                .steps
-                .iter()
-                .filter_map(|step| {
-                    let dependencies = value_as::<AgentTaskOutputDependencies>(
-                        &step.inputs,
-                        "agent_task_output_dependencies",
-                    )
-                    .unwrap_or_else(|| AgentTaskOutputDependencies {
-                        depends_on: step.needs.clone(),
-                        bindings: HashMap::new(),
-                    });
-                    (!dependencies.depends_on.is_empty() || !dependencies.bindings.is_empty())
-                        .then(|| (step.id.clone(), dependencies))
-                })
-                .collect();
             let mut artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>> =
                 HashMap::new();
             for artifact in &homeboy_plan.artifacts {
@@ -149,7 +131,6 @@ mod plan {
                 group_key,
                 tasks,
                 component_contracts,
-                output_dependencies,
                 artifact_outputs,
                 postprocess_steps,
                 services,
@@ -226,27 +207,17 @@ mod plan {
                 .tasks
                 .iter()
                 .map(|request| {
-                    let dependencies = self.output_dependencies.get(&request.task_id).cloned();
-                    let mut inputs = HashMap::from([(
+                    let inputs = HashMap::from([(
                         "agent_task_request".to_string(),
                         serde_json::to_value(request).unwrap_or(Value::Null),
                     )]);
-                    if let Some(dependencies) = &dependencies {
-                        inputs.insert(
-                            "agent_task_output_dependencies".to_string(),
-                            serde_json::to_value(dependencies).unwrap_or(Value::Null),
-                        );
-                    }
                     PlanStep {
                         id: request.task_id.clone(),
                         kind: "agent_task".to_string(),
                         label: Some(request.task_id.clone()),
                         blocking: true,
                         scope: Vec::new(),
-                        needs: dependencies
-                            .as_ref()
-                            .map(|dependencies| dependencies.depends_on.clone())
-                            .unwrap_or_default(),
+                        needs: Vec::new(),
                         needs_kind: PlanStepDependencyKind::Execution,
                         status: PlanStepStatus::Ready,
                         inputs,
@@ -317,6 +288,7 @@ mod plan {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct AgentTaskPlanJson {
         #[serde(default = "defaults::plan_schema")]
         schema: String,
@@ -326,8 +298,6 @@ mod plan {
         tasks: Vec<AgentTaskRequest>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         component_contracts: Vec<AgentTaskComponentContract>,
-        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        output_dependencies: HashMap<String, AgentTaskOutputDependencies>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         artifact_outputs: HashMap<String, Vec<AgentTaskArtifactOutputDeclaration>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -363,7 +333,6 @@ mod plan {
                 group_key: self.group_key,
                 tasks,
                 component_contracts: self.component_contracts,
-                output_dependencies: self.output_dependencies,
                 artifact_outputs: self.artifact_outputs,
                 postprocess_steps: self.postprocess_steps,
                 services: self.services,
@@ -387,7 +356,6 @@ mod plan {
                 group_key: plan.group_key.clone(),
                 tasks: plan.tasks.clone(),
                 component_contracts: plan.component_contracts.clone(),
-                output_dependencies: plan.output_dependencies.clone(),
                 artifact_outputs: plan.artifact_outputs.clone(),
                 postprocess_steps: plan.postprocess_steps.clone(),
                 services: plan.services.clone(),
