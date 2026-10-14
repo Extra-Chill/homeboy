@@ -1000,6 +1000,14 @@ pub type RunsArtifactCleanupPersistedRow = runs_service::PersistedArtifactCleanu
 pub struct RunDetail {
     #[serde(flatten)]
     pub summary: RunSummary,
+    /// The observation row's own status when the run is a durable agent-task
+    /// run and `status` carries the canonical Cook state instead (#15885).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_status: Option<String>,
+    /// The canonical Cook verdict for an agent-task run: the same state,
+    /// gate result and next action `agent-task status` reports (#15885).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cook: Option<crate::commands::cook_verdict::CookVerdict>,
     pub homeboy_version: Option<String>,
     pub metadata: Value,
     pub artifacts: Vec<ArtifactRecord>,

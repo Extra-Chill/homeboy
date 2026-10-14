@@ -6680,3 +6680,110 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
         );
     });
 }
+
+/// One durable Cook record, four read surfaces, one verdict (#15885).
+///
+/// The fixture is the production split from the issue: the lifecycle record
+/// says `succeeded` and its observation row says `pass` (or was marked
+/// `stale`), but the promoted candidate never verified, so the canonical
+/// control-plane state is `candidate_recoverable`. Every surface must report
+/// that state, and none may read the observation row as the verdict.
+#[test]
+fn every_cook_read_surface_reports_the_same_canonical_verdict() {
+    use crate::commands::runs::{runs_dossier_in_store, show_run_in_store, RunsOutput};
+    use homeboy::core::observation::{ObservationStore, RunStatus};
+
+    for observation_status in [RunStatus::Pass, RunStatus::Stale] {
+        with_temp_home(|| {
+            let run_id = "run-cli-unified-cook-verdict";
+            agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.state = AgentTaskRunState::Succeeded;
+                record.metadata["latest_promotion"] = json!({
+                    "status": "verification_pending",
+                    "task_id": "task-a",
+                });
+            })
+            .expect("persist unverified candidate");
+            let store = ObservationStore::open_initialized().expect("observation store");
+            store
+                .finish_run(run_id, observation_status, None)
+                .expect("pin the diverged observation status");
+            let observation = observation_status.as_str().to_string();
+
+            // agent-task status: the canonical control-plane projection.
+            let (status_value, _) = status(StatusArgs {
+                run_id: run_id.to_string(),
+                full: false,
+                exact: true,
+                strict_subject_exit: false,
+                watch: false,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
+            })
+            .expect("status");
+            assert_eq!(status_value["state"], "candidate_recoverable");
+            let reason = status_value["reason"]
+                .as_str()
+                .expect("status names why the Cook has not completed")
+                .to_string();
+
+            // runs show: the canonical state, the observation row kept aside.
+            let (show, _) = show_run_in_store(&store, run_id).expect("runs show");
+            let RunsOutput::Show(show) = show else {
+                panic!("expected show output");
+            };
+            assert_eq!(show.run.summary.status, "candidate_recoverable");
+            assert_eq!(
+                show.run.observation_status.as_deref(),
+                Some(observation.as_str())
+            );
+            let cook = show
+                .run
+                .cook
+                .as_ref()
+                .expect("runs show carries the verdict");
+            assert_eq!(cook.state, "candidate_recoverable");
+            assert_eq!(cook.reason.as_deref(), Some(reason.as_str()));
+            assert_eq!(cook.candidate.as_deref(), Some("verification_pending"));
+
+            // runs dossier: same state, never `stale_running_record` from the row.
+            let (dossier, _) = runs_dossier_in_store(&store, run_id).expect("runs dossier");
+            let RunsOutput::Dossier(dossier) = dossier else {
+                panic!("expected dossier output");
+            };
+            assert_eq!(dossier.status.status, "candidate_recoverable");
+            assert!(!dossier.status.stale);
+            assert_eq!(
+                dossier.status.category.as_deref(),
+                Some("candidate_recoverable")
+            );
+            assert_eq!(dossier.status.reason.as_deref(), Some(reason.as_str()));
+            assert_eq!(
+                dossier.status.observation_status.as_deref(),
+                Some(observation.as_str())
+            );
+            assert_eq!(dossier.cook.as_ref(), Some(cook));
+            assert!(dossier
+                .next_commands
+                .iter()
+                .any(|command| command.command == cook.next_action));
+
+            // diagnose: same state, and it explains the stall instead of
+            // reporting "no root cause" for a `succeeded` record.
+            let (diagnosis, _) = diagnose(DiagnoseArgs {
+                run_id: run_id.to_string(),
+                full: false,
+            })
+            .expect("diagnose");
+            assert_eq!(diagnosis["state"], "candidate_recoverable");
+            assert_eq!(diagnosis["record_state"], "succeeded");
+            assert_eq!(diagnosis["diagnosis_outcome"], "cook_state_explained");
+            assert_eq!(diagnosis["cook_verdict"]["reason"], reason.as_str());
+            assert_eq!(
+                diagnosis["cook_verdict"]["next_action"],
+                cook.next_action.as_str()
+            );
+        });
+    }
+}

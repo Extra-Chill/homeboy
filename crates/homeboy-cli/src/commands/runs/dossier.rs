@@ -7,6 +7,7 @@ use homeboy_engine_primitives::shell::shell_arg;
 
 use super::common::RunSummary;
 use super::{run_summary, CmdResult, RunsOutput};
+use crate::commands::cook_verdict::{cook_verdict_for_observation_run, CookVerdict};
 
 #[derive(Serialize)]
 pub struct RunsDossierOutput {
@@ -15,6 +16,9 @@ pub struct RunsDossierOutput {
     pub run_ref: String,
     pub status: RunsDossierStatus,
     pub run: RunSummary,
+    /// The canonical Cook verdict for an agent-task run (#15885).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cook: Option<CookVerdict>,
     pub refs: RunsDossierRefs,
     pub failure: evidence_report::EvidenceFailureSummary,
     pub env: RunsDossierEnvSummary,
@@ -32,6 +36,12 @@ pub struct RunsDossierStatus {
     pub stale_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// The observation row's own status when `status` carries the canonical
+    /// Cook state of an agent-task run (#15885).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<String>,
 }
@@ -109,32 +119,65 @@ pub(crate) fn runs_dossier_in_store(
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);
     let failure = evidence_report::evidence_failure_summary(&run);
-    let stale_reason = runs_service::running_status_note(&run);
     let env = env_summary(&run);
+    let cook = cook_verdict_for_observation_run(&run);
+    let status = dossier_status(&run, &failure, cook.as_ref());
+    let mut run_view = run_summary(run.clone());
+    if let Some(cook) = cook.as_ref() {
+        run_view.status = cook.state.clone();
+        run_view.status_note = cook.reason.clone();
+    }
 
     Ok((
         RunsOutput::Dossier(RunsDossierOutput {
             command: "runs.dossier",
             run_id: run.id.clone(),
             run_ref: format!("homeboy://run/{}", run.id),
-            status: RunsDossierStatus {
-                status: run.status.clone(),
-                stale: stale_reason.is_some(),
-                stale_reason,
-                category: status_category(&run, &failure),
-                finished_at: run.finished_at.clone(),
-            },
-            run: run_summary(run.clone()),
+            status,
+            run: run_view,
             refs: refs(&run),
             failure,
             env,
             artifacts: artifact_summary(artifact_index),
             inspection_commands: inspection_commands(&run),
-            repair_commands: repair_commands(&run),
-            next_commands: next_commands(&run),
+            repair_commands: repair_commands(&run, cook.as_ref()),
+            next_commands: next_commands(&run, cook.as_ref()),
+            cook,
         }),
         0,
     ))
+}
+
+/// An agent-task run is classified by its canonical Cook verdict, the same
+/// one `runs show` and `agent-task status` report; only a run without a
+/// durable agent-task record falls back to its observation row (#15885).
+fn dossier_status(
+    run: &RunRecord,
+    failure: &evidence_report::EvidenceFailureSummary,
+    cook: Option<&CookVerdict>,
+) -> RunsDossierStatus {
+    let Some(cook) = cook else {
+        let stale_reason = runs_service::running_status_note(run);
+        return RunsDossierStatus {
+            status: run.status.clone(),
+            stale: stale_reason.is_some(),
+            stale_reason,
+            category: status_category(run, failure),
+            observation_status: None,
+            reason: None,
+            finished_at: run.finished_at.clone(),
+        };
+    };
+    let stale = cook.is_stale();
+    RunsDossierStatus {
+        status: cook.state.clone(),
+        stale,
+        stale_reason: stale.then(|| cook.reason.clone()).flatten(),
+        category: cook.category(),
+        observation_status: Some(run.status.clone()),
+        reason: cook.reason.clone(),
+        finished_at: run.finished_at.clone(),
+    }
 }
 
 fn status_category(
@@ -327,9 +370,15 @@ fn inspection_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
     commands
 }
 
-fn repair_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
+fn repair_commands(run: &RunRecord, cook: Option<&CookVerdict>) -> Vec<RunsDossierCommandHint> {
     let mut commands = Vec::new();
-    if run.status == "running" {
+    // A durable Cook owns its own liveness; the observation row's `running`
+    // is not a repair signal when the Cook verdict says otherwise.
+    let observation_running = match cook {
+        Some(cook) => cook.state == "running" && run.status == "running",
+        None => run.status == "running",
+    };
+    if observation_running {
         commands.push(command_hint(
             "reconcile-running",
             "homeboy runs reconcile".to_string(),
@@ -339,13 +388,34 @@ fn repair_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
     commands
 }
 
-fn next_commands(run: &RunRecord) -> Vec<RunsDossierCommandHint> {
+fn next_commands(run: &RunRecord, cook: Option<&CookVerdict>) -> Vec<RunsDossierCommandHint> {
     let run_id = shell_arg(&run.id);
-    vec![command_hint(
+    let mut commands = Vec::new();
+    if let Some(cook) = cook {
+        commands.push(command_hint(
+            "cook-next-action",
+            cook.next_action.clone(),
+            "The next legal Cook action, as `agent-task status` reports it.",
+        ));
+        commands.push(command_hint(
+            "cook-status",
+            cook.status_command.clone(),
+            "Inspect the canonical Cook state, gates and publication.",
+        ));
+        if cook.reason.is_some() {
+            commands.push(command_hint(
+                "cook-diagnose",
+                cook.diagnose_command.clone(),
+                "Explain why the Cook has not completed.",
+            ));
+        }
+    }
+    commands.push(command_hint(
         "export",
         format!("homeboy runs export --run {run_id} --output <dir>"),
         "Create a portable metadata bundle for handoff or review.",
-    )]
+    ));
+    commands
 }
 
 fn command_hint(label: &str, command: String, reason: &str) -> RunsDossierCommandHint {

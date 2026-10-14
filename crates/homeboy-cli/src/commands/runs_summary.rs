@@ -137,6 +137,8 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         "command": run.get("command").map(super::operator_projection::value),
         "cwd": run.get("cwd").map(super::operator_projection::value),
         "status_note": run.get("status_note").map(super::operator_projection::value),
+        "observation_status": run.get("observation_status").map(super::operator_projection::value),
+        "cook": run.get("cook").map(super::operator_projection::value),
         "artifact_index": null,
         "homeboy_version": run.get("homeboy_version").map(super::operator_projection::value),
         "metadata": {
@@ -408,6 +410,38 @@ fn field_value_line(value: &Value) -> String {
     }
 }
 
+/// The canonical Cook verdict of an agent-task run, so `runs show` names the
+/// same state, gate result and next action as `agent-task status` (#15885).
+fn cook_verdict_lines(run: &Value) -> Vec<String> {
+    let Some(cook) = run.get("cook").filter(|cook| cook.is_object()) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if let Some(observation) = string_value(run, &["observation_status"]) {
+        lines.push(format!("Observation status: {observation}"));
+    }
+    if let Some(candidate) = string_value(cook, &["candidate"]) {
+        lines.push(format!("Candidate: {candidate}"));
+    }
+    if let Some(gates) = cook.get("gates").and_then(Value::as_array) {
+        for gate in gates {
+            let id = string_value(gate, &["id"]).unwrap_or("gate");
+            let state = string_value(gate, &["state"]).unwrap_or("unknown");
+            lines.push(format!("Gate {id}: {state}"));
+        }
+    }
+    if let Some(publication) = string_value(cook, &["publication"]) {
+        lines.push(format!("Publication: {publication}"));
+    }
+    if let Some(reason) = string_value(cook, &["reason"]) {
+        lines.push(format!("Reason: {reason}"));
+    }
+    if let Some(next) = string_value(cook, &["next_action"]) {
+        lines.push(format!("Next: {next}"));
+    }
+    lines
+}
+
 fn render_run_detail(run: &Value) -> String {
     let run_id = string_value(run, &["id"]).unwrap_or("<unknown>");
     let kind = string_value(run, &["kind"]).unwrap_or("run");
@@ -415,6 +449,7 @@ fn render_run_detail(run: &Value) -> String {
 
     // Put terminal state and a supported next action ahead of run metadata.
     let mut lines = vec![format!("Status: {status}")];
+    lines.extend(cook_verdict_lines(run));
     lines.extend(failure_summary_lines(run));
     lines.extend(recovery_command_lines(run));
     lines.push(format!("Run {run_id} ({kind})"));

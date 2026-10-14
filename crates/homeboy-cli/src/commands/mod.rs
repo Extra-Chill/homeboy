@@ -231,6 +231,7 @@ pub mod contract_lab_routing;
 mod contract_lab_routing_tests;
 pub mod contract_output_routing;
 pub mod control_plane;
+pub(crate) mod cook_verdict;
 pub mod daemon;
 pub mod deploy;
 pub mod docs;

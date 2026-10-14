@@ -1568,8 +1568,18 @@ pub(super) fn run_detail(
 ) -> homeboy::core::Result<RunDetail> {
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
     let run = project_redirected_cook_status(store, run)?;
+    let cook = crate::commands::cook_verdict::cook_verdict_for_observation_run(&run);
+    let mut summary = run_summary(run.clone());
+    let observation_status = cook.as_ref().map(|cook| {
+        // An agent-task run reports the canonical Cook state, never the
+        // observation row's `pass`/`stale` (#15885).
+        summary.status_note = cook.reason.clone();
+        std::mem::replace(&mut summary.status, cook.state.clone())
+    });
     Ok(RunDetail {
-        summary: run_summary(run.clone()),
+        summary,
+        observation_status,
+        cook,
         homeboy_version: run.homeboy_version,
         metadata: run.metadata_json,
         artifacts,
