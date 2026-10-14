@@ -305,7 +305,13 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
+    // The same verdict `runs show`, `runs dossier` and `diagnose` report
+    // (#15885): status names why a Cook has not completed, not just its state.
+    let verdict = crate::commands::cook_verdict::cook_verdict(&run);
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if let Some(reason) = verdict.reason {
+        value["reason"] = json!(reason);
+    }
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
@@ -467,6 +473,9 @@ fn compact_control_plane_status(value: Value) -> Value {
     }
     // Retain the prior canonical blocker and safe retry guidance attached by
     // this command, but never duplicate the complete eligibility matrix.
+    if let Some(reason) = value.get("reason").and_then(Value::as_str) {
+        compact["reason"] = bounded_diagnostic_message(reason);
+    }
     if let Some(blocker_summary) = value.get("blocker_summary") {
         compact["blocker_summary"] = blocker_summary
             .as_str()
@@ -2513,21 +2522,37 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     }
 
     let ranked_reasons = ranked_diagnostics(nested_reasons);
+    // The canonical Cook verdict, read exactly as `agent-task status --exact`
+    // reads it (#15885). The raw lifecycle record can still say `succeeded`
+    // for a Cook whose candidate was never verified or published; diagnose
+    // must report the state every other surface reports.
+    let verdict = homeboy::agents::orchestration::run_exact_from_current_environment(run_id)
+        .ok()
+        .map(|run| crate::commands::cook_verdict::cook_verdict(&run));
+    let record_state = serde_json::to_value(record.state).unwrap_or(Value::Null);
+    let state = verdict
+        .as_ref()
+        .map(|verdict| json!(verdict.state))
+        .unwrap_or_else(|| record_state.clone());
+    let state_label = state.as_str().unwrap_or("unknown").to_string();
     // `diagnose` is the printed recovery verb for a failed run (#14679): a
     // human-readable summary must exist whenever it runs, and it must say
     // whether a root cause was actually found rather than leaving `succeeded`
     // with an empty summary ambiguous between "nothing wrong" and "nothing
-    // reported".
-    let (diagnosis_outcome, summary) = match ranked_reasons.first() {
-        Some(diagnostic) => (
+    // reported". A Cook stopped short of publication without a recorded
+    // failure is explained by its verdict, not reported as "no root cause".
+    let verdict_reason = verdict.as_ref().and_then(|verdict| verdict.reason.clone());
+    let (diagnosis_outcome, summary) = match (ranked_reasons.first(), verdict_reason) {
+        (Some(diagnostic), _) => (
             "root_cause_identified",
             format!("{}: {}", diagnostic.class, diagnostic.message),
         ),
-        None => (
+        (None, Some(reason)) => ("cook_state_explained", format!("{state_label}: {reason}")),
+        (None, None) => (
             "no_root_cause_found",
             format!(
-                "no root cause diagnostic was found for run {} (state: {:?})",
-                record.run_id, record.state
+                "no root cause diagnostic was found for run {} (state: {state_label})",
+                record.run_id
             ),
         ),
     };
@@ -2581,9 +2606,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
         "run_id": record.run_id.clone(),
-        "state": record.state,
+        "state": state,
+        "record_state": record_state,
         "summary": summary,
         "diagnosis_outcome": diagnosis_outcome,
+        "cook_verdict": verdict,
         "root_cause": root_cause,
         "diagnostic_chain": diagnostic_chain,
         "causal_chain": causal_chain,

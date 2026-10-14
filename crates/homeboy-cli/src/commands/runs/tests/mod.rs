@@ -2303,7 +2303,14 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
             panic!("expected show output");
         };
         assert_eq!(show.run.summary.id, cook_id);
-        assert_eq!(show.run.summary.status, "fail");
+        // The cook id reports its selected attempt's canonical Cook state,
+        // the same one `agent-task status` reports (#15885).
+        assert_eq!(show.run.summary.status, "failed");
+        assert_eq!(
+            show.run.cook.as_ref().map(|cook| cook.run_id.as_str()),
+            Some(attempt_id)
+        );
+        assert_eq!(show.run.observation_status.as_deref(), Some("fail"));
     });
 }
 

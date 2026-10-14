@@ -79,8 +79,12 @@ pub(crate) fn attach_runner_artifact(
 // `use` (still reachable by descendant submodules) so the re-export never
 // widens their visibility.
 pub(crate) use common::RunSummary;
+#[cfg(test)]
+pub(crate) use dossier::runs_dossier_in_store;
 use handlers::require_run;
 pub(crate) use handlers::run_summary;
+#[cfg(test)]
+pub(crate) use handlers::show_run_in_store;
 pub(crate) use hotspots::fuzz_hotspot_lines;
 #[cfg(test)]
 pub(crate) use types::RunsArtifactGetArgs;

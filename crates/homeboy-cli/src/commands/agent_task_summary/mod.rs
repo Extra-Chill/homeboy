@@ -625,6 +625,11 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Blocker: {blocker}"));
         }
     }
+    if payload.get("blocker").is_none_or(Value::is_null) {
+        if let Some(reason) = string_value(payload, &["reason"]) {
+            lines.push(format!("Reason: {reason}"));
+        }
+    }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {

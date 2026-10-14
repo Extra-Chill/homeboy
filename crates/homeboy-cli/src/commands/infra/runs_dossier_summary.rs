@@ -24,6 +24,12 @@ fn render_dossier(dossier: &Value) -> String {
     if let Some(category) = string_value(dossier, &["status", "category"]) {
         lines.push(format!("Category: {category}"));
     }
+    if let Some(reason) = string_value(dossier, &["status", "reason"]) {
+        lines.push(format!("Reason: {reason}"));
+    }
+    if let Some(observation) = string_value(dossier, &["status", "observation_status"]) {
+        lines.push(format!("Observation status: {observation}"));
+    }
     if let Some(reason) = string_value(dossier, &["status", "stale_reason"]) {
         lines.push(format!("Stale reason: {reason}"));
     }
