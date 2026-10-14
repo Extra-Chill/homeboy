@@ -37,6 +37,12 @@ pub struct LifecycleReadArgs {
     /// Return complete lifecycle details instead of the bounded summary.
     #[arg(long)]
     pub full: bool,
+    /// Display the contents of a specific artifact by id.
+    #[arg(long, value_name = "ARTIFACT_ID", conflicts_with = "full")]
+    pub show: Option<String>,
+    /// Display only the final N lines of the selected artifact.
+    #[arg(long, value_name = "N", requires = "show")]
+    pub tail: Option<usize>,
 }
 
 #[derive(Args, Debug)]
@@ -415,6 +421,38 @@ mod tests {
         };
         assert!(args.exact);
         assert_eq!(args.run_id, "cook-a");
+    }
+
+    #[test]
+    fn artifacts_can_show_a_selected_artifact_and_tail_its_lines() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "artifacts",
+            "run-a",
+            "--show",
+            "transcript",
+            "--tail",
+            "12",
+        ])
+        .expect("artifact show and tail parse");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task")
+        };
+        let AgentTaskCommand::Artifacts(args) = agent_task.command else {
+            panic!("artifacts")
+        };
+        assert_eq!(args.show.as_deref(), Some("transcript"));
+        assert_eq!(args.tail, Some(12));
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "artifacts",
+            "run-a",
+            "--tail",
+            "12"
+        ])
+        .is_err());
     }
 
     #[test]
