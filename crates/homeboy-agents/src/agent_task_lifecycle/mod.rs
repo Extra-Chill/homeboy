@@ -85,6 +85,7 @@ pub use durable_progress::{record_promotion_progress, record_promotion_progress_
 pub use durable_state_probe::{
     durable_state_for_test, seed_status_purity_fixtures_for_test, StatusPurityFixture,
 };
+pub use failure_recording::canonical_runner_artifact_ref;
 pub use failure_recording::*;
 pub use health::*;
 pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;

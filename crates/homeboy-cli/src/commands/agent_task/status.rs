@@ -2198,6 +2198,9 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
+    if let Some(artifact_id) = args.show.as_deref() {
+        return show_artifact(&args.run_id, artifact_id, args.tail);
+    }
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
     let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
     if !false {
@@ -2216,6 +2219,112 @@ pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
     }
     preserve_controller_owner_placement(&mut value, &args.run_id);
     Ok((value, 0))
+}
+
+fn show_artifact(run_id: &str, artifact_id: &str, tail: Option<usize>) -> CmdResult<Value> {
+    use std::io::Read;
+
+    let target = resolve_cook_reader_target(run_id, false)?;
+    let run_id = target.run_id.as_str();
+    let snapshot = agent_task_lifecycle::durable_local_read(run_id)?;
+    let aggregate = snapshot.aggregate.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "artifact_id",
+            format!("run `{run_id}` has no aggregate artifacts"),
+            Some(artifact_id.to_string()),
+            None,
+        )
+    })?;
+    let selected = aggregate
+        .outcomes
+        .iter()
+        .find_map(|outcome| {
+            outcome
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.id == artifact_id)
+                .map(|artifact| (outcome.task_id.as_str(), artifact))
+        })
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact `{artifact_id}` was not found in run `{run_id}`"),
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+    let artifact = selected.1;
+    let path = artifact
+        .path
+        .as_deref()
+        .filter(|path| std::path::Path::new(path).is_file());
+    let temporary;
+    let source_path = if let Some(path) = path {
+        std::path::PathBuf::from(path)
+    } else {
+        let runner_id = snapshot.record.runner_id().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "artifact_id",
+                "runner artifact has no authenticated runner binding",
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+        let reference = homeboy::agents::agent_task_lifecycle::canonical_runner_artifact_ref(
+            runner_id,
+            run_id,
+            selected.0,
+            artifact_id,
+        );
+        temporary = tempfile::NamedTempFile::new().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("create artifact download target".to_string()),
+            )
+        })?;
+        let download =
+            homeboy::core::observation::runs_service::with_runner_evidence(|provider| {
+                provider.download_remote_artifact(&reference, Some(temporary.path().to_path_buf()))
+            })?;
+        download.output_path
+    };
+    let mut content = String::new();
+    std::fs::File::open(&source_path)
+        .and_then(|mut file| file.read_to_string(&mut content))
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!("read artifact `{artifact_id}`")),
+            )
+        })?;
+    if let Some(lines) = tail {
+        content = tail_lines(&content, lines);
+    }
+    Ok((
+        json!({"schema":"homeboy/agent-task-artifact-content/v1", "run_id":run_id, "artifact_id":artifact_id, "content":content}),
+        0,
+    ))
+}
+
+fn tail_lines(content: &str, count: usize) -> String {
+    content
+        .lines()
+        .rev()
+        .take(count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod artifact_content_tests {
+    #[test]
+    fn artifact_tail_keeps_the_last_lines_in_original_order() {
+        assert_eq!(super::tail_lines("one\ntwo\nthree\n", 2), "two\nthree");
+        assert_eq!(super::tail_lines("one\ntwo", 0), "");
+    }
 }
 
 pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {

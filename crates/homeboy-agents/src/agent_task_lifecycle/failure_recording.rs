@@ -2513,7 +2513,7 @@ pub(crate) fn persisted_observation_artifact_id(
     format!("agent-task-{:x}", id_hash.finalize())
 }
 
-pub(crate) fn canonical_runner_artifact_ref(
+pub fn canonical_runner_artifact_ref(
     runner_id: &str,
     run_id: &str,
     task_id: &str,
