@@ -1,8 +1,11 @@
 import Foundation
 
 /// Discovers the local Homeboy daemon's HTTP address by shelling out to
-/// `homeboy daemon status` through `CLIBridge`. Homeboy core owns the daemon
-/// lifecycle; this locator only reads `data.daemon.address` and caches it
+/// `homeboy daemon ensure-running` through `CLIBridge`. That core command
+/// returns the live daemon, or starts one when none is running, so a daemon
+/// stopped by an upgrade or an operator is recovered on the next read instead
+/// of leaving the control plane empty. Homeboy core owns the lifecycle and
+/// its safety checks; this locator only reads `data.address` and caches it
 /// until a connection failure forces rediscovery.
 actor HomeboyDaemonLocator {
     static let shared = HomeboyDaemonLocator()
@@ -22,17 +25,17 @@ actor HomeboyDaemonLocator {
         return try await rediscover()
     }
 
-    /// Forces a fresh `homeboy daemon status` read and updates the cache.
+    /// Forces a fresh `homeboy daemon ensure-running` and updates the cache.
     @discardableResult
     func rediscover() async throws -> URL {
-        let output: DaemonStatusOutput = try await cli.executeCommand(
-            HomeboyCommandRegistry.arguments("daemon status"),
-            dataType: DaemonStatusOutput.self,
+        let output: DaemonEnsureRunningOutput = try await cli.executeCommand(
+            HomeboyCommandRegistry.arguments("daemon ensure-running"),
+            dataType: DaemonEnsureRunningOutput.self,
             source: "Control Plane",
-            timeout: 15
+            timeout: 30
         )
 
-        guard let address = output.daemon?.address, !address.isEmpty else {
+        guard let address = output.address, !address.isEmpty else {
             throw HomeboyDaemonLocatorError.addressUnavailable
         }
 
@@ -63,19 +66,15 @@ enum HomeboyDaemonLocatorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .addressUnavailable:
-            return "Homeboy daemon status did not report a listening address. Run `homeboy daemon status` to check the daemon."
+            return "Homeboy daemon ensure-running did not report a listening address. Run `homeboy daemon status` to check the daemon."
         case .invalidAddress(let address):
             return "Homeboy daemon reported an unusable address: \(address)"
         }
     }
 }
 
-/// Mirrors the bounded `homeboy daemon status` projection (`homeboy/daemon-status/v1`).
-/// Only the fields the locator needs are declared; unknown fields are ignored.
-struct DaemonStatusOutput: Decodable {
-    let daemon: DaemonStatusAddress?
-}
-
-struct DaemonStatusAddress: Decodable {
+/// Mirrors the `homeboy daemon ensure-running` result data. Only the field
+/// the locator needs is declared; unknown fields are ignored.
+struct DaemonEnsureRunningOutput: Decodable {
     let address: String?
 }

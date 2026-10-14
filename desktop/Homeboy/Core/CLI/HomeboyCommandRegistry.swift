@@ -11,7 +11,7 @@ enum HomeboyCommandRegistry {
         "component list",
         "component set",
         "component show",
-        "daemon status",
+        "daemon ensure-running",
         "deploy",
         "extension action",
         "extension install",

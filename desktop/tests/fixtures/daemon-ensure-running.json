@@ -1,0 +1,15 @@
+{
+  "schema": "homeboy/command-result/v3",
+  "command": "daemon",
+  "operation": "ensure-running",
+  "success": true,
+  "exit_code": 0,
+  "status": "succeeded",
+  "data": {
+    "action": "ensure_running",
+    "address": "127.0.0.1:54321",
+    "lease_id": "00000000-0000-0000-0000-000000000001",
+    "pid": 12345,
+    "state_path": "/Users/example/.config/homeboy/daemon/generations/00000000-0000-0000-0000-000000000002/state.json"
+  }
+}

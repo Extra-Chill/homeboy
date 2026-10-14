@@ -5,8 +5,34 @@ import Foundation
 func runCLIBridgeModelDecodingContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testDeployDryRun(fixturesDir: fixturesDir, decoder: decoder)
     try testExtensionList(fixturesDir: fixturesDir, decoder: decoder)
+    try testDaemonEnsureRunning(fixturesDir: fixturesDir, decoder: decoder)
     try testHomeboyCLIHelperCommandShapes()
     try testMutationCommandShapes(testDir: testDir)
+}
+
+/// Mirrors `DaemonEnsureRunningOutput` in Core/API/HomeboyDaemonLocator.swift.
+private struct DaemonEnsureRunningOutput: Decodable {
+    let address: String?
+}
+
+/// The control-plane locator discovers the daemon through
+/// `homeboy daemon ensure-running`, which returns the live daemon or starts
+/// one. Its address is at `data.address` (not `data.daemon.address`, the
+/// `daemon status` projection).
+func testDaemonEnsureRunning(fixturesDir: String, decoder: JSONDecoder) throws {
+    print("Test: daemon-ensure-running.json")
+    print("--------------------------------")
+    let data = try Data(contentsOf: URL(fileURLWithPath: "\(fixturesDir)/daemon-ensure-running.json"))
+    let result = try decoder.decode(CLIResponse<DaemonEnsureRunningOutput>.self, from: data)
+    guard result.success, result.data?.address == "127.0.0.1:54321" else {
+        throw NSError(domain: "ContractTest", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "daemon-ensure-running.json: address not decoded from data.address"])
+    }
+    let locator = try String(contentsOfFile: "Homeboy/Core/API/HomeboyDaemonLocator.swift", encoding: .utf8)
+    try assertContains(locator, #"HomeboyCommandRegistry.arguments("daemon ensure-running")"#,
+        message: "locator must discover the daemon through daemon ensure-running")
+    print("[PASS] Decoded daemon address from ensure-running data.address")
+    print("")
 }
 
 func testDeployDryRun(fixturesDir: String, decoder: JSONDecoder) throws {
