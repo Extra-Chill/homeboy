@@ -1827,27 +1827,34 @@ fn ensure_running_with_idle_timeout(
             });
             return Err(error);
         }
-        // A dead or missing admission lease is still generation-routed. Start
-        // a verified successor in its own store instead of falling through to
-        // root-store cleanup, which can conflict with (or retire) a draining
-        // predecessor unrelated to this admission. Existing job custody stays
-        // registered until its own exact recovery proves it can be retired.
-        return start_admission_generation(addr, validation.state.as_ref(), default_idle_timeout);
+        // A dead admission owner is restarted in place: its store, lease and
+        // owner lock stay authoritative, and the successor's startup takes
+        // admission and resumes its in-flight work (#15830, #15936). Only a
+        // live owner is replaced through a new generation.
+        let in_place = (!validation.running).then(|| PathBuf::from(&endpoint.state_dir));
+        return start_admission_generation(
+            addr,
+            validation.state.as_ref(),
+            default_idle_timeout,
+            in_place,
+        );
     }
     let status = read_status()?;
     if status.running && !status.fresh {
-        return start_admission_generation(addr, status.state.as_ref(), default_idle_timeout);
+        return start_admission_generation(addr, status.state.as_ref(), default_idle_timeout, None);
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
 }
 
 /// Start B in an isolated state directory, then publish it as the admission
 /// owner. A remains untouched: its lease, job store, and endpoint continue to
-/// own all work admitted before this atomic registry update.
+/// own all work admitted before this atomic registry update. `in_place` names
+/// a dead owner's own state directory to restart instead.
 fn start_admission_generation(
     addr: &str,
     current: Option<&super::DaemonState>,
     default_idle_timeout: u64,
+    in_place: Option<PathBuf>,
 ) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
@@ -1868,7 +1875,10 @@ fn start_admission_generation(
         }
     }
 
-    let state_dir = generation_store::generation_state_dir()?;
+    let state_dir = match in_place {
+        Some(state_dir) => state_dir,
+        None => generation_store::generation_state_dir()?,
+    };
     let router_dir = generation_store::router_dir()?;
     std::fs::create_dir_all(&state_dir).map_err(|error| {
         Error::internal_io(

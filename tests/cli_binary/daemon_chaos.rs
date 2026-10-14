@@ -15,6 +15,7 @@
 //! | 7 | Restart in place over a dead admission owner (#15456) | `restart_in_place_takes_admission_from_a_dead_generation` |
 //! | 8 | Dead remote generation with a stale job reconciles (#15556) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --confirm-workload-processes-absent`) |
 //! | 9 | Host-service teardown (whole process group SIGKILL) recovers | `whole_daemon_process_group_killed_recovers_without_edits` |
+//! | 10 | Stop and restart in place mid-workflow, twice, resumes in one store (#15936) | `stop_and_restart_in_place_resumes_in_flight_work_every_time` |
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -345,6 +346,95 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
         serving_and_admitting,
     );
     reaper.track(daemon_pid(&after["data"]));
+    let _ = homeboy_at(&bin, home.path())
+        .args(["daemon", "stop"])
+        .status();
+}
+
+/// Case 10 (#15936): stopping a daemon with work in flight interrupts it
+/// instead of refusing, and `ensure-running` restarts it in place. A workflow
+/// (an in-daemon driver) and its step children resume after every restart, not
+/// just the first, and all of it stays in the one store.
+#[test]
+fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
+    let home = tempfile::tempdir().expect("home");
+    let bin = homeboy_bin();
+    let mut reaper = Reaper::default();
+    start_on_demand(&bin, home.path(), &mut reaper);
+
+    let definition = home.path().join("restart-proof.json");
+    std::fs::write(
+        &definition,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "restart-proof",
+            "steps": [
+                { "id": "a", "exec": { "program": "sh", "args": ["-c", "sleep 4; echo a"] } },
+                { "id": "b", "needs": ["a"], "exec": { "program": "sh", "args": ["-c", "sleep 4; echo b"] } }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let run = json_output(
+        &bin,
+        home.path(),
+        &["workflow", "run", definition.to_str().unwrap()],
+    );
+    let instance = run["data"]["instance"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workflow admitted: {run}"))
+        .to_string();
+
+    // Stop mid step a, then mid step b: every stop interrupts, every restart
+    // resumes in the same store.
+    for pause in [Duration::from_millis(1500), Duration::from_secs(4)] {
+        std::thread::sleep(pause);
+        let stopped = json_output(&bin, home.path(), &["daemon", "stop"]);
+        assert_eq!(
+            stopped["success"], true,
+            "stop with work in flight: {stopped}"
+        );
+        let restarted = json_output(&bin, home.path(), &["daemon", "ensure-running"]);
+        assert_eq!(restarted["success"], true, "restart in place: {restarted}");
+        reaper.track(restarted["data"]["pid"].as_i64().unwrap_or_default());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut last = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        last = json_output(&bin, home.path(), &["workflow", "status", &instance]);
+        if last["data"]["status"] == "succeeded" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert_eq!(
+        last["data"]["status"], "succeeded",
+        "workflow must resume after every restart: {last}"
+    );
+
+    let mut stores = Vec::new();
+    let mut dirs = vec![home.path().join(".config/homeboy/daemon")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "jobs.json.replay-tombstones.sqlite")
+            {
+                stores.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        stores.len(),
+        1,
+        "restart in place keeps one store: {stores:?}"
+    );
+
     let _ = homeboy_at(&bin, home.path())
         .args(["daemon", "stop"])
         .status();

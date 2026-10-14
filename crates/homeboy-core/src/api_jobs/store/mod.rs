@@ -2559,6 +2559,31 @@ impl JobStore {
         })
     }
 
+    /// A requested daemon stop interrupts in-thread controller work; it is not
+    /// the crash the one-resume fence guards against. Re-arm resume for the
+    /// active controller jobs that last executed under the stopped lease so a
+    /// restart in place resumes them again (#15936).
+    pub(crate) fn rearm_recovery_after_requested_stop(
+        &self,
+        stopped_lease_id: &str,
+    ) -> Result<usize> {
+        self.durable_transaction(|inner| {
+            let mut rearmed = 0;
+            for stored in inner.jobs.values_mut().filter(|stored| {
+                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && stored.job.daemon_lease_id.as_deref() == Some(stopped_lease_id)
+            }) {
+                if let Some(controller) = stored.controller_job.as_mut() {
+                    if controller.recovery_attempted {
+                        controller.recovery_attempted = false;
+                        rearmed += 1;
+                    }
+                }
+            }
+            Ok(rearmed)
+        })
+    }
+
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
         self.inner
             .lock()

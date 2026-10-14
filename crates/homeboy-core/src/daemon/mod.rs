@@ -66,8 +66,10 @@ pub use lifetime::launchable_executable as daemon_launchable_executable;
 /// Idle window, in seconds, for automatically launched daemons; `0` selects a
 /// resident launch. See `lifetime::launch_idle_timeout`.
 pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
+#[cfg(test)]
+use stop::active_daemon_job_ids;
 pub(crate) use stop::stop_unlocked;
-use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
+use stop::stop_with_force_for_lease;
 pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
 pub mod runner_workspace_root;
 pub use artifact_download::ArtifactDownload;
@@ -1960,6 +1962,14 @@ where
     }
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
+    if let Some(stopped_lease) = read_termination_evidence()
+        .ok()
+        .flatten()
+        .filter(|evidence| evidence.stop_requested)
+        .and_then(|evidence| evidence.lease_id)
+    {
+        let _ = job_store.rearm_recovery_after_requested_stop(&stopped_lease);
+    }
     recover_controller_jobs(&job_store);
     // Built-in cadences (`homeboy.retention`) are registered unless the
     // operator opted out; a failure here must not keep the daemon down.
@@ -2087,17 +2097,15 @@ where
         .as_ref()
         .is_some_and(|flag| flag.load(Ordering::Acquire))
     {
-        // Only a drained daemon is a clean stop. Controller work runs on
-        // detached threads that end with this process; with jobs still active
-        // keep the lease so dead-lease recovery resumes or reconciles them.
+        // A requested stop is clean even with work in flight: controller work
+        // on detached threads ends with this process and resumes from its
+        // checkpoint on the next start, which re-arms its resume (#15936).
+        // With jobs still active keep the lease, so dead-lease recovery also
+        // re-admits staged direct work.
         let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
         let clean = active_jobs == 0;
         write_termination_evidence(&DaemonTerminationEvidence {
-            classification: if clean {
-                DaemonTerminationClassification::CleanStop
-            } else {
-                DaemonTerminationClassification::UnexpectedExit
-            },
+            classification: DaemonTerminationClassification::CleanStop,
             observed_at: chrono::Utc::now().to_rfc3339(),
             lease_id: Some(state.lease_id.clone()),
             pid: Some(state.pid),
@@ -2112,7 +2120,7 @@ where
             supervisor_signal: None,
             stdout: None,
             stderr: None,
-            stop_requested: clean,
+            stop_requested: true,
         })?;
         if clean {
             remove_lease_if_identity_matches(
@@ -3855,12 +3863,6 @@ fn validate_lifecycle_stop_request(request: &LifecycleStopRequest) -> Result<()>
             Some(request.lease_id.clone()),
             None,
         ));
-    }
-    if !request.force {
-        let active_job_ids = active_daemon_job_ids()?;
-        if !active_job_ids.is_empty() {
-            return Err(active_jobs_block_daemon_stop_error(&state, &active_job_ids));
-        }
     }
     Ok(())
 }
@@ -6018,10 +6020,9 @@ mod tests {
         job_id
     }
 
-    /// #13619: a lease-bound stop is the replacement gate. It must first
-    /// reconcile every active job whose durable terminal evidence proves no
-    /// workload remains, so daemon replacement proceeds without the operator's
-    /// `--confirm-workload-processes-absent` attestation.
+    /// #13619: a stop first reconciles every active job whose durable terminal
+    /// evidence proves no workload remains, so only real in-flight work keeps
+    /// the lease for resume-on-restart.
     #[test]
     fn stop_gate_reconciles_terminal_evidenced_jobs_before_refusing() {
         crate::test_support::with_isolated_home(|_| {
@@ -6046,8 +6047,8 @@ mod tests {
         });
     }
 
-    /// The fence: an unknown unlinked live job survives the stop gate's
-    /// terminal-evidence reconciliation and still blocks replacement.
+    /// An unknown unlinked live job survives the stop's terminal-evidence
+    /// reconciliation and stays in flight for resume-on-restart.
     #[test]
     fn stop_gate_still_blocks_on_unknown_unlinked_live_jobs() {
         crate::test_support::with_isolated_home(|_| {
@@ -7430,40 +7431,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("daemon job {job_id} did not reach {expected:?} before timeout");
-    }
-
-    #[test]
-    fn routine_stop_names_active_jobs_and_daemon_identities() {
-        let state = DaemonState {
-            schema: DAEMON_LEASE_SCHEMA.to_string(),
-            lease_id: "lease-a".to_string(),
-            startup_token: "token-a".to_string(),
-            address: "127.0.0.1:7421".to_string(),
-            pid: 42,
-            state_path: "/tmp/state.json".to_string(),
-            started_at: "now".to_string(),
-            last_seen_at: "now".to_string(),
-            build_identity: build_identity::current(),
-            binary_sha256: None,
-            runtime_paths: DaemonRuntimeSnapshot {
-                loaded_at: "now".to_string(),
-                paths: Vec::new(),
-            },
-        };
-        let job_id = Uuid::parse_str("92e0a4b0-d0c1-4231-a83f-654734792797").expect("job id");
-
-        let error = active_jobs_block_daemon_stop_error(&state, &[job_id]);
-
-        assert!(error.message.contains(&job_id.to_string()));
-        assert_eq!(error.details["active_job_ids"], serde_json::json!([job_id]));
-        assert_eq!(
-            error.details["current_daemon_identity"],
-            state.build_identity.display
-        );
-        assert_eq!(
-            error.details["requested_homeboy_identity"],
-            build_identity::current().display
-        );
     }
 
     #[test]
