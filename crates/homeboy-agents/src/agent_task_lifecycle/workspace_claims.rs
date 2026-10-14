@@ -46,11 +46,33 @@ fn commit_budget_ms(now_ms: u64, claims: impl Iterator<Item = u64>) -> u64 {
 pub fn local_terminal_workspace_authority(
     record: &TaskWorktreeRecord,
 ) -> std::result::Result<Box<TerminalWorkspaceAuthorityProof>, WorktreeAuthorityRefusal> {
+    terminal_workspace_authority(record, None)
+}
+
+/// [`local_terminal_workspace_authority`] re-checked by the holder of the
+/// reconciliation claim on the record's workspace, at mutation time.
+///
+/// Holding that claim writes its own acquisition intent, and while the claim
+/// is live no other acquisition can create an intent or cleanup receipt for the
+/// workspace, so the holder's re-check does not treat that intent as an
+/// outstanding foreign claim. Every other piece of evidence is re-read.
+pub fn local_terminal_workspace_authority_under_claim(
+    record: &TaskWorktreeRecord,
+    held: &CompositeWorkspaceClaim,
+) -> std::result::Result<Box<TerminalWorkspaceAuthorityProof>, WorktreeAuthorityRefusal> {
+    terminal_workspace_authority(record, Some(held))
+}
+
+fn terminal_workspace_authority(
+    record: &TaskWorktreeRecord,
+    held: Option<&CompositeWorkspaceClaim>,
+) -> std::result::Result<Box<TerminalWorkspaceAuthorityProof>, WorktreeAuthorityRefusal> {
     let unavailable = MissingActiveWorktreeReason::TerminalAuthorityUnavailable;
     let workspace = record
         .effective_workspace_identity()
         .map_err(|error| refuse(unavailable.clone(), &error.message))?;
-    if composite_claim_receipt_outstanding(&workspace) {
+    let holds_workspace_claim = held.is_some_and(|claim| claim.workspace == workspace);
+    if !holds_workspace_claim && composite_claim_receipt_outstanding(&workspace) {
         return Err(refuse(
             MissingActiveWorktreeReason::RemoteClaimReleaseUnsupported,
             "workspace has an unreleased composite claim intent or cleanup receipt",
@@ -1021,8 +1043,24 @@ fn remove_composite_acquisition_intent(workspace: &WorkspaceIdentity) -> Result<
 /// Read-only: whether any composite claim intent or cleanup receipt may still
 /// cover `workspace`. An unreadable receipt cannot prove absence.
 fn composite_claim_receipt_outstanding(workspace: &WorkspaceIdentity) -> bool {
+    // An intent past the maximum claim lifetime no longer proves a live claim;
+    // acquisition clears it only after a complete authority inventory, so
+    // preflight leaves that decision to acquisition instead of blocking it.
     let intent_present = composite_acquisition_intent_path(workspace)
-        .map(|path| path.exists())
+        .map(|path| {
+            path.exists()
+                && fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<CompositeAcquisitionIntent>(&bytes).ok()
+                    })
+                    .is_none_or(|intent| {
+                        now_ms()
+                            < intent
+                                .started_at_ms
+                                .saturating_add(MAX_WORKSPACE_CLAIM_TTL_MS)
+                    })
+        })
         .unwrap_or(true);
     let receipt_present = || {
         let Ok(directory) = pending_composite_cleanup_dir() else {
@@ -1757,10 +1795,22 @@ mod tests {
             .expect("controller-only claim");
             assert!(claim.runners.is_empty());
             assert!(live.lock().expect("live claims").is_empty());
-            // While its acquisition intent is outstanding the record is preserved.
+            // While its acquisition intent is outstanding the record is preserved,
+            // except for the claim holder's own mutation-time re-check.
             assert_eq!(
                 local_terminal_workspace_authority(&local)
                     .expect_err("intent covers the workspace")
+                    .reason,
+                remote
+            );
+            assert!(local_terminal_workspace_authority_under_claim(&local, &claim).is_ok());
+            let mut foreign = claim.clone();
+            foreign.workspace = task_worktree("other", None)
+                .effective_workspace_identity()
+                .expect("other workspace");
+            assert_eq!(
+                local_terminal_workspace_authority_under_claim(&local, &foreign)
+                    .expect_err("a claim on another workspace grants nothing")
                     .reason,
                 remote
             );
@@ -2021,6 +2071,7 @@ mod tests {
                 state: "acquiring".into(),
             };
             write_composite_acquisition_intent(&intent).expect("write token-free intent");
+            assert!(composite_claim_receipt_outstanding(&workspace));
             assert!(matches!(
                 composite_acquisition_intent_for_workspace(&workspace),
                 Some(CompositeWorkspaceCleanupStatus::Pending { .. })
@@ -2037,6 +2088,8 @@ mod tests {
 
             intent.started_at_ms = now_ms().saturating_sub(MAX_WORKSPACE_CLAIM_TTL_MS + 1);
             write_composite_acquisition_intent(&intent).expect("age intent beyond ttl");
+            // Preflight defers an expired intent to acquisition's full inventory.
+            assert!(!composite_claim_receipt_outstanding(&workspace));
             let live = acquire_local_workspace_claim(workspace.clone(), 1).expect("live authority");
             assert!(matches!(
                 composite_acquisition_intent_for_workspace(&workspace),
