@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.0] - 2026-10-14
+
+### Added
+- declare workloads.fuzz for the generic homeboy workload command (Extra-Chill/homeboy#15840)
+
 ## [3.7.8] - 2026-10-11
 
 ### Changed
