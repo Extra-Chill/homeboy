@@ -664,6 +664,198 @@ mod tests {
         assert_eq!(output.stdout, "verified");
     }
 
+    static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ProcessEnvVarGuard {
+        name: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl ProcessEnvVarGuard {
+        fn set(name: &'static str, value: &std::ffi::OsStr) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for ProcessEnvVarGuard {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(prior) => std::env::set_var(self.name, prior),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn session_runtime_runner_fixture() -> Runner {
+        Runner {
+            id: "session-env".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: server::RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: server::RunnerPolicy::default(),
+        }
+    }
+
+    fn session_runtime_plan(
+        cwd: &Path,
+        command: Vec<String>,
+        env: HashMap<String, String>,
+    ) -> PreparedRunnerProcess {
+        PreparedRunnerProcess {
+            runner: session_runtime_runner_fixture(),
+            cwd: cwd.display().to_string(),
+            command,
+            env,
+            resource_guard_env: HashMap::new(),
+            secret_env_names: Vec::new(),
+            source_snapshot: SourceSnapshot::default(),
+            require_paths: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_jobs_inherit_session_runtime_env_from_the_daemon_process() {
+        let _lock = PROCESS_ENV_LOCK.lock().expect("process env lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime_dir = tempfile::tempdir().expect("runtime dir");
+        let _xdg = ProcessEnvVarGuard::set("XDG_RUNTIME_DIR", runtime_dir.path().as_os_str());
+        let _dbus = ProcessEnvVarGuard::unset("DBUS_SESSION_BUS_ADDRESS");
+
+        let plan = session_runtime_plan(
+            workspace.path(),
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '%s|%s' \"${XDG_RUNTIME_DIR:-unset}\" \"${DBUS_SESSION_BUS_ADDRESS:-unset}\""
+                    .to_string(),
+            ],
+            HashMap::new(),
+        );
+        let output = execute_runner_process(&plan).expect("run plan");
+
+        assert_eq!(output.exit_code, 0, "{}", output.stderr);
+        assert_eq!(
+            output.stdout,
+            format!("{}|unset", runtime_dir.path().display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_derived_runtime_dir_requires_a_uid_owned_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = PROCESS_ENV_LOCK.lock().expect("process env lock");
+        let runtime_root_parent = tempfile::tempdir().expect("runtime root parent");
+        let owned = runtime_root_parent
+            .path()
+            .join(unsafe { libc::getuid() }.to_string());
+        std::fs::create_dir(&owned).expect("uid runtime dir");
+        std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o700))
+            .expect("private mode");
+        std::fs::set_permissions(
+            runtime_root_parent.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("traversable root");
+
+        let mut env = HashMap::new();
+        super::session_runtime_env_with_root_for_test(
+            &HashMap::new(),
+            runtime_root_parent.path(),
+            &mut env,
+        );
+        assert_eq!(
+            env.get("XDG_RUNTIME_DIR").map(String::as_str),
+            Some(owned.display().to_string().as_str())
+        );
+        assert!(
+            !env.contains_key("DBUS_SESSION_BUS_ADDRESS"),
+            "no bus socket"
+        );
+
+        let shared_root = tempfile::tempdir().expect("shared runtime root");
+        let shared = shared_root
+            .path()
+            .join(unsafe { libc::getuid() }.to_string());
+        std::fs::create_dir(&shared).expect("shared runtime dir");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755))
+            .expect("shared mode");
+        let mut shared_env = HashMap::new();
+        super::session_runtime_env_with_root_for_test(
+            &HashMap::new(),
+            shared_root.path(),
+            &mut shared_env,
+        );
+        assert!(
+            !shared_env.contains_key("XDG_RUNTIME_DIR"),
+            "a mode 0755 runtime directory must not be treated as a private session"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_derived_session_bus_address_requires_the_bus_socket() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = PROCESS_ENV_LOCK.lock().expect("process env lock");
+        let runtime_root_parent = tempfile::tempdir().expect("runtime root parent");
+        let session_dir = runtime_root_parent
+            .path()
+            .join(unsafe { libc::getuid() }.to_string());
+        std::fs::create_dir(&session_dir).expect("uid runtime dir");
+        std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("private mode");
+
+        let bus_socket = std::os::unix::net::UnixListener::bind(session_dir.join("bus"))
+            .expect("bind session bus socket");
+        let _ = bus_socket;
+
+        let mut env = HashMap::new();
+        super::session_runtime_env_with_root_for_test(
+            &HashMap::new(),
+            runtime_root_parent.path(),
+            &mut env,
+        );
+        assert_eq!(
+            env.get("DBUS_SESSION_BUS_ADDRESS").map(String::as_str),
+            Some(format!("unix:path={}", session_dir.join("bus").display()).as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_env_and_inherited_session_env_win_over_derivation() {
+        let _lock = PROCESS_ENV_LOCK.lock().expect("process env lock");
+        let _unset_xdg = ProcessEnvVarGuard::unset("XDG_RUNTIME_DIR");
+        let mut env = HashMap::new();
+        super::session_runtime_env_with_root_for_test(
+            &HashMap::from([
+                ("XDG_RUNTIME_DIR".to_string(), "/custom/xdg".to_string()),
+                (
+                    "DBUS_SESSION_BUS_ADDRESS".to_string(),
+                    "unix:path=/custom/bus".to_string(),
+                ),
+            ]),
+            Path::new("/nonexistent-runtime-root"),
+            &mut env,
+        );
+        assert_eq!(env["XDG_RUNTIME_DIR"], "/custom/xdg");
+        assert_eq!(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/custom/bus");
+    }
+
     #[test]
     fn controller_proxy_projection_is_explicit_and_replaces_only_the_requested_name() {
         let mut env = HashMap::from([
@@ -1138,6 +1330,7 @@ pub(super) fn apply_runner_process_env(
     // The runner envelope is the producer boundary for direct commands, which
     // do not acquire an InvocationGuard of their own.
     env.extend(temp_owner.child_env_vars());
+    session_runtime_env(&plan.env, &mut env);
     configure_bash_runtime_path(&mut env, temp_owner)?;
     preserve_durable_homeboy_data_dir(command, &env);
     command.envs(env.iter());
@@ -1493,8 +1686,110 @@ pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
         "TMPDIR",
         "TEMP",
         "TMP",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
         homeboy_core::paths::DAEMON_STATE_DIR_ENV,
     ]
+}
+
+/// Session-level runtime env a runner job needs to reach the OS user session.
+///
+/// Runner jobs run as daemon children with a scrubbed environment. Long-running
+/// privileged-adjacent user tools (`systemd-run --user`, user-scope D-Bus
+/// clients) resolve the owning user session through `XDG_RUNTIME_DIR` and
+/// `DBUS_SESSION_BUS_ADDRESS`, so `apply_runner_process_env` re-adds them: first
+/// by inheritance (allow-listed above), then by deriving `XDG_RUNTIME_DIR`
+/// from `/run/user/<uid>` when the daemon itself has no usable value.
+/// Only a directory the current uid owns with mode `0700` is accepted; the
+/// numeric `/run/user/<uid>/bus` socket then implies the session bus address.
+pub(super) fn session_runtime_env(
+    plan_env: &HashMap<String, String>,
+    env: &mut HashMap<String, String>,
+) {
+    let inherited_xdg =
+        std::env::var_os("XDG_RUNTIME_DIR").map(|value| value.to_string_lossy().into_owned());
+    #[cfg(unix)]
+    let uid = Some(unsafe { libc::getuid() });
+    #[cfg(not(unix))]
+    let uid = None;
+    #[cfg(unix)]
+    let runtime_root = Some(PathBuf::from("/run/user"));
+    #[cfg(not(unix))]
+    let runtime_root = None;
+    apply_session_runtime_env(plan_env, inherited_xdg, uid, runtime_root, env);
+}
+
+#[cfg(all(unix, test))]
+pub(super) fn session_runtime_env_with_root_for_test(
+    plan_env: &HashMap<String, String>,
+    runtime_root: &Path,
+    env: &mut HashMap<String, String>,
+) {
+    apply_session_runtime_env(
+        plan_env,
+        None,
+        Some(unsafe { libc::getuid() }),
+        Some(runtime_root.to_path_buf()),
+        env,
+    );
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn apply_session_runtime_env(
+    plan_env: &HashMap<String, String>,
+    inherited_xdg: Option<String>,
+    uid: Option<u32>,
+    runtime_root: Option<PathBuf>,
+    env: &mut HashMap<String, String>,
+) {
+    let configured = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let session_dir = configured(plan_env.get("XDG_RUNTIME_DIR").cloned())
+        .or_else(|| configured(inherited_xdg))
+        .or_else(|| {
+            #[cfg(unix)]
+            {
+                derived_runtime_session_dir(uid?, runtime_root.as_deref()?)
+                    .map(|path| path.display().to_string())
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        });
+    if let Some(runtime_dir) = &session_dir {
+        env.entry("XDG_RUNTIME_DIR".to_string())
+            .or_insert(runtime_dir.clone());
+    }
+    #[cfg(not(unix))]
+    let _ = &mut session_dir;
+    let bus_address = configured(plan_env.get("DBUS_SESSION_BUS_ADDRESS").cloned()).or_else(|| {
+        let runtime_dir = session_dir.as_deref()?;
+        let bus = Path::new(runtime_dir).join("bus");
+        is_socket(&bus).then(|| format!("unix:path={}", bus.display()))
+    });
+    if let Some(bus_address) = bus_address {
+        env.entry("DBUS_SESSION_BUS_ADDRESS".to_string())
+            .or_insert(bus_address);
+    }
+}
+
+#[cfg(unix)]
+fn derived_runtime_session_dir(uid: u32, runtime_root: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let candidate = runtime_root.join(uid.to_string());
+    let metadata = fs::metadata(&candidate).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    (metadata.mode() & 0o777 == 0o700 && metadata.uid() == uid).then_some(candidate)
+}
+
+#[cfg(unix)]
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path)
+        .map(|metadata| metadata.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 pub(super) fn command_output(

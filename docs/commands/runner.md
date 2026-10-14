@@ -1035,6 +1035,29 @@ Runner job environment:
 - Public `env` values are redacted because legacy configs may still contain tokens; `secret_env` remains references-only.
 - `homeboy ssh <server> -- printenv NAME` inspects the server login shell environment. It does not include runner job env unless the variable is also configured on the server shell.
 - Use `homeboy runner exec <runner-id> -- printenv NAME` for final execution-time proof when debugging resolved runner job environment.
+- Runner jobs carry the OS user-session runtime env: `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` when the runner daemon itself has them, plus a Linux derivation from `/run/user/<uid>` when the daemon does not. The derivation accepts only a directory the job uid owns with mode `0700`, and the session bus address is added only when `<XDG_RUNTIME_DIR>/bus` exists. Use `homeboy runner exec <runner-id> -- printenv XDG_RUNTIME_DIR` for proof on the runner.
+
+### Long-running detached workloads
+
+`runner exec` is foreground-only: every runner job is process-tree-isolated under the runner daemon, and when the job's root process exits the runner deterministically terminates and reaps all remaining descendants before reporting terminal evidence. Backgrounding inside the command does not survive this cleanup:
+
+```sh
+# WRONG: returns immediately, then the runner job cleanup kills the workload.
+homeboy runner exec <runner-id> -- bash -lc 'nohup some-workload >/workload.log 2>&1 &'
+```
+
+To keep a long-running workload alive past the exec call, give it to the operating system's user-session service manager instead and let a runner-owned unit own the process:
+
+```sh
+homeboy runner exec <runner-id> -- \
+  bash -lc 'systemd-run --user --unit=my-workload --working-directory=<workspace> <long command>'
+# then poll from a separate exec call
+homeboy runner exec <runner-id> -- bash -lc 'systemctl --user status my-workload --no-pager'
+homeboy runner exec <runner-id> -- bash -lc 'journalctl --user --unit my-workload -n 50'
+homeboy runner exec <runner-id> -- bash -lc 'systemctl --user stop my-workload'
+```
+
+Runner jobs get a usable `XDG_RUNTIME_DIR` (see the runner job environment notes above) so `systemd-run --user` and `systemctl --user` work without exporting session variables manually.
 
 Runner metrics:
 
