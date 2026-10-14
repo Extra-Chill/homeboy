@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.423.1] - 2026-10-14
+
+### Fixed
+- require component lint gate before cook promotion
+- preview and status report the readiness-bound model
+- fold a pass's stale-run sweep into one summary notification
+- carry session runtime env into runner jobs and document foreground-only exec
+
 ## [0.423.0] - 2026-10-14
 
 ### Added
