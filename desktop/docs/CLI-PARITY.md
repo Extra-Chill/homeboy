@@ -6,7 +6,7 @@ Desktop now has two layers of CLI parity:
 - **Guided workflow UI** for common command families with safer forms, previews, and focused output.
 - **Command Browser** for full command-surface discoverability, help output, copyable invocations, and explicit raw CLI execution.
 
-Source of truth checked for this pass: `homeboy --help` plus focused help for the workspace commands from the installed CLI on 2026-04-27, and the current desktop `main` branch.
+Source of truth checked for this pass: `homeboy --help` and `homeboy contract manifest` from installed `homeboy` 0.421.0.
 
 ## Status Legend
 
@@ -23,9 +23,7 @@ Source of truth checked for this pass: `homeboy --help` plus focused help for th
 | `homeboy project` | supported first-pass UI | Project switcher and settings-backed project CRUD; wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Usable as app infrastructure. Raw global config editing stays CLI-only. | Matrix only |
 | `homeboy ssh` | partial/stale | Generic SSH support behind file and deploy workflows; server settings in `Homeboy/Views/Settings/ServersSettingsTab.swift`. | Keep as supporting infrastructure. Add an ad-hoc SSH console only if a real desktop workflow needs it. | Matrix only |
 | `homeboy server` | supported first-pass UI | Server settings UI plus server wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Usable for normal server setup. Advanced SSH/key diagnostics stay CLI-only until a focused UI needs them. | Matrix only |
-| `homeboy test` | supported first-pass UI | Quality workspace stage button via `Homeboy/Extensions/Quality/Views/QualityView.swift` and `Homeboy/Core/CLI/HomeboyCLI+QualityCommands.swift`. | Supports normal scoped runs (`changed-since`, `changed-only`, path override). Advanced analysis/drift/write flows remain CLI-only. | Matrix only |
 | `homeboy bench` | supported first-pass UI | Bench workspace in `Homeboy/Views/BenchView.swift`; wrappers in `Homeboy/Core/CLI/HomeboyCLI+RigBenchReleaseCommands.swift`. | Lists scenarios and runs benchmarks with iteration control. Baseline, ratchet, multi-run, concurrency, settings, and `--rig` comparisons remain CLI-only. | Matrix only |
-| `homeboy lint` | supported first-pass UI | Quality workspace stage button. | Read-only lint output is supported. `--fix`, baseline, ratchet, sniffs/category filters, and per-file/glob targeting remain CLI-only. | Matrix only |
 | `homeboy file` | supported first-pass UI | Remote file editor in `Homeboy/Extensions/RemoteFileEditor/`; file wrappers in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Core list/read/write/delete/rename/search workflows exist. Keep destructive operations guarded. | Matrix only |
 | `homeboy transfer` | missing workflow | No dedicated transfer workflow. | Keep out of File Editor for now. If the command returns to the installed CLI surface, Command Browser will expose it from `homeboy --help`. | Matrix only |
 | `homeboy deploy` | supported first-pass UI | Deployer tool in `Homeboy/Extensions/Deployer/`. | Deploy remains its own guarded write workflow. Release/build planning is now separate from deployment. | Matrix only |
@@ -34,23 +32,13 @@ Source of truth checked for this pass: `homeboy --help` plus focused help for th
 | `homeboy daemon` | intentionally CLI-only | No daemon management UI. | Desktop consumes CLI/API behavior; it should not manage the local daemon lifecycle unless a future diagnostic screen needs it. | Matrix only |
 | `homeboy extension` | supported first-pass UI | Extension manager and dynamic extension views under `Homeboy/Core/Extensions/` and `Homeboy/Views/Extensions/`. | Extension install/setup/run exists as app infrastructure. Advanced extension authoring stays CLI/docs-driven. | Matrix only |
 | `homeboy status` | supported first-pass UI | Workspace discovery now uses `status --full` in `Homeboy/Core/CLI/HomeboyCLI+WorkspaceCommands.swift`. | Primary app bootstrap path is current. A richer top-level status dashboard can wait for product need. | Matrix only |
-| `homeboy docs` | intentionally CLI-only | Static docs live under `docs/`; no in-app docs browser. | Keep command docs in CLI/browser docs. Contextual help panes can be added later without wrapping `homeboy docs`. | Matrix only |
-| `homeboy changelog` | intentionally CLI-only | No changelog UI. | Changelog generation/inspection stays CLI-only. Release planning can link to `changes`/`release --dry-run` output instead. | Matrix only |
 | `homeboy git` | read-only UI | Git workspace in `Homeboy/Extensions/GitOperations/`; `gitStatus()` wrapper plus GitHub issue/PR navigation. | Read-only `git status` is supported. `commit`, `push`, `pull`, `rebase`, `cherry-pick`, `tag`, `issue`, and `pr` writes stay CLI-only until confirmation UX exists. | Matrix only |
-| `homeboy issues` | missing workflow | Command Browser exposes the raw command surface; no issue reconciliation workflow. | Could belong in Quality or Git/GitHub later. No active desktop tracker until the workflow is designed. | Matrix only |
-| `homeboy version` | supported first-pass UI | Release workspace reads `version show` in `ReleaseWorkflowViewModel`. | Read-only version inspection is supported. `version bump` aliases release execution and remains CLI-only. | Matrix only |
-| `homeboy build` | supported first-pass UI | Release workspace `Build` action calls `homeboy build`; deployer still has deployment-specific build handling. | Component build is supported from release planning. Bulk/project build modes remain CLI-only. | Matrix only |
-| `homeboy validate` | supported first-pass UI | Quality workspace validation stage. | Direct non-mutating validation is supported. No advanced workflow beyond component/path selection. | Matrix only |
-| `homeboy changes` | supported first-pass UI | Release workspace reads `homeboy changes` and renders commits since baseline. | Single-component planning is supported. Project/bulk change reports and `--git-diffs` remain CLI-only. | Matrix only |
-| `homeboy release` | read-only UI | Release workspace runs `homeboy release <component> --dry-run`. | Dry-run planning is supported. Mutating release execution, recover, deploy-after-release, skip checks/publish, and GitHub release controls remain CLI-only. | Matrix only |
-| `homeboy review` | supported first-pass UI | Quality workspace `Run Review` action calls `homeboy review --summary`. | Read-only summary is supported with scope controls. PR-comment output, baselines, and ratchets remain CLI-only. | Matrix only |
-| `homeboy audit` | supported first-pass UI | Quality stage button plus audit slice helpers in `Homeboy/Core/CLI/HomeboyCLI+QualityCommands.swift`. | Current `homeboy audit <component>` stage is supported. Baseline/ratchet writes stay CLI-only. | Matrix only |
-| `homeboy refactor` | partial/stale | Refactor wrappers still exist in `Homeboy/Core/CLI/HomeboyCLI+QualityCommands.swift`, but no visible workflow. | Keep mutating refactors out of the UI until proposal/confirmation UX exists. Remove or modernize unused wrappers only when a concrete desktop workflow needs them. | Matrix only |
+| `homeboy release` | read-only UI | Release workspace runs `homeboy release <component> --dry-run`, `homeboy release changes`, and `homeboy release version show`. | Dry-run planning is supported. Mutating release execution, recover, deploy-after-release, skip checks/publish, and GitHub release controls remain CLI-only. | Matrix only |
+| `homeboy review` | supported first-pass UI | Quality workspace runs `homeboy review --summary`, with lint and test deep-dives via `homeboy review lint` and `homeboy review test`. Release planning runs `homeboy review build`. | Read-only summary and stage runs are supported with scope controls. PR-comment output, baselines, and ratchets remain CLI-only. | Matrix only |
+| `homeboy refactor rename` | intentionally CLI-only | The supported rename wrapper lives in `Homeboy/Core/CLI/HomeboyCLI+QualityCommands.swift`. | Keep mutating renames in the CLI until confirmation UX exists. | Matrix only |
 | `homeboy rig` | supported first-pass UI | Rigs workspace in `Homeboy/Views/Rigs/`; wrappers in `Homeboy/Core/CLI/HomeboyCLI+RigBenchReleaseCommands.swift`. | Supports list/show/status/check plus confirmed `up`/`down`. `install`, `update`, `sources`, `sync`, and `app` lifecycle commands remain CLI-only. | Matrix only |
-| `homeboy undo` | partial/stale | Undo wrappers exist in `Homeboy/Core/CLI/HomeboyCLI+RigBenchReleaseCommands.swift`, but no visible undo surface. | Surface undo from workflows that perform Homeboy writes rather than as a standalone command center. | Matrix only |
 | `homeboy upgrade` | supported first-pass UI | CLI update UI in `Homeboy/Views/Settings/GeneralSettingsTab.swift` and launch-time update sheet now use `homeboy upgrade --check` / `homeboy upgrade`. | Install help still shows the Homebrew path, but update execution is no longer Homebrew-specific. | Matrix only |
-| `homeboy list` | intentionally CLI-only | Alias for `--help`; no desktop wrapper. | No UI needed. | Matrix only |
-| `homeboy cargo` | intentionally CLI-only | No Cargo passthrough UI. | Keep as CLI-only extension convenience. Desktop should expose component-level build/test/validate instead. | Matrix only |
+| `homeboy cargo` | intentionally CLI-only | No Cargo passthrough UI. | Keep as CLI-only extension convenience. | Matrix only |
 | `homeboy wp` | intentionally CLI-only | WordPress settings surfaces exist, but no WP-CLI passthrough. | Keep as CLI-only unless a WordPress operations console is explicitly designed. | Matrix only |
 
 ## Workspace Additions Now Shipped
@@ -63,14 +51,13 @@ The workspace PR wave closed the old missing-workflow trackers for Bench, Rigs, 
 | Bench | `BenchView` lists scenarios and runs benchmarks. | Baseline/ratchet, rig comparison, multi-run/concurrency, and settings overrides remain CLI-only. |
 | Rigs | `RigsView` lists specs, shows status/check output, and confirms `up`/`down`. | Rig package install/update, sources management, and app launcher lifecycle remain CLI-only. |
 | Git | `GitOperationsView` shows component status and GitHub navigation. | Git writes and issue/PR mutations remain CLI-only. |
-| Quality | `QualityView` wraps review, audit, lint, test, and validate as non-mutating actions. | Fix/write/baseline/ratchet workflows remain CLI-only. |
-| Release/build planning | `ReleaseWorkflowView` shows changes, version, release dry-run, and build. | Actual release execution remains CLI-only. |
+| Quality | `QualityView` runs `review`, plus `review lint` and `review test` deep-dives. | Fix/write/baseline/ratchet workflows remain CLI-only. |
+| Release planning | `ReleaseWorkflowView` shows `release changes`, `release version show`, release dry-run, and `review build`. | Actual release execution remains CLI-only. |
 
 ## Still-Missing Desktop Workflows
 
-- `homeboy transfer` has no guided desktop workflow.
-- `homeboy issues` has no guided desktop workflow beyond the Command Browser.
-- `homeboy undo` has wrappers and Command Browser access, but no workflow-owned undo surface.
+- `homeboy transfer` is not in the current CLI and has no desktop workflow.
+- Issue reconciliation is `homeboy git issue`, not a top-level issues command, and stays CLI-only.
 - Advanced rig/bench/release/git mutation flows are intentionally CLI-only until the app has specific confirmation UX for each risk profile.
 
 ## Upstream Audit Detector False-Positive History

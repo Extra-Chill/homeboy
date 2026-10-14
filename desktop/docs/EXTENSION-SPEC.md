@@ -26,7 +26,7 @@ The desktop app stores installed extensions under its `AppPaths` root:
 
 Homeboy Desktop installs/links extensions by running the CLI (`homeboy extension install ...`), but the desktop app does not assume it shares the same on-disk config root as the CLI (`dirs::config_dir()/homeboy`).
 
-Note: the CLI embeds its core documentation in the binary (see `homeboy docs`).
+Note: the CLI embeds its core documentation in the binary (see `homeboy self docs`).
 ## Extension responsibilities
 
 Homeboy extensions can:
@@ -36,7 +36,7 @@ Homeboy extensions can:
 
 The manifest is a single unified `homeboy.json` file; extensions include only fields they need.
 
-For the authoritative runtime behavior, run `homeboy docs extension`.
+For the authoritative runtime behavior, run `homeboy self docs extension`.
 
 ## Manifest Schema
 
@@ -67,7 +67,7 @@ For the authoritative runtime behavior, run `homeboy docs extension`.
 
 ### Runtime Object
 
-Executable extensions use the CLI runtime contract described by `homeboy docs extension`.
+Executable extensions use the CLI runtime contract described by `homeboy self docs extension`.
 
 The manifest's `runtime` object configures shell commands that the CLI runs (for example `runCommand`, `setupCommand`, and optional `readyCheck`). The CLI injects execution context and merged settings via environment variables.
 
@@ -210,5 +210,5 @@ Project configuration requirements (local environment settings, subtargets, and 
 
 Use the CLI as the source of truth:
 
-- `homeboy docs project`
-- `homeboy docs extension`
+- `homeboy self docs project`
+- `homeboy self docs extension`

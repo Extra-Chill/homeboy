@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - rig/bench/release/undo
+// MARK: - rig/bench/release
 
 func runRigBenchReleaseUndoContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testBenchResult(fixturesDir: fixturesDir, decoder: decoder)
@@ -136,10 +136,13 @@ func testReleaseBuildPlanningCommandShapes() throws {
         print("[PASS] \(message)")
     }
 
-    try requireContains(source, "[\"changes\", componentId]", "changes helper uses current command shape", code: 98)
-    try requireContains(source, "[\"version\", \"show\", componentId]", "version show helper uses current command shape", code: 99)
-    try requireContains(source, "[\"build\", componentId]", "build helper uses current command shape", code: 100)
-    try requireContains(source, "[\"release\", componentId, \"--dry-run\"]", "release helper is dry-run only", code: 101)
+    try requireContains(source, "HomeboyCommandRegistry.arguments(\"release changes\", appending: [componentId])", "changes helper uses release changes", code: 98)
+    try requireContains(source, "HomeboyCommandRegistry.arguments(\"release version show\", appending: [componentId])", "version show helper uses release version show", code: 99)
+    try requireContains(source, "HomeboyCommandRegistry.arguments(\"review build\", appending: [componentId])", "build helper uses review build", code: 100)
+    try requireContains(source, "HomeboyCommandRegistry.arguments(\"release\", appending: [componentId, \"--dry-run\"])", "release helper is dry-run only", code: 101)
+    try requireNotContains(source, "[\"undo\"", "undo command is not invoked", code: 106)
+    try requireNotContains(source, "[\"changes\"", "top-level changes command is not invoked", code: 107)
+    try requireNotContains(source, "[\"build\"", "top-level build command is not invoked", code: 108)
     try requireContains(contentView, "case release = \"Release\"", "release is a separate core tool", code: 102)
     try requireContains(contentView, "ReleaseWorkflowView()", "release view is mounted separately from deployer", code: 103)
     try requireContains(contentView, "Release Disabled", "mutating release action remains disabled", code: 104)

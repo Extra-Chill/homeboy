@@ -42,6 +42,7 @@
 		445A81283F88E81B8C1F0710 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */; };
 		46238C2E19607D4410D23FA2 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */; };
 		465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */; };
+		4AC373868CADD6B52F177BF4 /* HomeboyCommandRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */; };
 		50C3063245F5FF6D48F45D65 /* ControlPlaneModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3174A2A7BEDDBA90DED9D2 /* ControlPlaneModels.swift */; };
 		5312A3BDB64264012E062616 /* ExtensionInputsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ACB611363480EC1ED86A127 /* ExtensionInputsView.swift */; };
 		543626E78A3C5502E448629E /* HomeboyDaemonLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1B499BE056410BC2BD2A42 /* HomeboyDaemonLocator.swift */; };
@@ -174,6 +175,7 @@
 		70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
 		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
 		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
+		7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCommandRegistry.swift; sourceTree = "<group>"; };
 		7E6E41FFC96012F3C390C094 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
 		7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+ProjectPinCommands.swift"; sourceTree = "<group>"; };
 		811079398986364AA0E0542A /* CLIVersionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIVersionChecker.swift; sourceTree = "<group>"; };
@@ -441,6 +443,7 @@
 				5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */,
 				A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */,
 				D8D33E39732C375690D3AC46 /* HomeboyCLIModels.swift */,
+				7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */,
 				86CDDF5BF2C45E9687E5C07B /* ShellCommandLineParser.swift */,
 			);
 			path = CLI;
@@ -812,6 +815,7 @@
 				306DE99757A1BBA6E328A8FF /* HomeboyCLI+WorkspaceCommands.swift in Sources */,
 				278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */,
 				CC892914AFEB03C734959003 /* HomeboyCLIModels.swift in Sources */,
+				4AC373868CADD6B52F177BF4 /* HomeboyCommandRegistry.swift in Sources */,
 				A6C1285910873B6C02B4CE79 /* HomeboyDaemonClient.swift in Sources */,
 				543626E78A3C5502E448629E /* HomeboyDaemonLocator.swift in Sources */,
 				2B66E2C66072EA7F119F138A /* HomeboyLabView.swift in Sources */,

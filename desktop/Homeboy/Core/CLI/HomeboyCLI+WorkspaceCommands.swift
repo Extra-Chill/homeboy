@@ -7,7 +7,7 @@ extension HomeboyCLI {
     /// Run `homeboy status --full` to get full context including extensions and components
     /// This is the primary way the desktop app discovers the workspace state
     func initWorkspace() async throws -> InitOutput {
-        let args = ["status", "--full"]
+        let args = HomeboyCommandRegistry.arguments("status", appending: ["--full"])
         return try await cli.executeCommand(args, dataType: InitOutput.self, source: "Status", timeout: 30)
     }
 
@@ -15,7 +15,7 @@ extension HomeboyCLI {
 
     /// Read-only wrapper for `homeboy git status`.
     func gitStatus(componentId: String, path: String? = nil) async throws -> GitStatusOutput {
-        var args = ["git", "status", componentId]
+        var args = HomeboyCommandRegistry.arguments("git status", appending: [componentId])
         if let path, !path.isEmpty {
             args.append(contentsOf: ["--path", path])
         }
@@ -58,7 +58,7 @@ extension HomeboyCLI {
 
     func projectList() async throws -> [ProjectListItem] {
         let output: ProjectListOutput = try await cli.executeCommand(
-            ["project", "list"],
+            HomeboyCommandRegistry.arguments("project list"),
             dataType: ProjectListOutput.self,
             source: "Project List"
         )
@@ -67,7 +67,7 @@ extension HomeboyCLI {
 
     func projectShow(id: String) async throws -> ProjectShowOutput {
         let output: ProjectShowOutput = try await cli.executeCommand(
-            ["project", "show", id],
+            HomeboyCommandRegistry.arguments("project show", appending: [id]),
             dataType: ProjectShowOutput.self,
             source: "Project Show"
         )
@@ -84,7 +84,7 @@ extension HomeboyCLI {
         basePath: String? = nil,
         tablePrefix: String? = nil
     ) async throws -> ProjectMutationOutput {
-        var args = ["project", "create", name, domain]
+        var args = HomeboyCommandRegistry.arguments("project create", appending: [name, domain])
         if let serverId {
             args.append(contentsOf: ["--server-id", serverId])
         }
@@ -107,7 +107,7 @@ extension HomeboyCLI {
 
     func projectSet(id: String, json: String) async throws -> ProjectMutationOutput {
         let output: ProjectMutationOutput = try await cli.executeCommand(
-            ["project", "set", id, "--json", json],
+            HomeboyCommandRegistry.arguments("project set", appending: [id, "--json", json]),
             dataType: ProjectMutationOutput.self,
             source: "Project Set"
         )
@@ -119,7 +119,7 @@ extension HomeboyCLI {
 
     func projectDelete(id: String) async throws {
         let _: ProjectMutationOutput = try await cli.executeCommand(
-            ["project", "delete", id],
+            HomeboyCommandRegistry.arguments("project delete", appending: [id]),
             dataType: ProjectMutationOutput.self,
             source: "Project Delete"
         )
@@ -129,7 +129,7 @@ extension HomeboyCLI {
 
     func serverList() async throws -> [ServerListItemCLI] {
         let output: ServerOutput = try await cli.executeCommand(
-            ["server", "list"],
+            HomeboyCommandRegistry.arguments("server list"),
             dataType: ServerOutput.self,
             source: "Server List"
         )
@@ -138,7 +138,7 @@ extension HomeboyCLI {
 
     func serverShow(id: String) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
-            ["server", "show", id],
+            HomeboyCommandRegistry.arguments("server show", appending: [id]),
             dataType: ServerOutput.self,
             source: "Server Show"
         )
@@ -155,7 +155,7 @@ extension HomeboyCLI {
         port: Int = 22
     ) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
-            ["server", "create", name, host, user, "--port", String(port)],
+            HomeboyCommandRegistry.arguments("server create", appending: [name, host, user, "--port", String(port)]),
             dataType: ServerOutput.self,
             source: "Server Create"
         )
@@ -167,7 +167,7 @@ extension HomeboyCLI {
 
     func serverSet(id: String, json: String) async throws -> ServerRecordCLI {
         let output: ServerOutput = try await cli.executeCommand(
-            ["server", "set", id, "--json", json],
+            HomeboyCommandRegistry.arguments("server set", appending: [id, "--json", json]),
             dataType: ServerOutput.self,
             source: "Server Set"
         )
@@ -179,7 +179,7 @@ extension HomeboyCLI {
 
     func serverDelete(id: String) async throws {
         let _: ServerOutput = try await cli.executeCommand(
-            ["server", "delete", id],
+            HomeboyCommandRegistry.arguments("server delete", appending: [id]),
             dataType: ServerOutput.self,
             source: "Server Delete"
         )
@@ -189,7 +189,7 @@ extension HomeboyCLI {
 
     func componentList() async throws -> [ComponentListItemCLI] {
         let output: ComponentOutput = try await cli.executeCommand(
-            ["component", "list"],
+            HomeboyCommandRegistry.arguments("component list"),
             dataType: ComponentOutput.self,
             source: "Component List"
         )
@@ -198,7 +198,7 @@ extension HomeboyCLI {
 
     func componentShow(id: String) async throws -> ComponentRecordCLI {
         let output: ComponentOutput = try await cli.executeCommand(
-            ["component", "show", id],
+            HomeboyCommandRegistry.arguments("component show", appending: [id]),
             dataType: ComponentOutput.self,
             source: "Component Show"
         )
@@ -214,11 +214,10 @@ extension HomeboyCLI {
         remotePath: String,
         buildArtifact: String? = nil
     ) async throws -> ComponentRecordCLI {
-        var args = [
-            "component", "create",
-            "--local-path", localPath,
-            "--remote-path", remotePath,
-        ]
+        var args = HomeboyCommandRegistry.arguments(
+            "component create",
+            appending: ["--local-path", localPath, "--remote-path", remotePath]
+        )
         if let buildArtifact {
             args.append(contentsOf: ["--build-artifact", buildArtifact])
         }
@@ -235,7 +234,7 @@ extension HomeboyCLI {
 
     func componentSet(id: String, json: String) async throws -> ComponentRecordCLI {
         let output: ComponentOutput = try await cli.executeCommand(
-            ["component", "set", id, "--json", json],
+            HomeboyCommandRegistry.arguments("component set", appending: [id, "--json", json]),
             dataType: ComponentOutput.self,
             source: "Component Set"
         )
@@ -247,7 +246,7 @@ extension HomeboyCLI {
 
     func componentDelete(id: String) async throws {
         let _: ComponentOutput = try await cli.executeCommand(
-            ["component", "delete", id],
+            HomeboyCommandRegistry.arguments("component delete", appending: [id]),
             dataType: ComponentOutput.self,
             source: "Component Delete"
         )

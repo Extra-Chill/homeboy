@@ -21,7 +21,7 @@ struct RunsCompareFilter {
 @MainActor
 extension HomeboyCLI {
     func runsList(filter: RunsListFilter = RunsListFilter()) async throws -> [RunSummary] {
-        var args = ["runs", "list"]
+        var args = HomeboyCommandRegistry.arguments("runs list")
         appendRunsListFilter(filter, to: &args)
         let output: RunsListOutput = try await cli.executeCommand(
             args,
@@ -34,7 +34,7 @@ extension HomeboyCLI {
 
     func runsShow(id: String) async throws -> RunDetail {
         let output: RunsShowOutput = try await cli.executeCommand(
-            ["runs", "show", id],
+            HomeboyCommandRegistry.arguments("runs show", appending: [id]),
             dataType: RunsShowOutput.self,
             source: "Runs Show",
             timeout: 30
@@ -44,7 +44,7 @@ extension HomeboyCLI {
 
     func runsArtifacts(id: String) async throws -> [RunArtifact] {
         let output: RunsArtifactsOutput = try await cli.executeCommand(
-            ["runs", "artifacts", id],
+            HomeboyCommandRegistry.arguments("runs artifacts", appending: [id]),
             dataType: RunsArtifactsOutput.self,
             source: "Runs Artifacts",
             timeout: 30
@@ -59,7 +59,7 @@ extension HomeboyCLI {
         fingerprint: String? = nil,
         limit: Int? = nil
     ) async throws -> [RunFinding] {
-        var args = ["runs", "findings", id]
+        var args = HomeboyCommandRegistry.arguments("runs findings", appending: [id])
         if let tool, !tool.isEmpty {
             args.append(contentsOf: ["--tool", tool])
         }
@@ -83,7 +83,7 @@ extension HomeboyCLI {
     }
 
     func runsCompare(filter: RunsCompareFilter = RunsCompareFilter()) async throws -> RunsCompareOutput {
-        var args = ["runs", "compare", "--format", "json", "--kind", filter.kind]
+        var args = HomeboyCommandRegistry.arguments("runs compare", appending: ["--format", "json", "--kind", filter.kind])
         if let componentId = filter.componentId, !componentId.isEmpty {
             args.append(contentsOf: ["--component", componentId])
         }

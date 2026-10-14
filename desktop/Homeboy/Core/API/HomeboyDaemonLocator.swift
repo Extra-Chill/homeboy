@@ -26,7 +26,7 @@ actor HomeboyDaemonLocator {
     @discardableResult
     func rediscover() async throws -> URL {
         let output: DaemonStatusOutput = try await cli.executeCommand(
-            ["daemon", "status"],
+            HomeboyCommandRegistry.arguments("daemon status"),
             dataType: DaemonStatusOutput.self,
             source: "Control Plane",
             timeout: 15

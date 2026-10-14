@@ -14,7 +14,7 @@ final class HomeboyLabViewModel: ObservableObject {
     @Published var artifacts: [RunArtifactSyncItem] = []
     @Published var components: [DeployableComponent] = []
     @Published var selectedComponentID: String?
-    @Published var selectedAction = "audit"
+    @Published var selectedAction = "bench"
     @Published var extraArguments = ""
     @Published var isLoadingRunners = false
     @Published var isRunningDoctor = false
@@ -25,7 +25,7 @@ final class HomeboyLabViewModel: ObservableObject {
     @Published var error: (any DisplayableError)?
     @Published var warning: AppWarning?
 
-    let actions = ["audit", "lint", "test", "bench"]
+    let actions = ["lint", "test", "bench"]
 
     private let cli = HomeboyCLI.shared
     private var pollingTask: Task<Void, Never>?

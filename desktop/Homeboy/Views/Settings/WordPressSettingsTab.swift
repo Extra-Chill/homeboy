@@ -46,7 +46,7 @@ struct WordPressSettingsTab: View {
                         .foregroundColor(.secondary)
                 }
 
-                Text("Use the CLI to manage subtargets: homeboy project subtarget add")
+                Text("Multisite subtargets are stored on the project.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -6,7 +6,7 @@ extension HomeboyCLI {
 
     func fileList(projectId: String, path: String) async throws -> FileOutput {
         try await cli.executeCommand(
-            ["file", "list", projectId, path],
+            HomeboyCommandRegistry.arguments("file list", appending: [projectId, path]),
             dataType: FileOutput.self,
             source: "File List"
         )
@@ -14,7 +14,7 @@ extension HomeboyCLI {
 
     func fileRead(projectId: String, path: String) async throws -> FileOutput {
         try await cli.executeCommand(
-            ["file", "read", projectId, path],
+            HomeboyCommandRegistry.arguments("file read", appending: [projectId, path]),
             dataType: FileOutput.self,
             source: "File Read",
             timeout: 60
@@ -22,7 +22,7 @@ extension HomeboyCLI {
     }
 
     func fileWrite(projectId: String, path: String, content: String) async throws -> FileOutput {
-        let response = try await cli.executeWithStdin(["file", "write", projectId, path], stdin: content, timeout: 60)
+        let response = try await cli.executeWithStdin(HomeboyCommandRegistry.arguments("file write", appending: [projectId, path]), stdin: content, timeout: 60)
         let result = try response.decodeResponse(FileOutput.self)
         guard result.success else {
             if let errorDetail = result.error {
@@ -37,7 +37,7 @@ extension HomeboyCLI {
     }
 
     func fileDelete(projectId: String, path: String, recursive: Bool) async throws -> FileOutput {
-        var args = ["file", "delete", projectId, path]
+        var args = HomeboyCommandRegistry.arguments("file delete", appending: [projectId, path])
         if recursive {
             args.append("--recursive")
         }
@@ -46,34 +46,34 @@ extension HomeboyCLI {
 
     func fileRename(projectId: String, oldPath: String, newPath: String) async throws -> FileOutput {
         try await cli.executeCommand(
-            ["file", "rename", projectId, oldPath, newPath],
+            HomeboyCommandRegistry.arguments("file rename", appending: [projectId, oldPath, newPath]),
             dataType: FileOutput.self,
             source: "File Rename"
         )
     }
 
     func sshCommand(projectId: String, command: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["ssh", projectId, command], timeout: 30)
+        try await cli.execute(HomeboyCommandRegistry.arguments("ssh", appending: [projectId, command]), timeout: 30)
     }
 
     func serverKeyGenerate(serverId: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["server", "key", "generate", serverId], timeout: 60)
+        try await cli.execute(HomeboyCommandRegistry.arguments("server key generate", appending: [serverId]), timeout: 60)
     }
 
     func serverKeyShow(serverId: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["server", "key", "show", serverId], timeout: 30)
+        try await cli.execute(HomeboyCommandRegistry.arguments("server key show", appending: [serverId]), timeout: 30)
     }
 
     func serverKeyUnset(serverId: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["server", "key", "unset", serverId], timeout: 30)
+        try await cli.execute(HomeboyCommandRegistry.arguments("server key unset", appending: [serverId]), timeout: 30)
     }
 
     func serverKeyImport(serverId: String, privateKeyPath: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["server", "key", "import", serverId, privateKeyPath], timeout: 60)
+        try await cli.execute(HomeboyCommandRegistry.arguments("server key import", appending: [serverId, privateKeyPath]), timeout: 60)
     }
 
     func serverKeyUse(serverId: String, privateKeyPath: String) async throws -> CLIBridgeResponse {
-        try await cli.execute(["server", "key", "use", serverId, privateKeyPath], timeout: 30)
+        try await cli.execute(HomeboyCommandRegistry.arguments("server key use", appending: [serverId, privateKeyPath]), timeout: 30)
     }
 
     // MARK: - File Search
@@ -85,7 +85,7 @@ extension HomeboyCLI {
         fileType: String? = nil,
         maxDepth: Int? = nil
     ) async throws -> FileFindOutput {
-        var args = ["file", "find", projectId, path]
+        var args = HomeboyCommandRegistry.arguments("file find", appending: [projectId, path])
         if let name = namePattern {
             args.append(contentsOf: ["--name", name])
         }
@@ -106,7 +106,7 @@ extension HomeboyCLI {
         maxDepth: Int? = nil,
         caseInsensitive: Bool = false
     ) async throws -> FileGrepOutput {
-        var args = ["file", "grep", projectId, path, pattern]
+        var args = HomeboyCommandRegistry.arguments("file grep", appending: [projectId, path, pattern])
         if let name = nameFilter {
             args.append(contentsOf: ["--name", name])
         }

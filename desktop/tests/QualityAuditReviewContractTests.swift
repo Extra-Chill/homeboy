@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - quality/audit/review
+// MARK: - quality/review
 
 func runQualityAuditReviewContractTests(testDir: String, fixturesDir: String, decoder: JSONDecoder) throws {
     try testQualityWorkspaceCommandShapes(testDir: testDir)
@@ -39,7 +39,7 @@ func testQualityWorkspaceCommandShapes(testDir: String) throws {
 
     try requireContains(contentView, "case quality = \"Quality\"", "Quality is registered as a core tool", code: 100)
     try requireContains(contentView, "QualityView()", "QualityView is mounted in the core tool stack", code: 101)
-    try requireContains(source, #"["review", componentId, "--summary"]"#, "Quality review uses current review --summary command", code: 102)
+    try requireContains(source, #"HomeboyCommandRegistry.arguments("review", appending: [componentId, "--summary"])"#, "Quality review uses current review --summary command", code: 102)
     try requireContains(source, #"args.append(contentsOf: ["--changed-since", changedSince])"#, "Quality scope supports changed-since", code: 104)
     try requireContains(source, #"args.append("--changed-only")"#, "Quality scope supports changed-only", code: 105)
     try requireContains(source, #"args.append(contentsOf: ["--path", path])"#, "Quality commands support component path override", code: 106)
@@ -48,10 +48,6 @@ func testQualityWorkspaceCommandShapes(testDir: String) throws {
     try requireContains(qualityView, "Findings:", "Quality UI renders stage finding summaries", code: 110)
     try requireContains(qualityViewModel, "HomeboyCLI.shared.qualityStage", "Quality view model exposes stage deep-dives", code: 111)
 
-    try requireNotContains(source, #"["audit", "code""#, "Removed stale audit code invocation", code: 112)
-    try requireNotContains(source, #"["audit", "docs""#, "Removed stale audit docs invocation", code: 113)
-    try requireNotContains(source, #"["audit", "structure""#, "Removed stale audit structure invocation", code: 114)
-    try requireNotContains(source, #"["supports""#, "Removed stale supports command invocation", code: 115)
     try requireNotContains(qualityView, "--fix", "Quality UI does not expose lint --fix", code: 116)
     try requireNotContains(qualityView, "--write", "Quality UI does not expose write actions", code: 117)
     try requireNotContains(source, "--baseline", "Quality helpers do not expose baseline writes", code: 118)
@@ -69,34 +65,10 @@ func testCurrentCLICommandSurface(testDir: String) throws {
         .appendingPathComponent("Homeboy/Core/CLI")
     let content = try cliSourceContent(at: source)
 
-    let removedShapes = [
-        "\"audit\", \"code\"",
-        "\"audit\", \"docs\"",
-        "\"audit\", \"structure\"",
-        "\"supports\"",
-        "SupportsOutput",
-        "[\"triage\"",
-        "[\"stack\"",
-        "[\"fleet\"",
-        "[\"db\"",
-        "[\"logs\"",
-        "[\"api\"",
-        "[\"auth\"",
-    ]
-
-    for shape in removedShapes {
-        guard !content.contains(shape) else {
-            throw NSError(domain: "ContractTest", code: 70,
-                userInfo: [NSLocalizedDescriptionKey: "Removed CLI shape still appears in Homeboy CLI sources: \(shape)"])
-        }
-    }
-    print("[PASS] Removed CLI command shapes are absent")
-
     let requiredShapes = [
-        "var args = [\"audit\", componentId]",
-        "args.append(contentsOf: [\"--only\", kind])",
-        "args.append(\"--help\")",
-        "commandSurfaceSupports",
+        "HomeboyCommandRegistry.arguments(\"review lint\", appending: [componentId])",
+        "HomeboyCommandRegistry.arguments(\"review test\", appending: [componentId])",
+        "\"refactor rename\"",
     ]
 
     for shape in requiredShapes {
@@ -105,7 +77,7 @@ func testCurrentCLICommandSurface(testDir: String) throws {
                 userInfo: [NSLocalizedDescriptionKey: "Expected CLI construction shape is missing: \(shape)"])
         }
     }
-    print("[PASS] Audit filters and help-surface probe are present")
+    print("[PASS] Quality stages route through supported review subcommands")
 
     print("")
 }

@@ -259,14 +259,14 @@ final class ReleaseWorkflowViewModel: ObservableObject, ConfigurationObserving {
         changes = nil
         version = nil
         releasePlan = nil
-        consoleOutput = "> homeboy changes \(component.id)\n"
-        consoleOutput += "> homeboy version show \(component.id) --path \(component.localPath)\n"
+        consoleOutput = "> homeboy release changes \(component.id)\n"
+        consoleOutput += "> homeboy release version show \(component.id) --path \(component.localPath)\n"
         consoleOutput += "> homeboy release \(component.id) --path \(component.localPath) --dry-run\n\n"
 
         Task {
             do {
-                async let changesResult = cli.changes(componentId: component.id)
-                async let versionResult: VersionShowOutput? = try? cli.versionShow(componentId: component.id, path: component.localPath)
+                async let changesResult = cli.releaseChanges(componentId: component.id)
+                async let versionResult: VersionShowOutput? = try? cli.releaseVersionShow(componentId: component.id, path: component.localPath)
                 async let releaseResult = cli.releaseDryRun(componentId: component.id, path: component.localPath)
 
                 changes = try await changesResult
@@ -290,11 +290,11 @@ final class ReleaseWorkflowViewModel: ObservableObject, ConfigurationObserving {
 
         isLoading = true
         error = nil
-        consoleOutput += "\n> homeboy build \(component.id) --path \(component.localPath)\n"
+        consoleOutput += "\n> homeboy review build \(component.id) --path \(component.localPath)\n"
 
         Task {
             do {
-                _ = try await cli.build(componentId: component.id, path: component.localPath)
+                try await cli.reviewBuild(componentId: component.id, path: component.localPath)
                 consoleOutput += "Build completed. Refreshing release plan...\n"
                 isLoading = false
                 refreshPlan()

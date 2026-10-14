@@ -21,6 +21,7 @@ func runTests(testDir: String) throws {
     try runQualityAuditReviewContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runControlPlaneContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runCookComposerContractTests(fixturesDir: fixturesDir)
+    try runHomeboyCommandPathContractTests(testDir: testDir)
 
     print("")
     print("All contract tests passed")

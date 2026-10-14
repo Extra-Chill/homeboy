@@ -4,7 +4,7 @@ import Foundation
 extension HomeboyCLI {
     func runnerList() async throws -> [HomeboyRunner] {
         let output: RunnerListOutput = try await cli.executeCommand(
-            ["runner", "list"],
+            HomeboyCommandRegistry.arguments("runner list"),
             dataType: RunnerListOutput.self,
             source: "Homeboy Lab",
             timeout: 30
@@ -20,7 +20,7 @@ extension HomeboyCLI {
 
     func runnerDoctor(id: String) async throws -> RunnerDoctorOutput {
         try await cli.executeCommand(
-            ["runner", "doctor", id],
+            HomeboyCommandRegistry.arguments("runner doctor", appending: [id]),
             dataType: RunnerDoctorOutput.self,
             source: "Homeboy Lab",
             timeout: 120
@@ -29,7 +29,7 @@ extension HomeboyCLI {
 
     func runnerConnect(id: String) async throws -> RunnerConnection {
         let output: RunnerConnectionOutput = try await cli.executeCommand(
-            ["runner", "connect", id],
+            HomeboyCommandRegistry.arguments("runner connect", appending: [id]),
             dataType: RunnerConnectionOutput.self,
             source: "Homeboy Lab",
             timeout: 120
@@ -42,7 +42,7 @@ extension HomeboyCLI {
 
     func runnerStatus(id: String) async throws -> RunnerConnection {
         let output: RunnerConnectionOutput = try await cli.executeCommand(
-            ["runner", "status", id],
+            HomeboyCommandRegistry.arguments("runner status", appending: [id]),
             dataType: RunnerConnectionOutput.self,
             source: "Homeboy Lab",
             timeout: 30
@@ -55,7 +55,7 @@ extension HomeboyCLI {
 
     func runnerDisconnect(id: String) async throws -> RunnerConnection {
         let output: RunnerConnectionOutput = try await cli.executeCommand(
-            ["runner", "disconnect", id],
+            HomeboyCommandRegistry.arguments("runner disconnect", appending: [id]),
             dataType: RunnerConnectionOutput.self,
             source: "Homeboy Lab",
             timeout: 30
@@ -68,7 +68,7 @@ extension HomeboyCLI {
 
     func runsArtifactGet(runId: String, artifactId: String, outputPath: String) async throws {
         let response = try await cli.execute(
-            ["runs", "artifact", "get", runId, artifactId, "--output", outputPath],
+            HomeboyCommandRegistry.arguments("runs artifact get", appending: [runId, artifactId, "--output", outputPath]),
             timeout: 120
         )
         guard response.success else {

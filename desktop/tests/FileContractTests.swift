@@ -59,8 +59,8 @@ func testRemoteFileEditorPinCommandShape(testDir: String) throws {
 
     let viewModelSource = try String(contentsOf: viewModelPath, encoding: .utf8)
     let cliSource = try String(contentsOf: cliPath, encoding: .utf8)
-    let currentAddCommand = #"["project", "pin", "add", projectId, path]"#
-    let currentRemoveCommand = #"["project", "pin", "remove", projectId, path]"#
+    let currentAddCommand = #"HomeboyCommandRegistry.arguments("project pin add", appending: [projectId, path])"#
+    let currentRemoveCommand = #"HomeboyCommandRegistry.arguments("project pin remove", appending: [projectId, path])"#
 
     guard cliSource.contains(currentAddCommand) else {
         throw NSError(domain: "ContractTest", code: 74,

@@ -103,7 +103,7 @@ final class CookComposerViewModel: ObservableObject {
         fieldErrors = [:]
         defer { isPreviewing = false }
 
-        let args = ["agent-task", "cook"] + form.buildArguments(includePreview: true)
+        let args = HomeboyCommandRegistry.arguments("agent-task cook", appending: form.buildArguments(includePreview: true))
         do {
             let envelope = try await cli.executeJSONWithStdin(args, stdin: form.prompt, as: CookPreviewEnvelope.self)
             if envelope.success, let data = envelope.data {
@@ -128,7 +128,7 @@ final class CookComposerViewModel: ObservableObject {
         isSubmitting = true
         defer { isSubmitting = false }
 
-        let args = ["agent-task", "cook"] + form.buildArguments(includePreview: false)
+        let args = HomeboyCommandRegistry.arguments("agent-task cook", appending: form.buildArguments(includePreview: false))
         do {
             let envelope = try await cli.executeJSONWithStdin(args, stdin: form.prompt, as: CookSubmitEnvelope.self)
             if envelope.success {

@@ -8,7 +8,7 @@ Homeboy Desktop treats Lab runners as Homeboy core execution targets. The app sh
 - `homeboy runner doctor <runner-id>` provides readiness, resources, capabilities, and checks.
 - `homeboy runner connect|status|disconnect <runner-id>` owns daemon bootstrap and tunnel session state.
 - Daemon `GET /jobs`, `GET /jobs/:id`, `GET /jobs/:id/events`, and `POST /jobs/:id/cancel` provide active job state.
-- Daemon `POST /audit|/lint|/test|/bench` queues non-mutating job-ready runs where the connected runner exposes them.
+- Daemon `POST /lint`, `POST /test`, and `POST /bench` queue non-mutating job-ready runs where the connected runner exposes them. `POST /audit` is not an accepted job kind.
 - Daemon `GET /runs/:id/artifacts/sync` and `GET /runs/:id/artifacts/:artifact-id` provide artifact listing and retrieval.
 
 ## Current Execution Dependency

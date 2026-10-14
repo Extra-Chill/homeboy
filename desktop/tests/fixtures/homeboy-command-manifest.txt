@@ -1,0 +1,471 @@
+activity
+activity list
+activity show
+activity watch
+agent-task
+agent-task accept
+agent-task active
+agent-task active-scope
+agent-task adopt
+agent-task artifacts
+agent-task auth
+agent-task auth map-env
+agent-task auth map-keychain-bundle
+agent-task auth remove
+agent-task auth set-config
+agent-task auth set-keychain
+agent-task auth set-keychain-bundle
+agent-task auth status
+agent-task batch-prepare
+agent-task cancel
+agent-task capacity
+agent-task contract
+agent-task cook
+agent-task cook-continue
+agent-task cook-feedback
+agent-task diagnose
+agent-task doctor
+agent-task evidence
+agent-task fanout
+agent-task fanout cook-batch
+agent-task finalize-pr
+agent-task gate-execute
+agent-task gate-feedback
+agent-task latest
+agent-task list
+agent-task logs
+agent-task placement-update
+agent-task promote
+agent-task promotion-provider
+agent-task prompts
+agent-task prompts list
+agent-task prompts remove
+agent-task prompts save
+agent-task prompts show
+agent-task providers
+agent-task quarantine
+agent-task rearm
+agent-task reconcile
+agent-task record-replacement-gate-proof
+agent-task replay-provider-boundary
+agent-task resume
+agent-task retained-artifacts
+agent-task retained-artifacts attach
+agent-task retained-artifacts discover
+agent-task retry
+agent-task review
+agent-task run
+agent-task run-plan
+agent-task runtime-recover
+agent-task runtime-validate
+agent-task status
+agent-task tool
+agent-task tool dispatch
+agent-task validate-plan
+agent-task verify-replacement
+agent-task watch
+bench
+bench list
+bench matrix
+cleanup
+cleanup artifacts
+cleanup automatic-retention
+cleanup resume
+cleanup retained-storage
+cleanup status
+component
+component artifacts
+component create
+component delete
+component env
+component list
+component projects
+component reconcile
+component rename
+component set
+component setup
+component shared
+component show
+config
+config path
+config remove
+config reset
+config set
+config show
+contract
+contract constants
+contract export
+contract list
+contract manifest
+contract materialize
+contract normalize
+contract show
+contract validate
+control-plane
+control-plane provider-effects
+control-plane provider-effects reconcile
+daemon
+daemon adopt-orphan
+daemon artifact-get
+daemon broker-config
+daemon ensure-running
+daemon jobs
+daemon jobs list
+daemon jobs prune
+daemon jobs show
+daemon jobs watch
+daemon plan
+daemon reconcile-dead-lease-orphans
+daemon reconcile-leaseless-orphans
+daemon reconcile-unleased-candidates
+daemon recover
+daemon recover-missing-lease-state
+daemon serve
+daemon start
+daemon status
+daemon stop
+daemon supervise
+deploy
+deps
+deps install
+deps stack
+deps stack apply
+deps stack outdated
+deps stack plan
+deps stack status
+deps status
+deps update
+extension
+extension action
+extension converge
+extension dev-run
+extension diff-installed
+extension exec
+extension install
+extension install-for-component
+extension list
+extension refresh
+extension relink
+extension run
+extension set
+extension setup
+extension show
+extension uninstall
+extension update
+file
+file copy
+file delete
+file download
+file edit
+file find
+file grep
+file list
+file mkdir
+file read
+file rename
+file sync
+file write
+fuzz
+fuzz compare
+fuzz contract
+fuzz discover
+fuzz doctor
+fuzz inspect
+fuzz list
+fuzz minimize
+fuzz plan
+fuzz replay
+fuzz report
+fuzz run
+fuzz run-campaign
+fuzz stable
+fuzz stable plan
+fuzz validate
+git
+git cherry-pick
+git commit
+git issue
+git issue close
+git issue comment
+git issue create
+git issue edit
+git issue find
+git patch
+git patch preserve
+git patch restore
+git pr
+git pr comment
+git pr create
+git pr edit
+git pr find
+git pr fleet
+git pr land
+git pr policy
+git pr policy merge
+git pr policy open
+git pr readiness
+git pr ready
+git pr reconcile-mergeability
+git pr refresh
+git pull
+git push
+git rebase
+git status
+git subtree
+git tag
+harvest
+project
+project components
+project components attach-path
+project components attach-paths
+project components clear
+project components list
+project components remove
+project components set
+project create
+project delete
+project init
+project list
+project pin
+project pin add
+project pin list
+project pin remove
+project pin rename
+project pin update
+project remove
+project rename
+project resolve-path
+project set
+project show
+project status
+refactor
+refactor rename
+release
+release artifact-source-authority
+release candidate
+release changelog
+release changelog show
+release changes
+release contains
+release gap
+release readiness
+release readiness list
+release readiness show
+release resolve
+release version
+release version show
+review
+review ai
+review build
+review ci
+review ci differential-gate
+review ci list
+review ci pins
+review ci plan
+review ci run
+review ci scope
+review ci triage
+review lint
+review test
+rig
+rig app
+rig app install
+rig app uninstall
+rig app update
+rig artifact
+rig artifact register
+rig check
+rig down
+rig install
+rig lint
+rig list
+rig materialize
+rig package
+rig package lint
+rig release-lock
+rig repair
+rig run
+rig show
+rig sources
+rig sources list
+rig sources refresh
+rig sources remove
+rig status
+rig up
+rig update
+runner
+runner add
+runner broker
+runner broker list
+runner broker pair
+runner broker revoke
+runner cache-prune
+runner connect
+runner dev-sync
+runner disconnect
+runner doctor
+runner enable
+runner env
+runner exec
+runner job
+runner job artifacts
+runner job cancel
+runner job list
+runner job logs
+runner job reconcile
+runner lifecycle
+runner list
+runner pair
+runner peer-sessions
+runner plan
+runner preflight
+runner recipe-providers
+runner recipe-run
+runner reconcile
+runner refresh-homeboy
+runner refresh-plan
+runner remove
+runner service
+runner service install
+runner service status
+runner set
+runner show
+runner status
+runner trust
+runner work
+runner workspace
+runner workspace apply
+runner workspace list
+runner workspace prune
+runner workspace pull
+runner workspace snapshots
+runner workspace sync
+runner workspace update
+runs
+runs artifact
+runs artifact attach
+runs artifact capture
+runs artifact cleanup-downloads
+runs artifact cleanup-persisted
+runs artifact get
+runs artifact get-handle
+runs artifact postprocess
+runs artifact preview
+runs artifact preview-handle
+runs artifacts
+runs bench-compare
+runs cancel
+runs compare
+runs distribution
+runs dossier
+runs env
+runs evidence
+runs export
+runs findings
+runs fuzz-compare
+runs hotspots
+runs import
+runs latest-run
+runs list
+runs proof
+runs reconcile
+runs refs
+runs report
+runs report failure-digest
+runs resources
+runs show
+runs watch
+runtime
+runtime controller-prune
+runtime helper
+runtime helper path
+runtime materialize-controller
+runtime promotion-takeover
+runtime refresh
+self
+self cleanup-runtime-tmp
+self docs
+self doctor
+self identity
+self postprocess-worker
+self service-supervisor-worker
+self status
+self upgrade-admission
+server
+server connect
+server create
+server delete
+server disconnect
+server key
+server key generate
+server key import
+server key show
+server key unset
+server key use
+server list
+server set
+server show
+server status
+source
+source package
+source package check
+ssh
+ssh list
+status
+trace
+trace observe
+tunnel
+tunnel artifact-origin
+tunnel artifact-origin dom-boxes
+tunnel artifact-origin inspect
+tunnel artifact-origin serve
+tunnel artifact-origin status
+tunnel preview-client
+tunnel preview-client diagnose-auth
+tunnel preview-client start
+tunnel preview-consumer
+tunnel preview-consumer run
+tunnel preview-ingress
+tunnel preview-ingress install
+tunnel preview-ingress install-status
+tunnel preview-ingress list
+tunnel preview-ingress route
+tunnel preview-ingress serve
+tunnel preview-ingress status
+tunnel preview-ingress unroute
+tunnel service
+tunnel service expose
+tunnel service list
+tunnel service remove
+tunnel service set
+tunnel service show
+tunnel service start
+tunnel service status
+tunnel service stop
+tunnel service url
+upgrade
+upgrade continue
+upgrade status
+workflow
+workflow approve
+workflow cancel
+workflow list
+workflow run
+workflow status
+workflow validate
+worktree
+worktree adopt
+worktree cleanup
+worktree create
+worktree finalize
+worktree holder
+worktree import
+worktree inventory
+worktree list
+worktree quarantine
+worktree quarantine clear
+worktree quarantine list
+worktree queue-create
+worktree reclaim
+worktree remove
+worktree status

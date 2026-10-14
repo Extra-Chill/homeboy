@@ -8,7 +8,7 @@ import Foundation
 extension HomeboyCLI {
     func agentTaskCapacity() async throws -> AgentTaskCapacityReport {
         try await cli.executeCommand(
-            ["agent-task", "capacity"],
+            HomeboyCommandRegistry.arguments("agent-task capacity"),
             dataType: AgentTaskCapacityReport.self,
             source: "Capacity",
             timeout: 30
@@ -22,7 +22,7 @@ extension HomeboyCLI {
     /// a Lab tunnel connection report rather than admission evidence.
     func runnerAdmissionStatus(id: String) async throws -> RunnerStatusReport {
         try await cli.executeCommand(
-            ["runner", "status", id],
+            HomeboyCommandRegistry.arguments("runner status", appending: [id]),
             dataType: RunnerStatusReport.self,
             source: "Runners",
             timeout: 30

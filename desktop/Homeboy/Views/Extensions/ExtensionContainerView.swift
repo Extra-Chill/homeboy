@@ -172,7 +172,7 @@ struct PlatformExtensionView: View {
         defer { isRunning = false }
         
         do {
-            let args = ["extension", "action", currentExtension.id, action.id]
+            let args = HomeboyCommandRegistry.arguments("extension action", appending: [currentExtension.id, action.id])
             let response = try await CLIBridge.shared.execute(args)
             actionOutput += "$ \(command)\n\(response.output)\n\n"
         } catch {

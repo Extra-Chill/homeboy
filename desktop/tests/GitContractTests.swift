@@ -81,7 +81,7 @@ func testGitWorkspaceCommandShapes(testDir: String) throws {
         print("[PASS] \(message)")
     }
 
-    try requireContains(cliSource, #"var args = ["git", "status", componentId]"#,
+    try requireContains(cliSource, #"HomeboyCommandRegistry.arguments("git status", appending: [componentId])"#,
         "Git status wrapper uses homeboy git status", code: 110)
     try requireContains(cliSource, #"args.append(contentsOf: ["--path", path])"#,
         "Git status wrapper supports --path", code: 111)

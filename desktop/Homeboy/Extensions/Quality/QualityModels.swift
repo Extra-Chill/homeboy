@@ -17,21 +17,19 @@ enum QualityScope: String, CaseIterable, Identifiable {
 }
 
 enum QualityStage: String, CaseIterable, Identifiable {
-    case audit
     case lint
     case test
-    case validate
 
     var id: String { rawValue }
 
     var label: String { rawValue.capitalized }
 
+    var commandPath: String { "review \(rawValue)" }
+
     var icon: String {
         switch self {
-        case .audit: return "magnifyingglass"
         case .lint: return "paintbrush"
         case .test: return "checklist"
-        case .validate: return "hammer"
         }
     }
 }
@@ -39,7 +37,6 @@ enum QualityStage: String, CaseIterable, Identifiable {
 struct QualityReviewOutput: Decodable {
     let command: String
     let summary: QualityReviewSummary
-    let audit: QualityStageResult?
     let lint: QualityStageResult?
     let test: QualityStageResult?
 }
@@ -67,33 +64,6 @@ struct QualityStageResult: Decodable, Identifiable {
         guard ran else { return "Skipped" }
         return passed ? "Passed" : "Failed"
     }
-}
-
-struct AuditOutput: Decodable {
-    let command: String?
-    let componentId: String?
-    let passed: Bool?
-    let status: String?
-    let findings: [AuditFinding]?
-    let summary: JSONValue?
-}
-
-struct AuditFinding: Decodable, Identifiable {
-    let rule: String?
-    let message: String
-    let file: String?
-    let line: Int?
-    let severity: String?
-
-    var id: String { [rule, file, line.map(String.init), message].compactMap { $0 }.joined(separator: ":") }
-}
-
-struct RefactorPlanOutput: Decodable {
-    let command: String?
-    let componentId: String?
-    let plan: JSONValue?
-    let findings: [AuditFinding]?
-    let summary: JSONValue?
 }
 
 struct RefactorResult: Decodable {

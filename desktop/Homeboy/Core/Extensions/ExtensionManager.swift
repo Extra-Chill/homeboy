@@ -98,7 +98,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
         error = nil
 
         do {
-            var args = ["extension", "list"]
+            var args = HomeboyCommandRegistry.arguments("extension list")
             if let projectId = ConfigurationManager.shared.activeProject?.id {
                 args.append(contentsOf: ["--project", projectId])
             }
@@ -183,7 +183,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Installs a extension from a Git URL
     func installExtension(from url: String) async throws {
-        let args = ["extension", "install", url]
+        let args = HomeboyCommandRegistry.arguments("extension install", appending: [url])
         let response = try await CLIBridge.shared.execute(args, timeout: 300)
 
         guard response.success else {
@@ -195,7 +195,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Links a local extension directory (uses install which auto-symlinks local paths)
     func linkExtension(path: String) async throws {
-        let args = ["extension", "install", path]
+        let args = HomeboyCommandRegistry.arguments("extension install", appending: [path])
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -207,7 +207,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Unlinks a linked extension (uses uninstall which handles symlinks)
     func unlinkExtension(extensionId: String) async throws {
-        let args = ["extension", "uninstall", extensionId]
+        let args = HomeboyCommandRegistry.arguments("extension uninstall", appending: [extensionId])
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -219,7 +219,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Uninstalls a extension via CLI
     func uninstallExtension(extensionId: String) async throws {
-        let args = ["extension", "uninstall", extensionId]
+        let args = HomeboyCommandRegistry.arguments("extension uninstall", appending: [extensionId])
         let response = try await CLIBridge.shared.execute(args)
 
         guard response.success else {
@@ -231,7 +231,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
 
     /// Sets up a extension via CLI
     func setupExtension(extensionId: String) async throws {
-        let args = ["extension", "setup", extensionId]
+        let args = HomeboyCommandRegistry.arguments("extension setup", appending: [extensionId])
         let response = try await CLIBridge.shared.execute(args, timeout: 600)
 
         guard response.success else {
@@ -249,7 +249,7 @@ class ExtensionManager: ObservableObject, ConfigurationObserving {
         inputs: [String: String],
         onOutput: @escaping (String) -> Void
     ) async {
-        var args = ["extension", "run", extensionId]
+        var args = HomeboyCommandRegistry.arguments("extension run", appending: [extensionId])
         for (key, value) in inputs.sorted(by: { $0.key < $1.key }) {
             args.append("\(key)=\(value)")
         }

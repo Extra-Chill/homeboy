@@ -192,7 +192,7 @@ actor CLIVersionChecker {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["upgrade", "--check", "--output", outputURL.path]
+        process.arguments = HomeboyCommandRegistry.arguments("upgrade", appending: ["--check", "--output", outputURL.path])
 
         let pipe = Pipe()
         process.standardOutput = pipe

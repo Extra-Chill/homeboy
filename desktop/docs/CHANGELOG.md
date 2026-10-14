@@ -121,7 +121,7 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 ## 0.6.1
 
 ### New Features
-- **CLI Docs Command**: Added `homeboy docs [topic...]` to display bundled CLI documentation in the terminal, with optional heading-based filtering.
+- **CLI Docs Command**: Added `homeboy self docs [topic...]` to display bundled CLI documentation in the terminal, with optional heading-based filtering.
 - **Docs bundling**: CLI docs are embedded into the CLI binary.
 
 ### Improvements
@@ -218,7 +218,7 @@ This release begins the CLI/Desktop split: the CLI is gaining functionality that
 - Switch from ZIP to DMG for macOS distribution (`dist/Homeboy-macOS.dmg`).
 
 ### Documentation
-- Add `docs/CLI.md` with desktop/CLI integration notes (CLI reference docs now live in the CLI binary via `homeboy docs`).
+- Add `docs/CLI.md` with desktop/CLI integration notes (CLI reference docs now live in the CLI binary via `homeboy self docs`).
 - Add `docs/ERROR-HANDLING.md` for Copyable system specification.
 
 ## 0.3.0

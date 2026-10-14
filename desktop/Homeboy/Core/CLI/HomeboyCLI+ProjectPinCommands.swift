@@ -4,21 +4,21 @@ import Foundation
 extension HomeboyCLI {
     func filePinAdd(projectId: String, path: String) async throws -> ProjectPinOutput {
         try await projectPin(
-            ["project", "pin", "add", projectId, path],
+            HomeboyCommandRegistry.arguments("project pin add", appending: [projectId, path]),
             source: "File Pin Add"
         )
     }
 
     func filePinRemove(projectId: String, path: String) async throws -> ProjectPinOutput {
         try await projectPin(
-            ["project", "pin", "remove", projectId, path],
+            HomeboyCommandRegistry.arguments("project pin remove", appending: [projectId, path]),
             source: "File Pin Remove"
         )
     }
 
     func filePinUpdatePath(projectId: String, oldPath: String, newPath: String) async throws -> ProjectPinOutput {
         try await projectPin(
-            ["project", "pin", "rename", projectId, oldPath, newPath],
+            HomeboyCommandRegistry.arguments("project pin rename", appending: [projectId, oldPath, newPath]),
             source: "File Pin Rename"
         )
     }

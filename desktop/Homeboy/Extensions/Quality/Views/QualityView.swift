@@ -98,7 +98,7 @@ struct QualityView: View {
         ContentUnavailableView(
             "Run Review",
             systemImage: "doc.text.magnifyingglass",
-            description: Text("Start with `homeboy review --summary` for a read-only audit/lint/test overview.")
+            description: Text("Start with `homeboy review --summary` for a read-only lint and test overview.")
         )
         .frame(maxWidth: .infinity, minHeight: 220)
     }
@@ -118,7 +118,7 @@ struct QualityView: View {
             Text(review.summary.component)
                 .font(.title3.bold())
 
-            Text("\(review.summary.totalFindings) findings across audit, lint, and test stages")
+            Text("\(review.summary.totalFindings) findings across lint and test stages")
                 .foregroundColor(.secondary)
         }
         .padding()
@@ -127,20 +127,10 @@ struct QualityView: View {
     }
 
     private func stageGrid(_ review: QualityReviewOutput) -> some View {
-        let stages = [review.audit, review.lint, review.test].compactMap { $0 }
-
-        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-            ForEach(stages) { stage in
-                stageCard(stage)
-            }
-
-            stageActionCard(.validate, result: nil)
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+            stageActionCard(.lint, result: review.lint)
+            stageActionCard(.test, result: review.test)
         }
-    }
-
-    private func stageCard(_ result: QualityStageResult) -> some View {
-        let stage = QualityStage(rawValue: result.stage) ?? .audit
-        return stageActionCard(stage, result: result)
     }
 
     private func stageActionCard(_ stage: QualityStage, result: QualityStageResult?) -> some View {
@@ -166,7 +156,7 @@ struct QualityView: View {
                         .lineLimit(2)
                 }
             } else {
-                Text("Run a direct non-mutating validation check.")
+                Text("Run this stage through homeboy review.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -87,15 +87,15 @@ func testRunHistoryWrapperCommandShapes() throws {
 
     let source = try cliSourceContent()
 
-    try assertContains(source, #"["runs", "list"]"#,
+    try assertContains(source, #"HomeboyCommandRegistry.arguments("runs list")"#,
         message: "runsList wrapper uses homeboy runs list")
-    try assertContains(source, #"["runs", "show", id]"#,
+    try assertContains(source, #"HomeboyCommandRegistry.arguments("runs show", appending: [id])"#,
         message: "runsShow wrapper uses homeboy runs show")
-    try assertContains(source, #"["runs", "artifacts", id]"#,
+    try assertContains(source, #"HomeboyCommandRegistry.arguments("runs artifacts", appending: [id])"#,
         message: "runsArtifacts wrapper uses homeboy runs artifacts")
-    try assertContains(source, #"["runs", "findings", id]"#,
+    try assertContains(source, #"HomeboyCommandRegistry.arguments("runs findings", appending: [id])"#,
         message: "runsFindings wrapper uses homeboy runs findings")
-    try assertContains(source, #"["runs", "compare", "--format", "json", "--kind", filter.kind]"#,
+    try assertContains(source, #"HomeboyCommandRegistry.arguments("runs compare", appending: ["--format", "json", "--kind", filter.kind])"#,
         message: "runsCompare wrapper forces JSON output")
     try assertContains(source, #"args.append(contentsOf: ["--component", componentId])"#,
         message: "run history wrappers support --component")

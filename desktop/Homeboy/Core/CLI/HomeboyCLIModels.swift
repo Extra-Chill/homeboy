@@ -555,42 +555,6 @@ struct ReleaseResult: Decodable {
     let skippedReason: String?
 }
 
-struct BuildOutput: Decodable {
-    let command: String
-    let componentId: String
-    let buildCommand: String
-    let stdout: String?
-    let stderr: String?
-    let success: Bool
-}
-
-// MARK: - Undo CLI Output Models
-
-struct UndoOutput: Decodable {
-    let command: String
-    let snapshotId: String?
-    let label: String?
-    let filesRestored: Int?
-    let filesRemoved: Int?
-    let errors: [String]?
-    let id: String?
-    let deleted: Bool?
-}
-
-struct UndoListOutput: Decodable {
-    let command: String
-    let snapshots: [UndoSnapshot]?
-}
-
-struct UndoSnapshot: Decodable, Identifiable {
-    let id: String
-    let label: String
-    let root: String
-    let fileCount: Int
-    let createdAt: UInt64
-    let age: String
-}
-
 // MARK: - Run History CLI Output Models
 
 struct RunsListOutput: Decodable {

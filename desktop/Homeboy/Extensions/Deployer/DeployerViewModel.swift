@@ -242,7 +242,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
         Task {
             do {
                 // Use dry-run to get all version info without deploying
-                let args = ["deploy", projectId, "--all", "--dry-run"]
+                let args = HomeboyCommandRegistry.arguments("deploy", appending: [projectId, "--all", "--dry-run"])
                 let response = try await cli.execute(args, timeout: 60)
 
                 isLoading = false
@@ -506,7 +506,7 @@ class DeployerViewModel: ObservableObject, ConfigurationObserving {
 
             do {
                 // Build CLI command: homeboy deploy <project> --json <component1> <component2> ...
-                let args = ["deploy", projectId] + componentIds
+                let args = HomeboyCommandRegistry.arguments("deploy", appending: [projectId] + componentIds)
 
                 let response = try await cli.execute(args, timeout: 300) // 5 min timeout for deployments
 

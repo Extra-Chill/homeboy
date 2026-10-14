@@ -161,13 +161,13 @@ func testHomeboyCLIHelperCommandShapes() throws {
         print("[PASS] \(message)")
     }
 
-    try requireContains("[\"refactor\", \"rename\", \"--from\", from, \"--to\", to, \"--component\", componentId]",
+    try requireContains("HomeboyCommandRegistry.arguments(\n            \"refactor rename\",\n            appending: [\"--from\", from, \"--to\", to, \"--component\", componentId]\n        )",
         "refactor rename uses current component flag shape", code: 81)
     try requireContains("[\"--file-type\", type]",
         "file find uses --file-type", code: 82)
     try requireContains("[\"--max-depth\", String(depth)]",
         "file search depth is converted before parser validation", code: 84)
-    try requireContains("let args = [\"status\", \"--full\"]",
+    try requireContains("HomeboyCommandRegistry.arguments(\"status\", appending: [\"--full\"])",
         "workspace discovery uses homeboy status --full", code: 92)
 
     try requireNotContains("[\"--type\", type]",

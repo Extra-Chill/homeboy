@@ -37,8 +37,8 @@ The desktop app does NOT have its own config tree. All storage is handled by the
 This document avoids duplicating CLI command docs.
 
 Use the CLI as the source of truth:
-- `homeboy docs`
-- `homeboy docs <topic>`
+- `homeboy self docs`
+- `homeboy self docs <topic>`
 - Markdown sources embedded into the CLI: `docs/` in the Homeboy CLI source tree
 
 ### Desktop ↔ CLI responsibilities
@@ -51,30 +51,30 @@ Use the CLI as the source of truth:
 
 The desktop app's Settings UI is the intended way to create and edit projects/servers.
 
-If you do edit config via CLI/scripts, use `homeboy docs projects`, `homeboy docs project`, and `homeboy docs server` for the canonical flag list and schema expectations.
+If you do edit config via CLI/scripts, use `homeboy self docs projects`, `homeboy self docs project`, and `homeboy self docs server` for the canonical flag list and schema expectations.
 
 ### server
 
 The desktop app expects servers to be editable in Settings, and uses the CLI for operations that require SSH (connection tests, remote file access, deployments).
 
-For canonical server command docs and JSON output, run `homeboy docs server`.
+For canonical server command docs and JSON output, run `homeboy self docs server`.
 
 ### wp / pm2 / deploy / ssh / file / extension / rig
 
 These areas are implemented by the CLI and surfaced by the desktop app via `CLIBridge`.
 
-For canonical flags, output schemas, safety rules, and subtarget behavior, use `homeboy docs` / `homeboy docs <topic>`.
+For canonical flags, output schemas, safety rules, and subtarget behavior, use `homeboy self docs` / `homeboy self docs <topic>`.
 
 ## Exit codes
 
 The desktop app relies on the CLI's mapped exit codes.
 
 Canonical mapping and error-code groups live in:
-- `homeboy docs json-output`
+- `homeboy self docs json-output`
 
 ## Error reporting
 
 The desktop app surfaces CLI failures as `AppError` instances (see [ERROR-HANDLING](ERROR-HANDLING.md)).
 
 Canonical error codes/messages and exit code mapping live in the CLI docs:
-- `homeboy docs json-output`
+- `homeboy self docs json-output`

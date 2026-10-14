@@ -271,7 +271,7 @@ struct GeneralSettingsTab: View {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: homeboyPath)
-        process.arguments = ["upgrade"]
+        process.arguments = HomeboyCommandRegistry.arguments("upgrade")
 
         let pipe = Pipe()
         process.standardOutput = pipe

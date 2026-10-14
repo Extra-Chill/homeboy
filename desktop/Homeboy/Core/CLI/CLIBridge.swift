@@ -286,7 +286,7 @@ actor CLIBridge {
 
     /// Executes a CLI command and returns the result
     /// - Parameters:
-    ///   - args: Arguments to pass to the CLI (e.g., ["project", "show", "mysite"])
+    ///   - args: Arguments to pass to the CLI, usually from HomeboyCommandRegistry.
     ///   - timeout: Maximum time to wait for the command to complete
     /// - Returns: The command result including output and exit code
     func execute(_ args: [String], timeout: TimeInterval = 30) async throws -> CLIBridgeResponse {

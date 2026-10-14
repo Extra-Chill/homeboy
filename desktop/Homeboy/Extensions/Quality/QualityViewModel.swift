@@ -84,7 +84,7 @@ final class QualityViewModel: ObservableObject, ConfigurationObserving {
         guard let component = selectedComponent else { return }
         runningStage = stage
         error = nil
-        consoleOutput = "Running homeboy \(stage.rawValue)..."
+        consoleOutput = "Running homeboy \(stage.commandPath)..."
 
         Task {
             do {
