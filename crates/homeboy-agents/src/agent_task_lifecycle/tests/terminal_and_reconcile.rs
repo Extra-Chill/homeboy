@@ -1208,36 +1208,31 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
         }
     });
 
-    let lease_id = "rooted-controller-test-generation";
+    // The root's serving lease is the controller job's only route.
     let daemon_dir = lifecycle_store.roots().config().join("daemon");
-    std::fs::create_dir_all(&daemon_dir).expect("create rooted daemon router");
+    std::fs::create_dir_all(&daemon_dir).expect("create rooted daemon dir");
+    let state_path = daemon_dir.join("state.json");
+    let lease = homeboy_core::daemon::DaemonState {
+        schema: homeboy_core::daemon::DAEMON_LEASE_SCHEMA.to_string(),
+        lease_id: "rooted-controller-test-lease".to_string(),
+        startup_token: String::new(),
+        address: address.to_string(),
+        pid: std::process::id(),
+        state_path: state_path.display().to_string(),
+        started_at: "now".to_string(),
+        last_seen_at: "now".to_string(),
+        build_identity: homeboy_core::build_identity::current(),
+        binary_sha256: None,
+        runtime_paths: homeboy_core::daemon::DaemonRuntimeSnapshot {
+            loaded_at: "now".to_string(),
+            paths: Vec::new(),
+        },
+    };
     std::fs::write(
-        daemon_dir.join("generations.json"),
-        serde_json::to_vec(&json!({
-            "schema": "homeboy.daemon.generations.v1",
-            "generations": {
-                "admission_owner": lease_id,
-                "generations": {
-                    lease_id: {
-                        "endpoint": {
-                            "lease_id": lease_id,
-                            "address": address.to_string(),
-                            "state_dir": "isolated-test-generation",
-                            "build_identity": "isolated-test-build"
-                        },
-                        "observed_active_jobs": null,
-                        "drain_state": "admitting"
-                    }
-                },
-                "job_owners": { controller_job_id.to_string(): lease_id },
-                "run_owners": {},
-                "artifact_owners": {},
-                "retired_evidence": {}
-            }
-        }))
-        .expect("serialize rooted controller registry"),
+        &state_path,
+        serde_json::to_vec(&lease).expect("serialize rooted serving lease"),
     )
-    .expect("write rooted controller registry");
+    .expect("write rooted serving lease");
     lifecycle_store
         .mutate_record(run_id, |record| {
             record.metadata["lab_staging_controller_job_id"] = json!(controller_job_id);

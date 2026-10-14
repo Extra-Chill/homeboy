@@ -580,9 +580,6 @@ fn commit(
         cancellations.clone(),
     )?;
     for child in admitted {
-        if let Ok(job) = store.get(child) {
-            let _ = crate::daemon::record_controller_job_generation(&job);
-        }
         let _ = crate::daemon::start_controller_job(child, store);
     }
     for (key, reason) in cancellations {

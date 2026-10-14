@@ -53,11 +53,6 @@ lease and immediately before service replacement. This operation-local evidence
 does not change normal status or workload admission. Missing describe capability
 is reported separately from an unreachable transport.
 
-Local daemon startup observes its exact candidate state path before activating
-that candidate in the generation registry. General status still follows the
-admitting registry owner. A dead historical admission route therefore cannot
-hide a freshly published replacement lease and create an activation deadlock.
-
 The live `runner_service_observation` regression drops the submission connection
 before reading its admission response, retries with the same idempotency key,
 replaces the HTTP client mid-job, resumes watch from its event cursor and checks

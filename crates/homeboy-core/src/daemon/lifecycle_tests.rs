@@ -9,8 +9,7 @@
 //! | 2 uncheckpointed job of a killed daemon | `killed_daemon_with_an_uncheckpointed_job_needs_attestation` |
 //! | 3 binary replaced under an idle daemon | `replaced_executable_is_reported_as_replaced` |
 //! | 5 foreground `daemon serve` (#15436) | `tokenless_live_lease_is_externally_supervised` |
-//! | 7 restart in place (#15456, #15558) | `in_place_restart_proves_the_registered_lease_dead` |
-//! | 8 dead generation with a stale job | `draining_dead_generation_with_a_dead_child_is_orphaned_with_proof` |
+//! | 8 dead daemon with a stale job | `dead_daemon_with_a_dead_child_is_orphaned_with_proof` |
 //! | 9 process group SIGKILL, zombies left | `zombie_lease_pid_is_dead_not_live` |
 //!
 //! Cases 4 and 6 are about in-flight work timing, not persisted state.
@@ -45,41 +44,6 @@ fn write_lease(dir: &Path, lease_id: &str, pid: u32, startup_token: &str) {
         serde_json::to_vec(&state).expect("lease json"),
     )
     .expect("write lease");
-}
-
-/// `entries`: (lease id, state dir, drain state).
-fn write_registry(router: &Path, admission_owner: &str, entries: &[(&str, &Path, &str)]) {
-    std::fs::create_dir_all(router).expect("router dir");
-    let generations: serde_json::Map<String, Value> = entries
-        .iter()
-        .map(|(lease_id, dir, drain)| {
-            (
-                lease_id.to_string(),
-                json!({
-                    "endpoint": {
-                        "lease_id": lease_id,
-                        "address": "127.0.0.1:1",
-                        "state_dir": dir.display().to_string(),
-                        "build_identity": "test",
-                    },
-                    "drain_state": drain,
-                }),
-            )
-        })
-        .collect();
-    let registry = json!({
-        "schema": "homeboy.daemon.generations.v1",
-        "generations": {
-            "admission_owner": admission_owner,
-            "generations": generations,
-            "job_owners": {},
-        },
-    });
-    std::fs::write(
-        router.join("generations.json"),
-        serde_json::to_vec_pretty(&registry).expect("registry json"),
-    )
-    .expect("write registry");
 }
 
 /// A PID that existed and has been reaped.
@@ -135,14 +99,11 @@ fn tokenless_live_lease_is_externally_supervised() {
 
         let view = observe(&router);
 
-        assert_eq!(view.registry, RegistryObservation::Absent);
-        assert_eq!(view.admission_owner, None);
         assert_eq!(
             generations(&view),
             json!([{
                 "lease_id": "SERVE",
                 "state_dir": dir(&router),
-                "registered": false,
                 "lifecycle": { "state": "admitting" },
                 "process": { "pid": std::process::id(), "liveness": "live" },
                 "supervision": "external",
@@ -154,71 +115,24 @@ fn tokenless_live_lease_is_externally_supervised() {
 }
 
 #[test]
-fn supervised_live_lease_in_a_draining_generation() {
+fn supervised_live_lease_is_homeboy_supervised() {
     with_isolated_home(|home| {
         let router = home.path().join("daemon");
-        write_lease(&router, "OLD", std::process::id(), "launcher-credential");
-        write_registry(&router, "OLD", &[("OLD", &router, "draining")]);
+        write_lease(&router, "OWNED", std::process::id(), "launcher-credential");
 
         let view = observe(&router);
 
-        assert_eq!(view.registry, RegistryObservation::Present);
-        assert_eq!(view.admission_owner.as_deref(), Some("OLD"));
         assert_eq!(
             generations(&view),
             json!([{
-                "lease_id": "OLD",
+                "lease_id": "OWNED",
                 "state_dir": dir(&router),
-                "registered": true,
-                "lifecycle": { "state": "draining" },
+                "lifecycle": { "state": "admitting" },
                 "process": { "pid": std::process::id(), "liveness": "live" },
                 "supervision": "homeboy_supervised",
                 "binary": { "state": "current" },
                 "jobs": [],
             }])
-        );
-    });
-}
-
-#[test]
-fn in_place_restart_proves_the_registered_lease_dead() {
-    with_isolated_home(|home| {
-        // The registry still routes to DEAD, but its directory now holds the
-        // restarted daemon's lease. That is the #15558 admission bug's input.
-        let router = home.path().join("daemon");
-        write_lease(&router, "LIVE", std::process::id(), "");
-        write_registry(&router, "DEAD", &[("DEAD", &router, "admitting")]);
-
-        let view = observe(&router);
-
-        assert_eq!(view.admission_owner.as_deref(), Some("DEAD"));
-        assert_eq!(
-            generations(&view),
-            json!([
-                {
-                    "lease_id": "DEAD",
-                    "state_dir": dir(&router),
-                    "registered": true,
-                    "lifecycle": {
-                        "state": "dead",
-                        "proof": { "kind": "same_dir_replaced", "current_lease_id": "LIVE" },
-                    },
-                    "process": { "liveness": "unknown" },
-                    "supervision": "unknown",
-                    "binary": { "state": "unknown" },
-                    "jobs": [],
-                },
-                {
-                    "lease_id": "LIVE",
-                    "state_dir": dir(&router),
-                    "registered": false,
-                    "lifecycle": { "state": "admitting" },
-                    "process": { "pid": std::process::id(), "liveness": "live" },
-                    "supervision": "external",
-                    "binary": { "state": "current" },
-                    "jobs": [],
-                },
-            ])
         );
     });
 }
@@ -230,7 +144,6 @@ fn zombie_lease_pid_is_dead_not_live() {
         let zombie = Zombie::spawn();
         let router = home.path().join("daemon");
         write_lease(&router, "KILLED", zombie.pid(), "launcher-credential");
-        write_registry(&router, "KILLED", &[("KILLED", &router, "admitting")]);
 
         let view = observe(&router);
 
@@ -239,7 +152,6 @@ fn zombie_lease_pid_is_dead_not_live() {
             json!([{
                 "lease_id": "KILLED",
                 "state_dir": dir(&router),
-                "registered": true,
                 "lifecycle": { "state": "dead", "proof": { "kind": "pid_dead" } },
                 "process": { "pid": zombie.pid(), "liveness": "zombie" },
                 "supervision": "homeboy_supervised",
@@ -306,7 +218,6 @@ fn killed_daemon_with_an_uncheckpointed_job_needs_attestation() {
     with_isolated_home(|home| {
         let router = home.path().join("daemon");
         write_lease(&router, "KILLED", dead_pid(), "launcher-credential");
-        write_registry(&router, "KILLED", &[("KILLED", &router, "admitting")]);
         let store = JobStore::open(router.join("jobs.json"))
             .expect("job store")
             .with_daemon_lease("KILLED".to_string());
@@ -332,18 +243,11 @@ fn killed_daemon_with_an_uncheckpointed_job_needs_attestation() {
 }
 
 #[test]
-fn draining_dead_generation_with_a_dead_child_is_orphaned_with_proof() {
+fn dead_daemon_with_a_dead_child_is_orphaned_with_proof() {
     with_isolated_home(|home| {
         let router = home.path().join("daemon");
-        let old = router.join("generations").join("old");
-        write_lease(&router, "LIVE", std::process::id(), "launcher-credential");
-        write_lease(&old, "OLD", dead_pid(), "launcher-credential");
-        write_registry(
-            &router,
-            "LIVE",
-            &[("LIVE", &router, "admitting"), ("OLD", &old, "draining")],
-        );
-        let store = JobStore::open(old.join("jobs.json"))
+        write_lease(&router, "OLD", dead_pid(), "launcher-credential");
+        let store = JobStore::open(router.join("jobs.json"))
             .expect("job store")
             .with_daemon_lease("OLD".to_string());
         let job = store.create("runner.exec");
@@ -366,18 +270,14 @@ fn draining_dead_generation_with_a_dead_child_is_orphaned_with_proof() {
             .expect("record child");
 
         let view = observe(&router);
-        let old_view = view
-            .generations
-            .iter()
-            .find(|generation| generation.lease_id.as_deref() == Some("OLD"))
-            .expect("old generation");
 
+        assert_eq!(view.generations.len(), 1);
+        let old_view = &view.generations[0];
         assert_eq!(
             old_view.lifecycle,
             GenerationLifecycle::Dead {
                 proof: DeathProof::PidDead
-            },
-            "a dead lease outranks its registry drain state"
+            }
         );
         assert_eq!(old_view.jobs.len(), 1);
         assert_eq!(
@@ -386,13 +286,6 @@ fn draining_dead_generation_with_a_dead_child_is_orphaned_with_proof() {
                 proof: Some(DeathProof::PidDead)
             }
         );
-        let live = view
-            .generations
-            .iter()
-            .find(|generation| generation.lease_id.as_deref() == Some("LIVE"))
-            .expect("live generation");
-        assert_eq!(live.lifecycle, GenerationLifecycle::Admitting);
-        assert!(live.jobs.is_empty(), "jobs stay with their own generation");
     });
 }
 
@@ -431,26 +324,13 @@ fn termination_evidence_for_the_exact_lease_is_the_death_proof() {
 }
 
 #[test]
-fn registered_generation_without_a_lease_is_stopped() {
+fn a_directory_without_a_lease_has_no_daemon() {
     with_isolated_home(|home| {
-        let router = home.path().join("daemon");
-        std::fs::create_dir_all(&router).unwrap();
-        write_registry(&router, "GONE", &[("GONE", &router, "admitting")]);
-
-        let view = observe(&router);
-
-        assert_eq!(view.generations.len(), 1);
-        assert_eq!(view.generations[0].lease_id.as_deref(), Some("GONE"));
-        assert_eq!(view.generations[0].lifecycle, GenerationLifecycle::Stopped);
-    });
-}
-
-#[test]
-fn empty_router_directory_has_no_generations() {
-    with_isolated_home(|home| {
-        let view = observe(&home.path().join("never-created"));
-        assert_eq!(view.registry, RegistryObservation::Absent);
-        assert!(view.generations.is_empty());
+        let existing = home.path().join("daemon");
+        std::fs::create_dir_all(&existing).unwrap();
+        for directory in [existing, home.path().join("never-created")] {
+            assert!(observe(&directory).generations.is_empty());
+        }
     });
 }
 
@@ -535,14 +415,10 @@ const CORRUPTIONS: &[Option<&[u8]>] = &[
 #[test]
 fn observe_is_total_over_missing_and_corrupt_state_files() {
     with_isolated_home(|home| {
-        for (index, file) in ["state.json", "generations.json", "jobs.json"]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, file) in ["state.json", "jobs.json"].into_iter().enumerate() {
             for (case, corruption) in CORRUPTIONS.iter().enumerate() {
                 let router = home.path().join(format!("router-{index}-{case}"));
                 write_lease(&router, "LEASE", dead_pid(), "launcher-credential");
-                write_registry(&router, "LEASE", &[("LEASE", &router, "admitting")]);
                 let target = router.join(file);
                 let _ = std::fs::remove_file(&target);
                 match corruption {
@@ -555,11 +431,6 @@ fn observe_is_total_over_missing_and_corrupt_state_files() {
                 serde_json::to_value(&view).expect("every view serializes");
                 let label = format!("{file} corrupted with case {case}");
                 match file {
-                    "generations.json" => assert!(
-                        matches!(view.registry, RegistryObservation::Unreadable { .. }),
-                        "{label}: {:?}",
-                        view.registry
-                    ),
                     "state.json" => assert!(
                         view.generations.iter().all(|generation| matches!(
                             generation.lifecycle,
@@ -582,7 +453,6 @@ fn observe_is_total_over_missing_and_corrupt_state_files() {
             // And with the file missing entirely.
             let router = home.path().join(format!("router-{index}-missing"));
             write_lease(&router, "LEASE", dead_pid(), "launcher-credential");
-            write_registry(&router, "LEASE", &[("LEASE", &router, "admitting")]);
             let _ = std::fs::remove_file(router.join(file));
             serde_json::to_value(observe(&router)).expect("view serializes");
         }

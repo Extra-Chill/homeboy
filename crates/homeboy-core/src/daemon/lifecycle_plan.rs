@@ -27,8 +27,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::lifecycle::{
-    BinaryFreshness, DaemonView, DeathProof, GenerationLifecycle, GenerationView, JobCustody,
-    RegistryObservation, Supervision,
+    BinaryFreshness, DaemonView, GenerationLifecycle, GenerationView, JobCustody, Supervision,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,7 +54,7 @@ pub enum WaitCause {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockCause {
-    /// The registry or a lease could not be read. Another repair
+    /// A lease could not be read. Another repair
     /// (corrupt-lease handling) may still apply.
     Unreadable,
     /// A live daemon process holds no lease; anything could race it.
@@ -81,12 +80,7 @@ pub enum Step {
         lease_id: String,
         job_ids: Vec<Uuid>,
     },
-    /// Move admission from a dead owner to the live generation (#15456).
-    ClaimAdmission {
-        from_lease_id: String,
-        to_lease_id: String,
-    },
-    /// Nothing live serves, and the admission owner is dead: start a daemon.
+    /// The daemon died and nothing else serves: start one.
     StartDaemon,
     /// Stop an idle Homeboy-supervised daemon whose binary is stale or
     /// replaced. Its startup credential authorizes a lease-bound stop.
@@ -94,9 +88,6 @@ pub enum Step {
     /// Stop an idle externally supervised daemon through its own lifecycle
     /// endpoint. Never by PID (#15437).
     StopViaLifecycleEndpoint { lease_id: String },
-    /// Remove a dead or stopped generation with no jobs, or an idle draining
-    /// one, from the registry.
-    RetireGeneration { lease_id: String },
 }
 
 /// The one operator confirmation the view cannot prove itself.
@@ -114,12 +105,6 @@ pub const CONFIRM_WORKLOAD_PROCESSES_ABSENT: &str = "confirm-workload-processes-
 
 /// Decide the one next action for `view`.
 pub fn plan(view: &DaemonView) -> Plan {
-    if let RegistryObservation::Unreadable { reason } = &view.registry {
-        return Plan::Blocked {
-            cause: BlockCause::Unreadable,
-            reason: format!("the generation registry is unreadable: {reason}"),
-        };
-    }
     if let Some((generation, reason)) =
         view.generations
             .iter()
@@ -164,8 +149,11 @@ pub fn plan(view: &DaemonView) -> Plan {
         };
     }
 
-    if let Some(plan) = plan_admission(view, &live) {
-        return plan;
+    // A stale lease with nothing live means the daemon died.
+    if live.is_empty() && view.generations.iter().any(is_dead) {
+        return Plan::Transition {
+            step: Step::StartDaemon,
+        };
     }
 
     for generation in &live {
@@ -174,40 +162,7 @@ pub fn plan(view: &DaemonView) -> Plan {
         }
     }
 
-    for generation in &view.generations {
-        if let Some(step) = retirement(view, generation) {
-            return Plan::Transition { step };
-        }
-    }
-
     Plan::Converged
-}
-
-/// The dead generations that can be restarted in place without an operator
-/// (#15830): each holds its own lease, and its own plan is to reconcile jobs
-/// proven gone or to resume checkpointed driver work. A generation with live
-/// workload, one that needs an attestation, and one already restarted in place
-/// are not adoptable.
-pub fn adoptable_dead_generations(view: &DaemonView) -> Vec<String> {
-    view.generations
-        .iter()
-        .filter(|generation| {
-            generation.registered
-                && matches!(
-                    generation.lifecycle,
-                    GenerationLifecycle::Dead {
-                        proof: DeathProof::PidDead | DeathProof::TerminationEvidence
-                    }
-                )
-        })
-        .filter_map(|generation| match plan_dead_generation_jobs(generation)? {
-            Plan::Transition {
-                step:
-                    Step::ReconcileProvenJobs { lease_id, .. } | Step::ResumeDriverWork { lease_id, .. },
-            } => Some(lease_id),
-            _ => None,
-        })
-        .collect()
 }
 
 fn plan_dead_generation_jobs(generation: &GenerationView) -> Option<Plan> {
@@ -272,48 +227,7 @@ fn plan_dead_generation_jobs(generation: &GenerationView) -> Option<Plan> {
     })
 }
 
-fn plan_admission(view: &DaemonView, live: &[&GenerationView]) -> Option<Plan> {
-    let owner_lease = view.admission_owner.as_deref();
-    let owner = owner_lease.and_then(|lease| {
-        view.generations
-            .iter()
-            .find(|g| g.registered && g.lease_id.as_deref() == Some(lease))
-    });
-    let owner_serving = owner.is_some_and(is_live);
-    if owner_serving {
-        return None;
-    }
-    // A registry whose owner is dead, stopped, or missing entirely.
-    if let Some(owner_lease) = owner_lease {
-        let admitting = live
-            .iter()
-            .find(|g| g.lifecycle == GenerationLifecycle::Admitting);
-        return Some(match admitting.and_then(|g| g.lease_id.clone()) {
-            Some(to_lease_id) => Plan::Transition {
-                step: Step::ClaimAdmission {
-                    from_lease_id: owner_lease.to_string(),
-                    to_lease_id,
-                },
-            },
-            // Nothing admitting. Draining generations never take admission
-            // back, so a new daemon must start; they retire on their own.
-            None => Plan::Transition {
-                step: Step::StartDaemon,
-            },
-        });
-    }
-    // No registry: a stale lease with nothing live means the daemon died.
-    let dead_unregistered = view.generations.iter().any(|g| !g.registered && is_dead(g));
-    (live.is_empty() && dead_unregistered).then_some(Plan::Transition {
-        step: Step::StartDaemon,
-    })
-}
-
 fn plan_stale_live_generation(generation: &GenerationView) -> Option<Plan> {
-    // A draining generation is already on its way out; retirement owns it.
-    if generation.lifecycle != GenerationLifecycle::Admitting {
-        return None;
-    }
     if !matches!(
         generation.binary,
         BinaryFreshness::Replaced | BinaryFreshness::Stale { .. }
@@ -347,27 +261,8 @@ fn plan_stale_live_generation(generation: &GenerationView) -> Option<Plan> {
     })
 }
 
-fn retirement(view: &DaemonView, generation: &GenerationView) -> Option<Step> {
-    if !generation.registered || !generation.jobs.is_empty() {
-        return None;
-    }
-    let lease_id = generation.lease_id.clone()?;
-    if view.admission_owner.as_deref() == Some(lease_id.as_str()) {
-        return None;
-    }
-    let retirable = match generation.lifecycle {
-        GenerationLifecycle::Dead { .. } | GenerationLifecycle::Stopped => true,
-        GenerationLifecycle::Draining => true,
-        GenerationLifecycle::Admitting | GenerationLifecycle::Unreadable { .. } => false,
-    };
-    retirable.then_some(Step::RetireGeneration { lease_id })
-}
-
 fn is_live(generation: &GenerationView) -> bool {
-    matches!(
-        generation.lifecycle,
-        GenerationLifecycle::Admitting | GenerationLifecycle::Draining
-    )
+    generation.lifecycle == GenerationLifecycle::Admitting
 }
 
 fn is_dead(generation: &GenerationView) -> bool {

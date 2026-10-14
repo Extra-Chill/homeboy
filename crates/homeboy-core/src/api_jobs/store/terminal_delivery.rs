@@ -34,12 +34,6 @@ pub(crate) fn retain_on(
 }
 
 impl JobStore {
-    pub(crate) fn pending_step_terminal_delivery_count(&self) -> Result<usize> {
-        match self.persistence_path() {
-            Some(path) => super::super::sql_store::pending_step_delivery_count_readonly(&path),
-            None => Ok(0),
-        }
-    }
     /// Read pending private evidence, including deliveries whose job was pruned.
     pub fn pending_step_terminal_deliveries(&self) -> Result<Vec<StepTerminalDelivery>> {
         self.step_delivery_rows(false)

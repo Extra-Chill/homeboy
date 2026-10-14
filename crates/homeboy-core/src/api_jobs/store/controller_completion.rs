@@ -199,10 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn terminal_identity_custody_survives_configured_pruning_and_archive_restart() {
+    fn terminal_identity_custody_survives_configured_pruning_and_restart() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("jobs.json");
-        let archive = directory.path().join("retained-jobs.json");
         let store = JobStore::open_without_reconciliation_with_retention(&path, 2, 1).unwrap();
         let mut winners = Vec::new();
         for status in [
@@ -238,11 +237,8 @@ mod tests {
             .terminal_controller_job(Uuid::new_v4())
             .unwrap()
             .is_none());
-        store.archive_terminal_controller_jobs(&archive).unwrap();
-        // Archive custody is independent of the retired source store and index.
-        fs::remove_file(super::super::super::persistence::tombstone_path(&path)).unwrap();
-        let retained = JobStore::open_without_reconciliation(&archive).unwrap();
-        assert!(retained.list().is_empty());
+        drop(store);
+        let retained = JobStore::open_without_reconciliation(&path).unwrap();
         for winner in winners {
             assert_eq!(
                 serde_json::to_value(
@@ -285,36 +281,6 @@ mod tests {
                 .unwrap();
             assert!(store.terminal_controller_job(id).is_err());
         }
-    }
-
-    #[test]
-    fn terminal_identity_status_read_does_not_create_or_migrate_missing_stores() {
-        let directory = tempfile::tempdir().unwrap();
-        let missing = directory.path().join("retired/missing-jobs.json");
-        assert!(
-            JobStore::terminal_controller_job_at(&missing, Uuid::new_v4())
-                .unwrap()
-                .is_none()
-        );
-        assert!(!directory.path().join("retired").exists());
-        let path = directory.path().join("jobs.json");
-        let store = JobStore::open_without_reconciliation_with_retention(&path, 2, 1).unwrap();
-        let id = running(&store);
-        store
-            .complete_controller_success(id, serde_json::json!({"original": true}))
-            .unwrap();
-        let another = running(&store);
-        store
-            .complete_controller_success(another, serde_json::json!({}))
-            .unwrap();
-        let tombstones = super::super::super::persistence::tombstone_path(&path);
-        let index_before = fs::read(&tombstones).unwrap();
-        assert!(JobStore::terminal_controller_job_at(&path, id)
-            .unwrap()
-            .unwrap()
-            .status
-            .is_terminal());
-        assert_eq!(fs::read(&tombstones).unwrap(), index_before);
     }
 }
 

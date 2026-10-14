@@ -111,24 +111,24 @@ reasoning in the dead-lease recovery section below: the attestation is
 unverifiable in process by construction, so a dispatcher supplying it would be
 fabricating evidence.
 
-### Dead generations restart in place
+### A dead daemon restarts in place
 
-A daemon generation that died with durable work in its store is adopted in its
-own state directory: the lease is re-proven dead, jobs proven gone are
-reconciled, and a replacement daemon starts in that directory. The replacement
-takes over the generation's registry entry (its routing, drain state, and
-admission ownership) and its startup recovery resumes checkpointed driver work
-such as `workflow` instances and `lab.staging-dispatch` jobs. A job's lease is
+Homeboy runs one daemon per state directory, with one job store. A daemon that
+died with durable work in its store is replaced in the same directory: the
+lease is re-proven dead, jobs proven gone are reconciled, and the replacement's
+startup recovery resumes checkpointed driver work such as `workflow` instances
+and `lab.staging-dispatch` jobs. An upgrade is the same restart: a stale daemon
+is stopped and its replacement resumes the work in the same store. A job's lease is
 the lease that last claimed its execution. The directory's exclusive owner lock
 admits one replacement, so concurrent adopters converge on one driver.
 
-The admitting daemon performs this adoption on its orchestration tick for every
-dead generation whose own lifecycle plan is `reconcile_proven_jobs` or
-`resume_driver_work`. `homeboy daemon recover --yes` applies the same step
-immediately, and `homeboy daemon adopt-orphan --lease-id <lease>` runs in the
-lease's registered generation directory wherever it is invoked. A generation
-with a live workload process waits for it; one that needs an operator
-attestation still requires `--confirm-workload-processes-absent`.
+The next daemon-backed command starts the replacement, and its startup
+recovery adopts the dead lease's work. `homeboy daemon recover --yes` follows
+the lifecycle plan (`start_daemon`, `reconcile_proven_jobs`, or
+`resume_driver_work`) immediately, and `homeboy daemon adopt-orphan
+--lease-id <lease>` adopts one exact dead lease. A dead daemon with a live
+workload process waits for it; one that needs an operator attestation still
+requires `--confirm-workload-processes-absent`.
 
 ## Local HTTP API
 
@@ -321,4 +321,4 @@ preview/apply rules for future write endpoints.
 
 ## Workflow cadences
 
-A running daemon admits due [workflow cadences](workflow.md#cadence-every) without an external timer. The admitting daemon's orchestration tick (every 60 seconds by default, `HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS`) admits one instance per due slot; `0` disables the tick and with it every cadence. Registrations live in `workflow-cadences.sqlite` beside the generation registry, so they survive daemon restarts and build rotations. At start the daemon registers the built-in `homeboy.retention` cadence unless the operator cancelled it.
+A running daemon admits due [workflow cadences](workflow.md#cadence-every) without an external timer. The admitting daemon's orchestration tick (every 60 seconds by default, `HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS`) admits one instance per due slot; `0` disables the tick and with it every cadence. Registrations live in `workflow-cadences.sqlite` in the daemon state directory, so they survive daemon restarts and build rotations. At start the daemon registers the built-in `homeboy.retention` cadence unless the operator cancelled it.

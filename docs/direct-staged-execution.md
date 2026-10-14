@@ -37,13 +37,11 @@ previous `PidDead` lease verdict under the daemon-owner lock, excludes conflicti
 foreground owners, and limits recovery to adopted queued jobs without a child
 reservation. The shared driver prepares the retained sealed source, and recovery
 transfers the exact original job to the new worker under the proven-dead lease.
-Old workers are fenced at child reservation. The generation registry transfers
-the original job route and counts without moving unrelated jobs or double-counting
-replays. Preparation failure becomes terminal diagnostic evidence for the normal
+Old workers are fenced at child reservation. Preparation failure becomes terminal diagnostic evidence for the normal
 retry lifecycle instead of another apparently accepted queue entry.
 
 This is same-store recovery and receipt replay. It does not forcibly replace a
-live draining daemon, migrate arbitrary stores between generations, cancel live
+live daemon, migrate arbitrary stores between daemons, cancel live
 jobs, or authorize a runtime rollout.
 
 ## Verification
