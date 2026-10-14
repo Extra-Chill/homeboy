@@ -250,6 +250,168 @@ fn rotation_entry_label(
     }
 }
 
+/// What provider readiness actually bound for this Cook, projected for
+/// `--preview` (#15854).
+///
+/// Admission selects the first configured route its readiness probe trusts and
+/// records every skipped route and its reason on the bound task
+/// (`provider_readiness_routing.skipped[]`). Preview reports that selection
+/// instead of the configured primary. Lab placement binds on the runner with
+/// the runner's own credentials, so there this states that the runner decides
+/// instead of naming a model it cannot prove.
+fn cook_provider_readiness_projection(
+    configured: &AgentTaskPlan,
+    plan: &AgentTaskPlan,
+    binding_runner_owned: bool,
+) -> Value {
+    let task = plan.tasks.first();
+    let route_order = configured
+        .tasks
+        .first()
+        .map(|task| match task.executor.model.as_deref() {
+            Some(model) => format!("{}/{model}", task.executor.backend),
+            None => task.executor.backend.clone(),
+        })
+        .into_iter()
+        .chain(
+            configured
+                .options
+                .rotation
+                .iter()
+                .flat_map(|rotation| rotation.entries.iter().map(rotation_entry_label)),
+        )
+        .collect::<Vec<_>>();
+    // The runner binds a Lab-placed route; the controller has no selection.
+    let selected_route = task.filter(|_| !binding_runner_owned).map(|task| {
+        serde_json::json!({
+            "backend": task.executor.backend,
+            "selector": task.executor.selector,
+            "model": task.executor.model,
+        })
+    });
+    let skipped = task
+        .and_then(|task| {
+            task.metadata
+                .pointer("/provider_readiness_routing/skipped")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| match &entry {
+            Value::Object(object) => {
+                let mut pruned = serde_json::Map::new();
+                for field in [
+                    "backend",
+                    "selector",
+                    "model",
+                    "state",
+                    "reason",
+                    "classification",
+                    "retryable",
+                    "remediation",
+                ] {
+                    if let Some(value) = object.get(field) {
+                        pruned.insert(field.to_string(), value.clone());
+                    }
+                }
+                Value::Object(pruned)
+            }
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut projection = serde_json::json!({
+        "schema": "homeboy/agent-task-provider-readiness-preview/v1",
+        "binding_owner": if binding_runner_owned { "runner" } else { "controller" },
+        "route_order": route_order,
+        "skipped": skipped,
+        "selected_route": selected_route,
+    });
+    if binding_runner_owned {
+        projection["statement"] = serde_json::json!(
+            "provider binding is decided on the lab runner during execution with the runner's own credentials; this preview does not claim any single model is ready"
+        );
+        if let Some(runner) = preview_lab_runner_id() {
+            projection["runner_readiness_check"] = serde_json::json!(format!(
+                "homeboy agent-task providers --runner {runner} --validate-readiness"
+            ));
+            projection["runner"] = serde_json::json!(runner);
+        }
+    }
+    projection
+}
+
+/// The Lab runner this preview's placement selected, if any.
+fn preview_lab_runner_id() -> Option<String> {
+    homeboy::core::parsed_command_preflight::captured_result()
+        .and_then(|result| result.placement.runner)
+        .map(|runner| runner.runner_id)
+}
+
+/// stderr disclosure for the readiness projection in `--preview` output.
+/// Quiet when nothing needs correcting: an unpinned controller route whose
+/// primary passed readiness binds entry 0 anyway.
+fn cook_provider_readiness_disclosure(
+    plan: &AgentTaskPlan,
+    binding_runner_owned: bool,
+) -> Option<String> {
+    let skipped = plan
+        .tasks
+        .first()
+        .map(|task| {
+            task.metadata
+                .pointer("/provider_readiness_routing/skipped")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    if binding_runner_owned {
+        let runner = preview_lab_runner_id();
+        return Some(match runner.as_deref() {
+            Some(runner) => format!(
+                "cook: provider binding is decided on lab runner `{runner}` during execution with the runner's credentials; the provider model below is the configured primary, not a readiness result. Check the runner: homeboy agent-task providers --runner {runner} --validate-readiness"
+            ),
+            None => "cook: provider binding is decided on the lab runner during execution with the runner's credentials; the provider model below is the configured primary, not a readiness result".to_string(),
+        });
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+    let skipped_summary = skipped
+        .iter()
+        .map(|entry| {
+            let route = entry
+                .get("model")
+                .and_then(Value::as_str)
+                .or(entry.get("backend").and_then(Value::as_str))
+                .unwrap_or("configured provider");
+            format!(
+                "{route} ({}: {})",
+                entry
+                    .get("classification")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                entry
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason reported"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selected = plan.tasks.first().and_then(|task| {
+        let backend = task.executor.backend.as_str();
+        let model = task.executor.model.as_deref();
+        model.map(|model| format!("{backend}/{model}"))
+    });
+    Some(format!(
+        "cook: provider readiness bound route: {}; skipped: {}; binding owner: controller",
+        selected.unwrap_or_else(|| "configured provider".to_string()),
+        skipped_summary,
+    ))
+}
+
 /// Warn before a detached Cook becomes observable only through durable status.
 pub(crate) fn detached_cook_route_less_warning(
     resolution: &homeboy::core::notification_route::NotificationRouteResolution,
@@ -614,7 +776,17 @@ pub(crate) fn preview_cook(
             serde_json::to_value(evidence_provenance)
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
+    // Preview reports the route provider readiness binds, never rotation entry
+    // 0 claimed as fact (#15854). Lab placement returns the plan unchanged:
+    // the runner binds with its own credentials, and the projection says so.
+    let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let configured_plan = plan;
+    let mut plan = validate_cook_provider_execution_plan(&configured_plan, &catalog)?;
     resolve_cook_execution_budget(&args, &mut plan)?;
+    let binding_runner_owned = placement["selected"].as_str() == Some("lab");
+    if let Some(disclosure) = cook_provider_readiness_disclosure(&plan, binding_runner_owned) {
+        eprintln!("{}", disclosure);
+    }
     eprintln!("{}", cook_effective_plan_disclosure(&plan));
     plan.metadata["gate_contract_validation"] = serde_json::to_value(&gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
@@ -636,6 +808,8 @@ pub(crate) fn preview_cook(
     resolved["gate_contract_validation"] =
         preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;
+    resolved["provider_readiness"] =
+        cook_provider_readiness_projection(&configured_plan, &plan, binding_runner_owned);
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
     resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
@@ -1649,6 +1823,39 @@ mod preview_tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+
+    /// Lab placement binds on the runner: preview names no selected route and
+    /// says the runner decides instead of presenting the configured primary
+    /// as the readiness result (#15854).
+    #[test]
+    fn lab_preview_readiness_projection_defers_binding_to_the_runner() {
+        let request: AgentTaskRequest = serde_json::from_value(serde_json::json!({
+            "task_id": "cook",
+            "executor": { "backend": "opencode", "model": "anthropic/claude-sonnet-5" },
+            "instructions": "run",
+        }))
+        .expect("request fixture");
+        let plan = AgentTaskPlan::new("lab-preview", vec![request]);
+
+        let lab = cook_provider_readiness_projection(&plan, &plan, true);
+        assert_eq!(lab["binding_owner"], "runner");
+        assert!(lab["selected_route"].is_null(), "{lab}");
+        assert!(lab["statement"]
+            .as_str()
+            .expect("runner statement")
+            .contains("decided on the lab runner"));
+        assert!(cook_provider_readiness_disclosure(&plan, true)
+            .expect("lab disclosure")
+            .contains("not a readiness result"));
+
+        let local = cook_provider_readiness_projection(&plan, &plan, false);
+        assert_eq!(local["binding_owner"], "controller");
+        assert_eq!(
+            local["selected_route"]["model"],
+            "anthropic/claude-sonnet-5"
+        );
+        assert!(cook_provider_readiness_disclosure(&plan, false).is_none());
+    }
     use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
     use homeboy::agents::agent_tasks::{
         AgentTaskExecutionContext, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
@@ -2057,8 +2264,17 @@ mod preview_tests {
             ..Default::default()
         });
 
-        validate_cook_provider_execution_plan(&plan, &catalog)
+        let selected = validate_cook_provider_execution_plan(&plan, &catalog)
             .expect("fallback route validates Cook");
+        assert_eq!(
+            selected.tasks[0].executor.model(),
+            Some("valid-fallback"),
+            "compile validation returns the route readiness bound"
+        );
+        assert_eq!(
+            selected.tasks[0].metadata["provider_readiness_routing"]["skipped"][0]["model"],
+            "invalid-primary"
+        );
         assert_eq!(plan.tasks[0].executor.model(), Some("invalid-primary"));
     }
 
@@ -8560,10 +8776,14 @@ pub(crate) fn compile_cook_plan(
     Ok(plan)
 }
 
+/// Admit a compiled Cook plan for the selected placement and return the plan
+/// readiness bound: the first trusted rotation route, with every skipped entry
+/// recorded on the task. Compile and preview share the process-local readiness
+/// cache, so preview reuses compile's probes instead of re-running them.
 fn validate_cook_provider_execution_plan(
     plan: &homeboy::agents::agent_tasks::AgentTaskPlan,
     catalog: &homeboy::agents::agent_task_provider::AgentTaskProviderCatalog,
-) -> homeboy::core::Result<()> {
+) -> homeboy::core::Result<homeboy::agents::agent_tasks::AgentTaskPlan> {
     let mut readiness_cache =
         homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
     // A Lab-placed Cook proves provider readiness on the runner with the
@@ -8575,7 +8795,7 @@ fn validate_cook_provider_execution_plan(
             &mut readiness_cache,
         )?;
     catalog.validate_selected_models(&selected_plan)?;
-    Ok(())
+    Ok(selected_plan)
 }
 
 pub(crate) fn validate_provider_evidence_inputs(

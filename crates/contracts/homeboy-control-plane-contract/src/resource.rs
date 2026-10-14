@@ -712,6 +712,11 @@ pub struct ControlPlaneProviderSummary {
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<ProviderSessionId>,
+    /// The model the provider dispatched with, from the durable execution
+    /// ledger: the readiness-bound route, never a skipped primary. Absent when
+    /// nothing dispatched (#15854).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -899,6 +904,7 @@ mod tests {
             id: "claude".to_string(),
             state: Some("succeeded".to_string()),
             session: Some(ProviderSessionId::new("sess-1").expect("session")),
+            model: Some("claude/model".to_string()),
         });
         resource.heartbeat_at = Some("2026-01-01T00:00:30Z".to_string());
         resource.liveness = Some(ControlPlaneLiveness {
