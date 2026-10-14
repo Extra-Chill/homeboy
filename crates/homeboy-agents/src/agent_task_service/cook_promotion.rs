@@ -6023,6 +6023,10 @@ fn substantive_contribution_chain(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut contributions = Vec::new();
     let mut current_run_id = terminal_run_id.to_string();
+    // A Homeboy-verified no-change attempt still materializes the baseline its
+    // follow-up runs in, so it is a provenance link, but it authored nothing
+    // and is never disclosed as a contribution (#15923).
+    let mut current_contributes = true;
     let mut visited = std::collections::BTreeSet::new();
     loop {
         if !visited.insert(current_run_id.clone()) {
@@ -6045,20 +6049,22 @@ fn substantive_contribution_chain(
                         None,
                     )
                 })?;
-        let execution = cook_attempt_execution_in_store(lifecycle_store, &current_run_id)?;
-        if execution.review_form_only {
-            return Err(Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "metadata-only review-form attempts cannot contribute implementation patches",
-                Some(current_run_id),
-                None,
-            ));
+        if current_contributes {
+            let execution = cook_attempt_execution_in_store(lifecycle_store, &current_run_id)?;
+            if execution.review_form_only {
+                return Err(Error::validation_invalid_argument(
+                    "cook_recipe.attempts",
+                    "metadata-only review-form attempts cannot contribute implementation patches",
+                    Some(current_run_id),
+                    None,
+                ));
+            }
+            contributions.push(CookContribution {
+                run_id: current_run_id.clone(),
+                execution,
+            });
         }
         let source = cook_contribution_source(lifecycle_store, &current_run_id)?;
-        contributions.push(CookContribution {
-            run_id: current_run_id.clone(),
-            execution,
-        });
         let Some(source) = source else {
             break;
         };
@@ -6082,7 +6088,9 @@ fn substantive_contribution_chain(
             ));
         }
         let source_promotion = exact_promotion_for_contribution(lifecycle_store, &source.run_id)?;
-        if !source_promotion.status.patch_promoted()
+        let source_contributes = source_promotion.status.patch_promoted();
+        if !(source_contributes
+            || verified_no_change_link(lifecycle_store, &source.run_id, &source_promotion)?)
             || source_promotion.source.task_id.as_str() != source.task_id.as_str()
             || source_promotion.patch_artifact.sha256.as_deref()
                 != Some(source.patch_sha256.as_str())
@@ -6095,9 +6103,28 @@ fn substantive_contribution_chain(
             ));
         }
         current_run_id = source.run_id;
+        current_contributes = source_contributes;
     }
     contributions.reverse();
     Ok(contributions)
+}
+
+/// A source attempt Homeboy proved changed nothing: its persisted promotion
+/// promoted no patch and its selected outcome carries Homeboy's unchanged
+/// checkout proof. Its follow-up still binds to it because its promotion owns
+/// the retry baseline, so the chain passes through it to its own source.
+fn verified_no_change_link(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<bool> {
+    if promotion.status != AgentTaskPromotionStatus::NoChanges
+        || !promotion.changed_files.is_empty()
+    {
+        return Ok(false);
+    }
+    let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
+    Ok(outcome.task_id == promotion.source.task_id && outcome.is_verified_unchanged_attempt())
 }
 
 fn substantive_lineage(

@@ -22033,6 +22033,154 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
     });
 }
 
+/// #15923: a gate-failed patch attempt, then a Homeboy-verified no-change
+/// attempt, then an applied green attempt. The green attempt's provenance
+/// binds to the no-change attempt that produced its baseline; that attempt
+/// authored nothing, so the contribution chain passes through it to the
+/// patch it carried forward instead of discarding the green candidate.
+#[test]
+fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-15923-no-change-chain";
+        let first_run_id = "cook-15923-no-change-chain-attempt-1";
+        let unchanged_run_id = "cook-15923-no-change-chain-attempt-2";
+        let green_run_id = "cook-15923-no-change-chain-attempt-3";
+        let first_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let unchanged_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = first_run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.backend = "first-provider".to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("first-model".to_string());
+        options.gates.verify = vec!["cargo test --locked agent_task_promotion --lib".to_string()];
+        let first_plan = options.identity.initial_plan.clone();
+        let task_id = first_plan.tasks[0].task_id.clone();
+        persist_initial_recipe(&options).expect("persist recipe");
+
+        let mut unchanged_plan = first_plan.clone();
+        unchanged_plan.tasks[0].executor.backend = "abstaining-provider".to_string();
+        unchanged_plan.tasks[0].executor.model = Some("abstaining-model".to_string());
+        unchanged_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+            "source_run_id": first_run_id,
+            "source_task_id": task_id,
+            "source_patch_artifact_sha256": first_sha,
+        });
+        let mut green_plan = first_plan.clone();
+        green_plan.tasks[0].executor.backend = "third-provider".to_string();
+        green_plan.tasks[0].executor.model = Some("third-model".to_string());
+        green_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+            "source_run_id": unchanged_run_id,
+            "source_task_id": task_id,
+            "source_patch_artifact_sha256": unchanged_sha,
+        });
+        for (attempt, run_id, plan) in [
+            (1, first_run_id, &first_plan),
+            (2, unchanged_run_id, &unchanged_plan),
+            (3, green_run_id, &green_plan),
+        ] {
+            if attempt > 1 {
+                super::super::record_recipe_attempt(cook_id, attempt, run_id, plan)
+                    .expect("persist bound retry");
+            }
+            agent_task_lifecycle::submit_plan(plan, Some(run_id)).expect("materialize attempt");
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                attempt,
+                run_id,
+            )
+            .expect("index attempt");
+        }
+        seed_review_form_aggregate(first_run_id, &first_plan);
+        seed_review_form_aggregate(unchanged_run_id, &unchanged_plan);
+        seed_review_form_aggregate(green_run_id, &green_plan);
+
+        let mut first_promotion = promotion(first_run_id);
+        first_promotion.status = AgentTaskPromotionStatus::GateFailed;
+        first_promotion.source.task_id = task_id.clone();
+        first_promotion.patch_artifact.sha256 = Some(first_sha.to_string());
+        agent_task_lifecycle::record_promotion(
+            first_run_id,
+            serde_json::to_value(first_promotion).unwrap(),
+        )
+        .expect("persist gate-failed source promotion");
+        let mut unchanged_promotion = promotion(unchanged_run_id);
+        unchanged_promotion.status = AgentTaskPromotionStatus::NoChanges;
+        unchanged_promotion.source.task_id = task_id.clone();
+        unchanged_promotion.patch_artifact.sha256 = Some(unchanged_sha.to_string());
+        unchanged_promotion.changed_files.clear();
+        unchanged_promotion.deterministic_gates.clear();
+        unchanged_promotion.gate_results.clear();
+        let record_unchanged_promotion = |promotion: &AgentTaskPromotionReport| {
+            agent_task_lifecycle::record_promotion(
+                unchanged_run_id,
+                serde_json::to_value(promotion).unwrap(),
+            )
+            .expect("persist no-change promotion");
+        };
+        let assert_binding_fails_closed = |reason: &str| {
+            let error = finalize_cook_pr_with_backend(
+                &options,
+                green_run_id,
+                &promotion(green_run_id),
+                &mut CaptureBackend::default(),
+            )
+            .expect_err(reason);
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not match its persisted promotion"),
+                "{reason}: {error}"
+            );
+        };
+        // An empty promotion without Homeboy's unchanged-checkout proof is not
+        // a verified no-change link.
+        record_unchanged_promotion(&unchanged_promotion);
+        assert_binding_fails_closed("an unverified empty source fails closed");
+        let mut unchanged_aggregate = review_form_aggregate(&unchanged_plan);
+        unchanged_aggregate.outcomes[0].metadata
+            [crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY] = Value::Bool(true);
+        agent_task_lifecycle::record_run_aggregate(
+            unchanged_run_id,
+            &unchanged_plan,
+            &unchanged_aggregate,
+        )
+        .expect("persist verified unchanged aggregate");
+        // Passing through a no-change link stays bound to its persisted
+        // promotion: a digest that does not match still fails closed.
+        let mut drifted = unchanged_promotion.clone();
+        drifted.patch_artifact.sha256 = Some(first_sha.to_string());
+        record_unchanged_promotion(&drifted);
+        assert_binding_fails_closed("a drifted no-change binding fails closed");
+        record_unchanged_promotion(&unchanged_promotion);
+
+        let mut backend = CaptureBackend::default();
+        finalize_cook_pr_with_backend(
+            &options,
+            green_run_id,
+            &promotion(green_run_id),
+            &mut backend,
+        )
+        .expect("a green candidate after a verified no-change attempt finalizes");
+        for expected in [
+            "Implementation 1: Homeboy (first-provider)",
+            "Implementation 2: Homeboy (third-provider)",
+            "Implementation 1: first-model",
+            "Implementation 2: third-model",
+        ] {
+            assert!(
+                backend.body.contains(expected),
+                "missing {expected}: {}",
+                backend.body
+            );
+        }
+        assert!(
+            !backend.body.contains("abstaining") && !backend.body.contains("Implementation 3"),
+            "a no-change attempt authored nothing: {}",
+            backend.body
+        );
+    });
+}
+
 #[test]
 fn promoted_detached_retry_recovers_cook_finalization_and_updates_existing_pr() {
     homeboy_core::test_support::with_isolated_home(|_| {
