@@ -1239,79 +1239,72 @@ fn submit_deferred_runner_staging(
             None,
         )
     })?;
-    let (source_artifact, workspace) = materialize_deferred_source(
-        &lifecycle_store,
-        run_id,
-        runner_id,
-        plan,
-        |control| {
-            let materialized = match SourceArtifactTransfer::from_directory_controlled(
-                format!("source-{run_id}"),
-                &source_path,
-                control,
-            ) {
-                Ok(artifact) => (Some(artifact), None),
-                Err(artifact_error) => {
-                    if !source_artifact_exceeds_transfer_bounds(&artifact_error) {
-                        return Err(artifact_error);
-                    }
-                    // Large clean Git worktrees are staged through the existing
-                    // controller-routed bundle authority. Non-Git sources retain the
-                    // bounded sealed-artifact contract and surface their original
-                    // containment/filtering failure.
-                    let git_status = control.output_exact(
-                        std::process::Command::new("git")
-                            .args(["status", "--porcelain=v1"])
-                            .current_dir(&source_path),
-                        "inspect deferred source worktree",
-                    )?;
-                    if !git_status.status.success() {
-                        return Err(artifact_error);
-                    }
-                    if !git_status.stdout.is_empty() {
-                        return Err(artifact_error);
-                    }
-                    let stage = crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
-                request,
-                crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
-                    &recipe.command,
-                ),
-                crate::lab_plan::base_lab_plan(None),
-                runner_id,
-                &source_path,
-                &["homeboy".to_string()],
-                request.job_overrides.workspace_root.as_deref(),
-                Some(run_id.to_string()),
-                &recipe.normalized_args,
-                Some(run_id),
-                control,
-            )?;
-                    bind_recipe_to_materialized_workspace(&mut recipe, &stage.remote_command);
-                    (
+    let (source_artifact, workspace) =
+        materialize_deferred_source(&lifecycle_store, run_id, runner_id, plan, |control| {
+            let materialized = if deferred_plan_requires_cook_workspace_stage(plan) {
+                // A sealed source artifact strips Git metadata and extracts on
+                // the runner as a plain file copy, so a Cook attempt routed
+                // through it could never honor its plan's admission identity
+                // attestation nor harvest a candidate patch (#15831). Stage the
+                // workspace through the controller-routed bundle authority
+                // instead; the runner verifies that materialization and rebinds
+                // the identity to it before execution.
+                (
                     None,
-                    Some(ControllerWorkspaceMaterialization::new(
-                        stage.remote_cwd.clone(),
-                        stage.remote_cwd,
-                        stage.synced.snapshot_identity,
-                        stage.synced.prepared_workspace_lease.ok_or_else(|| {
-                            Error::internal_unexpected(
-                                "controller-materialized Git workspace did not report its runner lease",
-                            )
-                        })?,
-                        stage.synced.current_workspace.source_commit.ok_or_else(|| {
-                            Error::internal_unexpected(
-                                "controller-materialized Git workspace did not report its source commit",
-                            )
-                        })?,
+                    Some(stage_deferred_cook_workspace(
+                        request,
+                        &mut recipe,
+                        plan,
+                        runner_id,
+                        &source_path,
                         run_id,
-                        canonical_digest(plan)?,
-                    )),
+                        control,
+                    )?),
                 )
+            } else {
+                match SourceArtifactTransfer::from_directory_controlled(
+                    format!("source-{run_id}"),
+                    &source_path,
+                    control,
+                ) {
+                    Ok(artifact) => (Some(artifact), None),
+                    Err(artifact_error) => {
+                        if !source_artifact_exceeds_transfer_bounds(&artifact_error) {
+                            return Err(artifact_error);
+                        }
+                        // Large clean Git worktrees are staged through the existing
+                        // controller-routed bundle authority. Non-Git sources retain the
+                        // bounded sealed-artifact contract and surface their original
+                        // containment/filtering failure.
+                        let git_status = control.output_exact(
+                            std::process::Command::new("git")
+                                .args(["status", "--porcelain=v1"])
+                                .current_dir(&source_path),
+                            "inspect deferred source worktree",
+                        )?;
+                        if !git_status.status.success() {
+                            return Err(artifact_error);
+                        }
+                        if !git_status.stdout.is_empty() {
+                            return Err(artifact_error);
+                        }
+                        (
+                            None,
+                            Some(stage_deferred_cook_workspace(
+                                request,
+                                &mut recipe,
+                                plan,
+                                runner_id,
+                                &source_path,
+                                run_id,
+                                control,
+                            )?),
+                        )
+                    }
                 }
             };
             Ok(materialized)
-        },
-    )?;
+        })?;
     // Seal only after the workspace is resolved: a materialized workspace
     // rewrites the recipe argv to its runner-local paths above.
     // The portable recipe is the sealed staging authority. It deliberately
@@ -1471,6 +1464,69 @@ fn deferred_source_control(
 /// that do not exist on the runner (#15226).
 fn bind_recipe_to_materialized_workspace(recipe: &mut LabStagingRecipe, remote_command: &[String]) {
     recipe.normalized_args = remote_command.to_vec();
+}
+
+/// Whether the deferred fallback's durable plan binds a Cook workspace
+/// admission identity, which only a controller-routed workspace stage can
+/// carry to the runner.
+fn deferred_plan_requires_cook_workspace_stage(
+    plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
+) -> bool {
+    plan.tasks.iter().any(|task| {
+        task.metadata
+            .get("cook_workspace_identity")
+            .is_some_and(|identity| !identity.is_null())
+    })
+}
+
+/// Stage the deferred fallback's source through the controller-routed workspace
+/// bundle authority and bind the sealed recipe argv to its runner-local paths.
+#[allow(clippy::too_many_arguments)]
+fn stage_deferred_cook_workspace(
+    request: &LabOffloadRequest<'_>,
+    recipe: &mut LabStagingRecipe,
+    plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
+    runner_id: &str,
+    source_path: &std::path::Path,
+    run_id: &str,
+    control: &crate::workspace::WorkspaceControl,
+) -> Result<ControllerWorkspaceMaterialization> {
+    let stage =
+        crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
+            request,
+            crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&recipe.command),
+            crate::lab_plan::base_lab_plan(None),
+            runner_id,
+            source_path,
+            &["homeboy".to_string()],
+            request.job_overrides.workspace_root.as_deref(),
+            Some(run_id.to_string()),
+            &recipe.normalized_args,
+            Some(run_id),
+            control,
+        )?;
+    bind_recipe_to_materialized_workspace(recipe, &stage.remote_command);
+    Ok(ControllerWorkspaceMaterialization::new(
+        stage.remote_cwd.clone(),
+        stage.remote_cwd,
+        stage.synced.snapshot_identity,
+        stage.synced.prepared_workspace_lease.ok_or_else(|| {
+            Error::internal_unexpected(
+                "controller-materialized Git workspace did not report its runner lease",
+            )
+        })?,
+        stage
+            .synced
+            .current_workspace
+            .source_commit
+            .ok_or_else(|| {
+                Error::internal_unexpected(
+                    "controller-materialized Git workspace did not report its source commit",
+                )
+            })?,
+        run_id,
+        canonical_digest(plan)?,
+    ))
 }
 
 fn source_artifact_exceeds_transfer_bounds(error: &Error) -> bool {
@@ -4967,6 +5023,43 @@ mod stale_lease_rejection_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_with_task_metadata(
+        metadata: serde_json::Value,
+    ) -> homeboy_agents::agent_task_scheduler::AgentTaskPlan {
+        homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
+            "deferred-plan",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture" },
+                "instructions": "deferred staging",
+                "workspace": { "root": "/tmp/source" },
+                "metadata": metadata,
+            }))
+            .expect("task")],
+        )
+    }
+
+    /// A sealed source artifact excludes `.git` and is extracted on the runner
+    /// without rebinding the Cook admission identity, so a Cook attempt staged
+    /// that way always failed `committed_harvest_preflight` with "source
+    /// workspace no longer matches its Cook admission identity attestation".
+    /// Only repositories small enough to fit the sealed bounds took that path,
+    /// which is why the failure looked repository-specific (#15831).
+    #[test]
+    fn deferred_cook_plans_require_the_git_workspace_stage() {
+        assert!(deferred_plan_requires_cook_workspace_stage(
+            &plan_with_task_metadata(serde_json::json!({
+                "cook_workspace_identity": { "canonical_path": "/tmp/source" }
+            }))
+        ));
+        assert!(!deferred_plan_requires_cook_workspace_stage(
+            &plan_with_task_metadata(serde_json::json!({ "cook_workspace_identity": null }))
+        ));
+        assert!(!deferred_plan_requires_cook_workspace_stage(
+            &plan_with_task_metadata(serde_json::json!({}))
+        ));
+    }
     use homeboy_core::api_jobs::JobEventKind;
     use homeboy_core::lab_contract::LabCommandContract;
     use homeboy_core::test_support::ControllerJobHarness;

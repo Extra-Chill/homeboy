@@ -457,6 +457,18 @@ impl CookRecipeStore {
         claim_lifecycle_continuation_for(self, cook_id, run_id)
     }
 
+    /// Claim for a daemon-scheduled consumer. Unlike
+    /// [`Self::claim_continuation_for`], this honors the retry deadline a
+    /// retryable failure recorded, so automatic retries are spaced instead of
+    /// exhausting the budget in one burst (#15831).
+    pub fn claim_scheduled_continuation_for(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<ScheduledContinuationClaim> {
+        claim_scheduled_lifecycle_continuation_for(self, cook_id, run_id)
+    }
+
     pub fn consume_claimed_with_dispatcher(
         &self,
         claim: ClaimedCookContinuation,
@@ -1942,6 +1954,47 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
 const LIFECYCLE_CONTINUATION_KEY: &str = "cook_continuation";
 const LIFECYCLE_CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation-lifecycle/v1";
 const MAX_CONTINUATION_RETRIES: u32 = 3;
+const CONTINUATION_RETRY_BACKOFF_BASE_SECS: i64 = 60;
+const CONTINUATION_RETRY_BACKOFF_MAX_SECS: i64 = 600;
+const CONTINUATION_RETRY_AT_KEY: &str = "next_attempt_at";
+
+/// Earliest time a scheduled consumer may reclaim a continuation after its
+/// `retries`-th retryable failure.
+///
+/// Each retry bumps the continuation generation, which immediately derives a
+/// new terminal-continuation work intent. Without a deadline the daemon burned
+/// the whole `MAX_CONTINUATION_RETRIES` budget within about a second, so a
+/// transient condition (for example a Lab artifact projection that is still
+/// being harvested) left the Cook `candidate_recoverable` with a failed
+/// continuation and no PR (#15831). Explicit operator claims ignore it.
+fn continuation_retry_deadline(retries: u64) -> String {
+    let exponent = u32::try_from(retries.saturating_sub(1).min(8)).unwrap_or(8);
+    let seconds = CONTINUATION_RETRY_BACKOFF_BASE_SECS
+        .saturating_mul(1_i64 << exponent)
+        .min(CONTINUATION_RETRY_BACKOFF_MAX_SECS);
+    (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()
+}
+
+/// Time left before a scheduled consumer may reclaim this continuation. A
+/// malformed deadline fails open so it can never strand recoverable work.
+fn continuation_retry_wait(value: Option<&Value>) -> Option<Duration> {
+    let deadline = value?.get(CONTINUATION_RETRY_AT_KEY)?.as_str()?;
+    let deadline = chrono::DateTime::parse_from_rfc3339(deadline).ok()?;
+    (deadline.with_timezone(&chrono::Utc) - chrono::Utc::now())
+        .to_std()
+        .ok()
+        .filter(|wait| !wait.is_zero())
+}
+
+/// Outcome of a claim made by an automatic (daemon-scheduled) consumer.
+pub enum ScheduledContinuationClaim {
+    Claimed(Box<ClaimedCookContinuation>),
+    /// The continuation is pending but a retry deadline spaces its next
+    /// automatic attempt; poll again after the returned wait.
+    RetryAfter(Duration),
+    /// Not claimable by this consumer; inspect the durable state.
+    Unavailable,
+}
 
 #[derive(Clone, Copy)]
 enum LifecycleContinuationTransition<'a> {
@@ -2078,6 +2131,32 @@ fn claim_lifecycle_continuation_for(
     claim_lifecycle_record(&lifecycle_store, &recipe_store.data_root(), cook_id, run_id)
 }
 
+/// Claim for an automatic consumer, honoring the retry deadline that spaces
+/// retryable failures. Explicit operator continuation keeps using
+/// [`claim_lifecycle_continuation_for`], which claims a pending entry at once.
+fn claim_scheduled_lifecycle_continuation_for(
+    recipe_store: &CookRecipeStore,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<ScheduledContinuationClaim> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
+    if let Ok(record) = lifecycle_store.read_record(run_id) {
+        let value = lifecycle_continuation(&record);
+        if lifecycle_continuation_state(value) == CookContinuationState::Pending {
+            if let Some(wait) = continuation_retry_wait(value) {
+                return Ok(ScheduledContinuationClaim::RetryAfter(wait));
+            }
+        }
+    }
+    Ok(
+        match claim_lifecycle_continuation_for(recipe_store, cook_id, run_id)? {
+            Some(claim) => ScheduledContinuationClaim::Claimed(Box::new(claim)),
+            None => ScheduledContinuationClaim::Unavailable,
+        },
+    )
+}
+
 /// Terminalize a continuation whose durable value cannot be decoded, so the
 /// queue makes progress and the failure stays inspectable on the record.
 fn terminalize_malformed_continuation(
@@ -2208,6 +2287,14 @@ fn claim_lifecycle_continuation_with_budget(
         if !lifecycle_continuation_is_claimable(lifecycle_continuation(&record)) {
             continue;
         }
+        // The queue scan is an automatic consumer: a backed-off retry is not
+        // claimable until its deadline passes (#15831).
+        if lifecycle_continuation_state(lifecycle_continuation(&record))
+            == CookContinuationState::Pending
+            && continuation_retry_wait(lifecycle_continuation(&record)).is_some()
+        {
+            continue;
+        }
         if inspected >= budget {
             return Ok(CookContinuationClaim {
                 claim: None,
@@ -2284,6 +2371,9 @@ fn claim_lifecycle_record(
         }
         let mut value = value;
         value["state"] = serde_json::json!("claimed");
+        if let Some(value) = value.as_object_mut() {
+            value.remove(CONTINUATION_RETRY_AT_KEY);
+        }
         value["claim_identity"] = serde_json::json!(claim_identity);
         value["owner_pid"] = serde_json::json!(std::process::id());
         value["claimed_at"] = serde_json::json!(agent_task_lifecycle::now_timestamp());
@@ -2343,6 +2433,8 @@ fn transition_lifecycle_continuation(
                         serde_json::json!("cook continuation retry budget exhausted");
                 } else {
                     value["state"] = serde_json::json!("pending");
+                    value[CONTINUATION_RETRY_AT_KEY] =
+                        serde_json::json!(continuation_retry_deadline(retries));
                 }
             }
             LifecycleContinuationTransition::RetryWithDiagnostic(diagnostic) => {
@@ -2443,6 +2535,28 @@ pub fn claim_continuation_for(
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
     default_store()?.claim_continuation_for(cook_id, run_id)
+}
+
+/// The continuation's recorded failure diagnostic, when it is terminally
+/// failed. Automatic consumers use it to announce the stop (#15831).
+pub fn failed_continuation_diagnostic_in_store(
+    store: &CookRecipeStore,
+    run_id: &str,
+) -> Result<Option<String>> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let record = lifecycle_store.read_record(run_id)?;
+    let value = lifecycle_continuation(&record);
+    if lifecycle_continuation_state(value) != CookContinuationState::Failed {
+        return Ok(None);
+    }
+    Ok(Some(
+        value
+            .and_then(|value| value.get("diagnostic"))
+            .and_then(Value::as_str)
+            .unwrap_or("cook continuation failed")
+            .to_string(),
+    ))
 }
 
 /// Continuation state for one Cook attempt from its authoritative lifecycle row.
@@ -4906,6 +5020,130 @@ mod tests {
             .claim_continuation_for("cook", "run")
             .unwrap()
             .is_some());
+    }
+
+    /// A retryable continuation failure must space its next *automatic* attempt
+    /// (#15831). Each retry derives a new work intent immediately, so without a
+    /// deadline the daemon burned the whole retry budget within about a second
+    /// and left a gate-passing candidate stranded at `candidate_recoverable`.
+    /// Explicit operator claims stay immediate.
+    #[test]
+    fn retryable_continuation_failure_spaces_only_automatic_reclaims() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+
+        let ScheduledContinuationClaim::Claimed(claim) = store
+            .claim_scheduled_continuation_for("cook", "run")
+            .unwrap()
+        else {
+            panic!("a fresh pending continuation is claimable at once");
+        };
+        claim.retry().unwrap();
+
+        let continuation =
+            lifecycle_store.read_record("run").unwrap().metadata["cook_continuation"].clone();
+        assert_eq!(continuation["state"], "pending");
+        assert_eq!(continuation["generation"], 1);
+        let wait = continuation_retry_wait(Some(&continuation)).expect("retry deadline");
+        assert!(wait > Duration::from_secs(30) && wait <= Duration::from_secs(60));
+
+        // Automatic consumers (scheduled work job and queue scan) wait.
+        assert!(matches!(
+            store
+                .claim_scheduled_continuation_for("cook", "run")
+                .unwrap(),
+            ScheduledContinuationClaim::RetryAfter(_)
+        ));
+        assert!(claim_next_from(&store).unwrap().is_none());
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
+        );
+
+        // Once the deadline passes the scheduled consumer claims it again and
+        // the claim clears the deadline.
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.metadata["cook_continuation"][CONTINUATION_RETRY_AT_KEY] =
+                    serde_json::json!("2020-01-01T00:00:00+00:00");
+                true
+            })
+            .unwrap();
+        let ScheduledContinuationClaim::Claimed(claim) = store
+            .claim_scheduled_continuation_for("cook", "run")
+            .unwrap()
+        else {
+            panic!("an elapsed deadline is claimable");
+        };
+        assert!(
+            lifecycle_store.read_record("run").unwrap().metadata["cook_continuation"]
+                .get(CONTINUATION_RETRY_AT_KEY)
+                .is_none()
+        );
+        claim.retry().unwrap();
+
+        // An explicit operator `cook-continue` ignores the automatic backoff.
+        assert!(store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .is_some());
+    }
+
+    /// The backoff grows with each retry and is bounded, and a malformed
+    /// deadline never strands recoverable work.
+    #[test]
+    fn continuation_retry_deadline_grows_and_fails_open() {
+        let wait = |retries| {
+            continuation_retry_wait(Some(&serde_json::json!({
+                CONTINUATION_RETRY_AT_KEY: continuation_retry_deadline(retries)
+            })))
+            .expect("future deadline")
+        };
+        assert!(wait(1) <= Duration::from_secs(60));
+        assert!(wait(2) > Duration::from_secs(60) && wait(2) <= Duration::from_secs(120));
+        assert!(wait(3) > Duration::from_secs(120) && wait(3) <= Duration::from_secs(240));
+        assert!(wait(20) <= Duration::from_secs(600));
+        assert!(continuation_retry_wait(Some(&serde_json::json!({
+            CONTINUATION_RETRY_AT_KEY: "not-a-timestamp"
+        })))
+        .is_none());
+        assert!(continuation_retry_wait(Some(&serde_json::json!({}))).is_none());
+    }
+
+    /// An exhausted retry budget leaves an inspectable diagnostic that the
+    /// automatic consumer announces instead of stopping silently (#15831).
+    #[test]
+    fn exhausted_continuation_reports_its_failure_diagnostic() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        assert_eq!(
+            failed_continuation_diagnostic_in_store(&store, "run").unwrap(),
+            None
+        );
+        for _ in 0..=MAX_CONTINUATION_RETRIES {
+            store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .expect("retry remains claimable by an explicit consumer")
+                .retry()
+                .unwrap();
+        }
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Failed
+        );
+        assert_eq!(
+            failed_continuation_diagnostic_in_store(&store, "run")
+                .unwrap()
+                .as_deref(),
+            Some("cook continuation retry budget exhausted")
+        );
     }
 
     #[test]

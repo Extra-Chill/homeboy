@@ -3,7 +3,7 @@
 //!
 //! These functions inspect provider outcomes/results to decide materializability,
 //! detect nested failed-executor status, recognize empty/incomplete runs, match
-//! required typed artifacts, and render output-binding templates. They are split
+//! required typed artifacts. They are split
 //! from the scheduling engine so the value-shaping concerns stay together.
 //! Helpers are `pub(super)` so the scheduler loop, scheduling engine, and tests
 //! can reach them without widening the crate-public surface.

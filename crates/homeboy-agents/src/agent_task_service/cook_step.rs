@@ -15,8 +15,8 @@
 //! exists only in the launcher's shell environment cannot be reproduced and is
 //! refused at admission with the names to declare.
 //!
-//! When the child exits, the observer registered here reconciles the linked
-//! Cook record the way the child would have had it survived: a handoff that
+//! When the step terminates, the durable consumer registered here reconciles
+//! the linked Cook record the way the child would have had it survived: a handoff that
 //! never materialized fails, an interrupted attempt is recorded as such, and
 //! the terminal notification is delivered once.
 
@@ -25,7 +25,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-use homeboy_core::daemon::step_job::{self, StepExit, StepJobRequest};
+use homeboy_core::daemon::step_job::{self, StepJobRequest, StepTerminalDelivery};
 use homeboy_core::daemon::workflow_job::WorkflowRunOutcome;
 use homeboy_core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use homeboy_core::{Error, ErrorCode, Result};
@@ -37,6 +37,7 @@ use crate::agent_task_lifecycle;
 pub const COOK_LAUNCH_STEP_KEY_PREFIX: &str = "agent-task-cook-launch:";
 /// Idempotency-key prefix of the step that runs one local Cook retry.
 pub const COOK_RETRY_STEP_KEY_PREFIX: &str = "agent-task-cook-retry:";
+pub const COOK_STEP_TERMINAL_CONSUMER: &str = "agent-task.cook-step";
 
 /// Process mechanics a Homeboy step needs beyond the provider base list: Git
 /// and SSH transport to the operator's agent, and locale/timezone for tools it
@@ -81,6 +82,7 @@ fn admitted_inside_runner_job() -> bool {
 
 fn is_invocation_context_env(name: &str) -> bool {
     name == step_job::STEP_JOB_ID_ENV
+        || name == step_job::STEP_JOB_STORE_ENV
         || INVOCATION_CONTEXT_ENV.contains(&name)
         || INVOCATION_CONTEXT_ENV_PREFIXES
             .iter()
@@ -201,6 +203,7 @@ pub fn cook_launch_step_request(
         args,
         cwd.display().to_string(),
         env,
+        COOK_STEP_TERMINAL_CONSUMER,
     )
     .with_linked_durable_run_id(cook_id)
 }
@@ -220,6 +223,7 @@ pub fn cook_retry_step_request(
         args,
         cwd.display().to_string(),
         env,
+        COOK_STEP_TERMINAL_CONSUMER,
     )
     .with_linked_durable_run_id(run_id)
 }
@@ -253,18 +257,20 @@ pub fn register_cook_step_hooks() {
         homeboy_core::daemon::workflow_job::register_workflow_run_progress_resolver(Arc::new(
             |cook_id: &str| workflow_cook_progress(cook_id),
         ));
-        step_job::register_step_exit_observer(Arc::new(|exit: &StepExit| {
-            if let Err(error) = observe_cook_step_exit(exit) {
-                eprintln!(
-                    "Cook step {} exit reconciliation failed: {}",
-                    exit.job_id, error.message
-                );
-            }
-        }));
+        homeboy_core::daemon::workflow_job::register_workflow_step_terminal_consumer(
+            COOK_STEP_TERMINAL_CONSUMER,
+        );
+        step_job::register_step_terminal_consumer(
+            COOK_STEP_TERMINAL_CONSUMER,
+            Arc::new(|exit| {
+                observe_cook_step_exit(exit)?;
+                Ok(json!({"reconciled": true, "job_id": exit.job_id}))
+            }),
+        );
     });
 }
 
-pub(super) fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
+pub(super) fn observe_cook_step_exit(exit: &StepTerminalDelivery) -> Result<()> {
     let Some(linked) = exit.linked_durable_run_id.as_deref() else {
         return Ok(());
     };
@@ -281,7 +287,7 @@ pub(super) fn observe_cook_step_exit(exit: &StepExit) -> Result<()> {
 ///
 /// The latest attempt the durable recipe declares speaks for the Cook. The
 /// handoff parent speaks only for a Cook it never redirected to an attempt
-/// (one that failed before materializing, which the step exit observer
+/// (one that failed before materializing, which the step terminal consumer
 /// records); a redirected parent's own state says nothing about the Cook's
 /// outcome, so an unreadable recipe or attempt then means "not yet".
 fn workflow_cook_record(
@@ -377,7 +383,7 @@ fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
     }))
 }
 
-fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
+fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let parent = store.read_record(cook_id)?;
     if exit.cancelled {
@@ -386,20 +392,20 @@ fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
         // job included. A detached launch only cancels the launch generation
         // it still owns.
         if !exit.key.starts_with(COOK_LAUNCH_STEP_KEY_PREFIX) {
-            let _ = agent_task_lifecycle::cancel_run_in_store(
+            agent_task_lifecycle::cancel_run_in_store(
                 &store,
                 cook_id,
                 Some("workflow Cook step cancelled"),
-            );
+            )?;
         } else if let Some(launcher_id) =
             parent.metadata["detached_cook_handoff"]["launcher_id"].as_str()
         {
-            let _ = agent_task_lifecycle::cancel_claimed_detached_cook_in_store(
+            agent_task_lifecycle::cancel_claimed_detached_cook_in_store(
                 &store,
                 cook_id,
                 launcher_id,
                 Some("Cook step cancelled"),
-            );
+            )?;
         }
         return Ok(());
     }
@@ -412,9 +418,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
     if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
         return Ok(());
     }
-    let Ok(index) = store.read_cook_index(cook_id) else {
-        return Ok(());
-    };
+    let index = store.read_cook_index(cook_id)?;
     let attempt = index.latest_run_id;
     let record = store.read_record(&attempt)?;
     if !record.state.is_terminal() {
@@ -423,7 +427,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepExit) -> Result<()> {
     notify_cook_attempt(cook_id, &attempt)
 }
 
-fn observe_retry_exit(run_id: &str, exit: &StepExit) -> Result<()> {
+fn observe_retry_exit(run_id: &str, exit: &StepTerminalDelivery) -> Result<()> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let record = store.read_record(run_id)?;
     let Some(cook_id) = record.metadata["cook_id"].as_str().map(str::to_string) else {
@@ -431,11 +435,11 @@ fn observe_retry_exit(run_id: &str, exit: &StepExit) -> Result<()> {
     };
     if exit.cancelled {
         if !record.state.is_terminal() {
-            let _ = agent_task_lifecycle::cancel_run_in_store(
+            agent_task_lifecycle::cancel_run_in_store(
                 &store,
                 run_id,
                 Some("Cook retry step cancelled"),
-            );
+            )?;
         }
         return Ok(());
     }

@@ -364,21 +364,6 @@ fn validate_plan_structure(plan: &AgentTaskPlan) -> Result<()> {
             )
         })?;
     }
-    for (task_id, dependencies) in &plan.output_dependencies {
-        if !task_ids.contains(task_id.as_str())
-            || dependencies
-                .depends_on
-                .iter()
-                .any(|dependency| !task_ids.contains(dependency.as_str()) || dependency == task_id)
-        {
-            return Err(Error::validation_invalid_argument(
-                "output_dependencies",
-                format!("task '{task_id}' has an unknown or self-referential dependency"),
-                Some(task_id.clone()),
-                None,
-            ));
-        }
-    }
     plan.validate_managed_services()
         .map_err(|problem| Error::validation_invalid_argument("services", problem, None, None))
 }
@@ -3412,7 +3397,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_plan_structure_rejects_duplicate_tasks_and_unknown_dependencies() {
+    fn validate_plan_structure_rejects_duplicate_tasks() {
         let workspace = tempfile::tempdir().expect("workspace");
         let mut duplicate = one_task_plan("duplicate-plan", workspace.path());
         duplicate.tasks.push(duplicate.tasks[0].clone());
@@ -3420,19 +3405,6 @@ mod tests {
             .expect_err("duplicate task")
             .message
             .contains("unique"));
-
-        let mut dependency = one_task_plan("dependency-plan", workspace.path());
-        dependency.output_dependencies.insert(
-            "same-task".to_string(),
-            crate::agent_task_scheduler::AgentTaskOutputDependencies {
-                depends_on: vec!["missing-task".to_string()],
-                bindings: HashMap::new(),
-            },
-        );
-        assert!(validate_plan_structure(&dependency)
-            .expect_err("unknown dependency")
-            .message
-            .contains("unknown"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::api_jobs::JobStore;
 use crate::test_support::with_isolated_home;
 
 fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
+    register_workflow_step_terminal_consumer(crate::daemon::step_job::STEP_RECEIPT_CONSUMER);
     let definition = WorkflowDefinition::from_value(definition).unwrap();
     definition.validate(&|_| true).unwrap();
     let inputs = definition.resolve_inputs(&BTreeMap::new()).unwrap();

@@ -1,4 +1,4 @@
-//! Scheduler dispatch, concurrency, retry, dependency-binding, matrix, and
+//! Scheduler dispatch, concurrency, retry, matrix, and
 //! cancellation behavior.
 
 use super::shared::*;
@@ -73,7 +73,7 @@ mod plan_projection_tests {
     }
 
     #[test]
-    fn static_batch_plans_remain_compatible_without_output_dependencies() {
+    fn independent_batch_plans_execute_after_json_round_trip() {
         let scheduler = AgentTaskScheduler::new(Arc::new(RecordingExecutor::new(
             HashMap::new(),
             Duration::from_millis(0),
@@ -96,9 +96,8 @@ mod plan_projection_tests {
     #[test]
     fn plan_level_component_contracts_are_preserved_on_executor_requests() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(RequestRecordingExecutor {
             observed: Arc::clone(&observed),
-            include_issue_number: true,
         }));
         let raw = serde_json::json!({
             "schema": AGENT_TASK_PLAN_SCHEMA,
@@ -141,28 +140,12 @@ mod plan_projection_tests {
     }
 
     #[test]
-    fn legacy_agent_task_plan_json_round_trips_through_homeboy_plan_projection() {
+    fn agent_task_plan_json_round_trips_through_homeboy_plan_projection() {
         let mut plan =
             AgentTaskPlan::new("plan-projection", vec![request("idea"), request("design")]);
         plan.group_key = Some("group-a".to_string());
         plan.options.max_concurrency = 2;
-        plan.metadata = json!({ "source": "compat" });
-        plan.output_dependencies.insert(
-            "design".to_string(),
-            AgentTaskOutputDependencies {
-                depends_on: vec!["idea".to_string()],
-                bindings: HashMap::from([(
-                    "issue_number".to_string(),
-                    AgentTaskOutputBinding {
-                        task_id: "idea".to_string(),
-                        path: "/outputs/issue_number".to_string(),
-                        artifact: None,
-                        required: true,
-                        default: Value::Null,
-                    },
-                )]),
-            },
-        );
+        plan.metadata = json!({ "source": "projection" });
         plan.artifact_outputs.insert(
             "idea".to_string(),
             vec![AgentTaskArtifactOutputDeclaration {
@@ -174,12 +157,12 @@ mod plan_projection_tests {
             }],
         );
 
-        let raw = serde_json::to_string(&plan).expect("serialize legacy contract");
+        let raw = serde_json::to_string(&plan).expect("serialize plan contract");
         let value: Value = serde_json::from_str(&raw).expect("serialized json");
         assert_eq!(value["schema"], AGENT_TASK_PLAN_SCHEMA);
         assert!(value.get("homeboy_plan").is_none());
 
-        let decoded: AgentTaskPlan = serde_json::from_str(&raw).expect("legacy plan decodes");
+        let decoded: AgentTaskPlan = serde_json::from_str(&raw).expect("plan decodes");
         let projected = AgentTaskPlan::from_homeboy_plan(decoded.homeboy_plan.clone());
 
         assert_eq!(
@@ -190,7 +173,11 @@ mod plan_projection_tests {
         assert_eq!(projected.plan_id, plan.plan_id);
         assert_eq!(projected.group_key, plan.group_key);
         assert_eq!(projected.tasks, plan.tasks);
-        assert_eq!(projected.output_dependencies, plan.output_dependencies);
+        assert!(projected
+            .homeboy_plan
+            .steps
+            .iter()
+            .all(|step| step.needs.is_empty()));
         assert_eq!(projected.artifact_outputs, plan.artifact_outputs);
         assert_eq!(projected.options, plan.options);
         assert_eq!(projected.metadata, plan.metadata);
@@ -199,32 +186,15 @@ mod plan_projection_tests {
     #[test]
     fn scheduler_executes_from_projected_homeboy_plan() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let scheduler = AgentTaskScheduler::new(Arc::new(OutputTemplateExecutor {
+        let scheduler = AgentTaskScheduler::new(Arc::new(RequestRecordingExecutor {
             observed: Arc::clone(&observed),
-            include_issue_number: true,
         }));
         let mut plan = AgentTaskPlan::new(
             "plan-homeboy-projection",
             vec![request("idea"), request("design")],
         );
         plan.options.max_concurrency = 2;
-        plan.tasks[1].instructions = "Build design for issue #{{outputs.issue_number}}".to_string();
-        plan.output_dependencies.insert(
-            "design".to_string(),
-            AgentTaskOutputDependencies {
-                depends_on: vec!["idea".to_string()],
-                bindings: HashMap::from([(
-                    "issue_number".to_string(),
-                    AgentTaskOutputBinding {
-                        task_id: "idea".to_string(),
-                        path: "/outputs/issue_number".to_string(),
-                        artifact: None,
-                        required: true,
-                        default: Value::Null,
-                    },
-                )]),
-            },
-        );
+        plan.tasks[1].instructions = "Build design".to_string();
         plan.rebuild_homeboy_plan();
         let projected = AgentTaskPlan::from_homeboy_plan(plan.homeboy_plan.clone());
 
@@ -237,6 +207,18 @@ mod plan_projection_tests {
 
         assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
-        assert_eq!(design.instructions, "Build design for issue #3447");
+        assert_eq!(design.instructions, "Build design");
+    }
+
+    #[test]
+    fn plan_json_rejects_retired_dependency_graph() {
+        let mut raw = serde_json::to_value(plan_with_tasks(2)).expect("plan json");
+        raw["output_dependencies"] = json!({
+            "task-1": { "depends_on": ["task-0"], "bindings": {} }
+        });
+        let error = serde_json::from_value::<AgentTaskPlan>(raw).expect_err("retired DAG rejected");
+        assert!(error
+            .to_string()
+            .contains("unknown field `output_dependencies`"));
     }
 }

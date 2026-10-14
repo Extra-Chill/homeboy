@@ -379,7 +379,6 @@ impl AgentTaskScheduler {
             .retain(|task| !recovered_ids.contains(task.task_id.as_str()));
         let max_queue_depth = plan.options.max_queue_depth.or(plan.options.max_tasks);
         let retry_budget_total = plan.options.retry.max_retries_total;
-        let output_dependencies = plan.output_dependencies.clone();
         let mut retry_budget_used = 0;
         let mut backpressure = Vec::new();
         let mut blocked_count = 0;
@@ -588,8 +587,6 @@ impl AgentTaskScheduler {
                     &queued,
                     &running,
                     &quarantined,
-                    &completed_by_task,
-                    &output_dependencies,
                     &plan.options.per_executor_concurrency,
                     &plan.options.per_model_concurrency,
                     &plan.options.resource_budget,
@@ -612,29 +609,6 @@ impl AgentTaskScheduler {
                                 );
                                 continue;
                             }
-                            if let Some(message) =
-                                AgentTaskScheduleSupport::waiting_for_task_dependencies(
-                                    &task,
-                                    &completed_by_task,
-                                    &output_dependencies,
-                                )
-                            {
-                                let outcome = AgentTaskScheduleSupport::block_scheduled_task(
-                                    &task,
-                                    "output_dependency",
-                                    message,
-                                    &mut backpressure,
-                                    &mut events,
-                                );
-                                record_completed_outcome(
-                                    &mut completed_by_task,
-                                    &mut outcomes,
-                                    outcome,
-                                );
-                                blocked_count += 1;
-                                continue;
-                            }
-
                             let task_units =
                                 task_resource_units(&task.request, &plan.options.resource_budget);
                             let max_active_units = plan
@@ -658,40 +632,25 @@ impl AgentTaskScheduler {
                         }
                         break;
                     }
-                    let dependency_wait = queued.front().and_then(|task| {
-                        AgentTaskScheduleSupport::waiting_for_task_dependencies(
+                    if let Some(task) = queued.front_mut() {
+                        AgentTaskScheduleSupport::record_resource_wait(
                             task,
-                            &completed_by_task,
-                            &output_dependencies,
-                        )
-                    });
-                    if dependency_wait.is_none() {
-                        if let Some(task) = queued.front_mut() {
-                            AgentTaskScheduleSupport::record_resource_wait(
-                                task,
-                                &running,
-                                &plan.options.resource_budget,
-                                &mut events,
-                            );
-                        }
+                            &running,
+                            &plan.options.resource_budget,
+                            &mut events,
+                        );
                     }
                     backpressure.push(AgentTaskBackpressureStatus {
-                        kind: if dependency_wait.is_some() {
-                            "output_dependency".to_string()
-                        } else {
-                            AgentTaskScheduleSupport::backpressure_kind(
-                                &queued,
-                                &running,
-                                &quarantined,
-                                &plan.options.per_executor_concurrency,
-                                &plan.options.per_model_concurrency,
-                                &plan.options.resource_budget,
-                            )
-                            .to_string()
-                        },
-                        message: dependency_wait.unwrap_or_else(|| {
-                            "queued tasks are waiting for scheduler capacity".to_string()
-                        }),
+                        kind: AgentTaskScheduleSupport::backpressure_kind(
+                            &queued,
+                            &running,
+                            &quarantined,
+                            &plan.options.per_executor_concurrency,
+                            &plan.options.per_model_concurrency,
+                            &plan.options.resource_budget,
+                        )
+                        .to_string(),
+                        message: "queued tasks are waiting for scheduler capacity".to_string(),
                         task_id: queued.front().map(|task| task.request.task_id.clone()),
                     });
                     break;
@@ -837,20 +796,6 @@ impl AgentTaskScheduler {
                 let mut request = scheduled.request;
                 if let Some(services) = services.as_ref() {
                     services.bind_into(&mut request.inputs, &mut request.metadata);
-                }
-                if let Err(outcome) = AgentTaskScheduleSupport::render_output_dependencies(
-                    &mut request,
-                    &completed_by_task,
-                    &output_dependencies,
-                ) {
-                    events.push(event(
-                        &outcome.task_id,
-                        AgentTaskState::Skipped,
-                        scheduled.attempt,
-                        outcome.summary.clone(),
-                    ));
-                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
-                    continue;
                 }
                 let task_id = request.task_id.clone();
                 if crate::agent_task_timeout::remaining_execution_deadline_ms(

@@ -4,9 +4,8 @@
 // Child modules import this prelude explicitly; parent imports do not propagate.
 pub(super) use super::super::fixtures::*;
 pub(super) use crate::agent_task::{
-    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskArtifactDeclaration,
-    AgentTaskMatrixAggregate, AgentTaskMatrixAxis, AgentTaskTypedArtifact,
-    AGENT_TASK_ARTIFACT_SCHEMA,
+    expand_agent_task_matrix, AgentTaskArtifact, AgentTaskMatrixAggregate, AgentTaskMatrixAxis,
+    AgentTaskTypedArtifact, AGENT_TASK_ARTIFACT_SCHEMA,
 };
 pub(super) use crate::agent_task_scheduler::attempt_workspace::fingerprint;
 pub(super) use crate::agent_task_scheduler::harvest::git_output_raw;
@@ -19,18 +18,6 @@ pub(super) use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub(super) use std::sync::{Arc, Mutex};
 pub(super) use std::thread;
 pub(super) use std::time::{Duration, Instant};
-
-pub(super) fn concept_packet_declaration() -> AgentTaskArtifactDeclaration {
-    AgentTaskArtifactDeclaration {
-        name: "concept_packet".to_string(),
-        artifact_type: Some("concept_packet".to_string()),
-        artifact_schema: Some("wp-site-generator/ConceptPacket/v1".to_string()),
-        path: None,
-        required: true,
-        description: None,
-        metadata: Value::Null,
-    }
-}
 
 pub(super) struct ConceptPacketExecutor {
     pub(super) observed: Arc<Mutex<Vec<AgentTaskRequest>>>,

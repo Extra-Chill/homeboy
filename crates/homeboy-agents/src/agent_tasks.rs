@@ -60,9 +60,8 @@ pub use super::agent_task_contract::agent_task_core_contract;
 // facade root for ergonomics.
 pub use super::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateStatus,
-    AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactOutputDeclaration,
-    AgentTaskArtifactPostprocessStep, AgentTaskExecutionContext, AgentTaskOutputBinding,
-    AgentTaskOutputDependencies, AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure,
+    AgentTaskAggregateTotals, AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
+    AgentTaskExecutionContext, AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure,
     AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
 };
 
@@ -296,8 +295,7 @@ pub mod provider {
 pub mod scheduler {
     pub use super::super::agent_task_schedule::{
         AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateStatus,
-        AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactOutputDeclaration,
-        AgentTaskExecutionContext, AgentTaskOutputBinding, AgentTaskOutputDependencies,
+        AgentTaskAggregateTotals, AgentTaskArtifactOutputDeclaration, AgentTaskExecutionContext,
         AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure, AgentTaskRetryPolicy,
         AgentTaskScheduleOptions, AgentTaskState,
     };

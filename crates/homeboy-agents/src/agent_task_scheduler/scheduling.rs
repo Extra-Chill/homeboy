@@ -1,9 +1,9 @@
-//! Dispatch, concurrency, and dependency-resolution engine for the agent-task
+//! Dispatch and concurrency engine for the agent-task
 //! scheduler.
 //!
 //! `AgentTaskScheduleSupport` houses the pure scheduling decisions (next
 //! dispatchable task, per-executor/per-model concurrency limits, resource
-//! budgeting, dependency binding, and totals aggregation) kept separate from
+//! budgeting, and totals aggregation) kept separate from
 //! the executor-driving loop in the parent module so the scheduling seams stay
 //! cohesive and independently testable. Helpers below are scheduling-private
 //! (`pub(super)`) so the parent module and tests can reach them without
@@ -16,15 +16,13 @@ use serde_json::Value;
 
 use super::outcome::{
     artifact_matches_required_artifact, event, evidence_matches_required_artifact,
-    invalid_required_typed_artifacts, mark_generated_from_outputs,
-    missing_required_typed_artifacts, missing_typed_artifacts_failure,
-    nested_failed_executor_status, provider_run_result_is_empty_incomplete, render_template_string,
-    runtime_result_is_materializable, typed_artifact_from_artifact, typed_artifact_from_evidence,
-    typed_artifact_from_outcome,
+    invalid_required_typed_artifacts, missing_required_typed_artifacts,
+    missing_typed_artifacts_failure, nested_failed_executor_status,
+    provider_run_result_is_empty_incomplete, runtime_result_is_materializable,
+    typed_artifact_from_artifact, typed_artifact_from_evidence, typed_artifact_from_outcome,
 };
 use super::resources::{
-    render_value_templates, resource_capacity_available, resource_is_busy, select_artifact_payload,
-    workspace_is_busy,
+    resource_capacity_available, resource_is_busy, select_artifact_payload, workspace_is_busy,
 };
 use super::*;
 
@@ -58,26 +56,15 @@ fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> Age
 }
 
 impl AgentTaskScheduleSupport {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "scheduler inputs are independently bounded resource and lifecycle state"
-    )]
     pub(super) fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
         quarantined: &[QuarantinedTask],
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
     ) -> Option<usize> {
         queued.iter().position(|task| {
-            if !Self::dependencies_satisfied(&task.request, completed_by_task, output_dependencies)
-            {
-                return false;
-            }
-
             // An existing workspace is mutable executor state. Keep one task at
             // a time in that directory so a commit range belongs to one task.
             if workspace_is_busy(task, running, quarantined) {
@@ -122,42 +109,6 @@ impl AgentTaskScheduleSupport {
         })
     }
 
-    pub(super) fn dependencies_satisfied(
-        request: &AgentTaskRequest,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
-    ) -> bool {
-        Self::dependency_task_ids(request, output_dependencies)
-            .iter()
-            .all(|task_id| completed_by_task.contains_key(task_id))
-    }
-
-    pub(super) fn waiting_for_dependencies(
-        request: &AgentTaskRequest,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
-    ) -> Option<String> {
-        let missing: Vec<String> = Self::dependency_task_ids(request, output_dependencies)
-            .into_iter()
-            .filter(|task_id| !completed_by_task.contains_key(task_id))
-            .collect();
-
-        (!missing.is_empty()).then(|| {
-            format!(
-                "task blocked waiting for output dependencies: {}",
-                missing.join(", ")
-            )
-        })
-    }
-
-    pub(super) fn waiting_for_task_dependencies(
-        task: &ScheduledTask,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
-    ) -> Option<String> {
-        Self::waiting_for_dependencies(&task.request, completed_by_task, output_dependencies)
-    }
-
     pub(super) fn block_scheduled_task(
         task: &ScheduledTask,
         kind: &str,
@@ -199,190 +150,6 @@ impl AgentTaskScheduleSupport {
             events,
         ));
         *blocked_count += 1;
-    }
-
-    pub(super) fn dependency_task_ids(
-        request: &AgentTaskRequest,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
-    ) -> Vec<String> {
-        let Some(dependencies) = output_dependencies.get(&request.task_id) else {
-            return Vec::new();
-        };
-        let mut task_ids = dependencies.depends_on.clone();
-        for binding in dependencies.bindings.values() {
-            if !task_ids.contains(&binding.task_id) {
-                task_ids.push(binding.task_id.clone());
-            }
-        }
-        task_ids
-    }
-
-    #[expect(
-        clippy::result_large_err,
-        reason = "scheduler returns the complete outcome for durable lifecycle recording"
-    )]
-    pub(super) fn render_output_dependencies(
-        request: &mut AgentTaskRequest,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-        output_dependencies: &HashMap<String, AgentTaskOutputDependencies>,
-    ) -> Result<(), AgentTaskOutcome> {
-        let Some(dependencies) = output_dependencies.get(&request.task_id) else {
-            return Ok(());
-        };
-        let bindings = match Self::resolve_output_bindings(request, dependencies, completed_by_task)
-        {
-            Ok(bindings) => bindings,
-            Err(message) => return Err(Self::skipped_output_dependency_outcome(request, message)),
-        };
-
-        request.instructions = render_template_string(&request.instructions, &bindings);
-        render_value_templates(&mut request.inputs, &bindings);
-        render_value_templates(&mut request.executor.config, &bindings);
-        render_value_templates(&mut request.workspace.materialization, &bindings);
-        render_value_templates(&mut request.metadata, &bindings);
-        for artifact in &mut request.expected_artifacts {
-            *artifact = render_template_string(artifact, &bindings);
-        }
-        mark_generated_from_outputs(request, dependencies, &bindings);
-        Ok(())
-    }
-
-    pub(super) fn resolve_output_bindings(
-        request: &AgentTaskRequest,
-        dependencies: &AgentTaskOutputDependencies,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-    ) -> Result<HashMap<String, Value>, String> {
-        let mut bindings = HashMap::new();
-        for (name, binding) in &dependencies.bindings {
-            let value = Self::select_bound_output(request, name, binding, completed_by_task)?;
-            bindings.insert(name.clone(), value);
-        }
-        Ok(bindings)
-    }
-
-    pub(super) fn select_bound_output(
-        request: &AgentTaskRequest,
-        name: &str,
-        binding: &AgentTaskOutputBinding,
-        completed_by_task: &HashMap<String, AgentTaskOutcome>,
-    ) -> Result<Value, String> {
-        let Some(outcome) = completed_by_task.get(&binding.task_id) else {
-            return Err(format!(
-                "task '{}' skipped because output binding '{}' waited for missing task '{}'",
-                request.task_id, name, binding.task_id
-            ));
-        };
-
-        // Resolve the fallback for a missing binding value: default if set,
-        // a required-error if the binding is required, else an empty string.
-        let missing_binding_fallback = |required_error: String| -> Result<Value, String> {
-            if !binding.default.is_null() {
-                return Ok(binding.default.clone());
-            }
-            if binding.required {
-                return Err(required_error);
-            }
-            Ok(Value::String(String::new()))
-        };
-
-        if let Some(artifact_binding) = &binding.artifact {
-            if let Some(typed_artifact) = outcome.typed_artifacts.iter().find(|artifact| {
-                Self::typed_artifact_matches_artifact_binding(artifact, artifact_binding)
-            }) {
-                let artifact_value = serde_json::to_value(typed_artifact).unwrap_or(Value::Null);
-                if let Some(payload_path) = &artifact_binding.payload_path {
-                    if let Some(value) = typed_artifact
-                        .payload
-                        .pointer(payload_path)
-                        .or_else(|| artifact_value.pointer(payload_path))
-                    {
-                        return Ok(value.clone());
-                    }
-                    return missing_binding_fallback(format!(
-                        "task '{}' skipped because required typed artifact binding '{}' payload was missing at '{}' from task '{}'",
-                        request.task_id, name, payload_path, binding.task_id
-                    ));
-                }
-
-                return Ok(typed_artifact.payload.clone());
-            }
-
-            let Some(artifact) = outcome.artifacts.iter().find(|artifact| {
-                artifact.kind == artifact_binding.kind
-                    && artifact_binding
-                        .artifact_id
-                        .as_ref()
-                        .map(|artifact_id| artifact.id == *artifact_id)
-                        .unwrap_or(true)
-                    && artifact_binding
-                        .schema
-                        .as_ref()
-                        .map(|schema| {
-                            artifact
-                                .metadata
-                                .get("payload_schema")
-                                .and_then(Value::as_str)
-                                == Some(schema.as_str())
-                        })
-                        .unwrap_or(true)
-            }) else {
-                return missing_binding_fallback(format!(
-                    "task '{}' skipped because required artifact binding '{}' with kind '{}' was missing from task '{}'",
-                    request.task_id, name, artifact_binding.kind, binding.task_id
-                ));
-            };
-
-            let artifact_value = serde_json::to_value(artifact).unwrap_or(Value::Null);
-            if let Some(payload_path) = &artifact_binding.payload_path {
-                if let Some(value) = artifact
-                    .metadata
-                    .get("payload")
-                    .and_then(|payload| payload.pointer(payload_path))
-                    .or_else(|| artifact_value.pointer(payload_path))
-                {
-                    return Ok(value.clone());
-                }
-                return missing_binding_fallback(format!(
-                    "task '{}' skipped because required artifact binding '{}' payload was missing at '{}' from task '{}'",
-                    request.task_id, name, payload_path, binding.task_id
-                ));
-            }
-
-            return Ok(artifact_value);
-        }
-
-        let outcome_value = serde_json::to_value(outcome).unwrap_or(Value::Null);
-        if let Some(value) = outcome_value.pointer(&binding.path) {
-            return Ok(value.clone());
-        }
-        missing_binding_fallback(format!(
-            "task '{}' skipped because required output binding '{}' was missing at '{}' from task '{}'",
-            request.task_id, name, binding.path, binding.task_id
-        ))
-    }
-
-    pub(super) fn skipped_output_dependency_outcome(
-        request: &AgentTaskRequest,
-        summary: String,
-    ) -> AgentTaskOutcome {
-        AgentTaskOutcome {
-            task_id: request.task_id.clone(),
-            status: AgentTaskOutcomeStatus::Failed,
-            summary: Some(summary.clone()),
-            failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
-            evidence_refs: vec![AgentTaskEvidenceRef {
-                kind: "scheduler".to_string(),
-                uri: "homeboy://agent-task/output-dependency-skipped".to_string(),
-                label: Some("scheduler output dependency skip".to_string()),
-            }],
-            diagnostics: vec![AgentTaskDiagnostic {
-                class: "output_dependency_missing".to_string(),
-                message: summary,
-                data: Value::Null,
-            }],
-            metadata: serde_json::json!({ "skipped": true, "skip_reason": "output_dependency_missing" }),
-            ..Default::default()
-        }
     }
 
     pub(super) fn artifact_lineage(
@@ -472,36 +239,6 @@ impl AgentTaskScheduleSupport {
             }
         }
         lineage
-    }
-
-    fn typed_artifact_matches_artifact_binding(
-        artifact: &AgentTaskTypedArtifact,
-        binding: &AgentTaskArtifactBinding,
-    ) -> bool {
-        let kind_matches = artifact.name == binding.kind
-            || artifact.artifact_type.as_deref() == Some(binding.kind.as_str())
-            || artifact.artifact_schema.as_deref() == Some(binding.kind.as_str());
-        if !kind_matches {
-            return false;
-        }
-
-        if binding.artifact_id.as_ref().map(|artifact_id| {
-            artifact
-                .artifact
-                .as_ref()
-                .map(|artifact| artifact.id.as_str())
-                == Some(artifact_id.as_str())
-                || artifact.name == *artifact_id
-        }) == Some(false)
-        {
-            return false;
-        }
-
-        binding
-            .schema
-            .as_ref()
-            .map(|schema| artifact.artifact_schema.as_deref() == Some(schema.as_str()))
-            .unwrap_or(true)
     }
 
     fn typed_artifact_matches_output_declaration(
@@ -2070,15 +1807,6 @@ impl AgentTaskScheduleSupport {
         };
 
         for outcome in outcomes {
-            if outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.class == "output_dependency_missing")
-            {
-                totals.skipped += 1;
-                continue;
-            }
-
             match outcome.status {
                 AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
                     totals.succeeded += 1

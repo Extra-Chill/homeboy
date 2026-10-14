@@ -3,7 +3,7 @@
 mod shared;
 
 mod adaptive_concurrency;
-mod artifact_binding;
+mod artifact_outputs;
 mod cancellation;
 mod concurrency;
 mod plan_projection;

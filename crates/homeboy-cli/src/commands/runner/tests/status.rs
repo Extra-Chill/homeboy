@@ -19,12 +19,13 @@ use homeboy_runner_contract::RunnerKind;
 
 use super::super::jobs::format_job_event;
 use super::super::status::{
-    declared_executable_requirement_diagnostics, declared_run_followups,
-    declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    execution_capabilities_with_local_placement, lab_runner_homeboy_output, non_local_sessions,
-    operator_summary, reconcile_output, reconciliation_outcome,
-    runner_artifact_feature_diagnostics, runner_followups, runner_followups_with_admission,
-    runner_status_operator_commands, runner_status_operator_hints, selected_admission_summary,
+    controller_local_status_output, declared_executable_requirement_diagnostics,
+    declared_run_followups, declared_runtime_diagnostics, declared_runtime_source_diagnostics,
+    declared_tool_diagnostics, execution_capabilities_with_local_placement,
+    lab_runner_homeboy_output, non_local_sessions, operator_summary, reconcile_output,
+    reconciliation_outcome, runner_artifact_feature_diagnostics, runner_followups,
+    runner_followups_with_admission, runner_status_operator_commands, runner_status_operator_hints,
+    selected_admission_summary,
 };
 use super::super::types::{RunnerConnectionOutput, RunnerReconciliationStatus};
 use crate::cli_surface::Cli;
@@ -1935,6 +1936,49 @@ fn global_capabilities_include_connected_lab_for_local_and_disconnected_remote_q
         capabilities.lab_runner_connection.connected_runner_ids,
         ["lab-connected"]
     );
+}
+
+#[test]
+fn controller_local_status_reports_local_state_without_lab_readiness() {
+    // #15935: a local query must not carry the cross-runner Lab readiness
+    // projection, which requires remote SSH probes to compute.
+    let output = controller_local_status_output("local");
+
+    assert_eq!(output.id.as_deref(), Some("local"));
+    assert!(output.extra.execution_capabilities.is_none());
+    assert!(output
+        .extra
+        .operator_hints
+        .iter()
+        .any(|hint| hint.contains("--placement local")));
+}
+
+#[test]
+fn controller_local_status_query_never_probes_a_configured_remote_runner() {
+    homeboy::test_support::with_isolated_home(|_| {
+        runner::create(r#"{"id":"local","kind":"local"}"#, false).expect("create local runner");
+        // An SSH runner on an unroutable TEST-NET address: any remote probe
+        // fails or blocks on it, so only a local-only query stays fast.
+        homeboy::core::server::create(r#"{"id":"lab","host":"192.0.2.1","user":"user"}"#, false)
+            .expect("create unroutable server");
+        runner::create(
+            r#"{"id":"lab","kind":"ssh","server_id":"lab","workspace_root":"/nonexistent"}"#,
+            false,
+        )
+        .expect("create ssh runner");
+
+        let started = std::time::Instant::now();
+        let (output, exit_code) =
+            super::super::status::status(Some("local"), false, false).expect("local status");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.extra.execution_capabilities.is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "local status took {:?}",
+            started.elapsed()
+        );
+    });
 }
 
 #[test]

@@ -912,6 +912,50 @@ impl AgentTaskLifecycleStore {
         release_cook_notification_event_claim_in_store(self, cook_id, "notification-started")
     }
 
+    /// Exactly-once marker for announcing that one attempt's automatic terminal
+    /// continuation failed. Kept separate from the Cook terminal marker so a
+    /// later operator `cook-continue` can still announce the final outcome.
+    pub fn claim_cook_continuation_failed_notification(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<bool> {
+        if cook_id.trim().is_empty() || run_id.trim().is_empty() {
+            return Ok(false);
+        }
+        claim_cook_notification_event_in_store(
+            self,
+            cook_id,
+            &continuation_failed_notification_event(run_id),
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "terminal-continuation"}),
+        )
+    }
+
+    pub fn confirm_cook_continuation_failed_notification(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<()> {
+        confirm_cook_notification_event_in_store(
+            self,
+            cook_id,
+            &continuation_failed_notification_event(run_id),
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "terminal-continuation", "state": "delivered"}),
+        )
+    }
+
+    pub fn release_cook_continuation_failed_notification_claim(
+        &self,
+        cook_id: &str,
+        run_id: &str,
+    ) -> Result<()> {
+        release_cook_notification_event_claim_in_store(
+            self,
+            cook_id,
+            &continuation_failed_notification_event(run_id),
+        )
+    }
+
     /// Commit a confirmed terminal delivery beside this store's own Cook index.
     pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
         confirm_cook_notification_in_store(self, cook_id, marker)
@@ -3027,6 +3071,13 @@ fn write_cook_index_projection(path: &PathBuf, index: &AgentTaskCookIndex) -> Re
 /// function is `default_store()?`, so the store's own method is used here: the
 /// claim marker is a bare filesystem create with no record read in front of it,
 /// and an ambient reach would land the marker in another home without failing.
+fn continuation_failed_notification_event(run_id: &str) -> String {
+    format!(
+        "notification-continuation-failed-{}",
+        sanitize_run_id(run_id)
+    )
+}
+
 pub(super) fn claim_cook_notification_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,

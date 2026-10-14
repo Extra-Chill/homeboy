@@ -1168,6 +1168,14 @@ impl CliRuntime {
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        match homeboy::core::daemon::step_job::await_step_child_start() {
+            Ok(true) => {}
+            Ok(false) => return std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("step child start gate: {}", error.message);
+                return std::process::ExitCode::FAILURE;
+            }
+        }
         #[cfg(feature = "test-support")]
         if let Some(path) = std::env::var_os("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL") {
             std::fs::write(path, b"initialized").expect("write runtime initialization sentinel");

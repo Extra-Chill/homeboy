@@ -822,6 +822,14 @@ pub fn record_active_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, TaskWorktreeState::Active, None);
 }
 
+/// Register an active task worktree whose native lifecycle is owned by
+/// `run_id`, as Cook provisioning records it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn record_active_for_run_at_for_test(id: &str, worktree_path: &Path, run_id: &str) {
+    record_for_test(id, worktree_path, TaskWorktreeState::Active, Some(run_id));
+}
+
 #[cfg(test)]
 pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, TaskWorktreeState::Removed, None);

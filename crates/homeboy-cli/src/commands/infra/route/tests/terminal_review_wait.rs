@@ -122,6 +122,7 @@ fn runner_wait_step_pins_runner_wait_and_resolved_runner_environment() {
         args,
         "/src",
         homeboy::core::env_materialization_plan::EnvMaterializationPlan::default(),
+        homeboy::core::daemon::step_job::STEP_RECEIPT_CONSUMER,
     )
     .with_wait(homeboy::core::daemon::step_job::StepWait {
         not_before: None,

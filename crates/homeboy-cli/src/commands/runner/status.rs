@@ -38,29 +38,7 @@ pub(super) fn status(
     if let Some(id) = id {
         let runners = runner::list()?;
         if is_controller_local_runner(&runners, id) {
-            // Best-effort: a controller-local query must not fail because a
-            // configured Lab runner could not be probed.
-            let lab_readiness = runner::lab_runner_readiness().ok();
-            return Ok((
-                RunnerOutput {
-                    command: "runner.status".to_string(),
-                    id: Some(id.to_string()),
-                    extra: RunnerExtra {
-                        execution_capabilities: Some(global_execution_capabilities(
-                            &runners,
-                            None,
-                            lab_readiness.as_ref(),
-                        )?),
-                        operator_hints: vec![
-                            "Controller-local execution is available; use `homeboy --placement local agent-task cook ...`."
-                                .to_string(),
-                        ],
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                0,
-            ));
+            return Ok((controller_local_status_output(id), 0));
         }
         let lab_readiness = runner::lab_runner_readiness()?;
         let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
@@ -226,6 +204,26 @@ pub(super) fn status(
         },
         0,
     ))
+}
+
+/// A controller-local query answers from local state only. Cross-runner
+/// execution capabilities (Lab admission readiness) are a remote probe and
+/// belong to `runner status` without an id or to a specific remote runner
+/// query; this query never touches a remote host (#15935).
+pub(super) fn controller_local_status_output(id: &str) -> RunnerOutput {
+    RunnerOutput {
+        command: "runner.status".to_string(),
+        id: Some(id.to_string()),
+        extra: RunnerExtra {
+            operator_hints: vec![
+                "Controller-local execution is available; use `homeboy --placement local agent-task cook ...`."
+                    .to_string(),
+                "Lab runner readiness: `homeboy runner status`.".to_string(),
+            ],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn is_controller_local_runner(runners: &[Runner], id: &str) -> bool {

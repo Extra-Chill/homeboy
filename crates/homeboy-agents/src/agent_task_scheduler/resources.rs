@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
 
-use super::outcome::{render_template_string, render_template_value};
 use super::*;
 
 pub(super) fn workspace_is_busy(
@@ -463,29 +461,6 @@ pub(super) fn adaptive_concurrency_decision(
             recent_timeouts: policy.recent_timeouts,
         },
     })
-}
-
-pub(super) fn render_value_templates(value: &mut Value, bindings: &HashMap<String, Value>) {
-    match value {
-        Value::String(raw) => {
-            if let Some(rendered) = render_template_value(raw, bindings) {
-                *value = rendered;
-            } else {
-                *raw = render_template_string(raw, bindings);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                render_value_templates(item, bindings);
-            }
-        }
-        Value::Object(object) => {
-            for value in object.values_mut() {
-                render_value_templates(value, bindings);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]

@@ -1886,37 +1886,58 @@ fn run_terminal_cook_continuation(
     checkpoint: serde_json::Value,
     progress: serde_json::Value,
 ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
-    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
+    use crate::agents::agent_task_service::{
+        CookContinuationState, ScheduledContinuationClaim, WorkJobStep,
+    };
 
     let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let Some(claim) = store.claim_continuation_for(&request.cook_id, &request.run_id)? else {
-        // A second consumer can own the continuation while this WorkJob is
-        // recovered. Only a completed claim is a completed job; an active claim
-        // must remain supervised until that consumer settles its durable state.
-        let state = crate::agents::agent_task_service::continuation_state_in_store(
-            &store,
-            &request.cook_id,
-            &request.run_id,
-        )?;
-        return match state {
-            CookContinuationState::Pending | CookContinuationState::Claimed => {
-                Ok(WorkJobStep::Continue {
-                    checkpoint,
-                    progress,
-                    wait: Duration::from_millis(250),
-                })
-            }
-            CookContinuationState::Completed => Ok(WorkJobStep::Complete(
-                serde_json::json!({ "claimed": false, "completed": true }),
-            )),
-            CookContinuationState::Absent | CookContinuationState::Failed => {
-                Err(Error::internal_unexpected(format!(
+    let claim = match store.claim_scheduled_continuation_for(&request.cook_id, &request.run_id)? {
+        ScheduledContinuationClaim::Claimed(claim) => *claim,
+        // A retryable failure spaced its next automatic attempt. Keep this job
+        // supervising the durable continuation until the deadline passes
+        // instead of failing it, which would leave the candidate stranded
+        // (#15831).
+        ScheduledContinuationClaim::RetryAfter(wait) => {
+            return Ok(WorkJobStep::Continue {
+                checkpoint,
+                progress,
+                wait: wait.min(TERMINAL_COOK_RETRY_POLL_MAX),
+            });
+        }
+        ScheduledContinuationClaim::Unavailable => {
+            // A second consumer can own the continuation while this WorkJob is
+            // recovered. Only a completed claim is a completed job; an active
+            // claim must remain supervised until that consumer settles its
+            // durable state.
+            let state = crate::agents::agent_task_service::continuation_state_in_store(
+                &store,
+                &request.cook_id,
+                &request.run_id,
+            )?;
+            return match state {
+                CookContinuationState::Pending | CookContinuationState::Claimed => {
+                    Ok(WorkJobStep::Continue {
+                        checkpoint,
+                        progress,
+                        wait: Duration::from_millis(250),
+                    })
+                }
+                CookContinuationState::Completed => Ok(WorkJobStep::Complete(
+                    serde_json::json!({ "claimed": false, "completed": true }),
+                )),
+                CookContinuationState::Failed => {
+                    announce_failed_terminal_continuation(&store, request);
+                    Err(Error::internal_unexpected(format!(
+                        "terminal Cook continuation is {state:?} without a claim"
+                    )))
+                }
+                CookContinuationState::Absent => Err(Error::internal_unexpected(format!(
                     "terminal Cook continuation is {state:?} without a claim"
-                )))
-            }
-        };
+                ))),
+            };
+        }
     };
-    let exit_code = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
+    let outcome = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
         claim,
         reconstruct_cook_attempt_dispatcher,
         |options| {
@@ -1934,18 +1955,82 @@ fn run_terminal_cook_continuation(
             )
             .map(|result| result.exit_code)
         },
-    )?;
-    if exit_code != 0 {
-        return Err(Error::internal_unexpected(format!(
+    );
+    let failure = match outcome {
+        Ok(0) => {
+            return Ok(WorkJobStep::Complete(serde_json::json!({
+                "claimed": true,
+                "cook_id": request.cook_id,
+                "run_id": request.run_id,
+                "exit_code": 0,
+            })));
+        }
+        Ok(exit_code) => Error::internal_unexpected(format!(
             "terminal Cook continuation exited with status {exit_code}"
-        )));
+        )),
+        Err(error) => error,
+    };
+    let state = crate::agents::agent_task_service::continuation_state_in_store(
+        &store,
+        &request.cook_id,
+        &request.run_id,
+    )?;
+    terminal_continuation_failure_step(state, failure, || {
+        announce_failed_terminal_continuation(&store, request)
+    })
+}
+
+/// Upper bound on one supervised wait while a continuation retry is backed
+/// off, so cancellation stays responsive during a long deadline.
+const TERMINAL_COOK_RETRY_POLL_MAX: Duration = Duration::from_secs(5);
+
+/// Settle this work job after its claimed continuation did not finish.
+///
+/// The consumer has already transitioned the durable continuation. A retryable
+/// failure leaves it `pending` under a new generation with a spaced retry
+/// deadline, and that generation derives its own work intent, so this job
+/// completes and hands the retry over. Failing it instead surfaced as an opaque
+/// `ValidationInvalidArgument` work job while the Cook silently stayed
+/// `candidate_recoverable` (#15831). A terminally failed continuation is
+/// announced before the job fails, so the stop is never silent.
+fn terminal_continuation_failure_step(
+    state: crate::agents::agent_task_service::CookContinuationState,
+    failure: Error,
+    announce_failed: impl FnOnce(),
+) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
+
+    match state {
+        CookContinuationState::Pending => Ok(WorkJobStep::Complete(serde_json::json!({
+            "claimed": true,
+            "retry_scheduled": true,
+            "error_code": failure.code.as_str(),
+            "message": failure.message,
+        }))),
+        CookContinuationState::Failed => {
+            announce_failed();
+            Err(failure)
+        }
+        _ => Err(failure),
     }
-    Ok(WorkJobStep::Complete(serde_json::json!({
-        "claimed": true,
-        "cook_id": request.cook_id,
-        "run_id": request.run_id,
-        "exit_code": exit_code,
-    })))
+}
+
+fn announce_failed_terminal_continuation(
+    store: &crate::agents::agent_task_service::CookRecipeStore,
+    request: &TerminalCookJobRequest,
+) {
+    let diagnostic = crate::agents::agent_task_service::failed_continuation_diagnostic_in_store(
+        store,
+        &request.run_id,
+    )
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "cook continuation failed".to_string());
+    crate::agents::agent_task_notify::cook_continuation_failed(
+        &request.cook_id,
+        &request.run_id,
+        &diagnostic,
+    );
 }
 
 fn terminal_cook_work_submission(
@@ -2510,6 +2595,7 @@ fn defer_until_runner_eligible(
         args,
         cwd.display().to_string(),
         environment,
+        homeboy::core::daemon::step_job::STEP_RECEIPT_CONSUMER,
     )
     .with_wait(homeboy::core::daemon::step_job::StepWait {
         not_before: None,

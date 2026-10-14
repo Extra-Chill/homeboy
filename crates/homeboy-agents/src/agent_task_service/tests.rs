@@ -1891,16 +1891,27 @@ fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
         .expect("running attempt");
         index_cook_attempt(cook_id, &attempt_id);
 
-        let exit = homeboy_core::daemon::step_job::StepExit {
+        let exit = homeboy_core::daemon::step_job::StepTerminalDelivery {
             job_id: "step-job".to_string(),
             key: "wf-instance/cook/1/item-0/1".to_string(),
+            request: homeboy_core::daemon::step_job::StepJobRequest::new(
+                "wf-instance/cook/1/item-0/1",
+                "/bin/sh",
+                vec![],
+                "/tmp",
+                Default::default(),
+                super::cook_step::COOK_STEP_TERMINAL_CONSUMER,
+            ),
+            checkpoint: None,
+            error: None,
+            outcome: homeboy_core::daemon::step_job::StepTerminalOutcome::Cancelled,
             linked_durable_run_id: Some(cook_id.to_string()),
-            child: homeboy_core::daemon::step_job::StepChild {
+            child: Some(homeboy_core::daemon::step_job::StepChild {
                 pid: u32::MAX,
                 start_identity: homeboy_core::process::ProcessStartIdentity::Linux {
                     starttime_ticks: 1,
                 },
-            },
+            }),
             exit_code: None,
             cancelled: true,
             log_path: std::path::PathBuf::new(),
@@ -1913,6 +1924,64 @@ fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
                 .state,
             AgentTaskRunState::Cancelled
         );
+    });
+}
+
+#[test]
+fn cook_step_reconciliation_failure_retains_delivery_until_lifecycle_is_available() {
+    with_isolated_home(|home| {
+        use homeboy_core::daemon::step_job::StepJobDriver;
+        use homeboy_core::test_support::ControllerJobHarness;
+        super::cook_step::register_cook_step_hooks();
+        let cook_id = "cook-terminal-retry";
+        let request = super::cook_step::cook_launch_step_request(
+            cook_id,
+            "launcher",
+            std::path::Path::new("/bin/sh"),
+            vec!["-c".to_string(), "exit 1".to_string()],
+            home.path(),
+            Default::default(),
+        );
+        let path = home.path().join("cook-jobs.json");
+        let harness = ControllerJobHarness::durable_queued(
+            std::sync::Arc::new(StepJobDriver),
+            serde_json::to_value(request).unwrap(),
+            &path,
+            "cook-lease",
+        )
+        .unwrap();
+        harness.start_via_controller_boundary().unwrap();
+        harness.wait_until_terminal().unwrap();
+        assert!(
+            harness.store().deliver_pending_step_terminals().is_err(),
+            "missing lifecycle must not ACK"
+        );
+        assert_eq!(
+            harness
+                .store()
+                .pending_step_terminal_deliveries()
+                .unwrap()
+                .len(),
+            1
+        );
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .unwrap();
+        let restarted =
+            homeboy_core::api_jobs::JobStore::open_without_reconciliation(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        restarted.deliver_pending_step_terminals().unwrap();
+        assert!(restarted
+            .pending_step_terminal_deliveries()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            agent_task_lifecycle::exact_record(cook_id).unwrap().state,
+            AgentTaskRunState::Failed
+        );
+        restarted.deliver_pending_step_terminals().unwrap();
     });
 }
 
