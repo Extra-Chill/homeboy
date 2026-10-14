@@ -10,6 +10,7 @@ Component configuration defines buildable and deployable units stored in `compon
   "name": "string",
   "local_path": "string",
   "remote_path": "string",
+  "default_verify_gates": ["shell command"],
   "build_artifact": "string",
   "deploy_together": ["component-id"],
   "artifact_inputs": [
@@ -64,6 +65,7 @@ Component configuration defines buildable and deployable units stored in `compon
 ### Optional Fields
 
 - **`name`** (string): Human-readable component name, defaults to `id`
+- **`default_verify_gates`** (array): Public verification commands used by `agent-task cook` when no `--verify` or private verification gates are supplied. Explicit per-run gates take precedence.
 - **`extract_command`** (string): Command to execute after artifact upload, runs inside target directory
   - Supports template variables: `{artifact}`, `{targetDir}`
 - **`version_targets`** (array): List of version detection patterns
