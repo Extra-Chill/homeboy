@@ -16,15 +16,13 @@ use crate::{paths, Result};
 /// older version is refused with an actionable error instead of upgraded.
 /// Changing the schema means editing the baseline and bumping this version,
 /// which deliberately makes every existing store fail to open.
-pub(crate) const SCHEMA_VERSION: i64 = 28;
+pub(crate) const SCHEMA_VERSION: i64 = 29;
 
 /// The full observation-store schema at [`SCHEMA_VERSION`].
 ///
-/// Column order matches what the historical migrations produced (columns
-/// added by `ALTER TABLE` sit after the original columns), so positional
-/// reads and a store created by the old migration chain are indistinguishable.
-/// `schema_equivalence_tests` pins this against a fixture captured from the
-/// migration chain itself.
+/// There is no upgrade path: a store at any other version is refused and the
+/// operator recreates it. `baseline_schema_matches_the_pinned_fixture` pins
+/// this against a committed snapshot so accidental drift is caught.
 const BASELINE_SCHEMA: &str = r#"
 CREATE TABLE schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -43,7 +41,10 @@ CREATE TABLE runs (
     homeboy_version TEXT,
     git_sha TEXT,
     rig_id TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    -- Control-plane mission this run belongs to. A run is its own mission
+    -- when unset; missions are derived from runs, never stored separately.
+    mission_id TEXT
 );
 
 -- Equality filters followed by started_at let latest/list queries walk a
@@ -54,6 +55,18 @@ CREATE INDEX idx_runs_status_started_at_desc
     ON runs(status, started_at DESC, id DESC);
 CREATE INDEX idx_runs_kind_component_started_at_desc
     ON runs(kind, component_id, started_at DESC, id DESC);
+-- Mission reads group a mission's runs and order missions by recency.
+CREATE INDEX idx_runs_mission_started_at
+    ON runs(mission_id, started_at ASC, id ASC)
+    WHERE mission_id IS NOT NULL;
+-- A run joins at most one mission, once: rebinding it to another mission
+-- would silently move it between control-plane resources.
+CREATE TRIGGER runs_mission_is_immutable
+    BEFORE UPDATE OF mission_id ON runs
+    WHEN OLD.mission_id IS NOT NULL AND NEW.mission_id IS NOT OLD.mission_id
+BEGIN
+    SELECT RAISE(ABORT, 'run cannot move to a different mission');
+END;
 -- Terminal retention selects known statuses before its finished-at cutoff.
 CREATE INDEX idx_runs_status_finished_at
     ON runs(status, finished_at ASC, id ASC);
@@ -189,52 +202,6 @@ CREATE INDEX idx_findings_tool_file
     ON findings(tool, file);
 CREATE INDEX idx_findings_fingerprint
     ON findings(fingerprint);
-
-CREATE TABLE triage_items (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    repo_owner TEXT NOT NULL,
-    repo_name TEXT NOT NULL,
-    item_type TEXT NOT NULL,
-    number INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    title TEXT NOT NULL,
-    url TEXT NOT NULL,
-    checks TEXT,
-    review_decision TEXT,
-    merge_state TEXT,
-    next_action TEXT,
-    comments_count INTEGER,
-    reviews_count INTEGER,
-    last_comment_at TEXT,
-    last_review_at TEXT,
-    updated_at TEXT,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    observed_at TEXT NOT NULL,
-    FOREIGN KEY(run_id) REFERENCES runs(id)
-);
-CREATE INDEX idx_triage_items_run
-    ON triage_items(run_id);
-CREATE INDEX idx_triage_items_repo_item
-    ON triage_items(provider, repo_owner, repo_name, item_type, number);
-
-CREATE TABLE control_plane_missions (
-    id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE control_plane_mission_runs (
-    mission_id TEXT NOT NULL,
-    run_id TEXT NOT NULL UNIQUE,
-    PRIMARY KEY(mission_id, run_id),
-    FOREIGN KEY(mission_id) REFERENCES control_plane_missions(id),
-    FOREIGN KEY(run_id) REFERENCES runs(id)
-);
-CREATE INDEX idx_control_plane_missions_created
-    ON control_plane_missions(created_at DESC, id DESC);
-CREATE INDEX idx_control_plane_mission_runs_mission
-    ON control_plane_mission_runs(mission_id, run_id);
 
 CREATE TABLE control_plane_event_appends (
     run_id TEXT NOT NULL,
@@ -456,6 +423,7 @@ fn unsupported_store_error(path: &Path, found: Option<i64>) -> crate::Error {
 pub(crate) fn open_initialized_connection(path: &Path) -> Result<Connection> {
     with_initialization_lock(path, || {
         let connection = open_connection(path)?;
+        ensure_incremental_auto_vacuum(&connection)?;
         ensure_wal_journal_mode(&connection)?;
         ensure_schema(&connection, path)?;
         Ok(connection)
@@ -534,6 +502,18 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+/// Request incremental auto-vacuum so retention can return freed pages to the
+/// filesystem (`PRAGMA incremental_vacuum`) without a full `VACUUM`. SQLite
+/// only honours this on a database with no tables yet and before it enters
+/// WAL mode, so it must run first; on an existing store it is a no-op.
+fn ensure_incremental_auto_vacuum(connection: &Connection) -> Result<()> {
+    connection
+        .pragma_update(None, "auto_vacuum", "INCREMENTAL")
+        .map_err(sqlite_error(
+            "request observation store incremental auto-vacuum",
+        ))
+}
+
 fn ensure_wal_journal_mode(connection: &Connection) -> Result<()> {
     let mode: String = connection
         .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
@@ -570,7 +550,7 @@ fn enforce_foreign_keys(connection: &Connection) -> Result<()> {
         return Err(crate::Error::internal_unexpected(
             "observation store could not enable PRAGMA foreign_keys, so the FOREIGN KEY(run_id) \
              REFERENCES runs(id) constraints this schema declares would not be enforced and \
-             deleting a run would orphan its artifacts, findings, triage items and trace rows",
+             deleting a run would orphan its artifacts, findings and trace rows",
         ));
     }
     Ok(())
@@ -745,31 +725,48 @@ mod tests {
         );
     }
 
-    /// The schema a store created by the historical 28-migration chain had,
-    /// captured from unmodified `origin/main` (96a210446) by opening a fresh
-    /// store and snapshotting it with [`schema_snapshot`]. Each object's
-    /// original `sql` is kept verbatim so tests can also rebuild such a store.
+    /// The schema a fresh store has at [`SCHEMA_VERSION`], captured with
+    /// [`schema_snapshot`]. Each object's `sql` is kept verbatim so tests can
+    /// also rebuild such a store. Regenerate it with
+    /// `HOMEBOY_WRITE_SCHEMA_FIXTURE=1 cargo test -p homeboy-core --lib
+    /// baseline_schema_matches_the_pinned_fixture` after an intended change.
+    const SCHEMA_FIXTURE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/observation-schema/v29-baseline-schema.json"
+    );
     const MIGRATED_SCHEMA_FIXTURE: &str =
-        include_str!("../../../tests/fixtures/observation-schema/v28-migrated-schema.json");
+        include_str!("../../../tests/fixtures/observation-schema/v29-baseline-schema.json");
 
     fn migrated_schema_fixture() -> serde_json::Value {
-        serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("migrated schema fixture")
+        serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("schema fixture")
     }
 
-    /// The squashed baseline must be indistinguishable from what the deleted
-    /// migration chain produced: every table, column (order, type, NOT NULL,
-    /// default, primary-key position), foreign key, CHECK and UNIQUE
-    /// constraint, index (columns, collation, direction, uniqueness, partial
-    /// predicate) and trigger. `sql` text is compared after collapsing
-    /// whitespace only, which is how `ALTER TABLE ADD COLUMN` rewrote it.
+    /// The baseline must match the pinned fixture exactly: every table,
+    /// column (order, type, NOT NULL, default, primary-key position), foreign
+    /// key, CHECK and UNIQUE constraint, index (columns, collation, direction,
+    /// uniqueness, partial predicate) and trigger. `sql` text is compared after
+    /// collapsing whitespace only. Any difference is a schema change, which
+    /// needs a new [`SCHEMA_VERSION`] because stores are never migrated.
     #[test]
-    fn baseline_schema_matches_the_historical_migration_chain() {
-        let fixture = migrated_schema_fixture();
-        assert_eq!(fixture["schema_version"], SCHEMA_VERSION);
-
+    fn baseline_schema_matches_the_pinned_fixture() {
         let directory = tempfile::tempdir().expect("temp dir");
         let connection = open_initialized_connection(&directory.path().join("observations.sqlite"))
             .expect("create baseline store");
+        if std::env::var_os("HOMEBOY_WRITE_SCHEMA_FIXTURE").is_some() {
+            let mut snapshot = schema_snapshot(&connection);
+            snapshot["schema_version"] = SCHEMA_VERSION.into();
+            snapshot["recorded_versions"] = serde_json::json!([SCHEMA_VERSION]);
+            std::fs::write(
+                SCHEMA_FIXTURE_PATH,
+                serde_json::to_string_pretty(&snapshot).unwrap() + "\n",
+            )
+            .expect("write schema fixture");
+        }
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(SCHEMA_FIXTURE_PATH).expect("read schema fixture"),
+        )
+        .expect("schema fixture");
+        assert_eq!(fixture["schema_version"], SCHEMA_VERSION);
 
         let mut expected = fixture.clone();
         let expected = expected.as_object_mut().expect("fixture object");
@@ -781,7 +778,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string_pretty(&actual).unwrap(),
             serde_json::to_string_pretty(&expected).unwrap(),
-            "the baseline schema drifted from the historical migration chain"
+            "the baseline schema drifted from the pinned fixture; bump SCHEMA_VERSION and regenerate it"
         );
         assert_eq!(recorded_versions(&connection), vec![SCHEMA_VERSION]);
     }
@@ -859,15 +856,15 @@ mod tests {
         );
     }
 
-    /// A store the migration chain brought to the current version -- with its
-    /// 28 version records and its rows -- opens without a single change.
+    /// A store already at the current version, with its rows, opens without a
+    /// single change.
     #[test]
     fn a_store_at_the_current_version_opens_unchanged() {
         let directory = tempfile::tempdir().expect("temp dir");
         let path = directory.path().join("observations.sqlite");
         {
             let connection = Connection::open(&path).expect("create current store");
-            replay_migrated_schema(&connection, 1..=SCHEMA_VERSION);
+            replay_migrated_schema(&connection, SCHEMA_VERSION..=SCHEMA_VERSION);
             connection
                 .execute_batch(
                     "INSERT INTO runs(id, kind, started_at, status) \
