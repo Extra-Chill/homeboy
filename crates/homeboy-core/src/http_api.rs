@@ -501,10 +501,11 @@ where
         }
         _ => {}
     }
-    // Boundary: one observation-backed HTTP request is one unit of work, so
-    // the store is opened exactly once. Control-plane reads return above and
-    // never open this unrelated store.
-    let store = ObservationStore::open_initialized()?;
+    // Boundary: only the run, artifact and finding readers below use the
+    // observation store, and each opens it exactly once for the request.
+    // Component, rig, activity, job and sandbox endpoints never open it, so an
+    // unavailable store cannot fail requests that do not depend on it.
+    let open_store = ObservationStore::open_initialized;
     let body = match &endpoint {
         HttpEndpoint::Components => json!({
             "command": "api.components.list",
@@ -538,14 +539,15 @@ where
         }
         HttpEndpoint::Runs => json!({
             "command": "api.runs.list",
-            "runs": list_runs(&store, &request.path, None, job_store)?,
+            "runs": list_runs(&open_store()?, &request.path, None, job_store)?,
             "active_runner_jobs": active_runner_jobs_for_path(&request.path, job_store),
         }),
         HttpEndpoint::Run { id } => json!({
             "command": "api.runs.show",
-            "run": show_run(&store, id, job_store)?,
+            "run": show_run(&open_store()?, id, job_store)?,
         }),
         HttpEndpoint::RunArtifacts { id } => {
+            let store = open_store()?;
             require_run(&store, id)?;
             // This route predates pagination. Keep an absent pagination request
             // exhaustive for deployed old clients; new CLI clients opt in by
@@ -587,9 +589,10 @@ where
             }
         }
         HttpEndpoint::RunArtifactContent { id, artifact_id } => {
-            artifact_content(&store, id, artifact_id)?
+            artifact_content(&open_store()?, id, artifact_id)?
         }
         HttpEndpoint::RunFindings { id } => {
+            let store = open_store()?;
             require_run(&store, id)?;
             json!({
                 "command": "api.runs.findings",
@@ -607,7 +610,7 @@ where
         }
         HttpEndpoint::BenchRuns => json!({
             "command": "api.bench.runs",
-            "runs": list_runs(&store, &request.path, Some("bench"), job_store)?,
+            "runs": list_runs(&open_store()?, &request.path, Some("bench"), job_store)?,
         }),
         // Deliberately does NOT federate runner-resident records. The daemon
         // serves this on a single-threaded accept loop, so a bounded runner
