@@ -371,6 +371,7 @@ impl JobStore {
         &self,
         completion: Completion,
         cancellation_requested: bool,
+        controller: &ControllerJobState,
     ) -> Result<Completion> {
         let Some(persistence) = &self.persistence else {
             return Ok(completion);
@@ -394,14 +395,30 @@ impl JobStore {
                 Some("serialize controller completion custody".to_string()),
             )
         })?;
-        let connection = super::super::persistence::open_tombstone_store(&persistence.path)?;
-        connection
+        let mut connection = super::super::persistence::open_tombstone_store(&persistence.path)?;
+        let transaction = connection.transaction().map_err(index_error)?;
+        transaction
             .execute(
                 "INSERT INTO controller_completions (job_id, payload) VALUES (?1, ?2)
              ON CONFLICT(job_id) DO UPDATE SET payload = excluded.payload",
                 params![completion.job_id.to_string(), raw],
             )
             .map_err(index_error)?;
+        if controller.job_type == crate::daemon::step_job::STEP_JOB_TYPE {
+            if let Some(delivery) = crate::daemon::step_job::terminal_delivery(
+                &completion.job_id.to_string(),
+                &controller.request,
+                controller.checkpoint.as_ref(),
+                Some(completion.status),
+                (completion.status == JobStatus::Failed).then(
+                    || serde_json::json!({"message": completion.message, "data": completion.data}),
+                ),
+                cancellation_requested,
+            )? {
+                super::terminal_delivery::retain_on(&transaction, &delivery, true)?;
+            }
+        }
+        transaction.commit().map_err(index_error)?;
         Ok(completion)
     }
 
@@ -488,6 +505,7 @@ impl JobStore {
                 data,
             },
             controller.cancellation_requested,
+            controller,
         )?;
         // Copy only once a real, legal mutation has durable completion custody.
         let prior = inner.clone();

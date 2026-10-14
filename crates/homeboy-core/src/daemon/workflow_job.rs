@@ -41,6 +41,18 @@ const OUTPUT_FILE: &str = "output.json";
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024;
 const POLL: Duration = Duration::from_millis(500);
 
+fn step_terminal_consumer() -> &'static RwLock<Option<String>> {
+    static CONSUMER: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+    CONSUMER.get_or_init(|| RwLock::new(None))
+}
+
+/// Domain consumer selected for linked workflow steps, frozen into each request.
+pub fn register_workflow_step_terminal_consumer(id: &str) {
+    *step_terminal_consumer()
+        .write()
+        .expect("workflow terminal consumer") = Some(id.to_string());
+}
+
 /// The admitted, immutable request for one workflow instance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -666,7 +678,16 @@ pub fn step_request(
             }
         }
     };
-    let mut step = StepJobRequest::new(submission.key.clone(), program, args, cwd, env);
+    let consumer = if linked_run.is_some() {
+        step_terminal_consumer()
+            .read()
+            .expect("workflow terminal consumer")
+            .clone()
+            .ok_or_else(|| invalid("linked workflow step requires a terminal consumer"))?
+    } else {
+        super::step_job::STEP_RECEIPT_CONSUMER.to_string()
+    };
+    let mut step = StepJobRequest::new(submission.key.clone(), program, args, cwd, env, consumer);
     if let Some(run_id) = linked_run {
         step = step.with_linked_durable_run_id(run_id);
     }

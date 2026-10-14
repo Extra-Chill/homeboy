@@ -125,7 +125,17 @@ pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
                CREATE TABLE IF NOT EXISTS controller_completions (
                   job_id TEXT PRIMARY KEY NOT NULL,
                   payload TEXT NOT NULL
-              );
+               );
+               CREATE TABLE IF NOT EXISTS step_terminal_deliveries (
+                  job_id TEXT PRIMARY KEY NOT NULL,
+                  payload TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+                  last_error TEXT,
+                  receipt TEXT
+               );
+               CREATE INDEX IF NOT EXISTS step_terminal_deliveries_pending
+                  ON step_terminal_deliveries(next_attempt_ms) WHERE receipt IS NULL;
                CREATE TABLE IF NOT EXISTS daemon_store_state (
                   id INTEGER PRIMARY KEY CHECK (id = 1),
                   generation INTEGER NOT NULL,

@@ -462,12 +462,16 @@ fn generation_active_jobs(
     let store = crate::api_jobs::JobStore::open_without_reconciliation(
         Path::new(&entry.endpoint.state_dir).join("jobs.json"),
     )?;
+    // Terminal callbacks still belong to the daemon even after the job row is
+    // pruned. Shared-store generations remain pinned until this custody ACKs.
+    let pending_deliveries = store.pending_step_terminal_delivery_count()?;
     Ok(store
         .list()
         .into_iter()
         .filter(|job| !job.status.is_terminal())
         .filter(|job| registry.job_owner(&job.id.to_string()) == Some(lease_id))
-        .count())
+        .count()
+        + pending_deliveries)
 }
 
 /// Whether a generation owns no non-terminal durable job, derived from its

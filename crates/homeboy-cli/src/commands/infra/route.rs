@@ -2595,6 +2595,7 @@ fn defer_until_runner_eligible(
         args,
         cwd.display().to_string(),
         environment,
+        homeboy::core::daemon::step_job::STEP_RECEIPT_CONSUMER,
     )
     .with_wait(homeboy::core::daemon::step_job::StepWait {
         not_before: None,
