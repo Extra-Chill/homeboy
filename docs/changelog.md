@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.427.0] - 2026-10-14
+
+### Added
+- read rig workload files and let a workload file escalate safety
+
+### Changed
+- collapse daemon generations into one in-place daemon per state dir
+
+### Fixed
+- admit every descendant of the authorized step child at the start gate
+- scope the store file to its schema version
+
 ## [0.426.2] - 2026-10-14
 
 ### Changed
