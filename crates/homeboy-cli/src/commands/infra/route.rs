@@ -556,10 +556,24 @@ pub(crate) fn route_after_parse_with_provenance(
     }
 }
 
-pub(crate) fn runner_provider_query_requires_runner_exec(
+pub(crate) fn run_runner_provider_query(
     runner_id: &str,
     normalized_args: &[String],
-) -> homeboy::core::Error {
+) -> homeboy::core::Result<(homeboy::runner::runners::RunnerExecOutput, i32)> {
+    let command = runner_provider_query_command(normalized_args);
+    let options = homeboy::runner::runners::RunnerExecOptions {
+        command,
+        raw_exec: true,
+        print_handoff: false,
+        mirror_evidence: false,
+        ..Default::default()
+    };
+    homeboy::runner::runners::exec_request(homeboy::runner::runners::RunnerExecRequest::new(
+        runner_id, options,
+    ))
+}
+
+fn runner_provider_query_command(normalized_args: &[String]) -> Vec<String> {
     let mut command = vec!["homeboy".to_string()];
     let mut skip_value = false;
     for argument in crate::command_capability::homeboy_owned_args(normalized_args)
@@ -604,26 +618,20 @@ pub(crate) fn runner_provider_query_requires_runner_exec(
         }
         command.push(argument.clone());
     }
-    let replay = format!(
-        "homeboy runner exec {} -- {}",
-        homeboy::core::engine::shell::quote_arg(runner_id),
-        command
-            .iter()
-            .map(|argument| homeboy::core::engine::shell::quote_arg(argument))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    homeboy::core::Error::validation_invalid_argument(
-        "runner",
-        "`agent-task providers --runner` cannot use durable Lab workspace staging; no offload was created. Query readiness through daemon-backed runner exec instead.",
-        Some(replay.clone()),
-        Some(vec![format!("Run `{replay}` to query the selected runner directly.")]),
-    )
+    command
 }
 
 pub(crate) fn is_agent_task_providers_query(args: &[String]) -> bool {
     args.windows(2)
         .any(|window| window[0] == "agent-task" && window[1] == "providers")
+}
+
+pub(crate) fn is_provider_readiness_query(args: &[String]) -> bool {
+    let args = crate::command_capability::homeboy_owned_args(args);
+    is_agent_task_providers_query(args)
+        && args
+            .iter()
+            .any(|argument| argument == "--validate-readiness")
 }
 
 fn materialized_placement_identity(
