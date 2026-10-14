@@ -2037,6 +2037,26 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
             matches!(waiting, WorkJobStep::Continue { checkpoint: next, .. } if next == checkpoint)
         );
 
+        // A retryable failure backs the continuation off. The scheduled job
+        // keeps supervising it (bounded poll) instead of failing and stranding
+        // the candidate (#15831).
+        claim.retry().expect("retryable failure returns the claim");
+        let backed_off = handler
+            .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+            .expect("backed-off retry stays supervised");
+        assert!(matches!(
+            backed_off,
+            WorkJobStep::Continue { checkpoint: ref next, wait, .. }
+                if *next == checkpoint
+                    && wait > std::time::Duration::from_millis(250)
+                    && wait <= TERMINAL_COOK_RETRY_POLL_MAX
+        ));
+
+        // An explicit operator claim ignores the automatic backoff.
+        let claim = store
+            .claim_continuation_for(cook_id, run_id)
+            .expect("claim lookup")
+            .expect("operator claim ignores the automatic backoff");
         claim.complete().expect("first owner completes");
         let replay = handler
             .advance(checkpoint, WorkJobInvocation::Resume)

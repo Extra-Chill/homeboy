@@ -828,3 +828,64 @@ fn progress_does_not_reach_an_ambient_default_transport() {
 fn batch_emission_is_inert_without_a_configured_transport() {
     homeboy_core::test_support::with_isolated_home(|_| {});
 }
+
+#[test]
+fn continuation_failed_payload_names_the_stop_and_the_rearm_command() {
+    let payload = continuation_failed_payload(
+        "cook-stalled",
+        "cook-stalled-attempt-1-abcd1234",
+        "cook continuation retry budget exhausted",
+    );
+    assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
+    let body = payload.render_body();
+    assert!(body.contains("continuation_failed"));
+    assert!(body.contains("cook continuation retry budget exhausted"));
+    assert!(payload.actions.iter().any(|action| action
+        .command
+        .contains("cook-continue cook-stalled-attempt-1-abcd1234 --rearm")));
+}
+
+/// A failed automatic terminal continuation is announced once per attempt and
+/// never consumes the Cook's own terminal announcement (#15831).
+#[test]
+fn failed_terminal_continuation_is_announced_once_without_consuming_cook_terminal() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("test.cook", vec!["true"]);
+        set_default_transport("test.cook");
+        let store = test_lifecycle_store();
+        let cook_id = "cook-continuation-failed";
+        let run_id = "cook-continuation-failed-attempt-1-abcd1234";
+
+        cook_continuation_failed(cook_id, run_id, "cook continuation retry budget exhausted");
+        assert!(
+            !store
+                .claim_cook_continuation_failed_notification(cook_id, run_id)
+                .unwrap(),
+            "a delivered announcement consumes its once marker"
+        );
+        assert!(
+            store
+                .claim_cook_continuation_failed_notification(cook_id, "another-attempt")
+                .unwrap(),
+            "the marker is scoped to one attempt"
+        );
+        assert!(
+            crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &store, cook_id, "test"
+            )
+            .unwrap(),
+            "the Cook terminal announcement stays eligible"
+        );
+    });
+}
+
+#[test]
+fn undelivered_continuation_failure_stays_eligible() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        cook_continuation_failed("cook-x", "cook-x-attempt-1", "failed");
+        assert!(store
+            .claim_cook_continuation_failed_notification("cook-x", "cook-x-attempt-1")
+            .unwrap());
+    });
+}
