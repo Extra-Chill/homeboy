@@ -285,6 +285,36 @@
       "HOMEBOY_FUZZ_ISOLATION"
     ]
   },
+  "workloads": {
+    "fuzz": {
+      "script": "scripts/workload/fuzz-workload.sh",
+      "env": ["HOMEBOY_NODE_FUZZ_COMMAND", "HOMEBOY_NODE_FUZZ_SCRIPT"],
+      "runtime_helpers": [
+        { "id": "runtime-settings" }
+      ],
+      "list_probes": [
+        {
+          "type": "json_pointer",
+          "path": "package.json",
+          "pointer": "/scripts/fuzz",
+          "id": "package-script-fuzz",
+          "label": "package.json scripts.fuzz",
+          "description": "The package.json fuzz script executed by the Node.js fuzz runner."
+        }
+      ],
+      "result_schema": "homeboy/fuzz-campaign/v1",
+      "replay_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-case.sh\"",
+      "minimize_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-case.sh\"",
+      "compare": {
+        "metrics": [
+          { "name": "cases_failed", "direction": "lower_is_better" },
+          { "name": "findings_open", "direction": "lower_is_better" }
+        ],
+        "findings_key": "fingerprint"
+      },
+      "safety_class": "read_only"
+    }
+  },
   "actions": [
     {
       "id": "release.package",

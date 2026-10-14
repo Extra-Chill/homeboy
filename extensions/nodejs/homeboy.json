@@ -45,7 +45,8 @@
       "bash scripts/test/nodejs-targeted-script-smoke.sh",
       "bash scripts/test/typescript-test-loader-smoke.sh",
       "bash scripts/trace/nodejs-trace-runner-smoke.sh",
-      "bash scripts/fuzz/nodejs-fuzz-runner-smoke.sh"
+      "bash scripts/fuzz/nodejs-fuzz-runner-smoke.sh",
+      "bash scripts/workload/nodejs-fuzz-workload-smoke.sh"
     ]
   }
 }
