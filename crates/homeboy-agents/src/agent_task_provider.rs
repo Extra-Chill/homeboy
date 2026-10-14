@@ -167,6 +167,13 @@ use catalog::{
     component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
     validate_provider_runner_readiness_for_backend_with_providers,
 };
+/// Empty-change classification shared with the scheduler's review-form deferral
+/// guard (#15880), so both entry points reach one verdict.
+pub(crate) use outcome_normalization::{
+    classify_empty_change_outcome, has_known_empty_change_set,
+    record_verified_unchanged_empty_attempt, verify_unchanged_empty_checkout,
+};
+
 #[cfg(test)]
 use command_runner::{
     immediate_provider_failure, is_transient_provider_error, provider_command_env,

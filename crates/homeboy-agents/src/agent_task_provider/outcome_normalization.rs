@@ -110,49 +110,62 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
     }
 
     if outcome.status == AgentTaskOutcomeStatus::Succeeded {
-        match intentional_no_change_verdict(outcome, workspace_root) {
-            IntentionalNoChangeValidation::Verified => {
-                // Preserve Succeeded. Cook applies task policy before deciding
-                // whether this evidence-only result may terminalize.
-                if !outcome.metadata.is_object() {
-                    outcome.metadata = json!({});
-                }
-                outcome.metadata[HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY] = Value::Bool(true);
-                outcome.summary = Some(
-                    "provider declared an intentional no-change review verdict bound to the verified workspace revision"
-                        .to_string(),
-                );
+        classify_empty_change_outcome(outcome, workspace_root);
+    }
+}
+
+/// The shared empty-change classification of a provider outcome (#7719, #15294,
+/// #15850). Successful outcomes are classified here at the owning normalization
+/// layer; the scheduler reuses the same rules inside
+/// `defer_missing_review_form_to_cook_loop` because a review-form deferral must
+/// not promote an empty change set to a gate-eligible candidate (#15880), so
+/// both entry points reach one verdict.
+pub(crate) fn classify_empty_change_outcome(
+    outcome: &mut AgentTaskOutcome,
+    workspace_root: Option<&std::path::Path>,
+) {
+    match intentional_no_change_verdict(outcome, workspace_root) {
+        IntentionalNoChangeValidation::Verified => {
+            // Preserve Succeeded. Cook applies task policy before deciding
+            // whether this evidence-only result may terminalize.
+            if !outcome.metadata.is_object() {
+                outcome.metadata = json!({});
             }
-            IntentionalNoChangeValidation::Invalid(message) => {
-                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
-                outcome.summary = Some(message);
-            }
-            IntentionalNoChangeValidation::Absent
-                if has_known_empty_change_set(outcome)
-                    && has_substantive_non_change_evidence(outcome) =>
-            {
-                // An empty change artifact next to substantive work evidence
-                // (a transcript, report, log, or other content-bearing artifact)
-                // is not a clean "nothing happened" — it is a patch-capture
-                // failure that would otherwise silently discard real changes,
-                // including committed ones (#7719). Surface it for controller
-                // review/salvage instead of collapsing it to NoOp.
-                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
-                outcome.summary = Some(
-                "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
+            outcome.metadata[HOMEBOY_INTENTIONAL_NO_CHANGE_VERIFIED_KEY] = Value::Bool(true);
+            outcome.summary = Some(
+                "provider declared an intentional no-change review verdict bound to the verified workspace revision"
                     .to_string(),
             );
-                if !outcome.metadata.is_object() {
-                    outcome.metadata = json!({});
-                }
-                outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] = Value::Bool(true);
-            }
-            IntentionalNoChangeValidation::Absent if has_known_empty_change_set(outcome) => {
-                outcome.status = AgentTaskOutcomeStatus::NoOp;
-                outcome.summary = Some("provider produced an empty change artifact".to_string());
-            }
-            IntentionalNoChangeValidation::Absent => {}
         }
+        IntentionalNoChangeValidation::Invalid(message) => {
+            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+            outcome.summary = Some(message);
+        }
+        IntentionalNoChangeValidation::Absent
+            if has_known_empty_change_set(outcome)
+                && has_substantive_non_change_evidence(outcome) =>
+        {
+            // An empty change artifact next to substantive work evidence
+            // (a transcript, report, log, or other content-bearing artifact)
+            // is not a clean "nothing happened" — it is a patch-capture
+            // failure that would otherwise silently discard real changes,
+            // including committed ones (#7719). Surface it for controller
+            // review/salvage instead of collapsing it to NoOp.
+            outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+            outcome.summary = Some(
+            "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
+                .to_string(),
+        );
+            if !outcome.metadata.is_object() {
+                outcome.metadata = json!({});
+            }
+            outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] = Value::Bool(true);
+        }
+        IntentionalNoChangeValidation::Absent if has_known_empty_change_set(outcome) => {
+            outcome.status = AgentTaskOutcomeStatus::NoOp;
+            outcome.summary = Some("provider produced an empty change artifact".to_string());
+        }
+        IntentionalNoChangeValidation::Absent => {}
     }
 }
 
@@ -181,15 +194,28 @@ pub(crate) fn accept_verified_unchanged_empty_attempt(
     {
         return;
     }
-    let (Some(workspace_root), Some(attempt_base)) = (workspace_root, attempt_base) else {
+    if !verify_unchanged_empty_checkout(workspace_root, attempt_base) {
         return;
+    }
+    record_verified_unchanged_empty_attempt(outcome);
+}
+
+/// Whether an attempt checkout is provably unchanged from its attempt base:
+/// `HEAD` is still the attempt base and the tree is clean apart from runner
+/// metadata, so there is nothing to salvage and no candidate to gate (#15294).
+pub(crate) fn verify_unchanged_empty_checkout(
+    workspace_root: Option<&std::path::Path>,
+    attempt_base: Option<&str>,
+) -> bool {
+    let (Some(workspace_root), Some(attempt_base)) = (workspace_root, attempt_base) else {
+        return false;
     };
     let attempt_base = attempt_base.trim();
     if attempt_base.is_empty()
         || homeboy_core::git::output_allow_empty(workspace_root, &["rev-parse", "HEAD"]).as_deref()
             != Some(attempt_base)
     {
-        return;
+        return false;
     }
     let mut status_args = vec!["status", "--porcelain", "--untracked-files=all", "--", "."];
     status_args.extend(
@@ -197,16 +223,25 @@ pub(crate) fn accept_verified_unchanged_empty_attempt(
             .iter()
             .copied(),
     );
-    if homeboy_core::git::output_allow_empty(workspace_root, &status_args)
-        .is_none_or(|status| !status.is_empty())
-    {
-        return;
-    }
+    homeboy_core::git::output_allow_empty(workspace_root, &status_args)
+        .is_none_or(|status| status.is_empty())
+}
+
+/// Record a Homeboy-verified unchanged attempt exactly like
+/// [`accept_verified_unchanged_empty_attempt`]: `Succeeded` with
+/// [`HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY`], so promotion reports a no-change
+/// attempt without running gates and Cook's no-change feedback loop acts on it
+/// (#15294/#15850).
+pub(crate) fn record_verified_unchanged_empty_attempt(outcome: &mut AgentTaskOutcome) {
     outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.failure_classification = None;
     outcome.summary = Some(
         "provider produced no change; Homeboy verified the attempt checkout is unchanged from its base"
             .to_string(),
     );
+    if !outcome.metadata.is_object() {
+        outcome.metadata = json!({});
+    }
     outcome.metadata[HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY] = Value::Bool(true);
 }
 
@@ -316,7 +351,7 @@ fn measure_homeboy_local_artifact(
     }
 }
 
-fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
+pub(crate) fn has_known_empty_change_set(outcome: &AgentTaskOutcome) -> bool {
     let changes = outcome
         .artifacts
         .iter()
