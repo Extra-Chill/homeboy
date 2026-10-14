@@ -27,7 +27,10 @@
 //!
 //! Modules reached only indirectly are still part of this surface. `fuzz_config`
 //! is glob-imported by [`manifest`], and `runtime_helper` is reached through
-//! `fuzz_config`.
+//! `fuzz_config` and `workload_kind`. [`workload_kind`] (the extension-declared
+//! `workloads.<kind>` sections) is manifest schema; [`workload_result`] (the
+//! generic envelope every kind's runner writes) is an extension-produced
+//! result.
 //!
 //! ## 3. Extension-produced domain results
 //!
@@ -155,6 +158,8 @@ pub mod manifest_deploy_config;
 pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
+pub mod workload_kind;
+pub mod workload_result;
 pub mod worktree_retention;
 pub use notification_transport_config::{
     NotificationRouteResolverConfig, NotificationRouteResolverRequest,
@@ -186,6 +191,14 @@ pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
     ArtifactCleanupCategory, ArtifactCleanupConfig, ArtifactCleanupDeclaration,
     ArtifactCleanupScope, DEFAULT_NESTED_SCOPE_MAX_DEPTH,
+};
+pub use workload_kind::{
+    workload_capability_id, WorkloadCompareConfig, WorkloadDeclaration, WorkloadFindingsKey,
+    WorkloadKindConfig, WorkloadListProbe, WorkloadMetricDirection, WorkloadMetricPolicy,
+    WorkloadSafetyClass, WORKLOAD_CAPABILITY_PREFIX,
+};
+pub use workload_result::{
+    WorkloadArtifact, WorkloadCase, WorkloadResult, WorkloadStatus, WORKLOAD_RESULT_SCHEMA,
 };
 pub use worktree_retention::{
     WorktreeRetentionBlockers, WorktreeRetentionBounds, WorktreeRetentionContinuation,

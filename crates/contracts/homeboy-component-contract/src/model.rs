@@ -405,6 +405,9 @@ impl Component {
                 homeboy_extension_contract::ExtensionCapability::Fuzz => &scripts.fuzz,
                 homeboy_extension_contract::ExtensionCapability::Trace => &scripts.trace,
                 homeboy_extension_contract::ExtensionCapability::Deps => &scripts.deps,
+                // Workload kinds are extension-declared; components have no
+                // per-kind `scripts` entry.
+                homeboy_extension_contract::ExtensionCapability::Workload => return &[],
             };
             if !commands.is_empty() {
                 return commands;

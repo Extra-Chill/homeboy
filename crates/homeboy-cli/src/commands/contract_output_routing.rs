@@ -94,6 +94,7 @@ impl Commands {
             }
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
+            Commands::Workload(args) => args.output_descriptor(output_file_mode),
             Commands::Runner(args) if runner::is_compact_exec_stdout(args) => {
                 raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
             }

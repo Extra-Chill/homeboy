@@ -7,7 +7,7 @@ use crate::commands::{
     activity, agent_task, bench, cleanup, component, config, contract, control_plane, daemon,
     deploy, extension, file, fuzz, git, harvest, project, refactor, release, review, rig, runner,
     runs, runtime, self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow,
-    worktree,
+    workload, worktree,
 };
 
 mod argument_provenance;
@@ -187,6 +187,8 @@ pub enum Commands {
         after_help = "Command-shaped trace modes:\n  homeboy trace list --profiles\n  homeboy trace <component> list\n  homeboy trace compare before.json after.json\n  homeboy trace compare <component> <scenario> --baseline-target <target> --candidate <target>\n  homeboy trace matrix <component> <scenario> --axis name=value1,value2\n  homeboy trace compare-variant --rig <rig-id> --scenario <scenario>\n  homeboy trace compare-bundle --component <component> --scenario <scenario>\n  homeboy trace overlay-locks --stale"
     )]
     Trace(trace::TraceArgs),
+    /// Run, compare, replay and inspect extension-declared workload kinds
+    Workload(workload::WorkloadArgs),
     /// Manage component dependencies
     Deps(DepsArgs),
     /// Remote file operations

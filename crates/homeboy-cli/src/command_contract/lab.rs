@@ -221,6 +221,7 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["review", "lint"],
     &["review", "test"],
     &["trace"],
+    &["workload", "run"],
     &["rig", "check"],
     &["rig", "run"],
     &["runtime", "refresh"],

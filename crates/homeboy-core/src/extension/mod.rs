@@ -18,6 +18,7 @@ pub mod self_check;
 mod setup_env;
 pub mod test;
 pub mod trace;
+pub mod workload;
 
 pub(crate) use homeboy_core::extension::resolve::{extension_guidance_hints, stderr_tail};
 

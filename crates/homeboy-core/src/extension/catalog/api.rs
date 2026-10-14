@@ -65,6 +65,11 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
     .filter(|capability| capability.has_manifest_support(&extension))
     .map(|capability| capability_descriptor(capability.label()))
     .collect::<Vec<_>>();
+    // Each declared workload kind is its own capability, so ownership
+    // resolution elects a provider per kind rather than per "workload".
+    capabilities.extend(extension.workloads.keys().map(|kind| {
+        capability_descriptor(&homeboy_extension_contract::workload_capability_id(kind))
+    }));
 
     if extension
         .runtime()
@@ -804,6 +809,34 @@ mod tests {
 
     fn readiness_response(request: &ExtensionApiReadinessRequest) -> ExtensionApiReadinessResponse {
         readiness_api_for_discovered(request, &discover_extensions())
+    }
+
+    #[test]
+    fn descriptor_publishes_one_capability_per_declared_workload_kind() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "kinds",
+                serde_json::json!({
+                    "name": "Kinds",
+                    "version": "1.0.0",
+                    "workloads": {
+                        "fuzz": { "script": "fuzz.sh" },
+                        "db-perf": { "script": "perf.sh" }
+                    }
+                }),
+            );
+
+            let descriptor = api_descriptor("kinds").expect("descriptor");
+
+            assert_eq!(
+                descriptor
+                    .capabilities
+                    .iter()
+                    .map(|capability| capability.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["workload.db-perf", "workload.fuzz"]
+            );
+        });
     }
 
     #[test]

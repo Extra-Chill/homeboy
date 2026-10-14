@@ -166,6 +166,10 @@ pub struct BaselineSlot<'a> {
     /// Git ref whose committed `homeboy.json` is read when the working tree
     /// has no baseline.
     pub fallback_ref: Option<&'a str>,
+    /// Runtime kind key replacing the adapter's static [`KindAdapter::KIND`].
+    /// The generic adapter for extension-declared kinds serves every kind, so
+    /// the kind it is comparing is data rather than a constant.
+    pub kind: Option<&'a str>,
 }
 
 impl<'a> BaselineSlot<'a> {
@@ -174,7 +178,14 @@ impl<'a> BaselineSlot<'a> {
             root,
             rig_id,
             fallback_ref: None,
+            kind: None,
         }
+    }
+
+    /// Store under `kind` instead of the adapter's `KIND`.
+    pub fn with_kind(mut self, kind: &'a str) -> Self {
+        self.kind = Some(kind);
+        self
     }
 
     pub fn with_fallback_ref(mut self, git_ref: Option<&'a str>) -> Self {
@@ -183,6 +194,7 @@ impl<'a> BaselineSlot<'a> {
     }
 
     fn key(&self, kind: &str) -> String {
+        let kind = self.kind.unwrap_or(kind);
         match self.rig_id {
             None => kind.to_string(),
             Some(rig_id) => format!("{kind}.rig.{rig_id}"),
@@ -440,6 +452,25 @@ mod tests {
         )
         .unwrap();
         assert!(json["baselines"]["counter.rig.studio"].is_object());
+    }
+
+    #[test]
+    fn runtime_kind_slot_replaces_the_static_kind_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let fuzz = BaselineSlot::new(dir.path(), None).with_kind("workload.fuzz");
+        let bench = BaselineSlot::new(dir.path(), Some("studio")).with_kind("workload.bench");
+        save_baseline::<Counter>(&fuzz, "demo", &values(3)).unwrap();
+        save_baseline::<Counter>(&bench, "demo", &values(4)).unwrap();
+
+        assert_eq!(load_baseline::<Counter>(&fuzz).unwrap().metadata.0[0].1, 3);
+        assert_eq!(load_baseline::<Counter>(&bench).unwrap().metadata.0[0].1, 4);
+        assert_eq!(stored(dir.path(), None), None, "static KIND slot untouched");
+        let json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("homeboy.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(json["baselines"]["workload.fuzz"].is_object());
+        assert!(json["baselines"]["workload.bench.rig.studio"].is_object());
     }
 
     #[test]

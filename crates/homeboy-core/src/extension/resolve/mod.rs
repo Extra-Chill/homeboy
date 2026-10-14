@@ -104,7 +104,14 @@ fn no_extensions_error(component: &Component) -> Error {
 }
 
 fn capability_missing_error(component: &Component, capability: ExtensionCapability) -> Error {
-    let capability_name = capability.label();
+    surface_missing_error(component, capability.label(), Some(capability))
+}
+
+fn surface_missing_error(
+    component: &Component,
+    capability_name: &str,
+    capability: Option<ExtensionCapability>,
+) -> Error {
     let mut err = Error::validation_invalid_argument(
         "extension",
         format!(
@@ -115,7 +122,7 @@ fn capability_missing_error(component: &Component, capability: ExtensionCapabili
         None,
     );
 
-    for hint in extension_guidance_hints(component, Some(capability)) {
+    for hint in extension_guidance_hints(component, capability) {
         err = err.with_hint(hint);
     }
 
@@ -266,6 +273,17 @@ fn resolve_extension_for_capability_if_available(
     component: &Component,
     capability: ExtensionCapability,
 ) -> Result<Option<String>> {
+    resolve_extension_for_surface_if_available(component, capability.label(), Some(capability))
+}
+
+/// [`resolve_extension_for_capability_if_available`] for a catalog capability
+/// id that has no [`ExtensionCapability`] variant, such as an
+/// extension-declared workload kind (`workload.<kind>`).
+fn resolve_extension_for_surface_if_available(
+    component: &Component,
+    surface: &str,
+    capability: Option<ExtensionCapability>,
+) -> Result<Option<String>> {
     let Some(extensions) = component.extensions.as_ref() else {
         return Ok(None);
     };
@@ -274,15 +292,13 @@ fn resolve_extension_for_capability_if_available(
     }
     let catalog = CapabilityCatalog::load()?;
 
-    if let Some(extension_id) = explicit_capability_extension(component, capability) {
+    if let Some(extension_id) = explicit_surface_extension(component, surface) {
         if !extensions.contains_key(extension_id) {
             return Err(Error::validation_invalid_argument(
-                format!("capability_extensions.{}", capability.label()),
+                format!("capability_extensions.{}", surface),
                 format!(
                     "Component '{}' selects extension '{}' for {} support, but it is not linked",
-                    component.id,
-                    extension_id,
-                    capability.label()
+                    component.id, extension_id, surface
                 ),
                 Some(extension_id.to_string()),
                 Some(vec![format!(
@@ -294,14 +310,14 @@ fn resolve_extension_for_capability_if_available(
         }
 
         let entry = catalog.resolvable_entry(extension_id)?;
-        if !catalog.provides(entry, capability.label()) {
+        if !catalog.provides(entry, surface) {
             return Err(Error::validation_invalid_argument(
-                format!("capability_extensions.{}", capability.label()),
+                format!("capability_extensions.{}", surface),
                 format!(
                     "Component '{}' selects extension '{}' for {} support, but that extension does not provide it",
                     component.id,
                     extension_id,
-                    capability.label()
+                    surface
                 ),
                 Some(extension_id.to_string()),
                 None,
@@ -311,8 +327,7 @@ fn resolve_extension_for_capability_if_available(
         return Ok(Some(extension_id.to_string()));
     }
 
-    let (mut matching, catalog_failures) =
-        catalog.candidates(extensions.keys(), capability.label());
+    let (mut matching, catalog_failures) = catalog.candidates(extensions.keys(), surface);
 
     match matching.len() {
         // Nothing advertises the capability. Invalid catalog entries keep the
@@ -320,19 +335,72 @@ fn resolve_extension_for_capability_if_available(
         0 if catalog_failures.is_empty() => Ok(None),
         0 => Err(unreadable_catalog_error(
             component,
+            surface,
             capability,
             &catalog_failures,
         )),
         1 => Ok(Some(matching.remove(0))),
-        _ => disambiguate_capability_owner(component, capability, &matching).map(Some),
+        _ => resolve_owner(component, surface, &matching).map(Some),
     }
+}
+
+/// Resolve the extension that provides an extension-declared workload kind
+/// and its execution context (#15840).
+///
+/// Ownership follows the same rule as every other capability, over the
+/// catalog capability `workload.<kind>`: explicit
+/// `capability_extensions."workload.<kind>"`, then `composition.includes`
+/// primacy, then an ambiguity error. The context's `script_path` is the kind's
+/// declared `script` (empty when the kind declares none).
+pub fn resolve_workload_execution_context(
+    component: &Component,
+    kind: &str,
+) -> Result<(
+    ExtensionExecutionContext,
+    homeboy_extension_contract::WorkloadKindConfig,
+)> {
+    let surface = homeboy_extension_contract::workload_capability_id(kind);
+    let extension_id = match resolve_extension_for_surface_if_available(component, &surface, None)?
+    {
+        Some(extension_id) => extension_id,
+        None if component
+            .extensions
+            .as_ref()
+            .is_none_or(|extensions| extensions.is_empty()) =>
+        {
+            return Err(no_extensions_error(component))
+        }
+        None => {
+            return Err(surface_missing_error(component, &surface, None).with_hint(format!(
+                "Declare `workloads.{kind}` in the providing extension's manifest; list installed kinds with `homeboy extension show <id>`."
+            )))
+        }
+    };
+    let manifest = load_extension(&extension_id)?;
+    let config = manifest.workload_kind(kind).cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "kind",
+            format!("Extension '{extension_id}' does not declare workloads.{kind}"),
+            Some(kind.to_string()),
+            None,
+        )
+    })?;
+    let mut context = execution_context_for_extension(
+        component,
+        None,
+        ExtensionCapability::Workload,
+        extension_id,
+    )?;
+    context.script_path = config.script.clone().unwrap_or_default();
+    Ok((context, config))
 }
 
 /// Reported only when a capability could not be satisfied *and* at least one
 /// linked catalog entry was invalid or missing.
 fn unreadable_catalog_error(
     component: &Component,
-    capability: ExtensionCapability,
+    surface: &str,
+    capability: Option<ExtensionCapability>,
     failures: &[(String, String)],
 ) -> Error {
     let names = failures
@@ -347,7 +415,7 @@ fn unreadable_catalog_error(
             "Component '{}' has no linked extensions that provide {} support, and {} \
              manifest(s) could not be read: {}",
             component.id,
-            capability.label(),
+            surface,
             failures.len(),
             names
         ),
@@ -368,7 +436,7 @@ fn unreadable_catalog_error(
             .unwrap_or("<extension_id>")
     ));
 
-    for hint in extension_guidance_hints(component, Some(capability)) {
+    for hint in extension_guidance_hints(component, capability) {
         err = err.with_hint(hint);
     }
 

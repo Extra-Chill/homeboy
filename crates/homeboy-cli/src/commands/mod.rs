@@ -264,6 +264,7 @@ pub mod tunnel;
 pub mod upgrade;
 pub mod utils;
 pub mod workflow;
+pub mod workload;
 pub mod worktree;
 
 // Command-runtime infrastructure: the routing, adapter, output/response,
