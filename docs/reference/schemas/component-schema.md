@@ -99,6 +99,7 @@ Component configuration defines buildable and deployable units stored in `compon
   - Deploy planning fails closed when a selection includes only part of a declared group. Select all coupled components explicitly or use `--all` for the project.
 - **`release`** (object): Component-scoped release configuration
   - **`enabled`** (boolean): Whether release pipeline is enabled
+  - **`owner`** (`local` or `ci`, default `local`): Who cuts releases. `ci` declares that the component's CI release workflow (homeboy-action) computes and publishes every release. A local `homeboy release` then reports `status: "ci_owned"` and exits `0` without planning, gating, or mutating. The CI caller is recognized by `HOMEBOY_RELEASE_CALLER=ci` or `GITHUB_ACTIONS=true`. See [CI-owned releases](../../commands/release.md#ci-owned-releases).
   - **`publish`** (boolean): Whether extension-provided registry/package publication is permitted; defaults to enabled when absent. Set `false` for components delivered exclusively through GitHub Release assets. GitHub Release creation and asset upload remain enabled independently.
   - **`steps`** (array): Release step definitions
   - **`settings`** (object): Release pipeline settings

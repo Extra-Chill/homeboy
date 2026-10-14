@@ -260,6 +260,15 @@ pub struct GithubHostConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ComponentReleaseConfig {
+    /// Who owns cutting releases for this component.
+    ///
+    /// Absent (or `local`) preserves the default behaviour: a local
+    /// `homeboy release` plans, gates, tags, and publishes. `ci` declares that
+    /// the component's CI (the reusable homeboy-action release workflow)
+    /// computes and publishes every release, so a local `homeboy release`
+    /// reports the CI ownership and performs no mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ReleaseOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_release: Option<ComponentGithubReleaseConfig>,
     /// Whether extension-provided registry or package publication is permitted.
@@ -346,6 +355,16 @@ impl ComponentReleaseConfig {
 
     pub fn publish_enabled(&self) -> bool {
         self.publish.unwrap_or(true)
+    }
+
+    /// Effective release owner; absent means [`ReleaseOwner::Local`].
+    pub fn release_owner(&self) -> ReleaseOwner {
+        self.owner.unwrap_or_default()
+    }
+
+    /// Whether the component declares CI as the owner of its releases.
+    pub fn ci_owns_release(&self) -> bool {
+        self.release_owner() == ReleaseOwner::Ci
     }
 
     pub fn validate_package_coverage(&self) -> HomeboyResult<()> {
@@ -498,6 +517,17 @@ fn package_coverage_error(message: &str) -> Error {
 pub struct ComponentGithubReleaseConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<GithubReleaseOwner>,
+}
+
+/// Owner of a component's release lifecycle (`release.owner`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseOwner {
+    /// A local `homeboy release` (the controller) cuts releases. Default.
+    #[default]
+    Local,
+    /// The component's CI release workflow cuts releases; local runs defer.
+    Ci,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

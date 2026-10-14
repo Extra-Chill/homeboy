@@ -383,6 +383,29 @@ When Homeboy classifies the commit range as having no releasable commits (e.g. d
 
 A skipped release is **not** reported as success: the process exits with code `5` and the JSON envelope reports `success: false`, even though `data` still carries the full result payload. This lets operators and CI distinguish a no-op release from a real one. To force a release when the skip is intentional, re-run with `--bump` (the hint echoes the exact command, including flags like `--skip-checks`).
 
+### CI-owned releases
+
+A component whose CI cuts its releases (the reusable homeboy-action release workflow, `Extra-Chill/homeboy-action/.github/workflows/release.yml`) declares it in `homeboy.json`:
+
+```json
+{ "release": { "owner": "ci" } }
+```
+
+`release.owner` defaults to `local`, the existing behaviour. With `"ci"`, `homeboy release <component>` (including `--dry-run` and `--project` batch selection) builds no plan, dispatches no preflight gate, records no readiness operation, and creates no commit, tag, or GitHub Release. It reads local git state only (no fetch) and exits `0` with:
+
+- `status: "ci_owned"` and `skipped_reason: "release-owned-by-ci"`
+- `tag`: the latest local release tag
+- `ci_release`: `owner`, `latest_tag`, `latest_tag_commit`, `head_commit`, `head_released` (whether the latest tag points at HEAD), `ci_release_url`, `next_action` (for example `gh run list --repo owner/repo --limit 5`), and `ci_caller_marker`
+
+Batch summaries count these components under `ci_owned`. They are not counted as skipped or failed, so a batch made up only of CI-owned components exits `0`.
+
+The CI caller still releases. Homeboy treats the invocation as the CI release caller when:
+
+1. `HOMEBOY_RELEASE_CALLER=ci` is set. This is the explicit marker for any CI system. `HOMEBOY_RELEASE_CALLER=local` forces the deferral even inside CI.
+2. Otherwise, `GITHUB_ACTIONS=true` is set. GitHub sets it on every Actions job, including the homeboy-action reusable release workflow, so that workflow needs no change.
+
+`--recover` and `--package-only` are explicit repairs of existing release state and are never deferred.
+
 ### Idempotent retry
 
 Publish steps are designed to be idempotent:
