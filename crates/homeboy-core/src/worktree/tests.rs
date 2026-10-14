@@ -405,7 +405,12 @@ impl WorktreeReconciliationAuthority for CountingAuthority {
     }
 }
 
-struct DeadlineAuthority;
+/// Exhausts the apply deadline while acquiring, then records whether the
+/// claim release was still granted time to run.
+#[derive(Default)]
+struct DeadlineAuthority {
+    released_with_budget: std::sync::atomic::AtomicBool,
+}
 
 impl WorktreeReconciliationAuthority for DeadlineAuthority {
     fn acquire(
@@ -425,8 +430,12 @@ impl WorktreeReconciliationAuthority for DeadlineAuthority {
     fn release(
         &self,
         _: &crate::workspace_claim::WorkspaceClaim,
-        _: std::time::Instant,
+        deadline: std::time::Instant,
     ) -> Result<()> {
+        self.released_with_budget.store(
+            std::time::Instant::now() < deadline,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         Ok(())
     }
 }
@@ -2502,7 +2511,7 @@ fn inventory_skips_authority_for_locally_blocked_missing_records() {
 }
 
 #[test]
-fn inventory_apply_deadline_returns_a_retry_without_mutating_the_missing_record() {
+fn inventory_apply_deadline_returns_a_retry_and_still_releases_the_held_claim() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
@@ -2512,18 +2521,20 @@ fn inventory_apply_deadline_returns_a_retry_without_mutating_the_missing_record(
         &sibling_worktree_path(source.path(), "deadline"),
     );
     write_record(&store, &record).unwrap();
+    let authority = DeadlineAuthority::default();
 
     let output = inventory_with_store_and_authority(
         WorktreeInventoryOptions {
             limit: 10,
             cursor: Some("fixture@before".to_string()),
             apply: true,
-            apply_deadline: Some(std::time::Instant::now() + std::time::Duration::from_millis(10)),
+            // Long enough to reach acquisition, which then exhausts it.
+            apply_deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(2)),
             ..Default::default()
         },
         &store,
         &dir.path().join("adopted"),
-        &DeadlineAuthority,
+        &authority,
     )
     .unwrap();
 
@@ -2537,6 +2548,10 @@ fn inventory_apply_deadline_returns_a_retry_without_mutating_the_missing_record(
         read_record(&store, &record.id).unwrap().state,
         TaskWorktreeState::Active
     );
+    // The exhausted apply budget must not strand the claim it acquired.
+    assert!(authority
+        .released_with_budget
+        .load(std::sync::atomic::Ordering::SeqCst));
 }
 
 fn mixed_remote_claim_page(store: &Path, source: &Path) -> Vec<TaskWorktreeRecord> {

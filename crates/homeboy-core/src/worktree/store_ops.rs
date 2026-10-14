@@ -1593,7 +1593,7 @@ pub(super) fn inventory_with_store_and_authority(
             let authority_snapshot = authority.acquire(&record, deadline)?;
             if std::time::Instant::now() >= deadline {
                 if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
-                    let _ = authority.release(claim, deadline);
+                    let _ = release_claim(authority, claim);
                 }
                 let cursor = records
                     .last()
@@ -1613,7 +1613,7 @@ pub(super) fn inventory_with_store_and_authority(
                     Err(error) => {
                         // A validation transport failure still owns a fence.
                         // Release it before returning a typed, non-mutating refusal.
-                        let release = authority.release(claim, deadline);
+                        let release = release_claim(authority, claim);
                         records.push(WorktreeInventoryRecord {
                             record,
                             path_exists,
@@ -1636,7 +1636,7 @@ pub(super) fn inventory_with_store_and_authority(
                     }
                 };
                 if !valid {
-                    let release = authority.release(claim, deadline);
+                    let release = release_claim(authority, claim);
                     records.push(WorktreeInventoryRecord {
                         record,
                         path_exists,
@@ -1660,7 +1660,7 @@ pub(super) fn inventory_with_store_and_authority(
             }
             if std::time::Instant::now() >= deadline {
                 if let WorktreeLivenessAuthority::Terminal { claim, .. } = &authority_snapshot {
-                    let _ = authority.release(claim, deadline);
+                    let _ = release_claim(authority, claim);
                 }
                 let cursor = records
                     .last()
@@ -1680,7 +1680,7 @@ pub(super) fn inventory_with_store_and_authority(
             );
             let release = match &authority_snapshot {
                 WorktreeLivenessAuthority::Terminal { claim, .. } => {
-                    authority.release(claim, deadline)
+                    release_claim(authority, claim)
                 }
                 _ => Ok(()),
             };
@@ -1850,6 +1850,20 @@ fn missing_active_worktree(
         local_evidence: evidence,
         continuation,
     }
+}
+
+/// Time granted to release a held reconciliation claim.
+///
+/// Release is cleanup the page owes whether or not its apply budget remains:
+/// bounded by an exhausted apply deadline it cannot take the config lock, and
+/// the claim's acquisition intent outlives the run.
+const CLAIM_RELEASE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn release_claim(
+    authority: &dyn WorktreeReconciliationAuthority,
+    claim: &crate::workspace_claim::WorkspaceClaim,
+) -> Result<()> {
+    authority.release(claim, std::time::Instant::now() + CLAIM_RELEASE_BUDGET)
 }
 
 fn reconcile_missing_record_with_store(
