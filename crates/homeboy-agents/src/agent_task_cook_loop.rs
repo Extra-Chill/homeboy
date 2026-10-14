@@ -354,10 +354,12 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             &failure_progression,
         ))
     } else if let Some(Some(gap)) = &review_form_gap {
-        // Gates are green but the AI form is missing/invalid: nudge another
-        // attempt with actionable feedback, exactly like a red gate — unless the
-        // retry budget is exhausted.
-        (retry_budget_remaining > 0).then(|| build_review_form_follow_up_request(&options, gap))
+        // Gates are green but the AI form is missing/invalid: nudge the model to
+        // supply it. The nudge is not bounded by the code-attempt budget: a
+        // change that turns green on its final attempt still gets its form.
+        // Dispatch bounds review-only executions with their own distinct
+        // review budget (`fresh_cook_review` / `candidate_adoption_review`).
+        Some(build_review_form_follow_up_request(&options, gap))
     } else if no_change_gap
         && !invalid_gate_declaration
         && !gate_budget_exceeded
@@ -389,10 +391,6 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     } else if baseline_red {
         AgentTaskCookLoopStatus::BaselineRed
     } else if !failed_gates.is_empty() {
-        AgentTaskCookLoopStatus::RetriesExhausted
-    } else if matches!(&review_form_gap, Some(Some(_))) {
-        // Green change, but the agent never produced a valid form and the retry
-        // budget is spent. The cook does not publish a PR without the form.
         AgentTaskCookLoopStatus::RetriesExhausted
     } else {
         AgentTaskCookLoopStatus::GreenCompleted
@@ -2579,7 +2577,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_review_form_with_exhausted_budget_does_not_complete() {
+    fn missing_review_form_on_final_code_attempt_still_requests_the_form() {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
@@ -2595,8 +2593,17 @@ mod tests {
             metadata: Value::Null,
         });
 
-        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
-        assert!(report.follow_up_request.is_none());
+        // #9692: gates turned green on the last code attempt (or on adoption,
+        // which evaluates at the last attempt). The form nudge has its own
+        // review budget, so the model is still asked for the form instead of
+        // the green candidate being reported as retries exhausted.
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+        assert!(report.failed_gates.is_empty());
+        let request = report
+            .follow_up_request
+            .expect("green final attempt without a form requests the form");
+        assert_eq!(request.inputs["cook_loop"]["review_form_required"], true);
+        assert_eq!(request.metadata["cook_loop"]["kind"], "review_form_only");
     }
 
     #[test]

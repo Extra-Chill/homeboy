@@ -937,20 +937,32 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             && options.gates.accept_inherited_failures
             && promotion.finalization_eligible(true))
     {
-        lifecycle_store.finish_candidate_adoption(
-            &record.run_id,
-            Some("adopted candidate did not pass the original deterministic gates".to_string()),
-            false,
-        )?;
+        // Name the verdict the feedback actually reached. Only a red declared
+        // gate is a gate failure; green gates with another unmet requirement
+        // must not be reported as failed verification (#9692).
+        let (status, reason) = if feedback.failed_gates.is_empty() {
+            let status = serde_json::to_value(feedback.status)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", feedback.status));
+            let reason = format!(
+                "adopted candidate passed the original deterministic gates but did not complete: {status}"
+            );
+            (status, reason)
+        } else {
+            (
+                "gate_failed".to_string(),
+                "adopted candidate did not pass the original deterministic gates".to_string(),
+            )
+        };
+        lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.clone()), false)?;
         return Ok(cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "gate_failed",
+            status: &status,
             disposition: CookDisposition::Terminal,
             attempts: vec![attempt],
             finalization: None,
-            stop_reason: Some(
-                "adopted candidate did not pass the original deterministic gates".to_string(),
-            ),
+            stop_reason: Some(reason),
             exit_code: 1,
             invocation_latest_run_id: Some(record.run_id.as_str()),
         }));
