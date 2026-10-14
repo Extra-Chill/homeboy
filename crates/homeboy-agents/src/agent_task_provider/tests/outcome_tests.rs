@@ -543,6 +543,106 @@ fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_uncha
         .is_none());
 }
 
+/// #15855: a provider-declared `no_op` without any change artifact (e.g. the
+/// local shell executor finishing without edits) on a checkout Homeboy verifies
+/// unchanged from its base is recorded with a Homeboy-owned empty patch and
+/// becomes the same verified no-change attempt as an empty provider patch. A
+/// `no_op` claim on a checkout that did change stays an unaudited `no_op`.
+#[test]
+fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_unchanged() {
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        homeboy_core::test_support::git_command_output(cwd, args)
+    }
+    let workspace = tempfile::tempdir().expect("attempt checkout");
+    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
+    git(workspace.path(), &["add", "lib.rs"]);
+    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
+    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "local-shell-no-op".to_string(),
+        attempt: 1,
+    };
+    // The executor pipeline order: record the change set, measure Homeboy-local
+    // artifacts, then accept a verified unchanged attempt.
+    let normalize = |attempt_base: Option<&str>| {
+        let root = tempfile::tempdir().expect("artifact root");
+        let mut outcome = AgentTaskOutcome {
+            task_id: "local-shell-no-op".to_string(),
+            status: AgentTaskOutcomeStatus::NoOp,
+            summary: Some("executor finished without changes".to_string()),
+            ..Default::default()
+        };
+        super::super::outcome_normalization::materialize_verified_no_op_change_set(
+            &mut outcome,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+            attempt_base,
+        );
+        normalize_homeboy_local_artifact_sizes(
+            &mut outcome,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+        );
+        super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+            &mut outcome,
+            Some(workspace.path()),
+            attempt_base,
+        );
+        outcome
+    };
+    let assert_unaudited = |outcome: &AgentTaskOutcome| {
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::NoOp);
+        assert!(outcome.artifacts.is_empty(), "{:?}", outcome.artifacts);
+        assert!(outcome
+            .metadata
+            .get("homeboy_empty_attempt_verified")
+            .is_none());
+    };
+
+    // Clean checkout at its base: a verified no-change attempt with an empty
+    // Homeboy-owned patch, exactly like an empty provider patch (#15294).
+    let clean = normalize(Some(&base));
+    assert_eq!(clean.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(clean.metadata["homeboy_empty_attempt_verified"], true);
+    assert_eq!(
+        clean.summary.as_deref(),
+        Some(
+            "provider produced no change; Homeboy verified the attempt checkout is unchanged from its base"
+        )
+    );
+    let [patch] = clean.artifacts.as_slice() else {
+        panic!("one empty patch artifact: {:?}", clean.artifacts);
+    };
+    assert_eq!(patch.kind, "patch");
+    assert_eq!(patch.size_bytes, Some(0));
+
+    // No attempt base recorded: cannot verify.
+    assert_unaudited(&normalize(None));
+
+    // Uncommitted work the no-op claim missed.
+    fs::write(workspace.path().join("lib.rs"), "changed\n").expect("dirty");
+    assert_unaudited(&normalize(Some(&base)));
+
+    // Committed work the no-op claim missed.
+    git(
+        workspace.path(),
+        &["commit", "--quiet", "-am", "provider commit"],
+    );
+    assert_unaudited(&normalize(Some(&base)));
+}
+
 #[test]
 fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_checkout() {
     let workspace = tempfile::tempdir().expect("workspace");
