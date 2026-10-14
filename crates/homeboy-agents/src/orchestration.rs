@@ -1324,7 +1324,7 @@ impl<L: RunLookup + RunListLookup> OrchestrationService<L> {
         let runs = page
             .snapshots
             .into_iter()
-            .map(|snapshot| project_record(&snapshot.record, snapshot.plan.as_ref()))
+            .map(|snapshot| project_run_summary(&snapshot.record, snapshot.plan.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         let has_more = page.next_position.is_some();
         let next_cursor = page
@@ -3994,14 +3994,34 @@ fn default_promote(
 }
 
 /// Project a durable record and optional plan the caller already loaded.
+///
+/// This is the single-run read shape: it carries `action_eligibility`, which
+/// run-list rows deliberately omit (see [`project_run_summary`]).
 pub fn project_record(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
     // Status reads must expose a dead adoption owner without persisting the
     // interruption; the reconcile action remains the mutating path.
-    let projected_record = project_dead_candidate_adoption(record);
-    let record = &projected_record;
+    let record = &project_dead_candidate_adoption(record);
+    let mut resource = project_summary_fields(record, plan)?;
+    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    Ok(resource)
+}
+
+/// Project a run-list row. List rows are summaries: they never compute or
+/// carry `action_eligibility`; clients read the single run for its actions.
+fn project_run_summary(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
+    project_summary_fields(&project_dead_candidate_adoption(record), plan)
+}
+
+fn project_summary_fields(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(format!("durable run id: {error}")))?;
     let identities = identities_for_record(record)?;
@@ -4036,7 +4056,6 @@ pub fn project_record(
     resource.candidate = candidate(record);
     resource.gates = gates(record);
     resource.publication = publication(record);
-    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
@@ -5074,6 +5093,35 @@ fn generic_observation_run(
     store: &homeboy_core::observation::ObservationStore,
     record: &homeboy_core::observation::RunRecord,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
+    let mut resource = generic_observation_run_summary(store, record)?;
+    resource.action_eligibility = record
+        .metadata_json
+        .pointer("/control_plane/actions")
+        .cloned()
+        .map(|actions| {
+            serde_json::from_value(actions).map(|actions| {
+                let mut report =
+                    homeboy_control_plane_contract::ControlPlaneActionEligibilityReport::new(
+                        resource.run.clone(),
+                    );
+                report.actions = actions;
+                report
+            })
+        })
+        .transpose()
+        .map_err(|error| {
+            ControlPlaneError::invalid_argument(format!(
+                "generic control-plane action eligibility is invalid: {error}"
+            ))
+        })?;
+    Ok(resource)
+}
+
+/// Run-list row for a generic observation run; omits `action_eligibility`.
+fn generic_observation_run_summary(
+    store: &homeboy_core::observation::ObservationStore,
+    record: &homeboy_core::observation::RunRecord,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
     let run = RunId::new(&record.id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
     let mut resource = ControlPlaneRun::new(run);
@@ -5107,26 +5155,6 @@ fn generic_observation_run(
             retry: None,
         });
     resource.artifacts = generic_observation_artifacts(record);
-    resource.action_eligibility = record
-        .metadata_json
-        .pointer("/control_plane/actions")
-        .cloned()
-        .map(|actions| {
-            serde_json::from_value(actions).map(|actions| {
-                let mut report =
-                    homeboy_control_plane_contract::ControlPlaneActionEligibilityReport::new(
-                        resource.run.clone(),
-                    );
-                report.actions = actions;
-                report
-            })
-        })
-        .transpose()
-        .map_err(|error| {
-            ControlPlaneError::invalid_argument(format!(
-                "generic control-plane action eligibility is invalid: {error}"
-            ))
-        })?;
     Ok(resource)
 }
 
@@ -5428,9 +5456,9 @@ impl ControlPlaneProvider for RegisteredProvider {
             .map(|record| {
                 if record.kind == "agent-task" {
                     let snapshot = lookup.exact(&record.id)?;
-                    project_record(&snapshot.record, snapshot.plan.as_ref())
+                    project_run_summary(&snapshot.record, snapshot.plan.as_ref())
                 } else {
-                    generic_observation_run(&observation, record)
+                    generic_observation_run_summary(&observation, record)
                 }
             })
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
@@ -6893,6 +6921,31 @@ mod tests {
         assert_eq!(third.runs[0].run.as_str(), "run-oldest");
         assert!(!third.has_more);
         assert!(third.next_cursor.is_none());
+    }
+
+    #[test]
+    fn run_list_rows_omit_action_eligibility_that_single_run_reads_carry() {
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert("run-summary".to_string(), snapshot("run-summary", None));
+        let service = OrchestrationService::new(MapLookup { snapshots });
+
+        let page = service
+            .runs(&ControlPlaneRunListRequest::default())
+            .expect("run page");
+        assert_eq!(page.runs.len(), 1);
+        assert!(page.runs[0].action_eligibility.is_none());
+        let row = serde_json::to_value(&page.runs[0]).expect("serialize row");
+        assert!(row.get("action_eligibility").is_none());
+
+        let run = service
+            .run(&RunId::new("run-summary").expect("run id"))
+            .expect("single run");
+        assert!(!run
+            .action_eligibility
+            .as_ref()
+            .expect("single-run read carries action eligibility")
+            .actions
+            .is_empty());
     }
 
     #[test]

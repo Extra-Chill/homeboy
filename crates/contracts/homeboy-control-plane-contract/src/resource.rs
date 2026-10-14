@@ -383,6 +383,9 @@ impl ControlPlaneRunListRequest {
 }
 
 /// One stable page of canonical run resources.
+///
+/// Rows are summaries: providers leave `action_eligibility` unset, and clients
+/// read the single run for its actions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneRunPage {

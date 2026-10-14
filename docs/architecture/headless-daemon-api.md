@@ -104,6 +104,9 @@ A useful headless UI can be built from this read/query surface:
   typed orchestration service. Mission and run discovery accept bounded
   `limit` values and opaque keyset cursors. Run discovery accepts an optional
   typed `mission` filter, and continuation cursors are bound to that filter.
+  Run-list rows are summaries: they omit `action_eligibility`, which is
+  computed only by the single-run read (`GET /v1/control-plane/runs/:id`).
+  Clients that render or execute actions fetch the run itself.
   Tasks are addressed within their parent run because persisted task names are
   run-local; task pagination cursors are likewise bound to the run.
   Provider attempts use their durable `{run}:{task}:{attempt}` owner identity;

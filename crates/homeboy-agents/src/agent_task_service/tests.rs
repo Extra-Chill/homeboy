@@ -2443,6 +2443,18 @@ fn daemon_run_list_includes_a_mission_less_agent_task_run_that_discovery_lists()
                 .map(|run| run.run.as_str())
                 .collect::<Vec<_>>()
         );
+        assert!(
+            page.runs.iter().all(|run| run.action_eligibility.is_none()),
+            "control-plane run list rows are summaries without action eligibility"
+        );
+        let detail = homeboy_core::control_plane::run(
+            &homeboy_control_plane_contract::RunId::new(run_id).expect("run id"),
+        )
+        .expect("daemon single-run read");
+        assert!(
+            detail.action_eligibility.is_some(),
+            "the single-run read owns action eligibility"
+        );
     });
 }
 
