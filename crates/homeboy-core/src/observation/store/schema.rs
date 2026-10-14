@@ -504,9 +504,17 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
 
 /// Request incremental auto-vacuum so retention can return freed pages to the
 /// filesystem (`PRAGMA incremental_vacuum`) without a full `VACUUM`. SQLite
-/// only honours this on a database with no tables yet and before it enters
-/// WAL mode, so it must run first; on an existing store it is a no-op.
+/// only honours this on an empty database before it enters WAL mode, so it
+/// must run first. The pragma is applied only to a brand-new file: on an
+/// auto-vacuum database SQLite rewrites header meta[6] in a write transaction,
+/// which would turn every read-only open into a file mutation.
 fn ensure_incremental_auto_vacuum(connection: &Connection) -> Result<()> {
+    let page_count: i64 = connection
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .map_err(sqlite_error("read observation store page count"))?;
+    if page_count > 0 {
+        return Ok(());
+    }
     connection
         .pragma_update(None, "auto_vacuum", "INCREMENTAL")
         .map_err(sqlite_error(
