@@ -24,16 +24,6 @@ use serde_json::Value;
 
 pub(crate) const COOK_VERDICT_SCHEMA: &str = "homeboy/cook-verdict/v1";
 
-/// Gate states that mean a deterministic gate rejected the candidate.
-const FAILED_GATE_STATES: [&str; 6] = [
-    "failed",
-    "fail",
-    "failure",
-    "error",
-    "denied",
-    "gate_failed",
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CookVerdict {
     pub schema: &'static str,
@@ -77,7 +67,7 @@ impl CookVerdict {
     /// Dossier category for this verdict. Agent-task runs are categorized by
     /// their canonical state, never by the observation row's status.
     pub(crate) fn category(&self) -> Option<String> {
-        if self.has_failed_gate() || self.candidate.as_deref().is_some_and(gate_failed) {
+        if self.has_failed_gate() || self.candidate.as_deref().is_some_and(candidate_gate_failed) {
             return Some("gate_failure".to_string());
         }
         let category = match self.state.as_str() {
@@ -158,8 +148,17 @@ fn state_label(state: ControlPlaneRunState) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// A deterministic gate rejected the candidate: the gate status the promotion
+/// recorded is the gate contract's own `Failed`, not a re-derived string list.
 fn gate_failed(state: &str) -> bool {
-    FAILED_GATE_STATES.contains(&state)
+    use homeboy::agents::agent_tasks::gate::AgentTaskGateStatus;
+    serde_json::from_value::<AgentTaskGateStatus>(Value::String(state.to_string()))
+        .is_ok_and(|status| status == AgentTaskGateStatus::Failed)
+}
+
+/// The promotion recorded that its deterministic gates rejected the candidate.
+fn candidate_gate_failed(state: &str) -> bool {
+    state == "gate_failed"
 }
 
 fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<String> {
@@ -205,7 +204,7 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
                 "the candidate was promoted but its gates have not verified it; it was not published"
                     .to_string()
             }
-            Some(candidate) if gate_failed(candidate) => format!(
+            Some(candidate) if candidate_gate_failed(candidate) => format!(
                 "candidate promotion reported `{candidate}`; the candidate was not published"
             ),
             Some(candidate) => format!(
