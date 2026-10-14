@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.423.0] - 2026-10-14
+
+### Added
+- read runner artifacts from controller
+
+### Fixed
+- classify a verified unchanged no_op without a patch artifact as no-change
+- open the observation store only for run readers
+
 ## [0.422.7] - 2026-10-14
 
 ### Changed
