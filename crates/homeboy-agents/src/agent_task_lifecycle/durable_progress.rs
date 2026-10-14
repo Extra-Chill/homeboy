@@ -2,6 +2,7 @@ use super::*;
 use homeboy_control_plane_contract::{
     ControlPlaneError, ControlPlaneErrorClass, ControlPlaneEventAppendRequest,
     ControlPlaneEventSource, RunId, TaskId, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_DATA_MAX_BYTES,
 };
 use homeboy_core::observation::PreparedControlPlaneEventAppend;
 use serde_json::{json, Value};
@@ -710,9 +711,31 @@ fn runner_job_event_request(
                 .then_some(timestamp_ms)
                 .flatten(),
             "progress": { "attempt": 0 },
-            "transport": data,
+            "transport": bounded_runner_transport(data),
         }),
     )?))
+}
+
+/// Runner job event payloads are transport evidence owned by the runner job
+/// log (`homeboy runner job logs`). Some carry whole staging envelopes, such
+/// as a source package manifest, and grow with the repository. The ledger
+/// keeps a bounded projection: payloads past a quarter of the event bound are
+/// replaced by their size, digest and top-level field names, so the event always
+/// appends and never masks the run's real outcome.
+fn bounded_runner_transport(data: Value) -> Value {
+    let bytes = serde_json::to_vec(&data).unwrap_or_default();
+    if bytes.len() <= CONTROL_PLANE_EVENT_DATA_MAX_BYTES / 4 {
+        return data;
+    }
+    json!({
+        "omitted": "runner transport exceeds the control-plane event bound; read it from the runner job log",
+        "bytes": bytes.len(),
+        "sha256": homeboy_engine_primitives::content_hash::sha256_hex(&bytes),
+        "fields": data
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    })
 }
 
 pub(crate) fn canonical_action_events_own_operation(

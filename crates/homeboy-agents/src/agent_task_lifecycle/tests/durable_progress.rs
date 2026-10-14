@@ -344,6 +344,68 @@ fn live_runner_snapshot_appends_runner_progress_once() {
 }
 
 #[test]
+fn oversize_runner_transport_appends_a_bounded_projection() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    let mut record = record_detached_lab_run_with_submission_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id: "durable-oversize-runner-transport",
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        },
+        &stub_lab_offload_submission,
+    )
+    .expect("running proxy");
+    // A staged execution adoption carries the whole source package manifest,
+    // which grows with the repository past the control-plane event bound.
+    let entries: Vec<Value> = (0..2_000)
+        .map(|index| json!({ "path": format!("cli/src/module-{index:04}.ts"), "sha256": "a".repeat(64) }))
+        .collect();
+    let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+    snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+    snapshot.events = vec![homeboy_core::api_jobs::JobEvent {
+        sequence: 1,
+        job_id: snapshot.job.id,
+        kind: homeboy_core::api_jobs::JobEventKind::Progress,
+        timestamp_ms: 42,
+        message: Some("queued staged execution adopted for direct daemon execution".to_string()),
+        data: Some(json!({
+            "phase": "staged_execution_adopted",
+            "staged_execution_envelope": { "metadata": { "staged_source_artifact": { "package": { "entries": entries } } } },
+        })),
+    }];
+
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("oversize runner event still reconciles");
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("replayed oversize runner event keeps the same receipt");
+
+    let events = durable_events(&lifecycle_store, &record.run_id);
+    let progress: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "runner.progress")
+        .collect();
+    assert_eq!(progress.len(), 1, "the bounded projection appends once");
+    let progress = progress[0];
+    assert_eq!(progress.data["phase"], "staged_execution_adopted");
+    let transport = &progress.data["transport"];
+    assert!(transport["omitted"].is_string());
+    assert!(transport["bytes"]
+        .as_u64()
+        .is_some_and(|bytes| bytes > 64 * 1024));
+    assert_eq!(transport["sha256"].as_str().map(str::len), Some(64));
+    assert_eq!(
+        transport["fields"],
+        json!(["phase", "staged_execution_envelope"])
+    );
+    assert!(serde_json::to_vec(&progress.data).expect("data").len() < 16 * 1024);
+}
+
+#[test]
 fn conflicting_runner_event_digest_does_not_skip_silently() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
