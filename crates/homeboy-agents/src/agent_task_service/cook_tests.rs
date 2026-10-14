@@ -18130,17 +18130,28 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     assert!(page.runs.len() <= 1);
                     for listed in &page.runs {
                         assert!(seen.insert(listed.run.to_string()), "duplicate attempt");
-                        let exact = crate::orchestration::run_exact_from_current_environment(
+                        // List rows are summaries; only single-run reads
+                        // carry action eligibility.
+                        assert!(listed.action_eligibility.is_none(), "{name}: summary row");
+                        let mut exact = crate::orchestration::run_exact_from_current_environment(
                             listed.run.as_str(),
                         )
                         .unwrap();
+                        assert!(
+                            exact.action_eligibility.take().is_some(),
+                            "{name}: exact actions"
+                        );
                         assert_eq!(listed, &exact, "{name}: exact row");
                         if launcher_ids.contains(listed.run.as_str()) {
                             continue;
                         }
-                        let detail =
+                        let mut detail =
                             crate::agent_task_service::control_plane_run(listed.run.as_str())
                                 .unwrap();
+                        assert!(
+                            detail.action_eligibility.take().is_some(),
+                            "{name}: detail actions"
+                        );
                         assert_eq!(listed, &detail, "{name}: list/detail");
                         let activity =
                             homeboy_core::activity::show_activity(listed.run.as_str()).unwrap();
