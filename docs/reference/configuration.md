@@ -69,7 +69,7 @@ probes every root listed here.
 | Root | Default | Override | Holds |
 | --- | --- | --- | --- |
 | Config root | `~/.config/homeboy` (`%APPDATA%\homeboy` on Windows) | `HOME` / `APPDATA` only | `homeboy.json`, component/project/server/extension declarations, `daemon/`, `rigs/`, `runner-sessions/`, `backups/`, `agent-runtimes/`, `preview-ingress/routes/` |
-| Data root | `$XDG_DATA_HOME/homeboy`, else `~/.local/share/homeboy` (`%LOCALAPPDATA%\homeboy` on Windows) | `HOMEBOY_DATA_DIR` | `homeboy.sqlite`, `artifacts/`, `cargo-targets/`, `controller-runtimes/`, `controller-scratch/`, `runtime/tmp/` |
+| Data root | `$XDG_DATA_HOME/homeboy`, else `~/.local/share/homeboy` (`%LOCALAPPDATA%\homeboy` on Windows) | `HOMEBOY_DATA_DIR` | `homeboy-v<schema>.sqlite` (one observation store per schema version; never migrated), `artifacts/`, `cargo-targets/`, `controller-runtimes/`, `controller-scratch/`, `runtime/tmp/` |
 | Artifact root | `<data root>/artifacts` | `homeboy --artifact-root <dir>`, `HOMEBOY_ARTIFACT_ROOT`, or config `artifact_root` | Persisted run artifacts |
 | Shared Cargo target root | `<data root>/cargo-targets` | `HOMEBOY_CARGO_TARGET_ROOT` or config `cargo_target_root` | Reconstructable shared Cargo target directories |
 | Runtime temp root | `<data root>/runtime/tmp` | `HOMEBOY_RUNTIME_TMPDIR` | Per-workload scratch, exported to every child process as `TMPDIR`/`TMP`/`TEMP` |

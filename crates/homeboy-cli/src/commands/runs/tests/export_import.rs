@@ -328,8 +328,12 @@ fn import_into_empty_db_and_reimport_is_idempotent() {
             .expect("export");
             run.id
         };
-        std::fs::remove_file(home.path().join(".local/share/homeboy/homeboy.sqlite"))
-            .expect("remove db");
+        std::fs::remove_file(
+            home.path()
+                .join(".local/share/homeboy")
+                .join(homeboy::core::paths::OBSERVATION_DB_FILENAME),
+        )
+        .expect("remove db");
 
         import_runs(
             &test_store(),

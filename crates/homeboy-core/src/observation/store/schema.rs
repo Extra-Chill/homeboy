@@ -14,8 +14,9 @@ use crate::{paths, Result};
 /// Homeboy keeps no migrations for older stores (#15742). The 28 historical
 /// migrations were squashed into [`BASELINE_SCHEMA`]; a store recorded at an
 /// older version is refused with an actionable error instead of upgraded.
-/// Changing the schema means editing the baseline and bumping this version,
-/// which deliberately makes every existing store fail to open.
+/// Changing the schema means editing the baseline, bumping this version, and
+/// renaming [`paths::OBSERVATION_DB_FILENAME`] to match, so the new schema gets
+/// its own store file while binaries on the old schema keep theirs.
 pub(crate) const SCHEMA_VERSION: i64 = 29;
 
 /// The full observation-store schema at [`SCHEMA_VERSION`].
@@ -676,6 +677,14 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn store_file_name_is_scoped_to_the_schema_version() {
+        assert_eq!(
+            crate::paths::OBSERVATION_DB_FILENAME,
+            format!("homeboy-v{}.sqlite", super::SCHEMA_VERSION)
+        );
+    }
+
     use super::*;
 
     /// An initializing open must persist WAL before it exposes the store.

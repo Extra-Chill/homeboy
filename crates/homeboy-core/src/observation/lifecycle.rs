@@ -594,7 +594,9 @@ mod tests {
         with_isolated_home(|_| {
             let observation = active_observation();
 
-            assert!(observation.store_path().ends_with("homeboy.sqlite"));
+            assert!(observation
+                .store_path()
+                .ends_with(crate::paths::OBSERVATION_DB_FILENAME));
         });
     }
 }

@@ -47,7 +47,8 @@ mod store_init_tests {
             assert_eq!(
                 status.path,
                 home.path()
-                    .join(".local/share/homeboy/homeboy.sqlite")
+                    .join(".local/share/homeboy")
+                    .join(crate::paths::OBSERVATION_DB_FILENAME)
                     .to_string_lossy()
             );
             assert!(
@@ -79,7 +80,9 @@ mod store_init_tests {
 
             assert_eq!(
                 path,
-                home.path().join(".local/share/homeboy/homeboy.sqlite")
+                home.path()
+                    .join(".local/share/homeboy")
+                    .join(crate::paths::OBSERVATION_DB_FILENAME)
             );
         });
     }
@@ -176,7 +179,7 @@ mod store_init_tests {
         let directory = tempfile::tempdir().expect("temp dir");
         let data_dir = directory.path().join("data");
         std::fs::create_dir_all(&data_dir).expect("create data dir");
-        let database = data_dir.join("homeboy.sqlite");
+        let database = crate::paths::observation_db_in_root(&data_dir);
         let setup = rusqlite::Connection::open(&database).expect("create rollback-journal store");
         setup
             .execute_batch("PRAGMA journal_mode=DELETE;")

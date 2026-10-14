@@ -303,7 +303,7 @@ fn now_ms() -> u128 {
 /// The operation-record store below an explicitly injected data root.
 ///
 /// The ambient form resolved `paths::observation_db()` and took its parent.
-/// `observation_db()` is `homeboy_data()?.join("homeboy.sqlite")`, so that
+/// `observation_db()` is `homeboy_data()?.join(OBSERVATION_DB_FILENAME)`, so that
 /// parent is exactly the data root: the database path was only ever a detour
 /// through it, and this store has never read or written the database itself.
 /// Naming the data root directly removes both the detour and the infallible
