@@ -6559,6 +6559,7 @@ pub(crate) fn cook_report_with_stores(
             )
         })
         .flatten();
+    let notes = provider_route_notes_for_run(lifecycle_store, latest_run_id.as_deref());
     let mut report = AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
@@ -6577,6 +6578,7 @@ pub(crate) fn cook_report_with_stores(
             terminal_failure_classification: None,
             primary_failure: None,
             moving_base_recovery: None,
+            provider_route_notes: notes,
             failure_context,
             report_stores: recipe_store
                 .zip(lifecycle_store)
@@ -6681,7 +6683,29 @@ pub(crate) fn bind_report_to_stores(
             context.next_actions = enriched.next_actions;
         }
     }
+    report.provider_route_notes =
+        provider_route_notes_for_run(Some(lifecycle_store), report.latest_run_id.as_deref());
     report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
+}
+
+/// One bounded operator-facing line per provider route the run skipped as
+/// unready before dispatch, prefixed once with the route that actually ran
+/// (#15881). The projection reads the durable run record and its admission
+/// plan; without either, a run rendered no route notes.
+fn provider_route_notes_for_run(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    run_id: Option<&str>,
+) -> Vec<String> {
+    let Some((store, run_id)) = lifecycle_store.zip(run_id) else {
+        return Vec::new();
+    };
+    let Ok(record) = store.read_record(run_id) else {
+        return Vec::new();
+    };
+    let Ok(plan) = agent_task_lifecycle::load_plan_in_store(store, run_id) else {
+        return Vec::new();
+    };
+    crate::agent_task_route_notes::provider_route_notes(&record, Some(&plan))
 }
 
 /// `select_cook_candidate` deliberately selects across the whole Cook index

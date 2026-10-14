@@ -4020,6 +4020,8 @@ pub fn project_record(
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
     resource.provider = assigned_provider(record);
+    resource.provider_route_notes =
+        crate::agent_task_route_notes::provider_route_notes(record, plan);
     resource.heartbeat_at = heartbeat_at(record);
     resource.created_at = record.submitted_at.clone();
     resource.updated_at = record.updated_at.clone();

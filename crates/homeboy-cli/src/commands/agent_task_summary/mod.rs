@@ -373,6 +373,17 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
                 .unwrap_or_else(unavailable_or_zero)
         ),
     ]);
+    // One bounded line per provider route the run skipped as unready before
+    // dispatch (#15881): a credentials-dead primary is operator-visible, not
+    // only an event-log line.
+    if let Some(notes) = payload
+        .get("provider_route_notes")
+        .and_then(Value::as_array)
+    {
+        for note in notes.iter().filter_map(Value::as_str).take(4) {
+            lines.push(note.to_string());
+        }
+    }
     if durable_unavailable {
         let reason = string_value(payload, &["durable_candidate", "reason"])
             .unwrap_or("authoritative candidate evidence could not be read");
@@ -1263,6 +1274,48 @@ mod tests {
         assert!(summary.contains("First artifact: /tmp/patch.diff\n"));
         assert!(summary.contains("Next: homeboy agent-task review homeboy-4345\n"));
         assert!(!summary.contains("{\n"));
+    }
+
+    /// #15881: one bounded line per provider route the run skipped as unready
+    /// before dispatch, so a credentials-dead primary is operator-visible.
+    #[test]
+    fn cook_summary_names_each_skipped_provider_route() {
+        let payload = json!({
+            "run_id": "skipped-route-run",
+            "state": "succeeded",
+            "task_count": 1,
+            "provider_route_notes": [
+                "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)",
+                "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
+            ]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload);
+
+        let summary = summary.expect("cook summary renders");
+        assert!(
+            summary.contains("Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)\n"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("xai/grok-4.7 skipped: usage_capped"),
+            "{summary}"
+        );
+
+        // A report without route notes renders unchanged (no empty block).
+        let plain = render_agent_task_summary(
+            AgentTaskSummaryKind::Cook,
+            &json!({
+                "run_id": "plain-run",
+                "state": "succeeded",
+                "task_count": 1,
+            }),
+        )
+        .expect("plain summary");
+        assert!(
+            !plain.contains("skipped:"),
+            "no route notes must not invent a skip line: {plain}"
+        );
     }
 
     #[test]

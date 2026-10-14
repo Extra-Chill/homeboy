@@ -36,6 +36,7 @@ fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCoo
         terminal_failure_classification: None,
         primary_failure: None,
         moving_base_recovery: None,
+        provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,
     }
@@ -111,6 +112,33 @@ fn green_no_finalize_is_completed_without_a_pull_request_link() {
     assert_eq!(payload.kind, NotifyEventKind::Completed);
     assert!(payload.links.is_empty());
     assert!(payload.render_body().contains("Status: green_no_finalize"));
+}
+
+/// #15881: a primary route skipped before dispatch is named in the terminal
+/// notification as one bounded line per skipped route.
+#[test]
+fn terminal_notification_names_skipped_provider_routes() {
+    let mut route_note_report = report("no_changes", None);
+    route_note_report.provider_route_notes = vec![
+        "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable (Refresh the provider-owned OpenCode credentials, then retry.)"
+            .to_string(),
+        "xai/grok-4.7 skipped: usage_capped (Wait for the provider usage cap to reset.)"
+            .to_string(),
+    ];
+    let payload = terminal_payload(&route_note_report, None, 1);
+    let body = payload.render_body();
+    assert!(
+        body.contains("Skipped route: Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable"),
+        "{body}"
+    );
+    assert!(
+        body.contains("Skipped route: xai/grok-4.7 skipped: usage_capped"),
+        "{body}"
+    );
+
+    // Without skips the notification gains no extra fact.
+    let plain = terminal_payload(&report("succeeded", None), None, 0);
+    assert!(!plain.render_body().contains("Skipped route:"),);
 }
 
 #[test]
