@@ -184,3 +184,86 @@ fn rss_bytes() -> u64 {
         .expect("Linux VmRSS")
         * 1024
 }
+
+/// An in-thread driver that declares no execution owner, like Lab staging,
+/// cleanup and promotion: only the one-resume fence guards its recovery.
+struct InThreadDriver;
+
+impl ControllerJobDriver for InThreadDriver {
+    fn job_type(&self) -> &'static str {
+        "test.15936-in-thread"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn public_request(&self, request: &Value) -> Result<Value> {
+        Ok(request.clone())
+    }
+    fn public_progress(&self, progress: &Value) -> Result<Value> {
+        Ok(progress.clone())
+    }
+    fn public_result(&self, result: &Value) -> Result<Value> {
+        Ok(result.clone())
+    }
+    fn public_error(&self, error: &Error) -> ControllerJobPublicError {
+        ControllerJobPublicError {
+            message: error.to_string(),
+            data: json!({}),
+        }
+    }
+    fn validate_secret_references(&self, _: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn execute(&self, _: Value, _: ControllerJobHandle) -> Result<Value> {
+        Ok(json!({}))
+    }
+    fn cancel(&self, _: &Value) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// #15936: the one-resume fence still stops a crash loop, but a requested stop
+/// of the lease that last ran the job re-arms its resume.
+#[test]
+fn requested_stop_rearms_the_one_resume_fence_for_its_own_lease_only() {
+    crate::test_support::with_isolated_home(|home| {
+        static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        REGISTERED.get_or_init(|| {
+            controller_job_driver::register_controller_job_driver(Arc::new(InThreadDriver)).unwrap()
+        });
+        let path = home.path().join("rearm-jobs.json");
+        let harness = crate::test_support::ControllerJobHarness::durable(
+            Arc::new(InThreadDriver),
+            json!({}),
+            &path,
+            "first",
+        )
+        .unwrap();
+        harness.handle().checkpoint(json!({ "phase": 1 })).unwrap();
+        let id = harness.job().unwrap().id;
+        let second = harness.reopen(&path, "second").unwrap();
+        assert!(second.store().claim_controller_execution(id, true).is_ok());
+
+        // `second` crashed: the job already spent its resume.
+        let third = second.reopen(&path, "third").unwrap();
+        assert!(third.store().claim_controller_execution(id, true).is_err());
+        // Another lease's requested stop proves nothing about this job.
+        assert_eq!(
+            third
+                .store()
+                .rearm_recovery_after_requested_stop("first")
+                .unwrap(),
+            0
+        );
+        assert!(third.store().claim_controller_execution(id, true).is_err());
+        // `second` was stopped on request: the job resumes again.
+        assert_eq!(
+            third
+                .store()
+                .rearm_recovery_after_requested_stop("second")
+                .unwrap(),
+            1
+        );
+        assert!(third.store().claim_controller_execution(id, true).is_ok());
+    });
+}

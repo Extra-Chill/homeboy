@@ -2284,7 +2284,7 @@ fn force_stop_lease_mismatch_cannot_signal_a_process() {
 
 #[cfg(unix)]
 #[test]
-fn force_stop_active_jobs_block_signaling() {
+fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid() {
     let _home = HomeGuard::new();
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
@@ -2298,14 +2298,20 @@ fn force_stop_active_jobs_block_signaling() {
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
+    // Active work no longer refuses a stop (#15936); the PID carries no
+    // startup token, so it is never signaled, and the lease stays for the
+    // dead-lease recovery that resumes that work.
     for result in [
         stop_for_lease(&state.lease_id),
         force_stop_for_lease(&state.lease_id),
     ] {
-        let error = result.expect_err("active job blocks stale daemon stop");
-        assert_eq!(error.details["active_job_ids"], serde_json::json!([job.id]));
+        let result = result.expect("active jobs do not block a stop");
+        assert!(!result.stopped);
     }
     assert!(pid_is_running(child.id()));
+    assert!(crate::paths::daemon_state_file()
+        .expect("state path")
+        .exists());
     child.kill().expect("cleanup test process");
     child.wait().expect("reap test process");
 }

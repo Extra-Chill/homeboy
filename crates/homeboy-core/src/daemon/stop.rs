@@ -61,10 +61,6 @@ fn tokenless_live_lease(expected_lease_id: &str) -> Result<Option<DaemonState>> 
 /// Stop a tokenless, reachable foreground daemon by asking it to stop itself,
 /// then wait (bounded) for its process to exit.
 fn request_foreground_lifecycle_stop(state: &DaemonState) -> Result<DaemonStopResult> {
-    let active_job_ids = active_daemon_job_ids()?;
-    if !active_job_ids.is_empty() {
-        return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
-    }
     let url = format!("http://{}/lifecycle/stop", state.address);
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -153,11 +149,6 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
             None,
         ));
     }
-    let active_job_ids = active_daemon_job_ids()?;
-    if !active_job_ids.is_empty() {
-        return Err(active_jobs_block_daemon_stop_error(&state, &active_job_ids));
-    }
-
     let identity = DaemonLeaseIdentity::from_state(&state);
     let current_state = read_lease_if_identity_matches(&path, &identity)?;
     if current_state.pid != state.pid {
@@ -166,8 +157,13 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
             state.pid, current_state.pid
         )));
     }
+    // With work in flight the dead lease stays: the next start's dead-lease
+    // recovery resumes that work (#15936).
+    let in_flight = !active_daemon_job_ids()?.is_empty();
     if !pid_is_running(state.pid) {
-        retire_dead_lease_and_generation(&path, &identity, &state)?;
+        if !in_flight {
+            retire_dead_lease_and_generation(&path, &identity, &state)?;
+        }
         return Ok(DaemonStopResult {
             stopped: false,
             already_absent: true,
@@ -177,9 +173,11 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
     if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
-        // The zero-job gate and exact lease revalidation make it safe to retire
-        // stale metadata, but the unowned PID must never receive a signal.
-        retire_dead_lease_and_generation(&path, &identity, &state)?;
+        // Exact lease revalidation makes it safe to retire stale metadata, but
+        // the unowned PID must never receive a signal.
+        if !in_flight {
+            retire_dead_lease_and_generation(&path, &identity, &state)?;
+        }
         return Ok(DaemonStopResult {
             stopped: false,
             already_absent: true,
@@ -189,10 +187,44 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
 
-    let termination = match terminate_exact_supervised_daemon(&path, &identity, &state)? {
+    stop_supervised_daemon(&path, &identity, &state, state_path_display)
+}
+
+/// Stop an exact token-owned daemon. Active controller work is interrupted,
+/// not refused: the stop is recorded as requested before any signal, so the
+/// next start re-arms and resumes that work from its checkpoint (#15936).
+/// While work is in flight the lease is kept, so dead-lease recovery also
+/// re-admits staged direct work.
+fn stop_supervised_daemon(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+    state_path_display: String,
+) -> Result<DaemonStopResult> {
+    let active_jobs = active_daemon_job_ids()?.len();
+    let mut evidence = DaemonTerminationEvidence {
+        classification: DaemonTerminationClassification::CleanStop,
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        lease_id: Some(state.lease_id.clone()),
+        pid: Some(state.pid),
+        binary_identity: Some(state.build_identity.display.clone()),
+        active_jobs,
+        resource_evidence: "unavailable: ordinary stop does not collect OS resource snapshots"
+            .to_string(),
+        os_evidence: "stop requested; termination pending".to_string(),
+        exit_code: None,
+        signal: None,
+        supervisor_signal: None,
+        stdout: None,
+        stderr: None,
+        stop_requested: true,
+    };
+    // Recorded before the signal: the supervisor reads it when its child exits.
+    write_termination_evidence(&evidence)?;
+    let termination = match terminate_exact_supervised_daemon(path, identity, state)? {
         SupervisedDaemonTerminationOutcome::Stopped(termination) => termination,
         SupervisedDaemonTerminationOutcome::AlreadyAbsent => {
-            remove_lease_if_identity_matches(&path, &identity)?;
+            remove_lease_if_identity_matches(path, identity)?;
             return Ok(DaemonStopResult {
                 stopped: false,
                 already_absent: true,
@@ -202,25 +234,14 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
             });
         }
     };
-    let evidence = DaemonTerminationEvidence {
-        classification: DaemonTerminationClassification::CleanStop,
-        observed_at: chrono::Utc::now().to_rfc3339(),
-        lease_id: Some(state.lease_id.clone()),
-        pid: Some(state.pid),
-        binary_identity: Some(state.build_identity.display.clone()),
-        active_jobs: 0,
-        resource_evidence: "unavailable: forced stop does not collect OS resource snapshots"
-            .to_string(),
-        os_evidence: termination.os_evidence(state.pid),
-        exit_code: None,
-        signal: termination.child_signal,
-        supervisor_signal: termination.supervisor_signal,
-        stdout: None,
-        stderr: None,
-        stop_requested: true,
-    };
+    evidence.observed_at = chrono::Utc::now().to_rfc3339();
+    evidence.os_evidence = termination.os_evidence(state.pid);
+    evidence.signal = termination.child_signal;
+    evidence.supervisor_signal = termination.supervisor_signal;
     write_termination_evidence(&evidence)?;
-    remove_lease_if_identity_matches(&path, &identity)?;
+    if active_jobs == 0 {
+        remove_lease_if_identity_matches(path, identity)?;
+    }
     Ok(DaemonStopResult {
         stopped: true,
         already_absent: false,
@@ -362,10 +383,10 @@ pub(super) fn revalidate_exact_termination_target(
     state: &DaemonState,
 ) -> Result<ExactTerminationTarget> {
     let current = read_lease_if_identity_matches(path, identity)?;
-    if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
+    if current.pid != state.pid {
         return Err(Error::validation_invalid_argument(
             "daemon_stop",
-            "daemon lease or active durable jobs changed before termination; refusing to signal",
+            "daemon lease changed before termination; refusing to signal",
             Some(state.lease_id.clone()),
             None,
         ));
@@ -389,10 +410,10 @@ fn revalidate_exact_supervisor_termination_target(
     supervisor_pid: u32,
 ) -> Result<ExactTerminationTarget> {
     let current = read_lease_if_identity_matches(path, identity)?;
-    if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
+    if current.pid != state.pid {
         return Err(Error::validation_invalid_argument(
             "daemon_stop",
-            "daemon lease or active durable jobs changed before supervisor termination; refusing to signal",
+            "daemon lease changed before supervisor termination; refusing to signal",
             Some(state.lease_id.clone()),
             None,
         ));
@@ -725,59 +746,18 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
         )));
     }
 
+    if pid_is_running(pid) && !force {
+        return stop_supervised_daemon(&path, &identity, state, state_path_display);
+    }
+    let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
     if pid_is_running(pid) {
-        let active_job_ids = active_daemon_job_ids()?;
-        if !force && !active_job_ids.is_empty() {
-            return Err(active_jobs_block_daemon_stop_error(state, &active_job_ids));
-        }
-        if !force {
-            let termination = match terminate_exact_supervised_daemon(&path, &identity, state)? {
-                SupervisedDaemonTerminationOutcome::Stopped(termination) => termination,
-                SupervisedDaemonTerminationOutcome::AlreadyAbsent => {
-                    remove_lease_if_identity_matches(&path, &identity)?;
-                    return Ok(DaemonStopResult {
-                        stopped: false,
-                        already_absent: true,
-                        pid: Some(pid),
-                        state_path: state_path_display,
-                        termination_evidence: None,
-                    });
-                }
-            };
-            let evidence = DaemonTerminationEvidence {
-                classification: DaemonTerminationClassification::CleanStop,
-                observed_at: chrono::Utc::now().to_rfc3339(),
-                lease_id: Some(state.lease_id.clone()),
-                pid: Some(pid),
-                binary_identity: Some(state.build_identity.display.clone()),
-                active_jobs: 0,
-                resource_evidence:
-                    "unavailable: ordinary stop does not collect OS resource snapshots".to_string(),
-                os_evidence: termination.os_evidence(pid),
-                exit_code: None,
-                signal: termination.child_signal,
-                supervisor_signal: termination.supervisor_signal,
-                stdout: None,
-                stderr: None,
-                stop_requested: true,
-            };
-            write_termination_evidence(&evidence)?;
-            remove_lease_if_identity_matches(&path, &identity)?;
-            return Ok(DaemonStopResult {
-                stopped: true,
-                already_absent: false,
-                pid: Some(pid),
-                state_path: state_path_display,
-                termination_evidence: Some(evidence),
-            });
-        }
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
             observed_at: chrono::Utc::now().to_rfc3339(),
             lease_id: Some(state.lease_id.clone()),
             pid: Some(pid),
             binary_identity: Some(state.build_identity.display.clone()),
-            active_jobs: JobStore::active_count_at_path(paths::daemon_jobs_file()?)?,
+            active_jobs,
             resource_evidence: "unavailable: launcher does not collect OS resource snapshots"
                 .to_string(),
             os_evidence:
@@ -797,8 +777,10 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     } else {
         false
     };
-
-    remove_lease_if_identity_matches(&path, &identity)?;
+    // Keep the lease while work is in flight; see `stop_supervised_daemon`.
+    if active_jobs == 0 {
+        remove_lease_if_identity_matches(&path, &identity)?;
+    }
 
     Ok(DaemonStopResult {
         stopped,
@@ -824,29 +806,6 @@ pub(super) fn active_daemon_job_ids() -> Result<Vec<Uuid>> {
         .collect::<Vec<_>>();
     job_ids.sort();
     Ok(job_ids)
-}
-
-pub(super) fn active_jobs_block_daemon_stop_error(
-    state: &DaemonState,
-    active_job_ids: &[Uuid],
-) -> Error {
-    let current_identity = state.build_identity.display.clone();
-    let requested_identity = build_identity::current().display;
-    let mut error = Error::validation_invalid_argument(
-        "daemon_stop",
-        format!(
-            "refusing daemon stop for lease `{}` ({current_identity}) while active durable jobs exist: {}. Requested Homeboy identity is `{requested_identity}`; wait for those jobs to finish before stopping the daemon",
-            state.lease_id,
-            active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-        ),
-        Some(state.lease_id.clone()),
-        Some(vec!["Inspect `homeboy daemon status` and the listed durable jobs before replacing this daemon.".to_string()]),
-    );
-    error.details["active_job_ids"] = serde_json::json!(active_job_ids);
-    error.details["current_daemon_identity"] = serde_json::json!(current_identity);
-    error.details["requested_homeboy_identity"] = serde_json::json!(requested_identity);
-    error.details["lifecycle_mutation"] = serde_json::json!("stop");
-    error
 }
 
 #[cfg(test)]
