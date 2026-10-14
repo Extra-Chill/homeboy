@@ -139,7 +139,7 @@ A step runs with `env_clear()` plus its admitted environment:
 
 ### Daemon restarts
 
-An instance lives in the daemon generation that admitted it, and its checkpoint is that generation's job store. `workflow status` and `list` query serving generations and also read registered generations' job stores without starting or reconciling a daemon, so terminal instances remain reachable after their daemon stops serving. `workflow approve` requires the owning generation to be serving.
+An instance lives in the daemon generation that admitted it, and its checkpoint is that generation's job store. `workflow status` and `list` query serving generations and also read the job stores of registered and retired generations without starting or reconciling a daemon, so terminal instances remain reachable after their daemon stops serving. `workflow approve` requires the owning generation to be serving.
 
 When the daemon that owns an instance dies, the instance resumes on its own. The next Homeboy command starts a new admitting daemon, and the admitting daemon restarts every dead generation that holds resumable work in that generation's own directory. The restarted daemon takes over the generation and resumes the instance from its checkpoint. That directory's owner lock admits one daemon, so the instance has one driver, and submission keys keep every step to one job. A step whose child was still running when the daemon died is protected until the child exits; its result is then read from the job ledger (and, for a `cook` step, from the Cook's run record), so no step runs twice. `homeboy daemon recover --yes` applies the same restart immediately.
 

@@ -635,3 +635,58 @@ fn terminal_workflow_is_read_from_a_non_serving_generation_store() {
         assert_eq!(listed["source"], "retained_generation");
     });
 }
+
+#[test]
+fn terminal_workflow_is_read_from_a_retired_unregistered_generation() {
+    with_isolated_home(|home| {
+        // A serving generation the client connects to; it never ran the workflow.
+        let serving_dir = home.path().join("generations/serving");
+        std::fs::create_dir_all(&serving_dir).unwrap();
+        let serving = generation_state("serving-generation", &serving_dir);
+        crate::daemon::generation_store::seed(&serving).unwrap();
+
+        // A retired generation: its directory and job store remain under the
+        // router's generations dir, but it has no registry entry.
+        let retired_dir = crate::daemon::generation_store::router_dir()
+            .unwrap()
+            .join("generations")
+            .join("retired");
+        std::fs::create_dir_all(&retired_dir).unwrap();
+        let store = JobStore::open_without_reconciliation(retired_dir.join("jobs.json"))
+            .unwrap()
+            .with_daemon_lease("retired-generation".to_string());
+        let request = request(
+            json!({"schema":"homeboy/workflow/v1","id":"retired","steps":[{"id":"done","exec":{"program":"sh","args":["-c","true"]}}]}),
+            home.path(),
+        );
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, job_id, 10).status,
+            JobStatus::Succeeded
+        );
+        assert!(
+            crate::daemon::generation_store::endpoint_for_lease("retired-generation")
+                .unwrap()
+                .is_none()
+        );
+
+        let client = crate::daemon::LocalControllerJobClient::connect_to_existing_endpoint(
+            crate::daemon::generation_store::endpoint_for_lease(&serving.lease_id)
+                .unwrap()
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let status = client.workflow(&request.instance).unwrap();
+        assert_eq!(status["status"], "succeeded");
+        assert_eq!(status["source"], "retained_generation");
+        let list = client.workflow_list().unwrap();
+        assert!(list["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entity| entity["instance"] == request.instance
+                && entity["source"] == "retained_generation"));
+    });
+}
