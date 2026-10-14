@@ -11,7 +11,6 @@ pub mod managed_services;
 mod outcome;
 mod outcome_artifacts;
 mod outcome_status;
-mod outcome_templates;
 mod postprocess;
 mod resources;
 mod scheduling;
@@ -27,18 +26,17 @@ pub use crate::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyAction, AgentTaskAdaptiveConcurrencyDecision,
     AgentTaskAdaptiveConcurrencyInputs, AgentTaskAdaptiveConcurrencyPolicy,
     AgentTaskAdaptiveConcurrencyStatus, AgentTaskAggregate, AgentTaskAggregateStatus,
-    AgentTaskAggregateTotals, AgentTaskArtifactBinding, AgentTaskArtifactLineage,
-    AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
-    AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus, AgentTaskCancellationToken,
-    AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
+    AgentTaskAggregateTotals, AgentTaskArtifactLineage, AgentTaskArtifactOutputDeclaration,
+    AgentTaskArtifactPostprocessStep, AgentTaskArtifactRunBinding, AgentTaskBackpressureStatus,
+    AgentTaskCancellationToken, AgentTaskCandidateAdoption, AgentTaskCandidateAdoptionDecision,
     AgentTaskCandidateCompletionPolicy, AgentTaskChildRun, AgentTaskExecutionBudget,
     AgentTaskExecutionContext, AgentTaskManagedService, AgentTaskManagedServiceBrowserOriginProbe,
     AgentTaskManagedServiceLifecycle, AgentTaskManagedServiceReadiness,
-    AgentTaskManagedServiceReadinessKind, AgentTaskOutputBinding, AgentTaskOutputDependencies,
-    AgentTaskPlan, AgentTaskProgressEvent, AgentTaskProviderRotationAttempt,
-    AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy, AgentTaskQueueStatus,
-    AgentTaskResourceBudget, AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy,
-    AgentTaskScheduleOptions, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
+    AgentTaskManagedServiceReadinessKind, AgentTaskPlan, AgentTaskProgressEvent,
+    AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
+    AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
+    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
 use crate::agent_task_timeout::timeout_with_grace;
 use crate::agent_task_timeout_artifacts::{

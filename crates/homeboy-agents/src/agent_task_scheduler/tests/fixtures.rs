@@ -412,12 +412,11 @@ pub(super) struct RecordingExecutor {
     pub(super) cancel_calls: Arc<Mutex<Vec<String>>>,
 }
 
-pub(super) struct OutputTemplateExecutor {
+pub(super) struct RequestRecordingExecutor {
     pub(super) observed: Arc<Mutex<Vec<AgentTaskRequest>>>,
-    pub(super) include_issue_number: bool,
 }
 
-impl AgentTaskExecutorAdapter for OutputTemplateExecutor {
+impl AgentTaskExecutorAdapter for RequestRecordingExecutor {
     fn execute(
         &self,
         request: AgentTaskRequest,
@@ -427,49 +426,7 @@ impl AgentTaskExecutorAdapter for OutputTemplateExecutor {
             .lock()
             .expect("observed requests")
             .push(request.clone());
-        let metadata = if request.task_id == "idea" && self.include_issue_number {
-            json!({ "github": { "issue_number": 3447 } })
-        } else {
-            json!({})
-        };
-        let outputs = if request.task_id == "idea" && self.include_issue_number {
-            json!({ "issue_number": 3447 })
-        } else {
-            Value::Null
-        };
-
-        let artifacts = if request.task_id == "idea" && self.include_issue_number {
-            vec![AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "concept".to_string(),
-                kind: "concept_packet".to_string(),
-                name: Some("concept.json".to_string()),
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: Some("artifacts/concept.json".to_string()),
-                url: None,
-                mime: Some("application/json".to_string()),
-                size_bytes: None,
-                sha256: Some("sha256:concept".to_string()),
-                metadata: json!({
-                    "payload_schema": "example/concept-packet/v1",
-                    "payload": { "title": "Demo concept" }
-                }),
-            }]
-        } else {
-            Vec::new()
-        };
-
-        AgentTaskOutcome {
-            task_id: request.task_id,
-            status: AgentTaskOutcomeStatus::Succeeded,
-            summary: Some("ok".to_string()),
-            artifacts,
-            outputs,
-            metadata,
-            ..Default::default()
-        }
+        outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
     }
 }
 
