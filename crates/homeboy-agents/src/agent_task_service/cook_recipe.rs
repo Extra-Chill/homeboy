@@ -1996,6 +1996,50 @@ pub enum ScheduledContinuationClaim {
     Unavailable,
 }
 
+/// Read-only admission view for a supervisor that consumes a continuation in a
+/// separate worker process. It never claims: the worker claims for itself, so
+/// the durable `owner_pid` names the process actually doing the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduledContinuationGate {
+    /// A retry deadline spaces the next automatic attempt.
+    RetryAfter(Duration),
+    /// A live process already holds the claim; observe it rather than spawn.
+    HeldByLiveOwner,
+    /// The continuation already finished; settle without a worker.
+    Settled(CookContinuationState),
+    /// A worker may run: it claims (reconstructing a missing record if needed).
+    Ready,
+}
+
+impl CookRecipeStore {
+    pub fn scheduled_continuation_gate(&self, run_id: &str) -> ScheduledContinuationGate {
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(self.data_root());
+        let Ok(record) = lifecycle_store.read_record(run_id) else {
+            return ScheduledContinuationGate::Ready;
+        };
+        let value = lifecycle_continuation(&record);
+        match lifecycle_continuation_state(value) {
+            CookContinuationState::Pending => continuation_retry_wait(value).map_or(
+                ScheduledContinuationGate::Ready,
+                ScheduledContinuationGate::RetryAfter,
+            ),
+            CookContinuationState::Claimed
+                if value
+                    .and_then(|value| value.get("owner_pid"))
+                    .and_then(Value::as_u64)
+                    .is_some_and(|pid| homeboy_core::process::pid_is_running(pid as u32)) =>
+            {
+                ScheduledContinuationGate::HeldByLiveOwner
+            }
+            state @ (CookContinuationState::Completed | CookContinuationState::Failed) => {
+                ScheduledContinuationGate::Settled(state)
+            }
+            _ => ScheduledContinuationGate::Ready,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum LifecycleContinuationTransition<'a> {
     Complete,

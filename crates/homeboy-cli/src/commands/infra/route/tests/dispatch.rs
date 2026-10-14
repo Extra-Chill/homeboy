@@ -2067,6 +2067,126 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
     });
 }
 
+/// Spawn a real short-lived process and record it as the continuation worker,
+/// publishing `outcome` to its outcome file when given.
+fn recorded_terminal_worker(
+    dir: &Path,
+    seconds: &str,
+    outcome: Option<serde_json::Value>,
+) -> (std::process::Child, serde_json::Value) {
+    let child = std::process::Command::new("sleep")
+        .arg(seconds)
+        .spawn()
+        .expect("spawn worker stand-in");
+    let start_identity = homeboy::core::process::process_start_identity(child.id())
+        .expect("identity")
+        .expect("identity available");
+    let outcome_path = dir.join("outcome.json");
+    if let Some(outcome) = outcome {
+        fs::write(
+            &outcome_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": TERMINAL_COOK_WORKER_SCHEMA,
+                "outcome": outcome,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let checkpoint = serde_json::json!({
+        "schema": "homeboy/terminal-cook-continuation-request/v1",
+        "cook_id": "cook-worker",
+        "run_id": "cook-worker-attempt-1",
+        "generation": 0,
+        "worker": {
+            "pid": child.id(),
+            "start_identity": start_identity,
+            "outcome_path": outcome_path,
+        },
+    });
+    (child, checkpoint)
+}
+
+#[test]
+fn terminal_continuation_runs_in_a_supervised_worker_process() {
+    use crate::agents::agent_task_service::{WorkJobHandler, WorkJobInvocation, WorkJobStep};
+    use homeboy::core::daemon::controller_job_driver::ControllerJobExecutionOwner;
+
+    crate::test_support::with_isolated_home(|_| {
+        let handler = TerminalCookWorkHandler;
+        let dir = tempdir().expect("worker dir");
+
+        // A live worker is the job's execution owner: recovery re-adopts it
+        // by kernel identity and the supervisor only observes it.
+        let (mut live, checkpoint) = recorded_terminal_worker(dir.path(), "30", None);
+        assert!(matches!(
+            handler.execution_owner(&checkpoint).expect("owner"),
+            ControllerJobExecutionOwner::Processes(ref processes) if processes[0].pid == live.id()
+        ));
+        let observed = handler
+            .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+            .expect("live worker is observed");
+        assert!(
+            matches!(observed, WorkJobStep::Continue { checkpoint: ref next, .. } if *next == checkpoint)
+        );
+        live.kill().unwrap();
+        live.wait().unwrap();
+
+        // An exited worker's published outcome settles the job.
+        let (mut done, checkpoint) = recorded_terminal_worker(
+            dir.path(),
+            "0",
+            Some(serde_json::json!({ "outcome": "complete", "result": { "exit_code": 0 } })),
+        );
+        done.wait().unwrap();
+        let settled = handler
+            .advance(checkpoint, WorkJobInvocation::Resume)
+            .expect("published outcome settles");
+        assert!(matches!(settled, WorkJobStep::Complete(ref result) if result["exit_code"] == 0));
+
+        // A failed outcome re-raises the worker's error class.
+        let (mut failed, checkpoint) = recorded_terminal_worker(
+            dir.path(),
+            "0",
+            Some(serde_json::json!({
+                "outcome": "failed",
+                "code": "validation.invalid_argument",
+                "message": "bad continuation",
+                "details": {},
+            })),
+        );
+        failed.wait().unwrap();
+        let Err(error) = handler.advance(checkpoint, WorkJobInvocation::Resume) else {
+            panic!("failed outcome fails the job");
+        };
+        assert_eq!(error.message, "bad continuation");
+
+        // A worker that keeps dying without an outcome is a fault: the job
+        // fails instead of respawning without bound.
+        fs::remove_file(dir.path().join("outcome.json")).unwrap();
+        let (mut crashed, mut checkpoint) = recorded_terminal_worker(dir.path(), "0", None);
+        crashed.wait().unwrap();
+        checkpoint["interrupted_workers"] =
+            serde_json::json!(TERMINAL_COOK_MAX_INTERRUPTED_WORKERS);
+        let Err(error) = handler.advance(checkpoint, WorkJobInvocation::Resume) else {
+            panic!("repeated crashes fail the job");
+        };
+        assert!(error.message.contains("without an outcome"));
+    });
+}
+
+#[test]
+fn admitted_terminal_continuation_cannot_carry_worker_custody() {
+    use crate::agents::agent_task_service::WorkJobHandler;
+
+    let dir = tempdir().expect("worker dir");
+    let (mut child, request) = recorded_terminal_worker(dir.path(), "0", None);
+    child.wait().unwrap();
+    let prepared = TerminalCookWorkHandler.prepare(request).expect("prepare");
+    assert!(prepared.get("worker").is_none());
+    assert!(prepared.get("interrupted_workers").is_none());
+}
+
 #[test]
 fn preacceptance_io_failure_becomes_a_typed_no_job_receipt() {
     let io_error = std::io::Error::new(

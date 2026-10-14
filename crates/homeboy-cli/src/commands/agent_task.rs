@@ -416,6 +416,10 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 )?;
             Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
         }
+        AgentTaskCommand::TerminalContinuationWorker { request, outcome } => {
+            let exit_code = crate::commands::route::run_terminal_cook_worker(&request, &outcome)?;
+            Ok((Value::Null, exit_code))
+        }
         AgentTaskCommand::GateExecute {
             request,
             resources,

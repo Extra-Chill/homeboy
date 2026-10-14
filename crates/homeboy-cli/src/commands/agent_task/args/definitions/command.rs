@@ -177,6 +177,15 @@ pub enum AgentTaskCommand {
     Adopt(AdoptArgs),
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
+    /// Internal: one daemon-supervised terminal Cook continuation pass.
+    #[command(hide = true)]
+    TerminalContinuationWorker {
+        #[arg(long)]
+        request: String,
+        /// File the worker publishes its outcome to before exiting.
+        #[arg(long)]
+        outcome: std::path::PathBuf,
+    },
     /// Internal admitted runner gate execution boundary.
     #[command(hide = true)]
     GateExecute {
