@@ -597,6 +597,65 @@ pub(crate) fn cook_terminal_for_attempt(
     cook_terminal(&report, None, exit_code);
 }
 
+/// Build the continuation-failed payload. Separated from delivery so its
+/// content is assertable without spawning a transport.
+fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) -> NotifyPayload {
+    let mut subject = cook_subject(cook_id, run_id, None);
+    subject.phase = Some("terminal_continuation".to_string());
+    let payload = NotifyPayload::new(NotifyEventKind::NeedsAttention, subject)
+        .with_fact("Status", "continuation_failed")
+        .with_fact("Attempt", run_id.to_string())
+        .with_fact("Reason", diagnostic.to_string())
+        .with_action(
+            NotifyAction::new(
+                "continue",
+                crate::agent_task_service::cook_recovery_command(
+                    run_id,
+                    &["cook-continue", run_id, "--rearm"],
+                ),
+            )
+            .with_kind("repair"),
+        );
+    cook_actions(payload, cook_id)
+}
+
+/// The daemon's automatic terminal continuation for a Cook attempt stopped
+/// for good (non-retryable failure or retry budget exhausted).
+///
+/// Before #15831 this stop was silent: the provider produced a candidate, the
+/// continuation that would gate, finalize, and open the PR failed inside a
+/// daemon work job, and the Cook sat at `candidate_recoverable` until someone
+/// happened to run `cook-continue`. Delivered at most once per attempt through
+/// its own marker, so it never consumes the Cook's terminal announcement.
+pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
+    let Ok(lifecycle_store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
+    let claimed = lifecycle_store
+        .claim_cook_continuation_failed_notification(cook_id, run_id)
+        .unwrap_or(false);
+    if !claimed {
+        return;
+    }
+    let payload = continuation_failed_payload(cook_id, run_id, diagnostic);
+    let event = NotifyEvent::lifecycle(payload.kind, cook_id, "continuation_failed")
+        .with_title(format!("cook needs attention — {cook_id}"))
+        .with_payload(payload);
+    let route = effective_route(run_id);
+    let dispatch = notify_outbox::dispatch_with_outbox(&event.with_route(route.as_ref()), None);
+    match dispatch.disposition {
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = lifecycle_store.confirm_cook_continuation_failed_notification(cook_id, run_id);
+        }
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = lifecycle_store
+                .release_cook_continuation_failed_notification_claim(cook_id, run_id);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batch / wave terminal (W3-5)
 // ---------------------------------------------------------------------------

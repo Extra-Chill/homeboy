@@ -61,6 +61,62 @@ fn terminal_cook_job_retry_epoch_changes_submission_key_but_keeps_active_fence()
     );
 }
 
+/// A claimed terminal continuation that failed retryably is handed to its
+/// next generation instead of failing the work job, and a terminally failed
+/// continuation is announced before the job fails (#15831).
+#[test]
+fn terminal_continuation_failure_step_hands_off_retries_and_announces_failure() {
+    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
+
+    let failure = || {
+        Error::validation_invalid_argument(
+            "cook_continuation.artifact_projection",
+            "artifact projection is not ready",
+            None,
+            None,
+        )
+        .with_retryable(true)
+    };
+
+    let mut announced = false;
+    let step =
+        terminal_continuation_failure_step(CookContinuationState::Pending, failure(), || {
+            announced = true
+        })
+        .expect("a pending retry completes this job");
+    assert!(matches!(
+        step,
+        WorkJobStep::Complete(ref result)
+            if result["retry_scheduled"] == true
+                && result["error_code"] == "validation.invalid_argument"
+    ));
+    assert!(!announced, "a scheduled retry is not a terminal stop");
+
+    let mut announced = false;
+    let Err(error) =
+        terminal_continuation_failure_step(CookContinuationState::Failed, failure(), || {
+            announced = true
+        })
+    else {
+        panic!("a failed continuation fails the job");
+    };
+    assert!(error.message.contains("artifact projection is not ready"));
+    assert!(
+        announced,
+        "a terminal continuation failure must be announced"
+    );
+
+    let mut announced = false;
+    assert!(
+        terminal_continuation_failure_step(CookContinuationState::Claimed, failure(), || {
+            announced = true
+        })
+        .is_err(),
+        "an unexpected state still fails the job"
+    );
+    assert!(!announced);
+}
+
 use super::*;
 use homeboy::core::test_support::bounded_output;
 use std::fs;
