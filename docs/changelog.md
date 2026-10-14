@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.425.0] - 2026-10-14
+
+### Added
+- persist step terminal delivery and gate child starts
+
+### Fixed
+- reuse component gate workspace during promotion
+
 ## [0.424.1] - 2026-10-14
 
 ### Changed
