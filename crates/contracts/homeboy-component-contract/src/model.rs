@@ -235,6 +235,10 @@ pub struct Component {
     /// deserializes it into its `AgentTaskReviewProfile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_profile: Option<serde_json::Value>,
+    /// Public deterministic gates used by `agent-task cook` when the caller
+    /// does not provide verification gates explicitly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_verify_gates: Vec<String>,
 }
 
 impl Component {
@@ -311,6 +315,7 @@ impl Component {
             cleanup_artifacts: Vec::new(),
             baselines: None,
             review_profile: None,
+            default_verify_gates: Vec::new(),
         }
     }
 
@@ -612,7 +617,8 @@ mod tests {
             "cli_path": "lando wp",
             "extra_drift_files": ["sdk/generated.ts"],
             "baselines": { "lint": { "findings": 0 } },
-            "review_profile": { "reviewers": ["chubes"] }
+            "review_profile": { "reviewers": ["chubes"] },
+            "default_verify_gates": ["cargo test --workspace"]
         });
 
         let component: Component =
@@ -622,6 +628,23 @@ mod tests {
         assert_eq!(
             serialized, declared,
             "a declared value must be visible after load and identical on the way back out"
+        );
+    }
+
+    #[test]
+    fn default_verify_gates_round_trip_as_component_configuration() {
+        let declared = serde_json::json!({
+            "id": "fixture",
+            "default_verify_gates": ["cargo test --workspace", "cargo fmt --check"]
+        });
+        let component: Component = serde_json::from_value(declared.clone()).unwrap();
+        assert_eq!(
+            component.default_verify_gates,
+            ["cargo test --workspace", "cargo fmt --check"]
+        );
+        assert_eq!(
+            serde_json::to_value(component).unwrap()["default_verify_gates"],
+            declared["default_verify_gates"]
         );
     }
 

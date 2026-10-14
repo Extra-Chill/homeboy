@@ -347,11 +347,43 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     let args = resolve_cook_destination(args)?;
+    let mut args = args;
+    apply_component_default_verify_gates(&mut args)?;
     validate_cook_request(&args)?;
     run_cook_with_executor(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
     )
+}
+
+fn apply_component_default_verify_gates(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let Some(component_id) = args
+        .repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("component_id"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let Some(component) = cook_registered_component_by_id(component_id)? else {
+        return Ok(());
+    };
+    apply_default_verify_commands(
+        args.gates.has_deterministic_gate(),
+        &mut args.gates.verify,
+        component.default_verify_gates,
+    );
+    Ok(())
+}
+
+fn apply_default_verify_commands(
+    has_explicit_gate: bool,
+    verify: &mut Vec<String>,
+    defaults: Vec<String>,
+) {
+    if !has_explicit_gate {
+        *verify = defaults;
+    }
 }
 
 /// Resolve the same pre-provisioning Cook inputs used by execution. This path
@@ -402,6 +434,7 @@ pub(crate) fn preview_cook(
         }
     }
     bind_cook_preview_lifecycle(&mut args);
+    apply_component_default_verify_gates(&mut args)?;
     if let Some((provider, replay)) = unresolved_cook_backend_preview(&args)? {
         return Ok((
             cook_preview_result(
@@ -11209,8 +11242,8 @@ pub(super) fn resolve_ai_tool_disclosure(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_preview_worktree_capacity, cook_continuation_status, cook_preview_result,
-        cook_provider_timeout_disclosure, cook_report_with_continuation,
+        apply_default_verify_commands, apply_preview_worktree_capacity, cook_continuation_status,
+        cook_preview_result, cook_provider_timeout_disclosure, cook_report_with_continuation,
         cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
         detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
         preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
@@ -11219,6 +11252,17 @@ mod tests {
     use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
+
+    #[test]
+    fn component_default_gates_fill_only_an_unconfigured_cook() {
+        let mut verify = Vec::new();
+        apply_default_verify_commands(false, &mut verify, vec!["cargo test".into()]);
+        assert_eq!(verify, ["cargo test"]);
+
+        let mut explicit = vec!["npm test".into()];
+        apply_default_verify_commands(true, &mut explicit, vec!["cargo test".into()]);
+        assert_eq!(explicit, ["npm test"]);
+    }
 
     #[test]
     fn preview_worktree_capacity_blocks_local_shortfall_and_reports_safe_action() {
