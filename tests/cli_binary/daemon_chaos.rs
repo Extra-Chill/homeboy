@@ -223,8 +223,10 @@ fn replaced_binary_under_an_idle_daemon_converges() {
 }
 
 /// Case 7 (#15456, #15460): a daemon restarted in place (service manager after
-/// a crash) must take admission from the dead generation instead of leaving
-/// every status probe following the dead lease.
+/// a crash) must take admission from the dead daemon instead of leaving every
+/// status probe following the dead lease. Since #15936 there is one in-place
+/// daemon per state dir, so status reporting the new pid admitting under a new
+/// lease is the whole invariant.
 #[cfg(unix)]
 #[test]
 fn restart_in_place_takes_admission_from_a_dead_generation() {
@@ -277,16 +279,9 @@ fn restart_in_place_takes_admission_from_a_dead_generation() {
         |data| serving_and_admitting(data) && daemon_pid(data) == second_pid,
     );
     let second_lease = second["data"]["daemon"]["lease_id"].as_str().unwrap();
-    assert_ne!(second_lease, first_lease);
-
-    let registry: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(home.path().join(".config/homeboy/daemon/generations.json"))
-            .expect("generation registry"),
-    )
-    .expect("registry JSON");
-    assert_eq!(
-        registry["generations"]["admission_owner"], second_lease,
-        "admission must move to the live generation"
+    assert_ne!(
+        second_lease, first_lease,
+        "the restarted daemon must admit work under its own lease"
     );
 }
 

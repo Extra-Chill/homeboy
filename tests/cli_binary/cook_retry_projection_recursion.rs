@@ -11,7 +11,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[test]
-fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch() {
+fn missing_transport_child_projection_resolves_without_recursion_or_provider_dispatch() {
     let context = HermeticTestContext::new();
     let cook_id = "cook-transport-retry-2026-09-13-181954";
     let parent_run_id = format!("{cook_id}-attempt-1");
@@ -88,8 +88,11 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
         .record_cook_attempt(cook_id, 1, &child_run_id)
         .expect("index Cook transport child");
 
-    // A crash after the lifecycle row commits but before its derived resource
-    // projection is persisted is a recoverable durable state.
+    // Remove the transport child's resource projection. Records and their
+    // projections now commit in one SQLite transaction, so this models damaged
+    // canonical state rather than a crash window. Rebuilding the projection
+    // projects retry eligibility, which once recursed until the stack
+    // overflowed (#14914); every read below must terminate.
     let connection = Connection::open(store.observation_db_path()).expect("open observation DB");
     connection
         .execute(
@@ -123,15 +126,21 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
         "retry-projection-recursion",
     ]);
     let output = bounded_output(&mut retry, Duration::from_secs(10));
+    // The Cook index lived only in the deleted projection, and SQLite is its
+    // sole authority (#15717), so retry cannot prove Cook ownership. It must
+    // refuse with a structured error, not recurse, crash, or dispatch.
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(2),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let envelope: Value = serde_json::from_slice(&output.stdout).expect("structured CLI result");
-    assert_eq!(envelope["success"], true);
-    assert_eq!(envelope["data"]["action"], "retry");
+    assert_eq!(envelope["success"], false);
+    assert_eq!(
+        envelope["diagnostics"]["code"],
+        "validation.invalid_argument"
+    );
 }
 
 #[test]
