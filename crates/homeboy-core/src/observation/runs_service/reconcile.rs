@@ -323,6 +323,16 @@ pub fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'st
 where
     F: Fn(u32) -> bool,
 {
+    // A row carrying a typed agent-task lifecycle record is a projection of
+    // that record, whose own reconciler owns liveness. Its owner lives inside
+    // the record, not in the generic owner keys, so the ownerless age rule
+    // would stamp every agent-task run older than the threshold `stale` while
+    // it is still executing. The lifecycle's later `running` writes are then
+    // refused by the terminal-row guard, dropping its provider ledger.
+    if run.metadata_json.get("agent_task_run").is_some() {
+        return None;
+    }
+
     // `/lab/remote_job_status` is written at dispatch and never corrected if
     // the offload dies, so an unbounded read of it is a claim about the past.
     // Honour it inside the exemption window, and stop honouring it after.
@@ -638,6 +648,46 @@ mod tests {
             .expect("reconcile");
             let unchanged = store
                 .get_run("fresh-ownerless-run")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, "running");
+            assert!(unchanged.finished_at.is_none());
+        });
+    }
+
+    /// A live agent-task row records its owner inside its typed lifecycle
+    /// record. Past the ownerless threshold it must stay `running`: staling it
+    /// makes the terminal-row guard silently refuse the lifecycle's own later
+    /// writes, including its provider-execution terminal state.
+    #[test]
+    fn reconcile_leaves_typed_agent_task_lifecycle_rows_to_their_lifecycle() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .import_run(&RunRecord {
+                    metadata_json: serde_json::json!({
+                        "schema": "homeboy/agent-task-observation-record/v1",
+                        "agent_task_run": {
+                            "state": "running",
+                            "metadata": { "runner_pid": u32::MAX },
+                        },
+                    }),
+                    ..ownerless_running_run("long-agent-task-run", minutes_ago(45))
+                })
+                .expect("import agent-task run");
+
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("reconcile");
+            let unchanged = store
+                .get_run("long-agent-task-run")
                 .expect("get run")
                 .expect("run exists");
 

@@ -132,6 +132,55 @@ fn reserve_provider_execution_appends_running_progress_once() {
         .is_some_and(|message| message.contains("provider execution running"))));
 }
 
+/// A provider that outlives the observation reconciler's ownerless threshold
+/// must still record its terminal state. The reconciler used to stamp the live
+/// row `stale`, after which the terminal-row guard silently refused the
+/// lifecycle's `running` writes, leaving the provider ledger `running` and
+/// publication refused for a missing succeeded provider runtime.
+#[test]
+fn provider_terminal_survives_observation_reconcile_of_a_long_run() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "durable-provider-long-run";
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, &plan.tasks[0], 1)
+        .expect("reserved");
+
+    let observation = lifecycle_store
+        .open_observation_initialized()
+        .expect("observation");
+    let mut row = observation
+        .get_run(run_id)
+        .expect("row")
+        .expect("row exists");
+    row.started_at = (chrono::Utc::now() - chrono::Duration::minutes(45)).to_rfc3339();
+    homeboy_core::observation::runs_service::reconcile_orphaned_running_runs(
+        &observation,
+        vec![row],
+        false,
+        |_| true,
+    )
+    .expect("observation reconcile");
+
+    record_provider_execution_terminal_in_store(
+        &lifecycle_store,
+        run_id,
+        &plan.tasks[0].task_id,
+        1,
+        "succeeded",
+    )
+    .expect("terminal");
+
+    let record = lifecycle_store.read_record(run_id).expect("record");
+    assert_eq!(
+        record.metadata["provider_executions"][0]["state"],
+        "succeeded"
+    );
+}
+
 #[test]
 fn cancel_appends_terminal_provider_progress_and_resumes_from_cursor() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
