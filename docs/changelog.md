@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.2] - 2026-10-15
+
+### Fixed
+- withhold Cook failure alerts for already-resolved trackers
+- make homeboy-core green on macOS controllers
+
 ## [0.428.1] - 2026-10-15
 
 ### Changed
