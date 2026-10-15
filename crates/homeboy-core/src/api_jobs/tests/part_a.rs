@@ -194,11 +194,15 @@ fn test_list() {
     let first = store.create("lint");
     let second = store.create("lint");
 
-    let mut jobs = store.list();
-    jobs.sort_by(|a, b| a.operation.cmp(&b.operation));
-    assert_eq!(jobs.len(), 2);
-    assert_eq!(jobs[0].id, first.id);
-    assert_eq!(jobs[1].id, second.id);
+    // Jobs created in the same millisecond tie on `created_at_ms` and are
+    // ordered by id, so the expectation follows the same documented order.
+    let mut expected = vec![first, second];
+    expected.sort_by_key(|job| (job.created_at_ms, job.id));
+    let listed: Vec<_> = store.list().into_iter().map(|job| job.id).collect();
+    assert_eq!(
+        listed,
+        expected.into_iter().map(|job| job.id).collect::<Vec<_>>()
+    );
 }
 
 #[test]
