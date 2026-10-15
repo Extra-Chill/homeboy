@@ -755,6 +755,8 @@ pub fn execute_execution_step(
     if !intent.authorizes(&store.read_record(&intent.subject_id)?) {
         return Ok(0);
     }
+    #[cfg(feature = "test-support")]
+    homeboy_core::test_support::wait_at_file_gate("HOMEBOY_TEST_EXECUTION_STEP_GATE")?;
     let Some(_generation) = pin_execution_generation_or_defer(&store, &intent.subject_id)? else {
         return Ok(75);
     };

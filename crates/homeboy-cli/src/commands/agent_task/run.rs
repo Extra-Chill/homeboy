@@ -11038,10 +11038,11 @@ pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
     )
 }
 
-pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
-    if !homeboy::core::resource_policy_context::captured_context()
-        .is_some_and(|context| context.local_override)
-    {
+pub(super) fn placement_update(
+    args: PlacementUpdateArgs,
+    placement: crate::cli_surface::Placement,
+) -> CmdResult<Value> {
+    if !placement.is_explicit_local_override() {
         return Err(Error::validation_invalid_argument(
             "placement",
             "placement update requires explicit --placement local authorization",

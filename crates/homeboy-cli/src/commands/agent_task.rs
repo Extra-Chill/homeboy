@@ -79,10 +79,16 @@ pub(crate) fn run_with_placement(
     args: AgentTaskArgs,
     placement: crate::cli_surface::Placement,
 ) -> CmdResult<Value> {
-    if let AgentTaskCommand::Fanout(fanout_args) = args.command {
-        return cook_batch::fanout_with_placement(fanout_args, placement);
+    match args.command {
+        AgentTaskCommand::Fanout(fanout_args) => {
+            cook_batch::fanout_with_placement(fanout_args, placement)
+        }
+        // Authorization is the operator's parsed `--placement local`. This
+        // control command never runs resource preflight, so a captured
+        // resource-policy context cannot carry that decision.
+        AgentTaskCommand::PlacementUpdate(update) => run::placement_update(update, placement),
+        command => run(AgentTaskArgs { command }),
     }
-    run(args)
 }
 
 fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str>) -> String {
@@ -278,7 +284,10 @@ pub(crate) fn run_with_cook_progress_and_provenance(
 ) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
-        AgentTaskCommand::PlacementUpdate(args) => run::placement_update(args),
+        // Entry points without the parsed global placement fail closed.
+        AgentTaskCommand::PlacementUpdate(args) => {
+            run::placement_update(args, crate::cli_surface::Placement::Auto)
+        }
         AgentTaskCommand::Cook(mut cook_args) => {
             cook_args.dispatch.core.client_context =
                 homeboy::agents::agent_task_dispatch_plan::capture_client_context_spec(
