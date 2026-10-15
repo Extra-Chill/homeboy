@@ -61,20 +61,9 @@ fn status(bin: &Path, home: &Path) -> serde_json::Value {
 }
 
 fn pid_alive(pid: i64) -> bool {
-    // SAFETY: signal 0 only checks existence.
-    if pid <= 0 || unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-        return false;
-    }
     // The test binary is a child subreaper, so killed daemons linger as
-    // zombies until it reaps them. A zombie is not running.
-    !std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit(')')
-                .next()
-                .map(|rest| rest.trim_start().starts_with('Z'))
-        })
-        .unwrap_or(false)
+    // zombies until it reaps them. The production probe reads those as exited.
+    pid > 0 && homeboy_core::process::pid_is_running(pid as u32)
 }
 
 /// Wait until `predicate` holds for the daemon status, or panic with the last
