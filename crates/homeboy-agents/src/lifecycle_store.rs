@@ -2396,6 +2396,13 @@ pub(super) fn write_record_guarded(
             terminal_finished_at(&record),
         )
     };
+    if status == RunStatus::Running.as_str() {
+        // A live owner write supersedes any stale verdict another process
+        // stamped on the row; a `running` row cannot carry one (#15978).
+        if let Some(object) = metadata_json.as_object_mut() {
+            object.remove("homeboy_reconciled");
+        }
+    }
     if let Some(cook_id) = record
         .metadata
         .get("cook_id")
@@ -2469,21 +2476,40 @@ pub(super) fn write_record_guarded(
             record.run_id
         ))
     })?;
-    if !applied
-        && guard.is_some()
-        && stored_run_revision(&committed.metadata_json) != stored_revision
-    {
-        // Another writer committed between our read and the statement. With
-        // the revision unchanged, it was the terminal guard that refused a
-        // live write over a terminal row, which is not a conflict.
-        return Ok(GuardedRecordWrite::Conflict {
-            actual_revision: stored_run_revision(&committed.metadata_json),
-            actual_state: committed
+    if !applied {
+        let committed_revision = stored_run_revision(&committed.metadata_json);
+        if committed_revision != stored_revision {
+            if guard.is_some() {
+                // Another writer committed between our read and the statement.
+                return Ok(GuardedRecordWrite::Conflict {
+                    actual_revision: committed_revision,
+                    actual_state: committed
+                        .metadata_json
+                        .pointer("/agent_task_run/state")
+                        .cloned()
+                        .and_then(|state| serde_json::from_value(state).ok()),
+                });
+            }
+            // An unchanged unfenced rewrite yields to the newer revision.
+        } else {
+            // The revision did not move, so the terminal-row guard refused
+            // this write. Over a row the lifecycle itself finished, that is a
+            // late live write losing to a final record, and the stored record
+            // is the answer. Over any other row the refusal would drop a live
+            // owner's write while reporting it committed (#15978), so it is an
+            // error rather than a silent success.
+            let stored_state = committed
                 .metadata_json
                 .pointer("/agent_task_run/state")
                 .cloned()
-                .and_then(|state| serde_json::from_value(state).ok()),
-        });
+                .and_then(|state| serde_json::from_value::<AgentTaskRunState>(state).ok());
+            if !stored_state.is_some_and(AgentTaskRunState::is_terminal) {
+                return Err(Error::internal_unexpected(format!(
+                    "agent-task record write refused by the terminal-row guard: run {} is stored as `{}` over a non-terminal typed record and the refused write projected `{}`",
+                    record.run_id, committed.status, projected.status,
+                )));
+            }
+        }
     }
     record_from_run(&store, &committed).map(GuardedRecordWrite::Committed)
 }
