@@ -3886,97 +3886,63 @@ fn rejected_admission_rebinding_writes_no_snapshot_bytes() {
 }
 
 #[test]
-fn execution_step_recovers_preparing_snapshot_after_crash_before_publish() {
-    homeboy::core::test_support::with_isolated_home(|_| {
-        let cook_id = "snapshot-publication-retry";
-        let args = [
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--run-id",
-            cook_id,
-            "--prompt",
-            "retryable snapshot",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-        let staged =
-            stage_cook_admission_inputs(&args, cook_id, None).expect("first staged snapshot");
-        let intent = staged.intent.as_ref().expect("staged intent").clone();
-        let binding = serde_json::json!({
-            "request_ref": "sha256:stable-request",
-            "admission_inputs": intent,
-            "input_publication": {
-                "state": "staged",
-                "staging_root": staged.staging_root.display().to_string(),
-                "published_root": staged.published_root.display().to_string(),
-            },
+fn execution_step_recovers_preparing_inputs_after_crash_before_and_after_publish() {
+    for published in [false, true] {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let cook_id = "snapshot-publication-retry";
+            let args = [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--run-id",
+                cook_id,
+                "--prompt",
+                "retryable snapshot",
+            ]
+            .map(str::to_string);
+            let staged = stage_cook_admission_inputs(&args, cook_id, None).expect("staged");
+            let binding = serde_json::json!({
+                "request_ref": "sha256:stable-request",
+                "admission_inputs": staged.intent.as_ref().expect("staged intent"),
+                "input_publication": {
+                    "state": "staged",
+                    "staging_root": staged.staging_root.display().to_string(),
+                    "published_root": staged.published_root.display().to_string(),
+                },
+            });
+            let state = if published {
+                "blocked_runner_unavailable"
+            } else {
+                "queued"
+            };
+            let prepared = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+                cook_id, binding, state, "waiting",
+            )
+            .expect("accepted binding");
+            let admission = &prepared.metadata["unmaterialized_cook_admission"];
+            assert_eq!(admission["state"], "preparing_inputs");
+            assert_eq!(
+                prepared.metadata["detached_cook_handoff"]["cook_id"],
+                cook_id
+            );
+            let root = admission_inputs_storage_root(cook_id).expect("published root");
+            if published {
+                staged.publish().expect("publish before simulated crash");
+            } else {
+                staged.retain_for_recovery();
+                assert!(!root.exists(), "simulated crash precedes atomic rename");
+            }
+            execute_admission_fixture(cook_id);
+            let recovered = agent_task_lifecycle::exact_record(cook_id).expect("recovered");
+            let admission = &recovered.metadata["unmaterialized_cook_admission"];
+            assert_eq!(admission["state"], state);
+            assert_eq!(
+                admission["binding"]["input_publication"]["state"],
+                "published"
+            );
+            assert!(root.is_dir());
         });
-        let prepared = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            cook_id, binding, "queued", "eligible",
-        )
-        .expect("accepted binding");
-        assert_eq!(
-            prepared.metadata["unmaterialized_cook_admission"]["state"],
-            "preparing_inputs"
-        );
-        assert_eq!(
-            prepared.metadata["detached_cook_handoff"]["cook_id"],
-            cook_id
-        );
-        staged.retain_for_recovery();
-        let root = admission_inputs_storage_root(cook_id).expect("published root");
-        assert!(!root.exists(), "simulated crash precedes atomic rename");
-        execute_admission_fixture(cook_id);
-        let recovered = agent_task_lifecycle::exact_record(cook_id).expect("recovered admission");
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["state"],
-            "queued"
-        );
-        assert!(root.is_dir());
-    });
-}
-
-#[test]
-fn execution_step_recovers_preparing_state_after_crash_after_publish() {
-    homeboy::core::test_support::with_isolated_home(|_| {
-        let cook_id = "snapshot-published-before-state";
-        let args = ["homeboy", "agent-task", "cook", "--run-id", cook_id]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let staged = stage_cook_admission_inputs(&args, cook_id, None).expect("staged snapshot");
-        let binding = serde_json::json!({
-            "request_ref": "sha256:published-request",
-            "admission_inputs": staged.intent.as_ref().expect("intent"),
-            "input_publication": {
-                "state": "staged",
-                "staging_root": staged.staging_root.display().to_string(),
-                "published_root": staged.published_root.display().to_string(),
-            },
-        });
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            cook_id,
-            binding,
-            "blocked_runner_unavailable",
-            "waiting",
-        )
-        .expect("prepared");
-        staged.publish().expect("publish before simulated crash");
-
-        execute_admission_fixture(cook_id);
-        let recovered = agent_task_lifecycle::exact_record(cook_id).expect("recovered admission");
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["state"],
-            "blocked_runner_unavailable"
-        );
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["input_publication"]
-                ["state"],
-            "published"
-        );
-    });
+    }
 }
 
 #[test]

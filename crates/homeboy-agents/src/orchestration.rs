@@ -4308,7 +4308,7 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     if (record.state == AgentTaskRunState::CandidateRecoverable
         && record.owner_process_is_running())
-        || record.has_live_execution_step_owner(Utc::now())
+        || record.has_live_execution_step_owner()
     {
         return ControlPlaneRunState::Running;
     }
@@ -4450,7 +4450,7 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     {
         return Some("source_materialization".to_string());
     }
-    if record.has_live_execution_step_owner(Utc::now()) {
+    if record.has_live_execution_step_owner() {
         return Some("promotion_gates".to_string());
     }
     if has_running_provider_execution(record) {

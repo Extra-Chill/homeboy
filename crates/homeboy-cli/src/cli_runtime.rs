@@ -719,74 +719,49 @@ pub(crate) fn runner_inventory_satisfies_admission_capabilities(
     })
 }
 
+/// Selects the runner for an admitted non-local Cook: `Ok(runner_id)`, or
+/// `Err(reason)` when no runner is currently eligible.
 pub(crate) fn select_unmaterialized_cook_runner(
-    request: &serde_json::Value,
-) -> crate::core::Result<serde_json::Value> {
-    let placement = &request["binding"]["placement"];
-    let required = request["binding"]["provider_runtime_refs"]["required_capabilities"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .collect::<BTreeSet<_>>();
-    let unavailable = |runner_id: &str, selection: &str| {
-        serde_json::json!({
-            "state": "blocked_runner_unavailable",
-            "reason": format!("runner `{runner_id}` does not satisfy required provider capabilities"),
-            "selection": selection,
-        })
+    runner_ref: Option<&str>,
+    required: &BTreeSet<&str>,
+) -> crate::core::Result<Result<String, String>> {
+    use crate::runner::runners::LabRunnerReadinessState as Readiness;
+    let eligible = |runner_id: String| -> crate::core::Result<Result<String, String>> {
+        Ok(
+            if runner_satisfies_admission_capabilities(&runner_id, required)? {
+                Ok(runner_id)
+            } else {
+                Err(format!(
+                    "runner `{runner_id}` does not satisfy required provider capabilities"
+                ))
+            },
+        )
     };
-    if let Some(runner_id) = placement["runner_ref"].as_str() {
-        let mut snapshot = crate::runner::runners::runner_admission_snapshot(runner_id)?;
-        if snapshot.summary.accepting_jobs
+    if let Some(runner_id) = runner_ref {
+        if crate::runner::runners::runner_admission_snapshot(runner_id)?
+            .summary
+            .accepting_jobs
             || crate::runner::refresh_explicit_detached_queue_runner(runner_id)?
         {
-            return if runner_satisfies_admission_capabilities(runner_id, &required)? {
-                Ok(
-                    serde_json::json!({ "state": "eligible", "runner_id": runner_id, "selection": "explicit" }),
-                )
-            } else {
-                Ok(unavailable(runner_id, "explicit"))
-            };
+            return eligible(runner_id.to_string());
         }
-        snapshot = crate::runner::runners::runner_admission_snapshot(runner_id)?;
-        return Ok(serde_json::json!({
-            "state": if snapshot.summary.daemon_fresh { "blocked_runner_unavailable" } else { "blocked_runner_stale" },
-            "reason": snapshot.summary.next_action.unwrap_or_else(|| format!("runner `{runner_id}` is not accepting jobs")),
-            "selection": "explicit",
-        }));
+        let snapshot = crate::runner::runners::runner_admission_snapshot(runner_id)?;
+        return Ok(Err(snapshot.summary.next_action.unwrap_or_else(|| {
+            format!("runner `{runner_id}` is not accepting jobs")
+        })));
     }
     let readiness = crate::runner::refresh_lab_runner_readiness_for_admission()?;
-    let selection = if readiness.state
-        == crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
-    {
-        crate::runner::refresh_detached_queue_runner()?
-    } else if readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady {
-        readiness.selected_runner_id.clone()
-    } else {
-        None
+    let selection = match readiness.state {
+        Readiness::CapacityBlocked => crate::runner::refresh_detached_queue_runner()?,
+        Readiness::ConnectedReady => readiness.selected_runner_id.clone(),
+        _ => None,
     };
-    if let Some(runner_id) = selection {
-        let selection_kind = if readiness.state
-            == crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
-        {
-            "reverse_capacity_queue"
-        } else {
-            "configured_policy"
-        };
-        return if runner_satisfies_admission_capabilities(&runner_id, &required)? {
-            Ok(
-                serde_json::json!({ "state": "eligible", "runner_id": runner_id, "selection": selection_kind }),
-            )
-        } else {
-            Ok(unavailable(&runner_id, selection_kind))
-        };
+    match selection {
+        Some(runner_id) => eligible(runner_id),
+        None => Ok(Err(readiness.reasons.first().cloned().unwrap_or_else(
+            || "no configured Lab runner currently satisfies admission policy".to_string(),
+        ))),
     }
-    Ok(serde_json::json!({
-        "state": if readiness.state == crate::runner::runners::LabRunnerReadinessState::Stale { "blocked_runner_stale" } else if readiness.state == crate::runner::runners::LabRunnerReadinessState::CapacityBlocked { "queued" } else { "blocked_runner_unavailable" },
-        "reason": readiness.reasons.first().cloned().unwrap_or_else(|| "no configured Lab runner currently satisfies admission policy".to_string()),
-        "selection": "configured_policy",
-    }))
 }
 
 pub struct CliRuntime {
@@ -4643,18 +4618,8 @@ mod tests {
             )
             .expect("create runner");
 
-            let outcome = select_unmaterialized_cook_runner(&serde_json::json!({
-                "binding": {
-                    "placement": {},
-                    "provider_runtime_refs": { "required_capabilities": [] }
-                }
-            }));
-            match outcome {
-                Ok(selection) => {
-                    assert_ne!(selection["state"], "eligible");
-                    assert!(selection["runner_id"].is_null());
-                    assert!(selection["reason"].is_string());
-                }
+            match select_unmaterialized_cook_runner(None, &BTreeSet::new()) {
+                Ok(selection) => assert!(selection.is_err(), "{selection:?}"),
                 Err(error) => {
                     // A hard refresh failure is also a fast rejection: the
                     // runners' own reasons ride with it and no runner id is

@@ -1096,6 +1096,32 @@ pub(super) fn prepare_reserved_cook_retry(
         .map(|_| ())
 }
 
+/// Reservation metadata freezing the retry's preparation against its source
+/// recipe attempt.
+fn retry_reservation_metadata(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    retry: &CookRetryAttempt,
+    source_run_id: &str,
+    replaces_source_attempt: bool,
+) -> Result<(super::RetryPreparation, serde_json::Map<String, Value>)> {
+    let recipes = super::CookRecipeStore::from_data_root(lifecycle_store.data_root().to_path_buf());
+    let preparation = super::RetryPreparation {
+        cook_id: retry.cook_id.clone(),
+        source_run_id: source_run_id.to_string(),
+        attempt: retry.attempt,
+        replaces_source_attempt,
+        source_recipe_revision: source_recipe_revision(&recipes, &retry.cook_id, source_run_id)?,
+        plan: retry.plan.clone(),
+    };
+    let value = serde_json::to_value(&preparation)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let metadata = serde_json::Map::from_iter([
+        ("cook_id".into(), json!(retry.cook_id)),
+        ("execution_retry_preparation".into(), value),
+    ]);
+    Ok((preparation, metadata))
+}
+
 fn source_recipe_revision(
     recipes: &super::CookRecipeStore,
     cook_id: &str,
@@ -1648,31 +1674,18 @@ where
                     )
                 })?;
             let reservation_source = lifecycle_store.read_record(&edge.source_run_id)?;
-            let preparation = super::RetryPreparation {
-                cook_id: cook_retry.cook_id.clone(),
-                source_run_id: reservation_source.run_id.clone(),
-                attempt: cook_retry.attempt,
-                replaces_source_attempt: edge.kind == super::CookLineageKind::Replacement,
-                source_recipe_revision: source_recipe_revision(
-                    &recipes,
-                    &cook_retry.cook_id,
-                    &reservation_source.run_id,
-                )?,
-                plan: cook_retry.plan.clone(),
-            };
+            let (preparation, metadata) = retry_reservation_metadata(
+                &lifecycle_store,
+                &cook_retry,
+                &reservation_source.run_id,
+                edge.kind == super::CookLineageKind::Replacement,
+            )?;
             agent_task_lifecycle::retry_with_force_and_metadata_and_preflight_in_store(
                 &lifecycle_store,
                 &reservation_source.run_id,
                 Some(retry_run_id),
                 force || preparation.replaces_source_attempt,
-                serde_json::Map::from_iter([
-                    ("cook_id".into(), json!(cook_retry.cook_id)),
-                    (
-                        "execution_retry_preparation".into(),
-                        serde_json::to_value(&preparation)
-                            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                    ),
-                ]),
+                metadata,
                 &preflight,
             )?;
             prepare_reserved_cook_retry(&lifecycle_store, retry_run_id, &preparation)?;
@@ -1795,12 +1808,10 @@ where
             // concurrent claim observers so neither can overwrite the other's
             // append-only recipe revision between its read and write.
             let reservation = lifecycle_store.read_record(&retry_run_id)?;
-            let intent_id = reservation.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
+            let execution = super::current_execution_intent(&lifecycle_store, &reservation)?
                 .ok_or_else(|| {
                     Error::internal_unexpected("Cook retry reservation has no execution intent")
                 })?;
-            let execution = super::load_execution_intent(&lifecycle_store, intent_id)?;
             let super::ExecutionStepMode::QueuedRun {
                 retry_preparation: Some(preparation),
             } = execution.mode
@@ -2385,26 +2396,12 @@ fn reserve_cook_retry_lifecycle(
             // idempotent across concurrent controllers and processes.
             let existed_before_claim =
                 agent_task_lifecycle::run_record_exists_in_store(lifecycle_store, retry_run_id)?;
-            let mut reservation_metadata =
-                serde_json::Map::from_iter([("cook_id".to_string(), json!(retry.cook_id))]);
-            reservation_metadata.insert(
-                "execution_retry_preparation".into(),
-                serde_json::to_value(super::RetryPreparation {
-                    cook_id: retry.cook_id.clone(),
-                    source_run_id: source.run_id.clone(),
-                    attempt: retry.attempt,
-                    replaces_source_attempt: retry.replaces_source_attempt,
-                    plan: retry.plan.clone(),
-                    source_recipe_revision: source_recipe_revision(
-                        &super::CookRecipeStore::from_data_root(
-                            lifecycle_store.data_root().to_path_buf(),
-                        ),
-                        &retry.cook_id,
-                        &source.run_id,
-                    )?,
-                })
-                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-            );
+            let (_, reservation_metadata) = retry_reservation_metadata(
+                lifecycle_store,
+                retry,
+                &source.run_id,
+                retry.replaces_source_attempt,
+            )?;
             let reserved =
                 agent_task_lifecycle::retry_with_force_and_metadata_and_preflight_in_store(
                     lifecycle_store,
@@ -2787,10 +2784,9 @@ fn is_pending_local_cook_retry_reservation(
     run_id: &str,
 ) -> Result<bool> {
     let record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-    let Some(id) = record.metadata["execution_scheduling"]["current_intent_id"].as_str() else {
+    let Some(intent) = super::current_execution_intent(lifecycle_store, &record)? else {
         return Ok(false);
     };
-    let intent = super::load_execution_intent(lifecycle_store, id)?;
     Ok(intent.authorizes(&record)
         && record.metadata["retry_of"] == source.run_id
         && matches!(intent.mode, super::ExecutionStepMode::QueuedRun { retry_preparation: Some(ref preparation) }

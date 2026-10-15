@@ -87,22 +87,13 @@ impl ExecutionStepIntent {
             || intent.epoch == 0
             || intent.run_id != intent.subject_id
             || intent.intent_id
-                != format!(
-                    "agent-task-exec:{}:{}:{}",
-                    intent.subject_id, intent.epoch, intent.recovery_attempt
-                )
+                != intent_id(&intent.subject_id, intent.epoch, intent.recovery_attempt)
             || intent.step.key != intent.intent_id
             || intent.step.terminal_consumer != EXECUTION_STEP_CONSUMER
             || intent.step.linked_durable_run_id.as_deref() != Some(intent.subject_id.as_str())
             || intent.step.wait.not_before != intent.not_before
             || intent.step.wait.runner_eligible != intent.runner
-            || intent.step.args
-                != [
-                    "agent-task",
-                    "execution-step",
-                    "--intent-id",
-                    &intent.intent_id,
-                ]
+            || intent.step.args != step_args(&intent.intent_id)
         {
             return Err(invalid("execution intent envelope does not match its step"));
         }
@@ -134,6 +125,44 @@ impl ExecutionStepIntent {
             version: 1,
             payload,
         })
+    }
+}
+
+fn intent_id(subject: &str, epoch: u64, recovery_attempt: u32) -> String {
+    format!("agent-task-exec:{subject}:{epoch}:{recovery_attempt}")
+}
+
+fn step_args(intent_id: &str) -> Vec<String> {
+    ["agent-task", "execution-step", "--intent-id", intent_id]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// Step environments carry the lifecycle roots that admitted them.
+fn store_from_step_env(step: &StepJobRequest) -> Option<AgentTaskLifecycleStore> {
+    let root = |name| step.env.public_env.get(name).map(std::path::PathBuf::from);
+    Some(AgentTaskLifecycleStore::new(
+        homeboy_core::paths::PathRoots::new(
+            root("HOMEBOY_CONFIG_ROOT")?,
+            root("HOMEBOY_DATA_DIR")?,
+            root("HOMEBOY_ARTIFACT_ROOT")?,
+        ),
+    ))
+}
+
+fn deterministic_failure(
+    error: &Error,
+    delivery: &step_job::StepTerminalDelivery,
+) -> crate::agent_task_lifecycle::AgentTaskTransition {
+    crate::agent_task_lifecycle::AgentTaskTransition::Terminate {
+        outcome: crate::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+        metadata: serde_json::Map::from_iter([(
+            "execution_step_failure".into(),
+            homeboy_core::redaction::redact_json(&json!({
+                "message": error.message, "code": error.code.as_str(), "details": error.details,
+                "job_id": delivery.job_id, "step_key": delivery.key, "classification": "deterministic",
+            })),
+        )]),
     }
 }
 
@@ -173,11 +202,8 @@ pub(crate) fn prepare_execution_intent(
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| invalid("execution scheduling epoch exhausted"))?;
-    let id = format!("agent-task-exec:{}:{epoch}:0", record.run_id);
-    let previous = record.metadata["execution_scheduling"]["current_intent_id"]
-        .as_str()
-        .map(|id| load_execution_intent(store, id))
-        .transpose()?;
+    let id = intent_id(&record.run_id, epoch, 0);
+    let previous = current_execution_intent(store, record)?;
     let admission = &record.metadata["unmaterialized_cook_admission"];
     let mode = if admission.is_object() {
         ExecutionStepMode::Admission {
@@ -227,7 +253,7 @@ pub(crate) fn prepare_execution_intent(
         (admission.is_object() && !local && runner.is_none())
             .then(|| (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339())
     });
-    let (program, cwd, env) = if let Some(previous) = &previous {
+    let (program, cwd, mut env) = if let Some(previous) = &previous {
         (
             previous.step.program.clone(),
             previous.step.cwd.clone(),
@@ -257,7 +283,6 @@ pub(crate) fn prepare_execution_intent(
             ])?,
         )
     };
-    let mut env = env;
     env.public_env.retain(|name, _| {
         ![
             "HOMEBOY_LOCAL_COOK_SUPERVISOR_JOB_ID",
@@ -270,12 +295,7 @@ pub(crate) fn prepare_execution_intent(
     let step = StepJobRequest::new(
         &id,
         program,
-        vec![
-            "agent-task".into(),
-            "execution-step".into(),
-            "--intent-id".into(),
-            id.clone(),
-        ],
+        step_args(&id),
         cwd,
         env,
         EXECUTION_STEP_CONSUMER,
@@ -345,20 +365,11 @@ pub fn register_execution_step_hooks() {
 /// decision is re-evaluated under the lifecycle lock and the successor is part
 /// of the same SQLite write as the recovery fence.
 fn consume_execution_terminal(delivery: &step_job::StepTerminalDelivery) -> Result<Value> {
-    let env = &delivery.request.env.public_env;
-    let roots = [
-        "HOMEBOY_CONFIG_ROOT",
-        "HOMEBOY_DATA_DIR",
-        "HOMEBOY_ARTIFACT_ROOT",
-    ]
-    .map(|name| env.get(name).map(std::path::PathBuf::from));
-    let [Some(config), Some(data), Some(artifacts)] = roots else {
+    let Some(store) = store_from_step_env(&delivery.request) else {
         return Ok(
             json!({"acknowledged": true, "diagnostic": "execution step has no rooted environment"}),
         );
     };
-    let store =
-        AgentTaskLifecycleStore::new(homeboy_core::paths::PathRoots::new(config, data, artifacts));
     consume_execution_terminal_in_store(&store, delivery)
 }
 
@@ -549,10 +560,7 @@ pub(super) fn consume_execution_terminal_in_store(
         } else {
             next.recovery_attempt += 1;
         }
-        next.intent_id = format!(
-            "agent-task-exec:{}:{}:{}",
-            next.subject_id, next.epoch, next.recovery_attempt
-        );
+        next.intent_id = intent_id(&next.subject_id, next.epoch, next.recovery_attempt);
         next.not_before = Some(
             (chrono::Utc::now()
                 + chrono::Duration::seconds(if runner_ineligible {
@@ -577,23 +585,7 @@ pub(super) fn consume_execution_terminal_in_store(
         };
         let mut prepared = stored.clone();
         prepared.updated_at = Some(chrono::Utc::now().to_rfc3339());
-        crate::agent_task_lifecycle::set_run_state(&mut prepared, AgentTaskRunState::Queued);
-        prepared.lifecycle.execution.started_at = None;
-        prepared.lifecycle.execution.finished_at = None;
-        for task in &mut prepared.tasks {
-            task.state = crate::agent_tasks::AgentTaskState::Queued;
-        }
-        for key in [
-            "execution_step_owner",
-            "runner_pid",
-            "runner_process_start_identity",
-            "runner_started_at",
-        ] {
-            prepared
-                .metadata
-                .as_object_mut()
-                .map(|metadata| metadata.remove(key));
-        }
+        crate::agent_task_lifecycle::reset_for_requeue(&mut prepared);
         prepared.metadata[PENDING_EXECUTION_INTENT] = work;
         prepared.metadata["execution_scheduling"]["current_intent_id"] = json!(next.intent_id);
         prepared.metadata["execution_scheduling"]["epoch"] = json!(next.epoch);
@@ -612,25 +604,15 @@ pub(super) fn consume_execution_terminal_in_store(
             prepared: Box::new(prepared),
         })
     });
-    if let Err(error) = committed {
-        if !deterministic_store_error(&error) {
-            return Err(error);
-        }
-        failure = Some(error);
-    }
-    if let Some(error) = failure {
+    if let Some(error) = committed.err().or(failure) {
         if !deterministic_store_error(&error) {
             return Err(error);
         }
         store.transition_when(subject, |record| {
-            (record.metadata["execution_scheduling"]["current_intent_id"].as_str() == Some(&delivery.key)
-                && !record.state.is_terminal()).then(|| AgentTaskTransition::Terminate {
-                outcome: AgentTaskTerminalOutcome::Failed,
-                metadata: serde_json::Map::from_iter([("execution_step_failure".into(), homeboy_core::redaction::redact_json(&json!({
-                    "message": error.message, "code": error.code.as_str(), "details": error.details,
-                    "job_id": delivery.job_id, "step_key": delivery.key, "classification": "deterministic",
-                })))]),
-            })
+            (record.metadata["execution_scheduling"]["current_intent_id"].as_str()
+                == Some(&delivery.key)
+                && !record.state.is_terminal())
+            .then(|| deterministic_failure(&error, delivery))
         })?;
         disposition = "failed";
     }
@@ -646,13 +628,7 @@ pub(super) fn consume_execution_terminal_in_store(
             store.transition_when(&run_id, |record| {
                 let key = record.metadata["execution_scheduling"]["current_intent_id"].as_str();
                 (!record.state.is_terminal() && key.is_none_or(|key| key == delivery.key))
-                    .then(|| AgentTaskTransition::Terminate {
-                        outcome: AgentTaskTerminalOutcome::Failed,
-                        metadata: serde_json::Map::from_iter([("execution_step_failure".into(), homeboy_core::redaction::redact_json(&json!({
-                            "message": error.message, "code": error.code.as_str(), "details": error.details,
-                            "job_id": delivery.job_id, "step_key": delivery.key, "classification": "deterministic",
-                        })))]),
-                    })
+                    .then(|| deterministic_failure(&error, delivery))
             })?;
         }
     }
@@ -690,17 +666,8 @@ pub(super) fn schedule_execution_intent_with_cleanup(
     let intent = ExecutionStepIntent::parse(payload)?;
     let receipt = schedule_execution_intent_with(payload, &mut submit)?;
     if let Some(previous) = &intent.superseded_intent_id {
-        let env = &intent.step.env.public_env;
-        let root = |name: &str| {
-            env.get(name)
-                .map(std::path::PathBuf::from)
-                .ok_or_else(|| invalid("replacement execution intent has no rooted environment"))
-        };
-        let store = AgentTaskLifecycleStore::new(homeboy_core::paths::PathRoots::new(
-            root("HOMEBOY_CONFIG_ROOT")?,
-            root("HOMEBOY_DATA_DIR")?,
-            root("HOMEBOY_ARTIFACT_ROOT")?,
-        ));
+        let store = store_from_step_env(&intent.step)
+            .ok_or_else(|| invalid("replacement execution intent has no rooted environment"))?;
         let previous = load_execution_intent(&store, previous)?;
         if previous.subject_id != intent.subject_id || previous.epoch >= intent.epoch {
             return Err(invalid(
@@ -711,6 +678,17 @@ pub(super) fn schedule_execution_intent_with_cleanup(
         cancel(&job)?;
     }
     Ok(receipt)
+}
+
+/// The intent currently authorized by a record's scheduling fence, if any.
+pub fn current_execution_intent(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Result<Option<ExecutionStepIntent>> {
+    record.metadata["execution_scheduling"]["current_intent_id"]
+        .as_str()
+        .map(|id| load_execution_intent(store, id))
+        .transpose()
 }
 
 /// Exact lookup is rooted in the lifecycle store and works after source ACK.
@@ -934,42 +912,138 @@ pub fn prepare_admission_arguments(binding: &Value, cook_id: &str) -> Result<Vec
 }
 
 #[cfg(test)]
-mod input_tests {
+pub(crate) mod execution_step_fixtures {
     use super::*;
-    use sha2::{Digest, Sha256};
+    use homeboy_core::test_support::ControllerJobHarness;
+    use std::time::{Duration, Instant};
 
-    fn inputs(root: &Path) -> Value {
-        let prompt = root.join("prompt");
-        std::fs::write(&prompt, "frozen mission").unwrap();
-        let refs = json!([{"kind": "prompt", "path": prompt, "sha256": format!("sha256:{:x}", Sha256::digest(b"frozen mission")), "argv_token": "homeboy-admission-ref:0"}]);
-        let bytes = serde_json::to_vec(&refs).unwrap();
-        let manifest = root.join("manifest");
-        std::fs::write(&manifest, &bytes).unwrap();
-        json!({"admission_inputs": {
-            "schema": "homeboy/cook-admission-inputs/v1", "cook_id": "subject",
-            "argv": ["homeboy", "agent-task", "cook", "--run-id", "subject", "--prompt=homeboy-admission-ref:0"],
-            "input_refs": refs,
-            "input_manifest": {"kind": "manifest", "path": manifest, "sha256": format!("sha256:{:x}", Sha256::digest(&bytes))}
-        }})
+    /// Queued-run transport with the default preflight and local dispatch.
+    pub(crate) struct QueuedRunTransport;
+    impl ExecutionStepTransport for QueuedRunTransport {
+        fn admission(&self, _: Vec<String>, _: Option<String>) -> Result<i32> {
+            panic!("queued run is not an admission")
+        }
     }
 
-    #[test]
-    fn execution_step_inputs_expand_only_verified_frozen_content() {
-        let root = tempfile::tempdir().unwrap();
-        let binding = inputs(root.path());
-        let argv = prepare_admission_arguments(&binding, "subject").unwrap();
-        assert_eq!(argv.last().unwrap(), "--prompt=frozen mission");
-        std::fs::write(root.path().join("prompt"), "changed mission").unwrap();
-        assert!(prepare_admission_arguments(&binding, "subject")
-            .unwrap_err()
-            .message
-            .contains("changed after acceptance"));
+    pub(crate) fn current_intent(
+        store: &AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> ExecutionStepIntent {
+        let record = store.read_record(run_id).unwrap();
+        assert!(
+            record.metadata.get(PENDING_EXECUTION_INTENT).is_none(),
+            "draft must not enter the lifecycle snapshot"
+        );
+        current_execution_intent(store, &record)
+            .unwrap()
+            .expect("current execution intent")
     }
+
+    /// A retryable interrupted spawn of `intent`'s exact step.
+    pub(crate) fn terminal_delivery(
+        intent: &ExecutionStepIntent,
+    ) -> step_job::StepTerminalDelivery {
+        step_job::StepTerminalDelivery {
+            job_id: "stage-b-terminal".into(),
+            key: intent.intent_id.clone(),
+            request: intent.step.clone(),
+            checkpoint: None,
+            linked_durable_run_id: Some(intent.subject_id.clone()),
+            child: None,
+            outcome: step_job::StepTerminalOutcome::SpawnInterrupted,
+            error: Some(
+                json!({"message": "spawn interrupted before PID checkpoint", "retryable": true}),
+            ),
+            exit_code: None,
+            cancelled: false,
+            log_path: Default::default(),
+        }
+    }
+
+    /// Durable daemon job store whose lease holder never shares `intent`'s key.
+    pub(crate) fn step_harness(
+        intent: &ExecutionStepIntent,
+        path: &Path,
+        lease: &str,
+    ) -> ControllerJobHarness {
+        let mut holder = intent.step.clone();
+        holder.key = format!("{lease}-holder");
+        ControllerJobHarness::durable_queued(
+            Arc::new(step_job::StepJobDriver),
+            serde_json::to_value(holder).unwrap(),
+            path,
+            lease,
+        )
+        .unwrap()
+    }
+
+    /// Frozen local admission whose inputs live under `root`. A `prompt` adds
+    /// one verified argv-token input.
+    pub(crate) fn admission_binding(root: &Path, subject: &str, prompt: Option<&str>) -> Value {
+        use sha2::{Digest, Sha256};
+        let digest = |bytes: &[u8]| format!("sha256:{:x}", Sha256::digest(bytes));
+        std::fs::create_dir_all(root).unwrap();
+        let mut argv = json!(["homeboy", "agent-task", "cook", "--run-id", subject]);
+        let refs = match prompt {
+            Some(prompt) => {
+                let path = root.join("prompt");
+                std::fs::write(&path, prompt).unwrap();
+                argv.as_array_mut()
+                    .unwrap()
+                    .push(json!("--prompt=homeboy-admission-ref:0"));
+                json!([{"kind": "prompt", "path": path, "sha256": digest(prompt.as_bytes()),
+                    "argv_token": "homeboy-admission-ref:0"}])
+            }
+            None => json!([]),
+        };
+        let manifest = serde_json::to_vec(&refs).unwrap();
+        std::fs::write(root.join("manifest.json"), &manifest).unwrap();
+        json!({
+            "placement": {"requested": "local"},
+            "admission_inputs": {
+                "schema": "homeboy/cook-admission-inputs/v1", "cook_id": subject,
+                "argv": argv, "input_refs": refs,
+                "input_manifest": {"kind": "manifest", "path": root.join("manifest.json"),
+                    "sha256": digest(&manifest)}
+            }
+        })
+    }
+
+    /// Run one `--exact` test of this binary until it writes `marker`, then
+    /// kill it at that durable boundary.
+    pub(crate) fn kill_test_child_at_marker(
+        test: &str,
+        env: &[(&str, &std::ffi::OsStr)],
+        marker: &Path,
+    ) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .envs(env.iter().copied())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() {
+            if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{test} did not reach its boundary");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::execution_step_fixtures::admission_binding;
+    use super::*;
 
     #[test]
     fn execution_step_inputs_reject_manifest_and_subject_substitution() {
         let root = tempfile::tempdir().unwrap();
-        let mut binding = inputs(root.path());
+        let mut binding = admission_binding(root.path(), "subject", Some("frozen mission"));
         assert!(prepare_admission_arguments(&binding, "another-subject").is_err());
         binding["admission_inputs"]["argv"][4] = json!("another-subject");
         assert!(prepare_admission_arguments(&binding, "subject")
@@ -982,5 +1056,18 @@ mod input_tests {
             .unwrap_err()
             .message
             .contains("manifest does not match"));
+    }
+
+    #[test]
+    fn execution_step_inputs_expand_only_verified_frozen_content() {
+        let root = tempfile::tempdir().unwrap();
+        let binding = admission_binding(root.path(), "subject", Some("frozen mission"));
+        let argv = prepare_admission_arguments(&binding, "subject").unwrap();
+        assert_eq!(argv.last().unwrap(), "--prompt=frozen mission");
+        std::fs::write(root.path().join("prompt"), "changed mission").unwrap();
+        assert!(prepare_admission_arguments(&binding, "subject")
+            .unwrap_err()
+            .message
+            .contains("changed after acceptance"));
     }
 }

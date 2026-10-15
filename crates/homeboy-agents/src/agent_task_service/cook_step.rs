@@ -388,12 +388,9 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         && parent.metadata["detached_cook_handoff"]["state"] != "redirected"
         && agent_task_lifecycle::is_unmaterialized_cook_admission(&parent)
     {
-        if let Some(intent_id) =
-            parent.metadata["execution_scheduling"]["current_intent_id"].as_str()
-        {
-            // The launcher transferred custody in the lifecycle transaction.
-            // Its exit cannot fail the independently supervised admission.
-            super::load_execution_intent(&store, intent_id)?;
+        // The launcher transferred custody in the lifecycle transaction.
+        // Its exit cannot fail the independently supervised admission.
+        if super::current_execution_intent(&store, &parent)?.is_some() {
             return Ok(());
         }
     }

@@ -301,13 +301,9 @@ impl AgentTaskLifecycleStore {
             }
             record.record_runner_metadata(false);
             if record.metadata["execution_scheduling"].is_object() {
-                record.metadata["execution_step_owner"] = json!({
-                    "intent_id": record.metadata["execution_scheduling"]["current_intent_id"],
-                    "job_id": std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok(),
-                    "pid": std::process::id(),
-                    "process_start_identity": homeboy_core::process::process_start_identity(std::process::id())
-                        .map_err(Error::internal_unexpected)?,
-                });
+                let intent_id =
+                    record.metadata["execution_scheduling"]["current_intent_id"].clone();
+                record.metadata["execution_step_owner"] = execution_step_owner(intent_id)?;
             }
             self.advance_record_locked_without_terminal_projection(&record, AgentTaskAdvance::Start)
                 .map(Some)
@@ -325,14 +321,12 @@ impl AgentTaskLifecycleStore {
             }
             record.record_runner_metadata(false);
             super::set_run_state(&mut record, super::AgentTaskRunState::Running);
-            record.metadata["execution_step_owner"] = json!({
-                "intent_id": intent.intent_id,
-                "job_id": std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok(),
-                "pid": std::process::id(),
-                "process_start_identity": homeboy_core::process::process_start_identity(std::process::id())
-                    .map_err(Error::internal_unexpected)?,
-            });
-            self.advance_record_locked_without_terminal_projection(&record, AgentTaskAdvance::Start)?;
+            record.metadata["execution_step_owner"] =
+                execution_step_owner(json!(intent.intent_id))?;
+            self.advance_record_locked_without_terminal_projection(
+                &record,
+                AgentTaskAdvance::Start,
+            )?;
             Ok(true)
         })
     }
@@ -2250,6 +2244,17 @@ fn write_record_fenced(
 /// in the same statement as the row replacement. A [`RecordWriteFence::Revision`]
 /// makes it a compare-and-swap, and a typed transition additionally appends a
 /// `run.transitioned` event in the same transaction (#15718).
+/// This process's claim on the exact step that authorized it.
+fn execution_step_owner(intent_id: Value) -> Result<Value> {
+    Ok(json!({
+        "intent_id": intent_id,
+        "job_id": std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok(),
+        "pid": std::process::id(),
+        "process_start_identity": homeboy_core::process::process_start_identity(std::process::id())
+            .map_err(Error::internal_unexpected)?,
+    }))
+}
+
 pub(super) fn write_record_guarded(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,

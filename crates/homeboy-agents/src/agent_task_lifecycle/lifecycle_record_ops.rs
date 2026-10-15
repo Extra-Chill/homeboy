@@ -49,6 +49,25 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
     );
 }
 
+/// Return a zero-execution run to the queue and drop its exact-step owner.
+pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
+    set_run_state(record, AgentTaskRunState::Queued);
+    record.lifecycle.execution.started_at = None;
+    record.lifecycle.execution.finished_at = None;
+    for task in &mut record.tasks {
+        task.state = AgentTaskState::Queued;
+    }
+    let metadata = record.ensure_metadata_object();
+    for key in [
+        "execution_step_owner",
+        "runner_pid",
+        "runner_process_start_identity",
+        "runner_started_at",
+    ] {
+        metadata.remove(key);
+    }
+}
+
 pub(crate) fn update_lifecycle_heartbeat(record: &mut AgentTaskRunRecord) {
     let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
     record.lifecycle.heartbeat = Some(RunHeartbeat {
