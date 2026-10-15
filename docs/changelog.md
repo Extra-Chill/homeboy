@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.6] - 2026-10-15
+
+### Fixed
+- admit Lab prompts without the prose redaction heuristic
+- materialize a no-change retry baseline from the empty promoted patch
+- treat a no-edit attempt missing only review_form as verified no-change
+
 ## [0.428.5] - 2026-10-15
 
 ### Changed
