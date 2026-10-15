@@ -51,6 +51,25 @@ impl Drop for CookDriverGuard {
 
 pub const COOK_RECIPE_SCHEMA: &str = "homeboy/agent-task-cook-recipe/v1";
 const CONTINUATION_SCHEMA: &str = "homeboy/agent-task-cook-continuation/v1";
+
+type TerminalCookScheduler = std::sync::Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>;
+
+fn terminal_cook_scheduler() -> &'static std::sync::OnceLock<TerminalCookScheduler> {
+    static SCHEDULER: std::sync::OnceLock<TerminalCookScheduler> = std::sync::OnceLock::new();
+    &SCHEDULER
+}
+
+pub fn register_terminal_cook_scheduler(schedule: TerminalCookScheduler) {
+    let _ = terminal_cook_scheduler().set(schedule);
+}
+
+pub fn schedule_terminal_cook_continuation(request: &Value) -> Result<Value> {
+    terminal_cook_scheduler()
+        .get()
+        .ok_or_else(|| Error::internal_unexpected("terminal Cook scheduler is not registered"))?(
+        request,
+    )
+}
 // Base capture reaches the network while holding this lock. It must always
 // surface a wedged peer rather than inherit an operator-configured unbounded
 // config-lock wait.
@@ -1406,30 +1425,6 @@ pub(crate) fn record_recipe_attempt(
     default_store()?.record_recipe_attempt(cook_id, attempt, run_id, plan)
 }
 
-pub(crate) fn record_recipe_retry_attempt(
-    cook_id: &str,
-    attempt: u32,
-    run_id: &str,
-    plan: &AgentTaskPlan,
-    source_run_id: &str,
-) -> Result<AgentTaskCookRecipe> {
-    default_store()?.record_recipe_retry_attempt(cook_id, attempt, run_id, plan, source_run_id)
-}
-
-pub(crate) fn record_recipe_attempt_replacement_with_plan(
-    cook_id: &str,
-    replaced_run_id: &str,
-    replacement_run_id: &str,
-    plan: &AgentTaskPlan,
-) -> Result<AgentTaskCookRecipe> {
-    default_store()?.record_recipe_attempt_replacement_with_plan(
-        cook_id,
-        replaced_run_id,
-        replacement_run_id,
-        plan,
-    )
-}
-
 /// Append an attempt. A remediation's lineage is read from the provenance its
 /// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
 /// lifecycle retry, whose plan says nothing about where it came from.
@@ -1563,6 +1558,10 @@ fn record_recipe_attempt_replacement_in_store_with_plan(
             .iter()
             .any(|attempt| attempt.run_id == replaced_run_id && attempt.attempt == existing.attempt)
             && existing.plan == *replacement_plan
+            && existing.lineage
+                == Some(super::cook_lineage::CookAttemptLineage::replacement(
+                    replaced_run_id,
+                ))
         {
             return Ok(recipe);
         }
@@ -2684,7 +2683,7 @@ pub fn preflight_continuation_claim_in_store(
         ));
     }
     let record = lifecycle_store.read_record_bounded(run_id)?;
-    if !rearm && record.has_live_pending_local_cook_supervisor(chrono::Utc::now()) {
+    if !rearm && record.has_live_execution_step_owner(chrono::Utc::now()) {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.claim",
             format!(
@@ -2863,7 +2862,12 @@ pub fn pre_execution_runtime_recovery(
     if record.state == AgentTaskRunState::Queued
         && admission["schema"] == "homeboy/cook-runtime-admission/v1"
         && admission["state"] == "queued"
-        && admission["fence"].as_u64().is_some_and(|fence| fence > 0)
+        && record.metadata["execution_scheduling"]["epoch"]
+            .as_u64()
+            .is_some_and(|epoch| epoch > 0)
+        && record.metadata["execution_scheduling"]["current_intent_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
         && admission["provider_executions_consumed"].as_u64() == Some(0)
     {
         return Some(PreExecutionRuntimeRecovery::QueuedRuntimeAdmission);
@@ -4108,6 +4112,10 @@ mod tests {
             )
             .unwrap());
             let before = lifecycle.read_record("run").unwrap();
+            assert!(before.metadata["cook_runtime_admission"]
+                .get("fence")
+                .is_none());
+            assert!(before.metadata["execution_scheduling"]["current_intent_id"].is_string());
             assert!(before.metadata.get("retry_of").is_none());
             let before_plan =
                 serde_json::to_value(lifecycle.read_controller_plan("run").unwrap()).unwrap();
@@ -4214,7 +4222,20 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(serde_json::to_value(repeated).unwrap(), actual);
-            agent_task_lifecycle::mark_running_in_store(&restarted, "run").unwrap();
+            let intent = super::super::load_execution_intent(
+                &restarted,
+                rebound.metadata["execution_scheduling"]["current_intent_id"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(agent_task_lifecycle::claim_exact_execution_intent_in_store(
+                &restarted,
+                &intent,
+                |_, _| Ok(()),
+            )
+            .unwrap()
+            .is_some());
             let running = restarted.read_record("run").unwrap();
             reconstruct_options_for_record_with_dispatcher(&historical, &running, None).unwrap();
             restarted
@@ -5616,7 +5637,7 @@ mod tests {
     }
 
     #[test]
-    fn continuation_preflight_rejects_a_live_local_cook_supervisor() {
+    fn continuation_preflight_rejects_a_live_execution_step_owner() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
         let lifecycle_store =
@@ -5628,17 +5649,14 @@ mod tests {
             })
             .unwrap();
         store.enqueue_terminal_continuation("cook", "run").unwrap();
-        let now = chrono::Utc::now();
         lifecycle_store
             .mutate_record("run", |record| {
-                record.metadata["cook_id"] = serde_json::json!("cook");
-                record.metadata["local_cook_supervisor"] = serde_json::json!({
-                    "state": "supervising",
-                    "cook_id": "cook",
-                    "pinned_run_id": "run",
-                    "lease_started_at": now.to_rfc3339(),
-                    "lease_expires_at": (now + chrono::Duration::seconds(30)).to_rfc3339(),
-                });
+                record.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                record
+                    .metadata
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(agent_task_lifecycle::execution_step_owner_fixture("cook"));
                 true
             })
             .unwrap();

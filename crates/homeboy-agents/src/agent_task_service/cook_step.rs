@@ -35,8 +35,6 @@ use crate::agent_task_lifecycle;
 
 /// Idempotency-key prefix of the step that runs an initial detached Cook.
 pub const COOK_LAUNCH_STEP_KEY_PREFIX: &str = "agent-task-cook-launch:";
-/// Idempotency-key prefix of the step that runs one local Cook retry.
-pub const COOK_RETRY_STEP_KEY_PREFIX: &str = "agent-task-cook-retry:";
 pub const COOK_STEP_TERMINAL_CONSUMER: &str = "agent-task.cook-step";
 
 /// Process mechanics a Homeboy step needs beyond the provider base list: Git
@@ -208,30 +206,11 @@ pub fn cook_launch_step_request(
     .with_linked_durable_run_id(cook_id)
 }
 
-/// The step that runs one reserved local Cook retry. The key is the retry run,
-/// so a launcher that takes over a crashed one converges on the same step.
-pub fn cook_retry_step_request(
-    run_id: &str,
-    program: &Path,
-    args: Vec<String>,
-    cwd: &Path,
-    env: EnvMaterializationPlan,
-) -> StepJobRequest {
-    StepJobRequest::new(
-        format!("{COOK_RETRY_STEP_KEY_PREFIX}{run_id}"),
-        program.display().to_string(),
-        args,
-        cwd.display().to_string(),
-        env,
-        COOK_STEP_TERMINAL_CONSUMER,
-    )
-    .with_linked_durable_run_id(run_id)
-}
-
 /// Register the step driver plus the Cook-side hooks it consults. Idempotent.
 pub fn register_cook_step_hooks() {
     static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     REGISTERED.get_or_init(|| {
+        super::register_execution_step_hooks();
         step_job::register_step_job_driver();
         step_job::register_step_secret_resolver(Arc::new(|refs: &[EnvSecretRef]| {
             let names = refs
@@ -276,11 +255,7 @@ pub(super) fn observe_cook_step_exit(exit: &StepTerminalDelivery) -> Result<()> 
     };
     // Every other linked step runs a Cook that bound its own handoff: a
     // detached launch, or a workflow `cook` step.
-    if exit.key.starts_with(COOK_RETRY_STEP_KEY_PREFIX) {
-        observe_retry_exit(linked, exit)
-    } else {
-        observe_launch_exit(linked, exit)
-    }
+    observe_launch_exit(linked, exit)
 }
 
 /// The record that speaks for a Cook, or why it cannot answer yet.
@@ -409,6 +384,19 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         }
         return Ok(());
     }
+    if !parent.state.is_terminal()
+        && parent.metadata["detached_cook_handoff"]["state"] != "redirected"
+        && agent_task_lifecycle::is_unmaterialized_cook_admission(&parent)
+    {
+        if let Some(intent_id) =
+            parent.metadata["execution_scheduling"]["current_intent_id"].as_str()
+        {
+            // The launcher transferred custody in the lifecycle transaction.
+            // Its exit cannot fail the independently supervised admission.
+            super::load_execution_intent(&store, intent_id)?;
+            return Ok(());
+        }
+    }
     // A handoff that never materialized an attempt has no other owner left.
     let parent = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
         &store,
@@ -418,7 +406,16 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
     if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
         return Ok(());
     }
-    let index = store.read_cook_index(cook_id)?;
+    let index = match store.read_cook_index(cook_id) {
+        Ok(index) => index,
+        Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
+            match settle_missing_launch_index(&store, cook_id, exit, &error)? {
+                Some(index) => index,
+                None => return Ok(()),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let attempt = index.latest_run_id;
     let record = store.read_record(&attempt)?;
     if !record.state.is_terminal() {
@@ -427,42 +424,64 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
     notify_cook_attempt(cook_id, &attempt)
 }
 
-fn observe_retry_exit(run_id: &str, exit: &StepTerminalDelivery) -> Result<()> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = store.read_record(run_id)?;
-    let Some(cook_id) = record.metadata["cook_id"].as_str().map(str::to_string) else {
-        return Ok(());
-    };
-    if exit.cancelled {
-        if !record.state.is_terminal() {
-            agent_task_lifecycle::cancel_run_in_store(
-                &store,
-                run_id,
-                Some("Cook retry step cancelled"),
-            )?;
+/// A redirected handoff without its canonical alias is broken durable
+/// provenance, not a readiness condition. Persist the diagnostic before ACKing
+/// so restarting terminal delivery cannot poison the queue indefinitely.
+fn settle_missing_launch_index(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    exit: &StepTerminalDelivery,
+    diagnostic: &Error,
+) -> Result<Option<agent_task_lifecycle::AgentTaskCookIndex>> {
+    let mut read_error = None;
+    let mut repaired_index = None;
+    store.transition_when(cook_id, |record| {
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+            || record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
+            || record.metadata["detached_cook_handoff"]["state"] != "redirected"
+        {
+            return None;
         }
-        return Ok(());
-    }
-    if !record.state.is_terminal() {
-        let provider_started = record
-            .metadata
-            .get("provider_executions")
-            .and_then(Value::as_array)
-            .is_some_and(|executions| !executions.is_empty());
-        if provider_started {
-            agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, run_id)?;
-        } else {
-            let plan = store.read_controller_plan(run_id)?;
-            agent_task_lifecycle::record_pre_execution_failure_in_store(
-                &store,
-                run_id,
-                &plan,
-                "local_retry_supervisor",
-                &retry_child_failure(&exit.log_path, run_id),
-            )?;
+        // Repeat the authority read under the lifecycle lock: a concurrent
+        // index repair wins rather than being overwritten by our earlier read.
+        match store.read_cook_index(cook_id) {
+            Ok(index) => {
+                repaired_index = Some(index);
+                return None;
+            }
+            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {}
+            Err(error) => {
+                read_error = Some(error);
+                return None;
+            }
         }
+        let mut handoff = record.metadata["detached_cook_handoff"].clone();
+        handoff["state"] = json!("exited_before_handoff");
+        handoff["admission_state"] = json!("failed");
+        handoff["reason"] = json!(diagnostic.message);
+        Some(agent_task_lifecycle::AgentTaskTransition::Terminate {
+            outcome: agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+            metadata: serde_json::Map::from_iter([
+                ("detached_cook_handoff".to_string(), handoff),
+                (
+                    "cook_controller_failure".to_string(),
+                    homeboy_core::redaction::redact_json(&json!({
+                        "code": diagnostic.code.as_str(),
+                        "message": diagnostic.message,
+                        "details": diagnostic.details,
+                        "retryable": false,
+                        "job_id": exit.job_id,
+                        "step_key": exit.key,
+                        "phase": "step_terminal_missing_cook_index",
+                    })),
+                ),
+            ]),
+        })
+    })?;
+    match read_error {
+        Some(error) => Err(error),
+        None => Ok(repaired_index),
     }
-    notify_cook_attempt(&cook_id, run_id)
 }
 
 fn notify_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
@@ -500,74 +519,7 @@ fn attempt_status_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'sta
     }
 }
 
-/// The retry child's own typed failure, read from the tail of its step log,
-/// so a retry that failed before provider execution reports why.
-fn retry_child_failure(log_path: &Path, run_id: &str) -> Error {
-    let Some(value) = last_failed_command_result(log_path) else {
-        return retry_child_diagnostics_unavailable(log_path);
-    };
-    let diagnostic = value
-        .get("diagnostics")
-        .or_else(|| value.get("error"))
-        .or_else(|| value.pointer("/data/failure_context/diagnostic"))
-        .filter(|diagnostic| diagnostic.is_object())
-        .cloned();
-    let Some(diagnostic) = diagnostic else {
-        return retry_child_diagnostics_unavailable(log_path);
-    };
-    let (Some(code), Some(message)) = (
-        diagnostic.get("code").and_then(Value::as_str),
-        diagnostic.get("message").and_then(Value::as_str),
-    ) else {
-        return retry_child_diagnostics_unavailable(log_path);
-    };
-    let mut evidence = json!({
-        "schema": value.get("schema"),
-        "command": value.get("command"),
-        "operation": value.get("operation"),
-        "status": value.get("status"),
-        "diagnostic": diagnostic,
-        "failure_context": value.pointer("/data/failure_context"),
-        "child_result_evidence": {
-            "kind": "detached-child-command-result",
-            "evidence_uri": format!("homeboy://agent-task/run/{run_id}/status#detached-child-command-result"),
-        },
-    });
-    evidence = homeboy_core::redaction::redact_json(&evidence);
-    bound_child_diagnostic(&mut evidence, 0);
-    let classification = diagnostic
-        .pointer("/details/classification")
-        .or_else(|| value.pointer("/data/failure_context/classification"))
-        .or_else(|| value.pointer("/data/terminal_failure_classification"))
-        .and_then(Value::as_str);
-    let mut error = Error::new(
-        match code {
-            "storage.exhausted" => ErrorCode::StorageExhausted,
-            _ => ErrorCode::InternalUnexpected,
-        },
-        homeboy_core::redaction::redact_string(message),
-        json!({
-            "field": code,
-            "child_reported_error_code": code,
-            "child_error_code": code,
-            "child_failure_classification": classification,
-            "child_command_result": evidence,
-        }),
-    )
-    .with_retryable(true);
-    if let Some(hints) = diagnostic.get("hints").and_then(Value::as_array) {
-        for hint in hints
-            .iter()
-            .filter_map(|hint| hint.get("message").and_then(Value::as_str))
-            .take(4)
-        {
-            error = error.with_hint(homeboy_core::redaction::redact_string(hint));
-        }
-    }
-    error
-}
-
-fn last_failed_command_result(log_path: &Path) -> Option<Value> {
+pub(super) fn last_failed_command_result(log_path: &Path) -> Option<Value> {
     let mut file = std::fs::File::open(log_path).ok()?;
     let length = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(
@@ -590,56 +542,59 @@ fn last_failed_command_result(log_path: &Path) -> Option<Value> {
         })
 }
 
-fn retry_child_diagnostics_unavailable(log_path: &Path) -> Error {
-    Error::new(
-        ErrorCode::InternalUnexpected,
-        "local Cook retry exited before provider execution",
-        json!({
-            "field": "local_retry_supervisor",
-            "child_diagnostics": {
-                "status": "unavailable",
-                "reason": "no_failed_command_result",
-                "step_log": log_path.display().to_string(),
-            },
-        }),
-    )
-    .with_retryable(true)
-}
-
-fn bound_child_diagnostic(value: &mut Value, depth: usize) {
-    const TEXT_LIMIT: usize = 2048;
-    if depth >= 4 {
-        *value = Value::String("[omitted: diagnostic depth limit]".to_string());
-        return;
-    }
-    match value {
-        Value::String(text) if text.len() > TEXT_LIMIT => {
-            let mut end = TEXT_LIMIT;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            text.push_str("...[truncated]");
-        }
-        Value::Array(values) => {
-            values.truncate(8);
-            for value in values {
-                bound_child_diagnostic(value, depth + 1);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                bound_child_diagnostic(value, depth + 1);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use homeboy_core::test_support::{with_isolated_home, EnvVarGuard};
+
+    #[test]
+    fn missing_launch_index_does_not_replace_cancellation() {
+        with_isolated_home(|home| {
+            let store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let cook_id = "cancelled-missing-index";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                .unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    agent_task_lifecycle::AgentTaskRunState::Cancelled,
+                );
+                record.metadata["detached_cook_handoff"]["state"] = json!("redirected");
+            })
+            .unwrap();
+            let before = store.read_record(cook_id).unwrap();
+            let request = cook_launch_step_request(
+                cook_id,
+                "launcher",
+                Path::new("/bin/sh"),
+                Vec::new(),
+                home.path(),
+                Default::default(),
+            );
+            let exit = StepTerminalDelivery {
+                job_id: "cancelled-step".to_string(),
+                key: request.key.clone(),
+                request,
+                checkpoint: None,
+                linked_durable_run_id: Some(cook_id.to_string()),
+                child: None,
+                outcome: step_job::StepTerminalOutcome::Exited,
+                error: None,
+                exit_code: Some(1),
+                cancelled: false,
+                log_path: home.path().join("step.log"),
+            };
+            observe_cook_step_exit(&exit).unwrap();
+            let after = store.read_record(cook_id).unwrap();
+            assert_eq!(
+                after.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(after.revision, before.revision);
+            assert!(after.metadata.get("cook_controller_failure").is_none());
+        });
+    }
 
     #[test]
     fn admitted_environment_is_declared_mechanics_and_homeboy_configuration_only() {
@@ -695,57 +650,5 @@ mod tests {
                 .public_env
                 .contains_key("HOMEBOY_COOK_STEP_CONTEXT_FIXTURE"));
         });
-    }
-
-    #[test]
-    fn launch_and_retry_steps_are_keyed_and_linked_to_their_durable_runs() {
-        let launch = cook_launch_step_request(
-            "cook-a",
-            "launcher-1",
-            Path::new("/bin/homeboy"),
-            vec!["--wait".to_string()],
-            Path::new("/tmp"),
-            EnvMaterializationPlan::default(),
-        );
-        assert_eq!(launch.key, "agent-task-cook-launch:cook-a:launcher-1");
-        assert_eq!(launch.linked_durable_run_id.as_deref(), Some("cook-a"));
-        let retry = cook_retry_step_request(
-            "cook-a-attempt-2",
-            Path::new("/bin/homeboy"),
-            Vec::new(),
-            Path::new("/tmp"),
-            EnvMaterializationPlan::default(),
-        );
-        assert_eq!(retry.key, "agent-task-cook-retry:cook-a-attempt-2");
-        assert_eq!(
-            retry.linked_durable_run_id.as_deref(),
-            Some("cook-a-attempt-2")
-        );
-    }
-
-    #[test]
-    fn retry_failure_reads_the_last_typed_command_result_from_the_step_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("step.log");
-        std::fs::write(
-            &log,
-            format!(
-                "progress line\n{}\n",
-                json!({
-                    "schema": "homeboy/command-result/v3",
-                    "success": false,
-                    "diagnostics": { "code": "storage.exhausted", "message": "disk is full" },
-                })
-            ),
-        )
-        .unwrap();
-        let error = retry_child_failure(&log, "run-a");
-        assert_eq!(error.code, ErrorCode::StorageExhausted);
-        assert_eq!(error.message, "disk is full");
-        let missing = retry_child_failure(&dir.path().join("absent.log"), "run-a");
-        assert_eq!(
-            missing.details["child_diagnostics"]["status"],
-            "unavailable"
-        );
     }
 }

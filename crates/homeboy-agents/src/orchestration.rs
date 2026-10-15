@@ -2150,10 +2150,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     &parameters.placement,
                                     &request.actor,
                                 )?;
-                        let reconciliation =
-                            crate::agent_task_service::reconcile_unmaterialized_cook_admission(
-                                &resolved,
-                            )?;
+                        let reconciliation = updated.metadata["execution_scheduling"].clone();
                         let current = self.lookup.store.read_record(&resolved)?;
                         Ok((updated, current, reconciliation))
                     })();
@@ -2373,13 +2370,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         )
                     } else {
                         let resumed = (|| -> homeboy_core::Result<_> {
-                            crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
-                                requested_id.as_str(),
-                            )?;
-                            let reconciliation =
-                                crate::agent_task_service::reconcile_unmaterialized_cook_admission(
+                            let rearmed =
+                                crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
                                     requested_id.as_str(),
                                 )?;
+                            let reconciliation = rearmed.metadata["execution_scheduling"].clone();
                             let current = self.lookup.store.read_record(&resolved)?;
                             Ok((current, reconciliation))
                         })();
@@ -4313,7 +4308,7 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     if (record.state == AgentTaskRunState::CandidateRecoverable
         && record.owner_process_is_running())
-        || record.has_live_pending_local_cook_supervisor(Utc::now())
+        || record.has_live_execution_step_owner(Utc::now())
     {
         return ControlPlaneRunState::Running;
     }
@@ -4455,7 +4450,7 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     {
         return Some("source_materialization".to_string());
     }
-    if record.has_live_pending_local_cook_supervisor(Utc::now()) {
+    if record.has_live_execution_step_owner(Utc::now()) {
         return Some("promotion_gates".to_string());
     }
     if has_running_provider_execution(record) {
@@ -4634,8 +4629,21 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             retry: None,
         });
     }
+    if record.state.is_terminal() {
+        if let Some(failure) = record.metadata.get("execution_step_failure") {
+            if let Some(message) = failure["message"].as_str() {
+                return Some(ControlPlaneBlocker {
+                    code: failure["diagnostic"]["code"].as_str().map(str::to_string),
+                    message: redacted_bounded(message, MESSAGE_BOUND),
+                    state: failure["classification"].as_str().map(str::to_string),
+                    reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
+                    retry: None,
+                });
+            }
+        }
+    }
     if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
-        if let Some((state, reason, retry)) = unmaterialized_admission_blocker(admission) {
+        if let Some((state, reason, retry)) = unmaterialized_admission_blocker(record, admission) {
             return Some(ControlPlaneBlocker {
                 code: Some(state.clone()),
                 message: reason.clone(),
@@ -4708,6 +4716,7 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
 }
 
 fn unmaterialized_admission_blocker(
+    record: &AgentTaskRunRecord,
     admission: &Value,
 ) -> Option<(String, String, Option<ControlPlaneAdmissionRetry>)> {
     let state = admission.get("state")?.as_str()?.trim();
@@ -4723,34 +4732,16 @@ fn unmaterialized_admission_blocker(
         .filter(|reason| !reason.trim().is_empty())
         .map(|reason| redacted_bounded(reason, MESSAGE_BOUND))
         .unwrap_or_else(|| redacted_bounded(state, MESSAGE_BOUND));
-    let Some(retry) = admission.get("retry") else {
-        return Some((state.to_string(), reason, None));
-    };
-    if retry.get("policy").and_then(Value::as_str) != Some("bounded_exponential") {
-        return Some((state.to_string(), reason, None));
-    }
-    let Some(max_attempts) = retry.get("max_attempts").and_then(Value::as_u64) else {
-        return Some((state.to_string(), reason, None));
-    };
-    let attempts = admission
-        .get("admission_attempts")
-        .and_then(Value::as_u64)
+    let attempts = record.metadata["execution_scheduling"]["recovery_failures"]
+        .as_u64()
         .unwrap_or_default();
-    let next_attempt_at = retry
-        .get("next_attempt_at")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-        .map(|timestamp| timestamp.to_rfc3339());
+    let max_attempts = 20;
+    // Deadlines belong to the immutable step request, not lifecycle status.
+    let next_attempt_at = None;
     let disposition = if state == "exhausted" || attempts >= max_attempts {
         ControlPlaneAdmissionRetryDisposition::Exhausted
-    } else if next_attempt_at
-        .as_deref()
-        .and_then(parse_timestamp)
-        .is_some_and(|timestamp| timestamp > Utc::now())
-    {
-        ControlPlaneAdmissionRetryDisposition::AutomaticReconciliationScheduled
     } else {
-        ControlPlaneAdmissionRetryDisposition::AutomaticReconciliationDue
+        ControlPlaneAdmissionRetryDisposition::AutomaticReconciliationScheduled
     };
     Some((
         state.to_string(),
@@ -9553,13 +9544,9 @@ mod tests {
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "queued",
             "reason": "Lab admission predicate controller_version != job_command_binary_version failed token=secret-value",
-            "admission_attempts": 3,
-            "retry": {
-                "policy": "bounded_exponential",
-                "next_attempt_at": "2099-01-01T00:00:00Z",
-                "max_attempts": 20,
-            },
         });
+        record.metadata["execution_scheduling"] =
+            json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 3});
 
         let resource = project_record(&record, None).expect("project admission");
         let blocker = resource.blocker.expect("admission blocker");
@@ -9577,9 +9564,9 @@ mod tests {
         assert_eq!(retry.policy, "bounded_exponential");
         assert_eq!(retry.attempts, 3);
         assert_eq!(retry.max_attempts, 20);
-        assert_eq!(
-            retry.next_attempt_at.as_deref(),
-            Some("2099-01-01T00:00:00+00:00")
+        assert!(
+            retry.next_attempt_at.is_none(),
+            "deadlines belong to the exact step"
         );
         assert_eq!(
             retry.disposition,
@@ -9596,8 +9583,7 @@ mod tests {
             resume.availability,
             ControlPlaneActionAvailability::Available
         );
-        assert!(resume.reason.contains("explicitly re-arms"));
-        assert!(resume.reason.contains("recommended next action"));
+        assert!(resume.reason.contains("explicitly rearmed"));
     }
 
     #[test]
@@ -9608,13 +9594,9 @@ mod tests {
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "exhausted",
             "reason": "bounded Lab admission retry budget exhausted",
-            "admission_attempts": 20,
-            "retry": {
-                "policy": "bounded_exponential",
-                "next_attempt_at": "2026-09-08T03:14:05.251948+00:00",
-                "max_attempts": 20,
-            },
         });
+        record.metadata["execution_scheduling"] =
+            json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 20});
 
         let resource = project_record(&record, None).expect("project exhausted admission");
         let blocker = resource.blocker.expect("admission blocker");
@@ -9819,18 +9801,12 @@ mod tests {
     }
 
     #[test]
-    fn active_local_cook_supervisor_projects_running_promotion_gate_state() {
+    fn active_execution_step_owner_projects_running_promotion_gate_state() {
         let mut record = record(AGENT_TASK_RUN);
         record.state = AgentTaskRunState::Succeeded;
-        let now = chrono::Utc::now();
-        record.metadata["cook_id"] = json!("cook");
-        record.metadata["local_cook_supervisor"] = json!({
-            "state": "supervising",
-            "cook_id": "cook",
-            "pinned_run_id": AGENT_TASK_RUN,
-            "lease_started_at": now.to_rfc3339(),
-            "lease_expires_at": (now + chrono::Duration::seconds(30)).to_rfc3339(),
-        });
+        record.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
 
         let resource = project_record(&record, None).expect("project active supervisor");
         assert_eq!(resource.state, ControlPlaneRunState::Running);

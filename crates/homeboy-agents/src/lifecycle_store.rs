@@ -97,31 +97,6 @@ impl AgentTaskLifecycleStore {
             .join("index.json")
     }
 
-    pub(crate) fn unmaterialized_admission_cursor(&self) -> Option<String> {
-        let path = self
-            .data_root()
-            .join("agent-task-cook-admissions")
-            .join("reconcile-cursor.json");
-        let value = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())?;
-        value["last_run_id"].as_str().map(str::to_string)
-    }
-
-    pub(crate) fn write_unmaterialized_admission_cursor(&self, run_id: &str) -> Result<()> {
-        let path = self
-            .data_root()
-            .join("agent-task-cook-admissions")
-            .join("reconcile-cursor.json");
-        write_private_json(
-            &path,
-            &json!({
-                "schema": "homeboy/unmaterialized-cook-reconcile-cursor/v1",
-                "last_run_id": run_id,
-            }),
-        )
-    }
-
     /// The observation database below these roots.
     ///
     /// Delegates to `paths` so this can never name a different file than the
@@ -293,10 +268,22 @@ impl AgentTaskLifecycleStore {
         run_id: &str,
         plan: &AgentTaskPlan,
     ) -> Result<Option<AgentTaskRunRecord>> {
+        self.bind_controller_plan_and_claim_queued_run_when(run_id, plan, |record| {
+            !record.metadata["execution_scheduling"].is_object()
+        })
+    }
+
+    pub(crate) fn bind_controller_plan_and_claim_queued_run_when(
+        &self,
+        run_id: &str,
+        plan: &AgentTaskPlan,
+        authorize: impl FnOnce(&AgentTaskRunRecord) -> bool,
+    ) -> Result<Option<AgentTaskRunRecord>> {
         self.with_config_lock(|| {
             let mut record = self.read_record(run_id)?;
             if record.state != super::AgentTaskRunState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
+                || !authorize(&record)
             {
                 return Ok(None);
             }
@@ -313,8 +300,40 @@ impl AgentTaskLifecycleStore {
                 }
             }
             record.record_runner_metadata(false);
+            if record.metadata["execution_scheduling"].is_object() {
+                record.metadata["execution_step_owner"] = json!({
+                    "intent_id": record.metadata["execution_scheduling"]["current_intent_id"],
+                    "job_id": std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok(),
+                    "pid": std::process::id(),
+                    "process_start_identity": homeboy_core::process::process_start_identity(std::process::id())
+                        .map_err(Error::internal_unexpected)?,
+                });
+            }
             self.advance_record_locked_without_terminal_projection(&record, AgentTaskAdvance::Start)
                 .map(Some)
+        })
+    }
+
+    pub(crate) fn claim_execution_admission(
+        &self,
+        intent: &crate::agent_task_service::ExecutionStepIntent,
+    ) -> Result<bool> {
+        self.with_config_lock(|| {
+            let mut record = self.read_record(&intent.subject_id)?;
+            if !intent.authorizes(&record) {
+                return Ok(false);
+            }
+            record.record_runner_metadata(false);
+            super::set_run_state(&mut record, super::AgentTaskRunState::Running);
+            record.metadata["execution_step_owner"] = json!({
+                "intent_id": intent.intent_id,
+                "job_id": std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok(),
+                "pid": std::process::id(),
+                "process_start_identity": homeboy_core::process::process_start_identity(std::process::id())
+                    .map_err(Error::internal_unexpected)?,
+            });
+            self.advance_record_locked_without_terminal_projection(&record, AgentTaskAdvance::Start)?;
+            Ok(true)
         })
     }
 
@@ -2269,6 +2288,29 @@ pub(super) fn write_record_guarded(
         }
     }
     let mut record = record.clone();
+    let execution_intent = record
+        .metadata
+        .as_object_mut()
+        .and_then(|metadata| metadata.remove(crate::agent_task_service::PENDING_EXECUTION_INTENT))
+        .map(serde_json::from_value::<homeboy_core::observation::WorkIntent>)
+        .transpose()
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    if let Some(intent) = &execution_intent {
+        intent.validate(&record.run_id)?;
+        let execution = crate::agent_task_service::ExecutionStepIntent::parse(&intent.payload)?;
+        if intent.kind != crate::agent_task_service::EXECUTION_STEP_KIND
+            || intent.version != 1
+            || intent.id != execution.intent_id
+            || !execution.authorizes(&record)
+        {
+            return Err(Error::validation_invalid_argument(
+                "execution_intent",
+                "execution draft does not authorize its lifecycle record",
+                None,
+                None,
+            ));
+        }
+    }
     // The store owns the revision: whatever the caller carried, the committed
     // row is one past the stored one. SQL repeats the bump atomically.
     record.revision = stored_revision + 1;
@@ -2400,7 +2442,8 @@ pub(super) fn write_record_guarded(
     let record = normalize_decoded_record(&projected, record)?;
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
     let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
-    let intents = work_intents_for_record(&record)?;
+    let mut intents = work_intents_for_record(&record)?;
+    intents.extend(execution_intent);
     let applied = store.upsert_imported_run_with_events_intents_and_revision(
         &projected,
         preserve_terminal,

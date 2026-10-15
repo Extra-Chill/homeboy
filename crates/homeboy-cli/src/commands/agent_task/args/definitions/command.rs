@@ -47,6 +47,11 @@ pub struct ActiveScopeArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    #[command(hide = true)]
+    ExecutionStep {
+        #[arg(long)]
+        intent_id: String,
+    },
     /// Diagnose provider and runtime readiness on a runner, and optionally repair it.
     Doctor(AgentTaskDoctorArgs),
     /// Submit an agent task, run its gates, and open a pull request.
@@ -349,6 +354,34 @@ mod cook_continue_tests {
         cli_surface::{Cli, Commands},
         commands::agent_task::AgentTaskCommand,
     };
+
+    #[test]
+    fn execution_step_parses_only_the_exact_intent_id_and_is_hidden() {
+        use clap::CommandFactory;
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "execution-step",
+            "--intent-id",
+            "agent-task-exec:run-a:1:0",
+        ])
+        .unwrap();
+        let Commands::AgentTask(args) = cli.command else {
+            panic!("agent-task command")
+        };
+        let AgentTaskCommand::ExecutionStep { intent_id } = args.command else {
+            panic!("execution-step command")
+        };
+        assert_eq!(intent_id, "agent-task-exec:run-a:1:0");
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("agent-task")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(!help.contains("execution-step"));
+        assert!(Cli::try_parse_from(["homeboy", "agent-task", "execution-step"]).is_err());
+    }
 
     #[test]
     fn continuation_preflight_parses_the_public_rearm_and_artifact_path() {

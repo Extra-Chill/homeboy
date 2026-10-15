@@ -760,7 +760,6 @@ pub(crate) fn connect_service_runner(
     write_session(&session)?;
 
     super::super::runner_probe_gate::invalidate_runner_probes(runner_id);
-    wake_unmaterialized_admission_reconciliation();
     Ok((
         RunnerConnectReport {
             runner_id: runner_id.to_string(),

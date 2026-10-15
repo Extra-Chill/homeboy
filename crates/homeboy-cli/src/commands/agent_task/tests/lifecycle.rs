@@ -2,6 +2,30 @@
 
 use super::support::*;
 
+fn execute_retry_step_fixture(
+    run_id: &str,
+    executor: homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
+    dispatcher: impl Fn(
+        &Value,
+    ) -> homeboy::core::Result<
+        Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+    >,
+) -> homeboy::core::Result<i32> {
+    struct Transport;
+    impl homeboy::agents::agent_task_service::ExecutionStepTransport for Transport {
+        fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy::core::Result<i32> {
+            panic!("queued retry only")
+        }
+    }
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    let id = record.metadata["execution_scheduling"]["current_intent_id"]
+        .as_str()
+        .unwrap();
+    homeboy::agents::agent_task_service::execute_execution_step(
+        id, executor, dispatcher, &Transport,
+    )
+}
+
 #[derive(Parser)]
 struct FinalizePrCli {
     #[command(flatten)]
@@ -58,7 +82,7 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
 }
 
 #[test]
-fn replay_admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence() {
+fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence() {
     with_isolated_home(|_| {
         let run_id = "run-cli-replay-admission-diagnostic";
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
@@ -70,31 +94,24 @@ fn replay_admission_failure_is_visible_in_status_and_diagnose_without_provider_e
             "eligible",
         )
         .expect("admission");
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
-                "state": "consumed", "fence": 1, "token": "fixture-token",
-            });
-        })
-        .expect("replay claim");
         let message = "native task worktree registration no longer matches the requested branch";
-        assert!(
-            !agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
-                run_id,
-                99,
-                "stale-token",
-                &json!({ "code": "validation.invalid_argument", "message": "stale worker" }),
-            )
-            .expect("stale worker is fenced out")
-        );
-        let untouched = agent_task_lifecycle::exact_record(run_id).expect("active admission");
-        assert!(!untouched.state.is_terminal());
-        assert!(untouched.metadata.get("cook_controller_failure").is_none());
-        assert!(agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
-            run_id, 1, "fixture-token", &json!({
-                "code": "validation.invalid_argument", "message": message,
-                "details": { "cook_phase": "controller_target_preparation", "field": "to_worktree", "api_key": "fixture-private-key" },
-            }),
-        ).expect("terminal replay failure"));
+        let store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let mut error = Error::validation_invalid_argument("to_worktree", message, None, None);
+        error.details = json!({"cook_phase": "controller_target_preparation", "field": "to_worktree", "api_key": "fixture-private-key"});
+        store.transition(
+            run_id,
+            store.read_record(run_id).unwrap().revision,
+            homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
+                outcome: homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                metadata: serde_json::Map::from_iter([("execution_step_failure".to_string(), json!({
+                    "message": error.message,
+                    "diagnostic": {"code": "validation.invalid_argument", "message": error.message, "details": error.details},
+                    "classification": "failed",
+                }))]),
+            },
+        )
+        .unwrap();
 
         let (diagnosis, exit) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
@@ -107,7 +124,7 @@ fn replay_admission_failure_is_visible_in_status_and_diagnose_without_provider_e
             diagnosis["root_cause"]["class"],
             "validation.invalid_argument"
         );
-        assert_eq!(diagnosis["root_cause"]["message"], message);
+        assert_eq!(diagnosis["root_cause"]["message"], error.message);
         assert_eq!(
             diagnosis["root_cause"]["cook_phase"],
             "controller_target_preparation"
@@ -1882,11 +1899,21 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             )
             .expect("constrained fixture capacity");
             homeboy::core::defaults::reset_config_cache_for_test();
-            let (failed, exit_code) = run_next_queued(Arc::new(CountingCookExecutor {
-                executions: Arc::clone(&executions),
-                patch_path: Some(patch.display().to_string()),
-            }))
-            .expect("queue reports its failed admission");
+            let exit_code = execute_retry_step_fixture(
+                &successor_run_id,
+                Arc::new(CountingCookExecutor {
+                    executions: Arc::clone(&executions),
+                    patch_path: Some(patch.display().to_string()),
+                }),
+                |_| Ok(None),
+            )
+            .expect("exact step reports its failed admission");
+            let failed = serde_json::to_value(
+                test_lifecycle_store()
+                    .read_aggregate(&successor_run_id)
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(exit_code, 1, "{failed:#}");
             assert_eq!(failed["status"], "failed", "{failed:#}");
             assert_eq!(
@@ -1919,19 +1946,19 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             assert_eq!(idle["claimed"], false);
             return;
         }
-        let queued = homeboy::agents::agent_task_service::run_next_with_cook_dispatcher(
+        let queued = execute_retry_step_fixture(
+            &successor_run_id,
             Arc::new(CountingCookExecutor {
                 executions: Arc::clone(&executions),
                 patch_path: Some(patch.display().to_string()),
             }),
             |_| Ok(None),
-            Some(&std::collections::HashSet::from([successor_run_id.clone()])),
         )
         .expect("queue owner executes the Cook successor through its lifecycle");
 
         let completed = agent_task_lifecycle::exact_record(&successor_run_id)
             .expect("successor completion is durable");
-        assert_eq!(queued.exit_code, 0, "{queued:#?}\n{completed:#?}");
+        assert_eq!(queued, 0, "{queued:#?}\n{completed:#?}");
         assert_eq!(executions.load(Ordering::SeqCst), 1, "{queued:#?}");
         assert_eq!(completed.metadata["provider_executions_consumed"], 1);
         assert!(
@@ -2603,11 +2630,11 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
 
         let executor = Arc::new(CountingCookExecutor::default());
         let dispatcher = Arc::new(CountingCookDispatcher::default());
-        let (retried, exit_code) = retry_with(
+        let (_, _) = retry_with(
             RetryArgs {
                 run_id: run_id.to_string(),
                 new_run_id: None,
-                run: true,
+                run: false,
                 force: false,
                 idempotency_key: Some("historical-retry-1".to_string()),
                 backend: None,
@@ -2620,11 +2647,28 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
         )
         .expect("queued retry recovers under the current runtime");
 
-        // The transport accepted the recovered attempt, then this fixture
-        // returns without a provider result, so Cook records a new
-        // pre-execution failure rather than replaying the old runtime.
+        let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id).unwrap();
+        let exit_code = execute_retry_step_fixture(
+            &recipe.attempts.last().unwrap().run_id,
+            executor.clone(),
+            |_| Ok(Some(dispatcher.clone())),
+        )
+        .unwrap();
+        let retried = serde_json::to_value(
+            agent_task_lifecycle::exact_record(&recipe.attempts.last().unwrap().run_id).unwrap(),
+        )
+        .unwrap();
+        // This transport fixture returns without publishing an aggregate.
+        // The exact child reports that controller diagnostic; it does not
+        // synthesize a provider result or replay the old runtime.
         assert_eq!(exit_code, 1, "{retried:#?}");
-        assert_eq!(retried["status"], "pre_execution_failure");
+        assert!(
+            retried["metadata"]["cook_controller_failure"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("aggregate.json"),
+            "{retried:#?}"
+        );
         assert_eq!(
             dispatcher.prepared.load(Ordering::SeqCst),
             1,
@@ -5930,7 +5974,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
             RetryArgs {
                 run_id: source_run_id.to_string(),
                 new_run_id: None,
-                run: true,
+                run: false,
                 force: false,
                 idempotency_key: Some("cook-retry-run-1".to_string()),
                 backend: None,
@@ -5943,7 +5987,14 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
         )
         .expect("retry --run resumes the Cook lifecycle");
 
-        assert_ne!(value["status"], "accepted_unscheduled");
+        let _ = value;
+        let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id).unwrap();
+        execute_retry_step_fixture(
+            &recipe.attempts.last().unwrap().run_id,
+            executor.clone(),
+            |_| Ok(Some(Arc::new(RetryRunDispatcher))),
+        )
+        .unwrap();
         assert_eq!(RETRY_RUN_DISPATCHES.load(Ordering::SeqCst), 1);
     });
 }
@@ -6019,20 +6070,8 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                 let run_id = replacement.record.run_id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    super::super::run::consume_queued_cook_retry_with(
-                        CookContinueArgs {
-                            cook_or_attempt_id: run_id,
-                            preflight: false,
-                            rearm: false,
-                            artifact_id: None,
-                            timeout_ms: None,
-                            review_form_timeout_ms: None,
-                            backend: None,
-                            selector: None,
-                            model: None,
-                            acknowledge_model_override: false,
-                            full: false,
-                        },
+                    execute_retry_step_fixture(
+                        &run_id,
                         Arc::new(CountingCookExecutor::default()),
                         |_| Ok(Some(Arc::new(RetryRunDispatcher))),
                     )
@@ -6052,8 +6091,8 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         assert_eq!(record.metadata["retry_of"], source_run_id);
         assert_eq!(record.metadata["cook_id"], cook_id);
         assert_eq!(
-            record.metadata["cook_operation_claims"][0]["operation_key"],
-            format!("retry-run:{}", replacement.record.run_id)
+            record.metadata["execution_step_owner"]["intent_id"],
+            replacement.record.metadata["execution_scheduling"]["current_intent_id"]
         );
     });
 }

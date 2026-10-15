@@ -1023,7 +1023,7 @@ fn register_startup_providers_after_reconcile(
     // durable Work jobs below rather than this unrelated periodic sweep.
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::agent_task::capacity::register_capacity_snapshot_provider();
-    crate::commands::route::register_unmaterialized_cook_replay_driver();
+    crate::commands::route::register_execution_orchestration();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // New orchestration submissions share one versioned lifecycle driver.
     crate::agents::agent_task_service::register_work_job_driver();
@@ -1279,9 +1279,7 @@ impl CliRuntime {
         // The replay worker carries a one-use claim token. Background startup
         // reconcilers spawn sibling Homeboy processes, which would inherit and
         // race to consume that exact token before the supervised Cook runs.
-        let is_unmaterialized_replay_worker =
-            crate::commands::route::is_unmaterialized_replay_worker();
-        if command_capability == CommandCapability::Mutation && !is_unmaterialized_replay_worker {
+        if command_capability == CommandCapability::Mutation {
             schedule_controller_fallback_reconciliation();
         }
 
@@ -1701,6 +1699,30 @@ impl CliRuntime {
         if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
+        if let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::ExecutionStep { intent_id },
+        }) = &cli.command
+        {
+            // This parsing-only entry must not capture a placement decision
+            // that hides the recorded request from its normal transport adapter.
+            let result =
+                crate::commands::agent_task::run(crate::commands::agent_task::AgentTaskArgs {
+                    command: crate::commands::agent_task::AgentTaskCommand::ExecutionStep {
+                        intent_id: intent_id.clone(),
+                    },
+                });
+            let (value, exit_code) = match result {
+                Ok((value, exit_code)) => (Ok(value), exit_code),
+                Err(error) => (Err(error), 2),
+            };
+            output_runtime::emit_json_result_for_identity(
+                value,
+                output_file.as_deref(),
+                exit_code,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
 
         // Resolve the parsed command contract before any admission probe. The
         // completed result is captured exactly once after preflight.
@@ -1958,6 +1980,85 @@ impl CliRuntime {
         self.extension_discovery
             .get_or_init(collect_extension_cli_info_metadata_only)
     }
+}
+
+/// Revalidate the recorded Cook through the normal placement policy when an
+/// exact execution-step child starts. This is transport policy, not lifecycle
+/// authorization (which the agents executor already claimed).
+pub(crate) fn execution_step_cook_preflight(
+    cli: &Cli,
+    argv: &[String],
+) -> crate::core::Result<crate::core::parsed_command_preflight::ParsedCommandPreflightResult> {
+    use crate::core::parsed_command_preflight as preflight;
+    let input = resource_policy::parsed_command_preflight_input(cli, argv);
+    let readiness = if cli.placement == crate::cli_surface::Placement::Local {
+        None
+    } else {
+        Some(
+            cli.runner
+                .as_deref()
+                .map(crate::runner::lab_runner_readiness_for_admission)
+                .unwrap_or_else(crate::runner::refresh_lab_runner_readiness_for_admission)?,
+        )
+    };
+    let selected = cli.runner.clone().or_else(|| {
+        readiness
+            .as_ref()
+            .and_then(|value| value.selected_runner_id.clone())
+    });
+    if let Some(runner_id) = cli.runner.as_deref() {
+        if !crate::runner::runners::runner_admission_snapshot(runner_id)?
+            .summary
+            .accepting_jobs
+        {
+            let mut error = crate::core::Error::validation_invalid_argument(
+                "runner",
+                "runner lost eligibility before execution-step transport preparation",
+                Some(runner_id.to_string()),
+                None,
+            );
+            error.retryable = Some(true);
+            error.details["execution_step_disposition"] = serde_json::json!("runner_ineligible");
+            return Err(error);
+        }
+    }
+    let result = preflight::resolve_parsed_command_preflight(
+        argv.to_vec(),
+        input,
+        preflight::ParsedCommandPolicySnapshot {
+            resource_admission_evidence: preflight::ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: readiness
+                .as_ref()
+                .map(|value| parsed_lab_readiness_snapshot(cli, value)),
+            selected_runner_id: selected.clone(),
+            generic_route: generic_route_policy_snapshot(cli, selected.clone()),
+            deferred_pressure_refusal: false,
+            runner_admitted: selected.as_ref().is_some_and(|id| {
+                readiness.as_ref().is_some_and(|value| {
+                    value.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                        && value.available_runner_ids.contains(id)
+                })
+            }),
+            auto_local_capacity_fallback: false,
+        },
+    )?;
+    if cli.placement == crate::cli_surface::Placement::Lab && result.placement.runner.is_none() {
+        let mut error = crate::core::Error::validation_invalid_argument(
+            "runner",
+            "required Lab runner is unavailable at execution-step start",
+            None,
+            None,
+        );
+        if cli.runner.is_some() {
+            error.retryable = Some(true);
+            error.details["execution_step_disposition"] = serde_json::json!("runner_ineligible");
+        }
+        return Err(error);
+    }
+    preflight::capture_result(result.clone());
+    crate::commands::utils::execution_provenance::capture(&result);
+    Ok(result)
 }
 
 /// Config inspection must not initialize daemon reconciliation or provider

@@ -8,7 +8,7 @@ mod terminal_review_wait;
 fn terminal_cook_uses_shared_work_job_with_the_existing_active_fence() {
     use homeboy::core::daemon::controller_job_driver::ControllerJobDriver;
 
-    register_unmaterialized_cook_replay_driver();
+    register_execution_orchestration();
     let request = serde_json::json!({
         "schema": "homeboy/terminal-cook-continuation-request/v1",
         "cook_id": "cook",

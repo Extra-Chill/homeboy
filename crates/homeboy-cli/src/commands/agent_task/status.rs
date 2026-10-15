@@ -5739,6 +5739,22 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             data: failure.clone(),
         });
     }
+    if let Some(failure) = record.metadata.get("execution_step_failure") {
+        let diagnostic = &failure["diagnostic"];
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: diagnostic["code"]
+                .as_str()
+                .unwrap_or("execution_step_failure")
+                .to_string(),
+            message: failure["message"]
+                .as_str()
+                .unwrap_or("execution step failed")
+                .to_string(),
+            source: "execution_step_failure".to_string(),
+            data: diagnostic.get("details").cloned().unwrap_or(Value::Null),
+        });
+    }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
         let details = failure.get("details")?;
         if let Some(receipt) = lab_transport_receipt_from_details(details) {

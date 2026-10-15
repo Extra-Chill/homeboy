@@ -56,7 +56,8 @@ pub(super) fn agent_task_resource_behavior(
     };
 
     Some(match &args.command {
-        agent_task::AgentTaskCommand::Doctor(_)
+        agent_task::AgentTaskCommand::ExecutionStep { .. }
+        | agent_task::AgentTaskCommand::Doctor(_)
         | agent_task::AgentTaskCommand::RuntimeRecover(_)
         | agent_task::AgentTaskCommand::RuntimeValidate(_)
         | agent_task::AgentTaskCommand::Cancel(_)
