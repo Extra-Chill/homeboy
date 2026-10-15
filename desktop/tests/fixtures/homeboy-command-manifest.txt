@@ -59,6 +59,7 @@ agent-task run-plan
 agent-task runtime-recover
 agent-task runtime-validate
 agent-task status
+agent-task terminal-continuation-worker
 agent-task tool
 agent-task tool dispatch
 agent-task validate-plan
@@ -451,6 +452,13 @@ workflow list
 workflow run
 workflow status
 workflow validate
+workload
+workload compare
+workload inspect
+workload list
+workload minimize
+workload replay
+workload run
 worktree
 worktree adopt
 worktree cleanup
