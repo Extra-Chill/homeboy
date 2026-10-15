@@ -1,8 +1,6 @@
 use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy::core::server::RunnerSettings;
-use homeboy::runner::runners::{
-    self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
-};
+use homeboy::runner::runners::{self as runner, RunnerExecOutput};
 use serde_json::Value;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -339,36 +337,6 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             |(output, exit_code)| (RunnerCommandOutput::Lifecycle(Box::new(output)), exit_code),
         ),
         RunnerCommand::Job { command } => map_job(jobs::job(command)),
-        RunnerCommand::Work {
-            runner_id,
-            broker_url,
-            broker_token,
-            project,
-            lease_ms,
-            r#loop,
-            idle_backoff_ms,
-            max_idle_backoff_ms,
-            broker_failure_backoff_ms,
-            broker_retry_limit,
-        } => {
-            let concurrency_limit = runner::load(&runner_id)
-                .ok()
-                .and_then(|runner| runner.settings.concurrency_limit);
-            let broker_token = broker_token.or_else(runner::broker_token_from_env);
-            map_worker(runner::run_reverse_worker(ReverseRunnerWorkerOptions {
-                runner_id,
-                broker_url,
-                broker_token,
-                project_id: project,
-                lease_ms,
-                concurrency_limit,
-                loop_mode: r#loop,
-                idle_backoff_ms,
-                max_idle_backoff_ms,
-                broker_failure_backoff_ms,
-                broker_retry_limit,
-            }))
-        }
         RunnerCommand::Workspace { command } => {
             workspace::run(command).map(|(output, exit_code)| {
                 (RunnerCommandOutput::Workspace(Box::new(output)), exit_code)
@@ -951,10 +919,6 @@ fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommand
             (RunnerCommandOutput::BrokerJob(Box::new(output)), exit_code)
         }
     })
-}
-
-fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerCommandOutput> {
-    result.map(|(output, exit_code)| (RunnerCommandOutput::Worker(Box::new(output)), exit_code))
 }
 
 #[cfg(test)]

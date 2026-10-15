@@ -221,7 +221,7 @@ pub use runner_probe_gate::{
 };
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;
-mod worker;
+mod staged_workspace;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;
@@ -446,7 +446,6 @@ pub use offload_metadata::{
     lab_offload_metadata, lab_offload_metadata_with_workspace_mapping,
     lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
 };
-pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{
     RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
     RunnerResourceMetrics,
@@ -473,7 +472,6 @@ pub use session::{
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
 pub use upgrade_runners::register as register_runner_upgrade;
-pub use worker::{run_reverse_worker, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput};
 pub use workspace::reap_run_workspace;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,

@@ -80,7 +80,7 @@ homeboy-engine-primitives = { version = "0.1.0", path = "crates/homeboy-engine-p
 # production default for those constructors.
 homeboy-cli = { version = "0.1.0", path = "crates/homeboy-cli", features = ["test-support"] }
 # Integration tests here spawn the real binary via CARGO_BIN_EXE_homeboy and
-# dispatch `--backend fixture` (tests/reverse_cook_queue_acceptance.rs). That
+# dispatch `--backend fixture` (tests/cook_lab_handoff_test.rs). That
 # executor double is compiled only under `homeboy-agents/test-support`, and this
 # dev-only edge is what activates it for the test build of that binary (#11118).
 homeboy-agents = { version = "0.1.0", path = "crates/homeboy-agents", features = ["test-support"] }

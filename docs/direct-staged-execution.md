@@ -18,7 +18,7 @@ under the existing staging lock. Atomic adoption preserves the job UUID,
 submission-key index, event history, and source provenance while transferring
 execution into the normal daemon-local capacity and child lifecycle.
 
-The runner driver shares the reverse worker's source verification. It retains a
+The runner driver verifies the staged source before execution. It retains a
 directory descriptor during preparation and capacity waiting, rechecks ownership
 before execution, and uses that descriptor as the child working directory. Public
 environment overrides, declared secret names, and the durable run identity are
