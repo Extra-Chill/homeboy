@@ -5641,7 +5641,13 @@ fn compact_cook_diagnostic(diagnostic: &Value) -> Value {
     json!({
         "code": cause.get("code"),
         "field": cause.get("field").or_else(|| diagnostic.pointer("/details/field")),
-        "message": bounded_value(cause.get("message").unwrap_or(&Value::Null)),
+        // Truncate rather than drop: a long cause (e.g. git apply stderr) is
+        // exactly the explanation an operator needs.
+        "message": cause
+            .get("message")
+            .and_then(Value::as_str)
+            .map(bounded_diagnostic_message)
+            .unwrap_or(Value::Null),
     })
 }
 
@@ -7202,6 +7208,41 @@ mod tests {
             "a report without failure_context must not grow one"
         );
         assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    #[test]
+    fn compact_cook_failure_diagnostic_truncates_a_long_cause_instead_of_dropping_it() {
+        let cause = format!(
+            "Invalid argument 'promotion_provider.patch': could not apply promotion patch: {}",
+            "error: patch does not apply\n".repeat(40)
+        );
+        let report = json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "cook_id": "cook-1",
+            "latest_run_id": "run-1",
+            "status": "durable_failure",
+            "attempts": [],
+            "failure_context": {
+                "diagnostic": {
+                    "message": cause,
+                    "details": { "field": "promotion_provider.patch" },
+                    "deepest_cause": {
+                        "code": "validation.invalid_argument",
+                        "field": "promotion_provider.patch",
+                        "message": cause,
+                    }
+                }
+            }
+        });
+
+        let diagnostic = &compact_cook_report(report, false)["failure_context"]["diagnostic"];
+
+        assert_eq!(diagnostic["field"], "promotion_provider.patch");
+        let message = diagnostic["message"]
+            .as_str()
+            .expect("a rejected promotion must say why");
+        assert!(message.starts_with("Invalid argument 'promotion_provider.patch'"));
+        assert!(message.chars().count() <= COMPACT_TEXT_LIMIT + 1);
     }
 
     #[test]

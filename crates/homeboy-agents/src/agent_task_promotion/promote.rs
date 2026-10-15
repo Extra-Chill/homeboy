@@ -2162,18 +2162,33 @@ fn promote_committed_changes(
     )?
     .unwrap_or_else(|| committed_patch.patch_path.clone());
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
-    let trusted_unpushed_candidate_destination =
-        options
-            .candidate_ref
-            .as_ref()
-            .map(|_| TrustedUnpushedCandidateDestination {
-                path: options
-                    .source_worktree_path
-                    .clone()
-                    .expect("candidate has source workspace"),
-                head: committed_patch.candidate.clone(),
-            });
     let materialized_workspace = materialized_promotion_workspace()?;
+    // The committed delta was read from the source workspace at its candidate
+    // HEAD. When that workspace is also the promotion destination (adoption,
+    // or a candidate committed directly on the declared destination), the
+    // destination already holds the candidate: re-applying it onto itself can
+    // never succeed, so let apply verify it is already present instead.
+    let source_is_destination = || {
+        let source = options.source_worktree_path.as_deref()?;
+        let source = std::fs::canonicalize(source).ok()?;
+        let destination = resolve_promotion_target_path(
+            &options.to_worktree,
+            materialized_workspace.as_deref(),
+            None,
+            None,
+        )
+        .ok()??;
+        (source == destination).then_some(source)
+    };
+    let trusted_unpushed_candidate_destination = if options.candidate_ref.is_some() {
+        options.source_worktree_path.clone()
+    } else {
+        source_is_destination()
+    }
+    .map(|path| TrustedUnpushedCandidateDestination {
+        path,
+        head: committed_patch.candidate.clone(),
+    });
     // Keep committed-change promotion on the same atomic base-validation
     // boundary as artifact promotion: no apply or checkpoint may precede a
     // failed declared base lookup.
