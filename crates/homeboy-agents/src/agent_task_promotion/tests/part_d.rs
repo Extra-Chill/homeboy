@@ -783,3 +783,76 @@ fn promotion_report_serializes_generic_command_evidence() {
         Some("fake-workspace-provider")
     );
 }
+
+/// Harvest captures `git diff --binary --full-index --find-renames`; sections
+/// for binary edits, pure renames, empty files and mode changes carry only a
+/// `diff --git` header, and each must still name its changed files (#16005).
+#[test]
+fn normalize_promotion_patch_reads_changed_files_from_header_only_sections() {
+    type Change = fn(&Path);
+    let cases: [(&str, Change, &[&str]); 5] = [
+        (
+            "binary edit",
+            |repo| std::fs::write(repo.join("image.bin"), [0u8, 1, 2, 255, 0, 9]).unwrap(),
+            &["image.bin"],
+        ),
+        (
+            "rename",
+            |repo| git(repo, &["mv", "notes.txt", "renamed.txt"]),
+            &["notes.txt", "renamed.txt"],
+        ),
+        (
+            "empty file",
+            |repo| std::fs::write(repo.join("empty.txt"), "").unwrap(),
+            &["empty.txt"],
+        ),
+        (
+            "mode change",
+            |repo| {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    repo.join("notes.txt"),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap()
+            },
+            &["notes.txt"],
+        ),
+        (
+            "text edit",
+            |repo| std::fs::write(repo.join("notes.txt"), "changed\n").unwrap(),
+            &["notes.txt"],
+        ),
+    ];
+    for (name, change, expected) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "homeboy@example.test"]);
+        git(repo, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(repo.join("notes.txt"), "original\n").unwrap();
+        std::fs::write(repo.join("image.bin"), [0u8, 1, 2, 3, 0, 5]).unwrap();
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        change(repo);
+        git(repo, &["add", "-A"]);
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args([
+                "diff",
+                "--cached",
+                "--binary",
+                "--full-index",
+                "--find-renames",
+                "HEAD",
+            ])
+            .output()
+            .expect("git diff");
+        let patch = String::from_utf8(output.stdout).expect("utf8 patch");
+        assert!(patch.starts_with("diff --git "), "{name} produced a patch");
+
+        let normalized = normalize_promotion_patch(&patch, "homeboy@promoted-task")
+            .unwrap_or_else(|error| panic!("{name} normalizes: {error:?}"));
+        assert_eq!(normalized.changed_files, expected, "{name}");
+    }
+}

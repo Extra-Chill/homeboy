@@ -30,17 +30,26 @@ pub(crate) fn normalize_promotion_patch(
     let mut normalized_lines = Vec::new();
     for line in patch.lines() {
         let normalized_line = normalize_patch_header_line(line, &repo_slug)?;
-        if let Some(path) = line
-            .strip_prefix("+++ ")
-            .or_else(|| line.strip_prefix("--- "))
-        {
-            let path = normalized_line
+        // Binary, rename-only, empty-file and mode-only sections carry no
+        // `---`/`+++` lines, so the `diff --git` header names their files too.
+        let header_paths: Vec<&str> =
+            if let Some(rest) = normalized_line.strip_prefix("diff --git ") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() == 2 {
+                    parts
+                } else {
+                    Vec::new()
+                }
+            } else if let Some(path) = normalized_line
                 .strip_prefix("+++ ")
                 .or_else(|| normalized_line.strip_prefix("--- "))
-                .unwrap_or(path)
-                .trim();
+            {
+                vec![path.trim()]
+            } else {
+                Vec::new()
+            };
+        for path in header_paths {
             if path == "/dev/null" {
-                normalized_lines.push(normalized_line);
                 continue;
             }
             let path = path
