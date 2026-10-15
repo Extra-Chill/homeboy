@@ -537,7 +537,7 @@ impl AgentTaskRunRecord {
             && self.local_owner_liveness() == LocalOwnerLiveness::Absent
             && !self.has_planned_runner_execution()
             && !super::has_live_pending_runner_submission_intent(self, now)
-            && !self.has_live_execution_step_owner(now)
+            && !self.has_live_execution_step_owner()
             && self.aggregate_path.is_none()
             && self.totals.is_none()
             && self.artifact_refs.is_empty()
@@ -654,7 +654,7 @@ impl AgentTaskRunRecord {
         // same write that makes the queued successor visible. The daemon job id
         // arrives later, so do not classify that intentional interval as an
         // ownerless runner.
-        if self.has_live_execution_step_owner(chrono::Utc::now()) {
+        if self.has_live_execution_step_owner() {
             return;
         }
 
@@ -733,10 +733,7 @@ impl AgentTaskRunRecord {
     }
 
     /// Durable step custody replaces the caller's expiring retry lease.
-    pub(crate) fn has_live_execution_step_owner(
-        &self,
-        _now: chrono::DateTime<chrono::Utc>,
-    ) -> bool {
+    pub(crate) fn has_live_execution_step_owner(&self) -> bool {
         let scheduling = &self.metadata["execution_scheduling"];
         if !scheduling["current_intent_id"].is_string()
             || self.state == AgentTaskRunState::Cancelled
@@ -1228,16 +1225,14 @@ mod tests {
             .metadata
             .get(METADATA_KEY_STALE_RUNNING_REASON)
             .is_none());
-        assert!(
-            record.has_live_execution_step_owner(chrono::Utc::now() + chrono::Duration::days(1))
-        );
+        assert!(record.has_live_execution_step_owner());
         record.metadata["execution_step_owner"]["intent_id"] = json!("superseded-step");
-        assert!(!record.has_live_execution_step_owner(chrono::Utc::now()));
+        assert!(!record.has_live_execution_step_owner());
         record.metadata["execution_step_owner"]["intent_id"] = json!("fixture-step");
         record.state = AgentTaskRunState::Succeeded;
-        assert!(record.has_live_execution_step_owner(chrono::Utc::now()));
+        assert!(record.has_live_execution_step_owner());
         record.state = AgentTaskRunState::Cancelled;
-        assert!(!record.has_live_execution_step_owner(chrono::Utc::now()));
+        assert!(!record.has_live_execution_step_owner());
     }
 
     #[test]

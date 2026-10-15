@@ -976,19 +976,18 @@ fn record_unmaterialized_cook_admission_locked(
     let state = state.to_string();
     let reason = homeboy_core::redaction::redact_string(reason);
     let binding_for_write = binding.clone();
-    let mut intent_error = None;
-    let record = lifecycle_store.mutate_record(&cook_id, |record| {
+    let record = mutate_with_execution_intent(lifecycle_store, &cook_id, |record| {
         if record.state.is_terminal()
             || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
                 == "cancelled"
         {
-            return false;
+            return Ok(false);
         }
         let existing = &record.metadata["unmaterialized_cook_admission"];
         if existing.is_object() {
             // The first immutable admission owns retry/lease state. An
             // idempotent duplicate must not erase active execution ownership.
-            return false;
+            return Ok(false);
         }
         if record.metadata["caller_workspace"].is_null() {
             if let Some(workspace) = binding_for_write.get("caller_workspace") {
@@ -1014,18 +1013,8 @@ fn record_unmaterialized_cook_admission_locked(
             .as_object_mut()
             .expect("handoff metadata object")
             .remove("admission_deadline_at");
-        if let Err(error) =
-            crate::agent_task_service::prepare_execution_intent(lifecycle_store, record, None)
-        {
-            intent_error = Some(error);
-            return false;
-        }
-        record.updated_at = Some(now_timestamp());
-        true
+        Ok(true)
     })?;
-    if let Some(error) = intent_error {
-        return Err(error);
-    }
     let Some(record) = record else {
         let existing = lifecycle_store.read_record(&cook_id)?;
         if existing.metadata["unmaterialized_cook_admission"]["binding"] != binding {
@@ -1231,25 +1220,14 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     if current.state != AgentTaskRunState::Queued {
         return Ok(current);
     }
-    let mut intent_error = None;
-    let updated = store.mutate_record(&cook_id, |record| {
+    let updated = mutate_with_execution_intent(&store, &cook_id, |record| {
         let admission = &mut record.metadata["unmaterialized_cook_admission"];
         if record.state != AgentTaskRunState::Queued || !admission.is_object() {
-            return false;
+            return Ok(false);
         }
         admission["reason"] = json!("explicit scoped resume requested");
-        if let Err(error) =
-            crate::agent_task_service::prepare_execution_intent(&store, record, None)
-        {
-            intent_error = Some(error);
-            return false;
-        }
-        record.updated_at = Some(now_timestamp());
-        true
+        Ok(true)
     })?;
-    if let Some(error) = intent_error {
-        return Err(error);
-    }
     Ok(updated.unwrap_or(current))
 }
 
@@ -3764,6 +3742,30 @@ pub fn mark_running_in_store(
     .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
+/// `mutate_record` whose accepted mutation also commits a fresh execution
+/// intent in the same write. A failed draft aborts the write.
+fn mutate_with_execution_intent(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    mutate: impl FnOnce(&mut AgentTaskRunRecord) -> Result<bool>,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let mut failure = None;
+    let record = store.mutate_record(run_id, |record| {
+        let prepared = mutate(record).and_then(|accepted| {
+            if accepted {
+                crate::agent_task_service::prepare_execution_intent(store, record, None)?;
+                record.updated_at = Some(now_timestamp());
+            }
+            Ok(accepted)
+        });
+        prepared.unwrap_or_else(|error| {
+            failure = Some(error);
+            false
+        })
+    })?;
+    failure.map_or(Ok(record), Err)
+}
+
 /// Return a materialized Cook attempt to the durable queue when runtime
 /// promotion admission is unavailable before provider work begins. This keeps
 /// the attempt identity and provider budget intact; queued execution claims it
@@ -3793,23 +3795,7 @@ pub fn defer_cook_runtime_admission_in_store(
             "provider_executions_consumed": 0,
         });
         record.updated_at = Some(now.clone());
-        set_run_state(record, AgentTaskRunState::Queued);
-        record.lifecycle.execution.started_at = None;
-        record.lifecycle.execution.finished_at = None;
-        for task in &mut record.tasks {
-            task.state = AgentTaskState::Queued;
-        }
-        for key in [
-            "execution_step_owner",
-            "runner_pid",
-            "runner_process_start_identity",
-            "runner_started_at",
-        ] {
-            record
-                .metadata
-                .as_object_mut()
-                .map(|metadata| metadata.remove(key));
-        }
+        reset_for_requeue(record);
         let not_before = Some((chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());
         if let Err(error) =
             crate::agent_task_service::prepare_execution_intent(lifecycle_store, record, not_before)
@@ -5187,7 +5173,7 @@ pub fn rearm_quarantined_run_in_store(
                 None,
             )
         })?;
-    let mut intent_error = None;
+    let mut failure = None;
     let updated = lifecycle_store.mutate_record(&run_id, |record| {
         if record.state != AgentTaskRunState::Queued
             || record.metadata.get("queue_quarantine").is_none()
@@ -5199,16 +5185,14 @@ pub fn rearm_quarantined_run_in_store(
             if let Err(error) =
                 crate::agent_task_service::prepare_execution_intent(lifecycle_store, record, None)
             {
-                intent_error = Some(error);
+                failure = Some(error);
                 return false;
             }
         }
         record.updated_at = Some(now_timestamp());
         true
     })?;
-    if let Some(error) = intent_error {
-        return Err(error);
-    }
+    failure.map_or(Ok(()), Err)?;
     updated.ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",

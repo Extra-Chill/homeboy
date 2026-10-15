@@ -1,6 +1,7 @@
 //! Cross-store boundary evidence. Subprocesses stop at durable boundaries; the
 //! counted executor is reached only through the exact lifecycle claim.
 use super::*;
+use crate::agent_task_service::execution_step::execution_step_fixtures::kill_test_child_at_marker;
 use homeboy_core::daemon::step_job::{self, StepJobDriver};
 use homeboy_core::test_support::ControllerJobHarness;
 use std::process::Command;
@@ -44,67 +45,31 @@ impl ExecutionStepTransport for Materializer {
     }
 }
 
-fn admission_binding(root: &Path, subject: &str) -> Value {
-    use sha2::{Digest, Sha256};
-    std::fs::create_dir_all(root).unwrap();
-    std::fs::write(root.join("manifest.json"), b"[]").unwrap();
-    serde_json::json!({
-        "placement": {"requested": "local"},
-        "admission_inputs": {
-            "schema": "homeboy/cook-admission-inputs/v1", "cook_id": subject,
-            "argv": ["homeboy", "agent-task", "cook", "--run-id", subject],
-            "input_refs": [],
-            "input_manifest": {"kind": "manifest", "path": root.join("manifest.json"),
-                "sha256": format!("sha256:{:x}", Sha256::digest(b"[]"))}
-        }
-    })
-}
-
 fn admit_execution_intent(
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     intent: &ExecutionStepIntent,
 ) {
     register_execution_step_hooks();
-    let path = store.data_root().join("boundary-jobs.sqlite");
-    let mut holder = intent.step.clone();
-    holder.key = "materializer-holder".into();
-    let harness = ControllerJobHarness::durable_queued(
-        Arc::new(StepJobDriver),
-        serde_json::to_value(holder).unwrap(),
-        &path,
+    let harness = step_harness(
+        intent,
+        &store.data_root().join("boundary-jobs.sqlite"),
         "materializer",
-    )
-    .unwrap();
-    let payload = serde_json::to_value(intent).unwrap();
-    let receipt = schedule_execution_intent_with(&payload, |request| {
-        Ok(harness.admit_keyed(request)?.id.to_string())
-    })
-    .unwrap();
+    );
+    let receipt =
+        schedule_execution_intent_with(&serde_json::to_value(intent).unwrap(), |request| {
+            Ok(harness.admit_keyed(request)?.id.to_string())
+        })
+        .unwrap();
     store
         .open_observation_initialized()
         .unwrap()
         .acknowledge_work_intent(&intent.intent_id, &receipt)
         .unwrap();
-    let restarted = harness.reopen(&path, "materializer-restarted").unwrap();
-    assert_eq!(
-        schedule_execution_intent_with(&payload, |request| Ok(restarted
-            .admit_keyed(request)?
-            .id
-            .to_string()))
-        .unwrap(),
-        receipt
-    );
-    assert_eq!(
-        load_execution_intent(store, &intent.intent_id)
-            .unwrap()
-            .intent_id,
-        intent.intent_id
-    );
 }
 
 fn execute_and_assert_one_initial_attempt(subject: &str) {
     let store = test_lifecycle_store();
-    let intent = execution_intent_for(&store, subject);
+    let intent = current_intent(&store, subject);
     admit_execution_intent(&store, &intent);
     let calls = Arc::new(AtomicUsize::new(0));
     let transport = Materializer {
@@ -113,15 +78,7 @@ fn execute_and_assert_one_initial_attempt(subject: &str) {
     };
     for _ in 0..2 {
         assert_eq!(
-            execute_execution_step(
-                &intent.intent_id,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone()
-                }),
-                |_| Ok(None),
-                &transport
-            )
-            .unwrap(),
+            execute_counted(&intent.intent_id, &calls, &transport).unwrap(),
             0
         );
     }
@@ -147,7 +104,7 @@ fn execution_step_publication_crash_entry() {
     let root = store.data_root().join("agent-task-cook-admissions");
     let staging = root.join("staging");
     let published = root.join("published");
-    let mut binding = admission_binding(&staging, subject);
+    let mut binding = admission_binding(&staging, subject, None);
     binding["admission_inputs"]["input_manifest"]["path"] =
         serde_json::json!(published.join("manifest.json"));
     binding["input_publication"] = serde_json::json!({"state": "staged", "staging_root": staging, "published_root": published});
@@ -172,21 +129,14 @@ fn execution_step_staging_committed_and_rename_before_binding_recover_same_initi
     for boundary in ["staging", "rename"] {
         with_isolated_home(|home| {
             let marker = home.path().join("boundary");
-            let mut child = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "agent_task_service::tests::boundary_tests::execution_step_publication_crash_entry", "--nocapture"])
-                .env("S8_PUBLICATION_BOUNDARY", boundary).env("S8_BOUNDARY_MARKER", &marker)
-                .spawn().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !marker.exists() {
-                if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    panic!("boundary not reached");
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            child.kill().unwrap();
-            child.wait().unwrap();
+            kill_test_child_at_marker(
+                "agent_task_service::tests::boundary_tests::execution_step_publication_crash_entry",
+                &[
+                    ("S8_PUBLICATION_BOUNDARY", boundary.as_ref()),
+                    ("S8_BOUNDARY_MARKER", marker.as_os_str()),
+                ],
+                &marker,
+            );
             let store = test_lifecycle_store();
             let subject = "publication-boundary";
             assert_eq!(
@@ -217,23 +167,15 @@ fn execution_step_concurrent_drain_reuses_one_submission_and_executes_once() {
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
             &store,
             subject,
-            admission_binding(&home.path().join("inputs"), subject),
+            admission_binding(&home.path().join("inputs"), subject, None),
             "queued",
             "test",
         )
         .unwrap();
         register_execution_step_hooks();
-        let intent = execution_intent_for(&store, subject);
-        let mut holder = intent.step.clone();
-        holder.key = "drain-holder".into();
+        let intent = current_intent(&store, subject);
         let path = store.data_root().join("boundary-jobs.sqlite");
-        let harness = ControllerJobHarness::durable_queued(
-            Arc::new(StepJobDriver),
-            serde_json::to_value(holder).unwrap(),
-            &path,
-            "drain",
-        )
-        .unwrap();
+        let harness = step_harness(&intent, &path, "drain");
         let barrier = Barrier::new(2);
         let receipts = std::thread::scope(|scope| {
             let drain = || {
@@ -272,12 +214,12 @@ fn execution_step_concurrent_rearm_placement_and_cancel_fence_all_old_children()
             agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
                 &store,
                 subject,
-                admission_binding(&home.path().join("inputs"), subject),
+                admission_binding(&home.path().join("inputs"), subject, None),
                 "queued",
                 "test",
             )
             .unwrap();
-            let original = execution_intent_for(&store, subject);
+            let original = current_intent(&store, subject);
             admit_execution_intent(&store, &original);
             let reserved_child = format!("{subject}-attempt-1");
             agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
@@ -315,27 +257,11 @@ fn execution_step_concurrent_rearm_placement_and_cancel_fence_all_old_children()
                 subject: subject.into(),
                 calls: calls.clone(),
             };
-            execute_execution_step(
-                &original.intent_id,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone(),
-                }),
-                |_| Ok(None),
-                &transport,
-            )
-            .unwrap();
+            execute_counted(&original.intent_id, &calls, &transport).unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 0);
             if cancel {
-                let current = execution_intent_for(&store, subject);
-                execute_execution_step(
-                    &current.intent_id,
-                    Arc::new(CountingExecutor {
-                        calls: calls.clone(),
-                    }),
-                    |_| Ok(None),
-                    &transport,
-                )
-                .unwrap();
+                let current = current_intent(&store, subject);
+                execute_counted(&current.intent_id, &calls, &transport).unwrap();
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert_eq!(
                     store.read_record(subject).unwrap().state,
@@ -362,28 +288,23 @@ fn execution_step_rearm_cancels_superseded_waiting_job_and_lost_cleanup_ack_is_i
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
             &store,
             subject,
-            admission_binding(&home.path().join("inputs"), subject),
+            admission_binding(&home.path().join("inputs"), subject, None),
             "queued",
             "test",
         )
         .unwrap();
         register_execution_step_hooks();
-        let initial = execution_intent_for(&store, subject);
-        let mut holder = initial.step.clone();
-        holder.key = "cleanup-holder".into();
-        let path = home.path().join("cleanup-jobs.sqlite");
-        let harness = ControllerJobHarness::durable_queued(
-            Arc::new(StepJobDriver),
-            serde_json::to_value(holder).unwrap(),
-            &path,
+        let initial = current_intent(&store, subject);
+        let harness = step_harness(
+            &initial,
+            &home.path().join("cleanup-jobs.sqlite"),
             "cleanup",
-        )
-        .unwrap();
+        );
         let old_job = harness
             .admit_keyed(initial.step.submission().unwrap())
             .unwrap();
         agent_task_lifecycle::rearm_unmaterialized_cook_admission(subject).unwrap();
-        let replacement = execution_intent_for(&store, subject);
+        let replacement = current_intent(&store, subject);
         let payload = serde_json::to_value(&replacement).unwrap();
         let schedule = |lose_ack| {
             super::super::execution_step::schedule_execution_intent_with_cleanup(
@@ -444,25 +365,9 @@ fn execution_step_gated_crash_child_entry() {
         calls: calls.clone(),
     };
     if matches!(intent.mode, ExecutionStepMode::Admission { .. }) {
-        execute_execution_step(
-            &id,
-            Arc::new(CountingExecutor {
-                calls: calls.clone(),
-            }),
-            |_| Ok(None),
-            &materializer,
-        )
-        .unwrap();
+        execute_counted(&id, &calls, &materializer).unwrap();
     } else {
-        execute_execution_step(
-            &id,
-            Arc::new(CountingExecutor {
-                calls: calls.clone(),
-            }),
-            |_| Ok(None),
-            &LocalExecutionStepTransport,
-        )
-        .unwrap();
+        execute_counted(&id, &calls, &QueuedRunTransport).unwrap();
     }
     if calls.load(Ordering::SeqCst) > 0 {
         std::fs::write(std::env::var_os("S8_BOUNDARY_MARKER").unwrap(), "provider").unwrap();
@@ -482,7 +387,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
             &|_| Ok(()),
         )
         .unwrap();
-        let intent = execution_intent_for(&store, "gate-retry");
+        let intent = current_intent(&store, "gate-retry");
         register_execution_step_hooks();
         let path = home.path().join("gate-jobs.sqlite");
         let harness = ControllerJobHarness::durable(
@@ -521,7 +426,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
         assert!(child.wait().unwrap().success());
         assert!(!marker.exists());
         restarted.store().deliver_pending_step_terminals().unwrap();
-        let recovered = execution_intent_for(&store, "gate-retry");
+        let recovered = current_intent(&store, "gate-retry");
         assert_eq!(recovered.subject_id, intent.subject_id);
         assert_eq!(recovered.recovery_attempt, 1);
         let calls = Arc::new(AtomicUsize::new(0));
@@ -530,15 +435,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
             &recovered.intent_id,
             &recovered.intent_id,
         ] {
-            execute_execution_step(
-                id,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone(),
-                }),
-                |_| Ok(None),
-                &LocalExecutionStepTransport,
-            )
-            .unwrap();
+            execute_counted(id, &calls, &QueuedRunTransport).unwrap();
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -553,7 +450,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
     with_isolated_home(|home| {
         let store = test_lifecycle_store();
         let subject = "runner-restart";
-        let mut binding = admission_binding(&home.path().join("inputs"), subject);
+        let mut binding = admission_binding(&home.path().join("inputs"), subject, None);
         binding["placement"] =
             serde_json::json!({"requested": "lab", "runner_ref": "boundary-runner"});
         binding["admission_inputs"]["argv"]
@@ -570,7 +467,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
             &store, subject, binding, "queued", "test",
         )
         .unwrap();
-        let intent = execution_intent_for(&store, subject);
+        let intent = current_intent(&store, subject);
         assert_eq!(intent.runner.as_deref(), Some("boundary-runner"));
         assert_eq!(intent.step.wait.runner_eligible, intent.runner);
         let eligible = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -618,10 +515,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
             store.read_cook_index(subject).is_err(),
             "no destination work before eligibility"
         );
-        assert_eq!(
-            execution_intent_for(&store, subject).intent_id,
-            intent.intent_id
-        );
+        assert_eq!(current_intent(&store, subject).intent_id, intent.intent_id);
         assert_eq!(
             store.read_record(subject).unwrap().metadata["execution_scheduling"]
                 ["recovery_failures"],
@@ -663,12 +557,9 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
             1
         );
         let calls = Arc::new(AtomicUsize::new(0));
-        execute_execution_step(
+        execute_counted(
             &intent.intent_id,
-            Arc::new(CountingExecutor {
-                calls: calls.clone(),
-            }),
-            |_| Ok(None),
+            &calls,
             &Materializer {
                 subject: subject.into(),
                 calls: calls.clone(),

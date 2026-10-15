@@ -28,6 +28,9 @@ use super::super::cook_promotion::{
     selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
     CookReportInput, MovingBaseCookRecovery,
 };
+use super::super::execution_step::execution_step_fixtures::{
+    current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
+};
 
 #[test]
 fn admitted_component_identity_survives_explicit_repository_selection() {
@@ -5019,10 +5022,8 @@ struct AdmissionFailingAttemptDispatcher {
     message: &'static str,
     runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     phase: &'static str,
+    retryable: bool,
 }
-
-#[derive(Debug)]
-struct RetryableAdmissionFailingAttemptDispatcher(AdmissionFailingAttemptDispatcher);
 
 #[derive(Debug)]
 struct RetryableTransportFailingAttemptDispatcher {
@@ -5253,33 +5254,16 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
 
         assert_eq!(deferred.exit_code, 75);
-        struct Transport;
-        impl crate::agent_task_service::ExecutionStepTransport for Transport {
-            fn admission(&self, _: Vec<String>, _: Option<String>) -> Result<i32> {
-                panic!("materialized attempt is not an admission")
-            }
-            fn queued_preflight(
-                &self,
-                _: &agent_task_lifecycle::AgentTaskRunRecord,
-                _: &mut AgentTaskPlan,
-                _: &crate::agent_task_service::ExecutionStepIntent,
-            ) -> Result<()> {
-                Ok(())
-            }
-        }
         let lifecycle = test_lifecycle_store();
         for _ in 0..3 {
-            let record = lifecycle.read_record(&run_id).unwrap();
-            let id = record.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap();
-            let intent = crate::agent_task_service::load_execution_intent(&lifecycle, id).unwrap();
+            let intent = current_intent(&lifecycle, &run_id);
+            let id = intent.intent_id.as_str();
             assert_eq!(
                 crate::agent_task_service::execute_execution_step(
                     id,
                     Arc::new(UnusedExecutor),
                     |_| panic!("no transport construction under promotion contention"),
-                    &Transport
+                    &QueuedRunTransport
                 )
                 .unwrap(),
                 75
@@ -5291,30 +5275,17 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
                 queued.metadata["execution_scheduling"]["recovery_failures"],
                 0
             );
-            let next_id = queued.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap();
-            assert_ne!(next_id, id);
-            let next =
-                crate::agent_task_service::load_execution_intent(&lifecycle, next_id).unwrap();
+            let next = current_intent(&lifecycle, &run_id);
+            assert_ne!(next.intent_id, id);
             let remaining = chrono::DateTime::parse_from_rfc3339(next.not_before.as_ref().unwrap())
                 .unwrap()
                 .signed_duration_since(chrono::Utc::now())
                 .num_milliseconds();
             assert!((0..=2000).contains(&remaining));
-            let delivery = homeboy_core::daemon::step_job::StepTerminalDelivery {
-                job_id: "promotion-deferral".into(),
-                key: id.into(),
-                request: intent.step,
-                checkpoint: None,
-                linked_durable_run_id: Some(run_id.clone()),
-                child: None,
-                outcome: homeboy_core::daemon::step_job::StepTerminalOutcome::Exited,
-                error: None,
-                exit_code: Some(75),
-                cancelled: false,
-                log_path: Default::default(),
-            };
+            let mut delivery = terminal_delivery(&intent);
+            delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Exited;
+            delivery.error = None;
+            delivery.exit_code = Some(75);
             super::super::execution_step::consume_execution_terminal_in_store(
                 &lifecycle, &delivery,
             )
@@ -5330,11 +5301,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
             .join("runtime-admission-test-release");
         std::fs::write(release, b"release").expect("release short simulated upgrade");
         promotion.wait().expect("upgrade owner exits");
-        let ready_id = lifecycle.read_record(&run_id).unwrap().metadata["execution_scheduling"]
-            ["current_intent_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let ready_id = current_intent(&lifecycle, &run_id).intent_id;
         crate::agent_task_service::execute_execution_step(
             &ready_id,
             Arc::new(ImmediateSuccessExecutor),
@@ -5346,7 +5313,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
                     preparations: preparations.clone(),
                 })))
             },
-            &Transport,
+            &QueuedRunTransport,
         )
         .expect("daemon resumes exact materialized attempt after lock release");
         assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 1);
@@ -5367,7 +5334,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
             &ready_id,
             Arc::new(UnusedExecutor),
             |_| panic!("claimed same attempt cannot dispatch twice"),
-            &Transport,
+            &QueuedRunTransport,
         )
         .expect("second delivery is inert");
         assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 1);
@@ -5573,26 +5540,10 @@ impl AgentTaskCookAttemptDispatcher for AdmissionFailingAttemptDispatcher {
             error.details["lab_handoff_runtime_recovery"] =
                 serde_json::to_value(recovery).expect("runtime recovery serializes");
         }
+        if self.retryable {
+            error = error.with_retryable(true);
+        }
         Err(error)
-    }
-}
-
-impl AgentTaskCookAttemptDispatcher for RetryableAdmissionFailingAttemptDispatcher {
-    fn durable_recipe(&self) -> Result<Value> {
-        self.0.durable_recipe()
-    }
-    fn pre_execution_failure_phase(&self) -> &'static str {
-        self.0.phase
-    }
-    fn dispatch_attempt(
-        &self,
-        plan: AgentTaskPlan,
-        run_id: &str,
-        baseline: Option<&DerivedCookBaselineCapability>,
-    ) -> Result<()> {
-        self.0
-            .dispatch_attempt(plan, run_id, baseline)
-            .map_err(|error| error.with_retryable(true))
     }
 }
 
@@ -8810,13 +8761,12 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
         let run_id = "cook-admission-timeout-attempt-1";
         let mut options = batch_cook_options(
             cook_id,
-            Arc::new(RetryableAdmissionFailingAttemptDispatcher(
-                AdmissionFailingAttemptDispatcher {
-                    message: "timed out waiting for controller generation admission",
-                    runtime_recovery: None,
-                    phase: "controller_admission",
-                },
-            )),
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "timed out waiting for controller generation admission",
+                runtime_recovery: None,
+                phase: "controller_admission",
+                retryable: true,
+            }),
         );
         options.provider_transport.provider_invocation =
             Some(homeboy_core::command_invocation::CommandInvocation {
@@ -10154,12 +10104,6 @@ fn execute_reserved_retry_fixture(
     run_id: &str,
     executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
 ) -> i32 {
-    struct Transport;
-    impl crate::agent_task_service::ExecutionStepTransport for Transport {
-        fn admission(&self, _: Vec<String>, _: Option<String>) -> Result<i32> {
-            panic!("queued retry only")
-        }
-    }
     struct Dispatcher(crate::agent_task_scheduler::SharedAgentTaskExecutor);
     impl std::fmt::Debug for Dispatcher {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -10184,15 +10128,12 @@ fn execute_reserved_retry_fixture(
             Ok(())
         }
     }
-    let record = agent_task_lifecycle::exact_record(run_id).unwrap();
-    let id = record.metadata["execution_scheduling"]["current_intent_id"]
-        .as_str()
-        .unwrap();
+    let intent = current_intent(&test_lifecycle_store(), run_id);
     crate::agent_task_service::execute_execution_step(
-        id,
+        &intent.intent_id,
         executor.clone(),
         |_| Ok(Some(Arc::new(Dispatcher(executor.clone())))),
-        &Transport,
+        &QueuedRunTransport,
     )
     .unwrap()
 }
@@ -10876,47 +10817,17 @@ fn execution_step_reservation_before_recipe_and_index_repairs_and_executes_provi
         let reserved = format!("{}-retry", options.identity.initial_run_id);
         let store = test_lifecycle_store();
         let marker = home.path().join("reservation-committed");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "agent_task_service::cook::tests::execution_step_reservation_crash_entry",
-                "--nocapture",
-            ])
-            .env("S8_RESERVATION_MARKER", &marker)
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !marker.exists() {
-            if std::time::Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("reservation boundary not reached");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        child.kill().unwrap();
-        child.wait().unwrap();
+        kill_test_child_at_marker(
+            "agent_task_service::cook::tests::execution_step_reservation_crash_entry",
+            &[("S8_RESERVATION_MARKER", marker.as_os_str())],
+            &marker,
+        );
         // Reopen both durable stores before repairing the killed caller's
         // reservation. Lost admission/ACK replay selects the same daemon job.
         crate::agent_task_service::register_execution_step_hooks();
-        let record = store.read_record(&reserved).unwrap();
-        let intent = crate::agent_task_service::load_execution_intent(
-            &store,
-            record.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
+        let intent = current_intent(&store, &reserved);
         let path = store.data_root().join("reservation-jobs.sqlite");
-        let mut holder = intent.step.clone();
-        holder.key = "reservation-holder".into();
-        let harness = homeboy_core::test_support::ControllerJobHarness::durable_queued(
-            Arc::new(homeboy_core::daemon::step_job::StepJobDriver),
-            serde_json::to_value(holder).unwrap(),
-            &path,
-            "reservation-original",
-        )
-        .unwrap();
+        let harness = step_harness(&intent, &path, "reservation-original");
         let admitted = harness
             .admit_keyed(intent.step.submission().unwrap())
             .unwrap();
@@ -12884,13 +12795,12 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
         let run_id = "cook-admission-retry-attempt-1";
         let mut options = batch_cook_options(
             "cook-admission-retry",
-            Arc::new(RetryableAdmissionFailingAttemptDispatcher(
-                AdmissionFailingAttemptDispatcher {
-                    message: "controller generation is held by another cook",
-                    runtime_recovery: None,
-                    phase: "controller_admission",
-                },
-            )),
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "controller generation is held by another cook",
+                runtime_recovery: None,
+                phase: "controller_admission",
+                retryable: true,
+            }),
         );
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = Some(source.clone());
@@ -12958,13 +12868,10 @@ fn retry_after_admission_failure_restores_managed_workspace_after_baseline_clean
             Some(source.to_str().expect("UTF-8 source path"))
         );
 
-        let intent = crate::agent_task_service::load_execution_intent(
-            &test_lifecycle_store(),
-            retry.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
+        let intent =
+            crate::agent_task_service::current_execution_intent(&test_lifecycle_store(), &retry)
+                .unwrap()
+                .unwrap();
         let crate::agent_task_service::ExecutionStepMode::QueuedRun {
             retry_preparation: Some(preparation),
         } = intent.mode
@@ -13026,13 +12933,12 @@ fn retry_reports_missing_candidate_source_as_retryable_recovery() {
         let run_id = "cook-missing-worktree-attempt-1";
         let mut options = batch_cook_options(
             "cook-missing-worktree",
-            Arc::new(RetryableAdmissionFailingAttemptDispatcher(
-                AdmissionFailingAttemptDispatcher {
-                    message: "controller generation is held by another cook",
-                    runtime_recovery: None,
-                    phase: "controller_admission",
-                },
-            )),
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "controller generation is held by another cook",
+                runtime_recovery: None,
+                phase: "controller_admission",
+                retryable: true,
+            }),
         );
         options.identity.initial_run_id = run_id.to_string();
         options.workspace.source_worktree_path = Some(source.clone());
@@ -13609,6 +13515,7 @@ fn cook_persists_controller_runtime_mismatch_before_provider_execution() {
                 message: "pinned controller executable hash mismatch: expected fixture, found replacement",
                 runtime_recovery: None,
                 phase: "controller_admission",
+                retryable: false,
             }),
         );
         options.provider_transport.provider_invocation =
@@ -13653,6 +13560,7 @@ fn cook_lab_workspace_stage_failure_advertises_diagnostics_not_retry() {
                     ),
                 ),
                 phase: "lab_staging_controller",
+                retryable: false,
             }),
         );
         options.provider_transport.provider_invocation =
@@ -13722,6 +13630,7 @@ fn cook_pre_provider_worktree_lookup_failure_advertises_diagnostics_not_retry() 
                 message: "native worktree could not be resolved before provider dispatch",
                 runtime_recovery: None,
                 phase: "pre_provider_worktree_lookup",
+                retryable: false,
             }),
         );
         options.provider_transport.provider_invocation =

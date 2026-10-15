@@ -1088,10 +1088,8 @@ fn classify_liveness(
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
-    // A bounded local Cook supervisor lease is ownership for both initial
-    // submissions and retries until runner identity is published. Honor it
-    // regardless of queued/running so discovery cannot cancel a live lease.
-    if record.has_live_execution_step_owner(now) {
+    // The exact execution step owns the run, queued or running.
+    if record.has_live_execution_step_owner() {
         return AgentTaskLiveness::Active;
     }
     // A completed Retry action intentionally leaves its successor queued until

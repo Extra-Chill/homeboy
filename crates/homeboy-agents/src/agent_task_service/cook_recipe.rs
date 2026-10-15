@@ -2683,7 +2683,7 @@ pub fn preflight_continuation_claim_in_store(
         ));
     }
     let record = lifecycle_store.read_record_bounded(run_id)?;
-    if !rearm && record.has_live_execution_step_owner(chrono::Utc::now()) {
+    if !rearm && record.has_live_execution_step_owner() {
         return Err(Error::validation_invalid_argument(
             "cook_continuation.claim",
             format!(
@@ -4222,13 +4222,9 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(serde_json::to_value(repeated).unwrap(), actual);
-            let intent = super::super::load_execution_intent(
-                &restarted,
-                rebound.metadata["execution_scheduling"]["current_intent_id"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
+            let intent = super::super::current_execution_intent(&restarted, &rebound)
+                .unwrap()
+                .unwrap();
             assert!(agent_task_lifecycle::claim_exact_execution_intent_in_store(
                 &restarted,
                 &intent,

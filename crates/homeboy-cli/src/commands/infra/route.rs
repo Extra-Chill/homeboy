@@ -2343,36 +2343,29 @@ pub(crate) fn execute_admitted_cook_arguments(
         ));
     };
     if cli.placement != homeboy::cli_surface::Placement::Local {
+        let required = cook
+            .dispatch
+            .required_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
         let selection = crate::cli_runtime::select_unmaterialized_cook_runner(
-            &serde_json::json!({
-                "binding": {"placement": {"requested": cli.placement, "runner_ref": cli.runner},
-                    "provider_runtime_refs": {"required_capabilities": cook.dispatch.required_capabilities}}
-            }),
-        )?;
-        cli.runner = Some(
-            selection["runner_id"]
-                .as_str()
-                .ok_or_else(|| {
-                    let mut error = Error::validation_invalid_argument(
-                        "runner",
-                        selection["reason"]
-                            .as_str()
-                            .unwrap_or("no eligible configured runner for this admitted Cook"),
-                        None,
-                        None,
-                    );
-                    error.retryable = Some(true);
-                    // Readiness evidence only; agents owns the durable wait
-                    // disposition and budget. Unpinned timed selection failures
-                    // remain genuine recovery failures.
-                    if cli.runner.is_some() {
-                        error.details["execution_step_disposition"] =
-                            serde_json::json!("runner_ineligible");
-                    }
-                    error
-                })?
-                .to_string(),
-        );
+            cli.runner.as_deref(),
+            &required,
+        )?
+        .map_err(|reason| {
+            let mut error = Error::validation_invalid_argument("runner", reason, None, None);
+            error.retryable = Some(true);
+            // Readiness evidence only; agents owns the durable wait
+            // disposition and budget. Unpinned timed selection failures
+            // remain genuine recovery failures.
+            if cli.runner.is_some() {
+                error.details["execution_step_disposition"] =
+                    serde_json::json!("runner_ineligible");
+            }
+            error
+        })?;
+        cli.runner = Some(selection);
     }
     let preflight = crate::cli_runtime::execution_step_cook_preflight(&cli, &argv)?;
     if let Some(exit) = run_split_placement_cook(

@@ -513,7 +513,6 @@ mod tests {
         let mut record = record(AgentTaskRunState::Queued, false);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_unavailable",
-            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
         });
         let report = lifecycle_action_eligibility(&record, None);
         let resume = report
@@ -527,9 +526,10 @@ mod tests {
             ControlPlaneActionAvailability::Available
         );
         assert!(resume.reason.contains("explicitly rearmed"));
-        assert!(!resume
-            .reason
-            .contains("automatic admission retry is scheduled"));
+        assert!(
+            !resume.reason.contains("scheduled"),
+            "the step owns its wait"
+        );
     }
 
     #[test]
@@ -584,7 +584,6 @@ mod tests {
             let mut record = record(state, false);
             record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
                 "state": "blocked_runner_stale",
-                "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
             });
             assert_eq!(
                 decision(
@@ -598,7 +597,6 @@ mod tests {
         let mut running = record(AgentTaskRunState::Running, false);
         running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
-            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
         });
         running.metadata["provider_executions"] = serde_json::json!([{
             "state": "running", "owner_pid": std::process::id()
@@ -614,7 +612,6 @@ mod tests {
         let mut quarantined = record(AgentTaskRunState::Queued, false);
         quarantined.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
-            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
         });
         quarantined.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
         assert_eq!(
@@ -628,7 +625,6 @@ mod tests {
         let mut exhausted = record(AgentTaskRunState::Queued, false);
         exhausted.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
-            "retry": {"next_attempt_at": "2026-01-01T00:01:00Z"}
         });
         assert_eq!(
             decision(
@@ -636,33 +632,6 @@ mod tests {
                 ControlPlaneAction::Resume
             ),
             ControlPlaneActionAvailability::Unavailable
-        );
-    }
-
-    #[test]
-    fn scheduled_unmaterialized_retry_describes_resume_as_a_manual_rearm() {
-        let mut record = record(AgentTaskRunState::Queued, false);
-        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
-            "state": "blocked_runner_stale",
-        });
-        record.metadata["execution_scheduling"] =
-            serde_json::json!({"epoch": 1, "current_intent_id": "fixture", "recovery_failures": 0});
-
-        let report = lifecycle_action_eligibility(&record, None);
-        let resume = report
-            .actions
-            .iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
-            .expect("resume action");
-
-        assert_eq!(
-            resume.availability,
-            ControlPlaneActionAvailability::Available
-        );
-        assert!(resume.reason.contains("explicitly rearmed"));
-        assert!(
-            !resume.reason.contains("scheduled for"),
-            "the step owns its wait deadline"
         );
     }
 

@@ -34,45 +34,50 @@ fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStor
         .expect("lifecycle store")
 }
 
-fn execution_intent_for(
-    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> ExecutionStepIntent {
-    let record = store.read_record(run_id).unwrap();
-    assert!(
-        record.metadata.get(PENDING_EXECUTION_INTENT).is_none(),
-        "draft must not enter the lifecycle snapshot"
-    );
-    let id = record.metadata["execution_scheduling"]["current_intent_id"]
-        .as_str()
-        .unwrap();
-    load_execution_intent(store, id).unwrap()
+use super::execution_step::consume_execution_terminal_in_store;
+use super::execution_step::execution_step_fixtures::{
+    admission_binding, current_intent, step_harness, terminal_delivery, QueuedRunTransport,
+};
+
+fn execute_counted(
+    id: &str,
+    calls: &Arc<AtomicUsize>,
+    transport: &impl ExecutionStepTransport,
+) -> homeboy_core::Result<i32> {
+    execute_execution_step(
+        id,
+        Arc::new(CountingExecutor {
+            calls: calls.clone(),
+        }),
+        |_| Ok(None),
+        transport,
+    )
 }
 
-struct LocalExecutionStepTransport;
-impl ExecutionStepTransport for LocalExecutionStepTransport {
-    fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
-        panic!("ordinary retry is not an admission")
-    }
+fn prepare_empty_admission(id: &str) {
+    agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+        id,
+        serde_json::json!({}),
+        "queued",
+        "test",
+    )
+    .unwrap();
+}
+
+fn work_intent_absent(store: &agent_task_lifecycle::AgentTaskLifecycleStore, id: &str) -> bool {
+    store
+        .open_observation_readonly()
+        .unwrap()
+        .work_intent_by_id(id)
+        .unwrap()
+        .is_none()
 }
 
 #[test]
 fn execution_step_admission_exact_child_expands_verified_inputs_once_and_stale_is_inert() {
     with_isolated_home(|home| {
-        use sha2::{Digest, Sha256};
-        let digest = |bytes: &[u8]| format!("sha256:{:x}", Sha256::digest(bytes));
-        let prompt_path = home.path().join("prompt.txt");
-        let manifest_path = home.path().join("manifest.json");
-        std::fs::write(&prompt_path, "frozen prompt").unwrap();
-        let refs = serde_json::json!([{"kind": "prompt", "path": prompt_path.display().to_string(), "sha256": digest(b"frozen prompt"), "argv_token": "@frozen-prompt"}]);
-        let manifest = serde_json::to_vec(&refs).unwrap();
-        std::fs::write(&manifest_path, &manifest).unwrap();
-        let binding = serde_json::json!({
-            "placement": {"requested": "local"},
-            "admission_inputs": {"schema": "homeboy/cook-admission-inputs/v1", "cook_id": "step-inputs",
-                "argv": ["homeboy", "agent-task", "cook", "--run-id", "step-inputs", "--prompt=@frozen-prompt"], "input_refs": refs,
-                "input_manifest": {"kind": "manifest", "path": manifest_path.display().to_string(), "sha256": digest(&manifest)}}
-        });
+        let binding = admission_binding(home.path(), "step-inputs", Some("frozen prompt"));
+        let prompt_path = home.path().join("prompt");
         let store = test_lifecycle_store();
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
             &store,
@@ -82,7 +87,7 @@ fn execution_step_admission_exact_child_expands_verified_inputs_once_and_stale_i
             "test",
         )
         .unwrap();
-        let intent = execution_intent_for(&store, "step-inputs");
+        let intent = current_intent(&store, "step-inputs");
         assert!(
             run_next(Arc::new(CountingExecutor {
                 calls: Arc::new(AtomicUsize::new(0))
@@ -106,37 +111,21 @@ fn execution_step_admission_exact_child_expands_verified_inputs_once_and_stale_i
             }
         }
         let transport = AdmissionTransport(AtomicUsize::new(0));
-        let executor = Arc::new(CountingExecutor {
-            calls: Arc::new(AtomicUsize::new(0)),
-        });
+        let calls = Arc::new(AtomicUsize::new(0));
         std::fs::write(&prompt_path, "corrupt prompt").unwrap();
-        assert!(execute_execution_step(
-            &intent.intent_id,
-            executor.clone(),
-            |_| Ok(None),
-            &transport
-        )
-        .is_err());
+        assert!(execute_counted(&intent.intent_id, &calls, &transport).is_err());
         assert_eq!(transport.0.load(Ordering::SeqCst), 0);
         assert_eq!(
             store.read_record("step-inputs").unwrap().state,
             AgentTaskRunState::Queued
         );
         std::fs::write(&prompt_path, "frozen prompt").unwrap();
-        assert_eq!(
-            execute_execution_step(
-                &intent.intent_id,
-                executor.clone(),
-                |_| Ok(None),
-                &transport
-            )
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            execute_execution_step(&intent.intent_id, executor, |_| Ok(None), &transport).unwrap(),
-            0
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                execute_counted(&intent.intent_id, &calls, &transport).unwrap(),
+                0
+            );
+        }
         assert_eq!(transport.0.load(Ordering::SeqCst), 1);
         let record = store.read_record("step-inputs").unwrap();
         assert_eq!(record.state, AgentTaskRunState::Running);
@@ -160,7 +149,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             "test",
         )
         .unwrap();
-        let initial = execution_intent_for(&store, "step-admission");
+        let initial = current_intent(&store, "step-admission");
         assert_eq!(initial.epoch, 1);
         assert_eq!(initial.runner.as_deref(), Some("runner-a"));
         assert_eq!(initial.step.wait.runner_eligible, initial.runner);
@@ -173,7 +162,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
         )
         .unwrap();
         assert_eq!(
-            execution_intent_for(&store, "step-admission").intent_id,
+            current_intent(&store, "step-admission").intent_id,
             initial.intent_id
         );
         let subject_lock = try_execution_subject_lock_in_store(&store, "step-admission")
@@ -181,7 +170,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             .unwrap();
         agent_task_lifecycle::rearm_unmaterialized_cook_admission("step-admission").unwrap();
         assert_eq!(
-            execution_intent_for(&store, "step-admission").epoch,
+            current_intent(&store, "step-admission").epoch,
             1,
             "a live materializer is not superseded"
         );
@@ -196,7 +185,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
         );
         drop(subject_lock);
         agent_task_lifecycle::rearm_unmaterialized_cook_admission("step-admission").unwrap();
-        let rearmed = execution_intent_for(&store, "step-admission");
+        let rearmed = current_intent(&store, "step-admission");
         assert_eq!(rearmed.epoch, 2);
         assert!(!initial.authorizes(&store.read_record("step-admission").unwrap()));
         agent_task_lifecycle::update_unmaterialized_cook_placement_in_store(
@@ -206,7 +195,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             "test",
         )
         .unwrap();
-        let placed = execution_intent_for(&store, "step-admission");
+        let placed = current_intent(&store, "step-admission");
         assert_eq!(placed.epoch, 3);
         assert_eq!(placed.runner, None);
         let ExecutionStepMode::Admission { admission_request } = &placed.mode else {
@@ -225,7 +214,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             "duplicate",
         )
         .unwrap();
-        assert_eq!(execution_intent_for(&store, "step-admission").epoch, 3);
+        assert_eq!(current_intent(&store, "step-admission").epoch, 3);
         assert!(
             load_execution_intent(&store, &initial.intent_id).is_ok(),
             "replacements retain immutable earlier intents"
@@ -236,7 +225,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             serde_json::json!({"pid": 1})
         )
         .unwrap());
-        let deferred = execution_intent_for(&store, "step-admission");
+        let deferred = current_intent(&store, "step-admission");
         assert_eq!(deferred.epoch, 4);
         assert_eq!(deferred.not_before, deferred.step.wait.not_before);
         assert!(
@@ -257,7 +246,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             "test",
         )
         .unwrap();
-        assert_eq!(execution_intent_for(&store, "step-annotated").epoch, 1);
+        assert_eq!(current_intent(&store, "step-annotated").epoch, 1);
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
             &store,
             "step-created",
@@ -266,7 +255,7 @@ fn execution_step_admission_writers_commit_replacement_intents_atomically() {
             "test",
         )
         .unwrap();
-        assert_eq!(execution_intent_for(&store, "step-created").epoch, 1);
+        assert_eq!(current_intent(&store, "step-created").epoch, 1);
     });
 }
 
@@ -284,7 +273,7 @@ fn execution_step_ordinary_retry_is_atomic_and_exact_executor_is_once_and_stale_
         )
         .unwrap();
         assert_eq!(retry.metadata["retry_of"], "step-source");
-        let initial = execution_intent_for(&store, &retry.run_id);
+        let initial = current_intent(&store, &retry.run_id);
         let revision = store.read_record(&retry.run_id).unwrap().revision;
         let frozen_plan = store.read_controller_plan(&retry.run_id).unwrap();
         assert!(store
@@ -312,20 +301,16 @@ fn execution_step_ordinary_retry_is_atomic_and_exact_executor_is_once_and_stale_
         .unwrap();
         assert!(!initial.authorizes(&store.read_record(&retry.run_id).unwrap()));
         agent_task_lifecycle::rearm_quarantined_run_in_store(&store, &retry.run_id).unwrap();
-        assert_eq!(execution_intent_for(&store, &retry.run_id).epoch, 2);
+        assert_eq!(current_intent(&store, &retry.run_id).epoch, 2);
         assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
             &store,
             &retry.run_id,
             serde_json::json!({})
         )
         .unwrap());
-        let current = execution_intent_for(&store, &retry.run_id);
-        super::execution_step::consume_execution_terminal_in_store(
-            &store,
-            &execution_terminal(&current),
-        )
-        .unwrap();
-        let recovered = execution_intent_for(&store, &retry.run_id);
+        let current = current_intent(&store, &retry.run_id);
+        consume_execution_terminal_in_store(&store, &terminal_delivery(&current)).unwrap();
+        let recovered = current_intent(&store, &retry.run_id);
         assert_eq!(recovered.epoch, current.epoch);
         assert_eq!(recovered.recovery_attempt, 1);
         assert_eq!(
@@ -334,16 +319,7 @@ fn execution_step_ordinary_retry_is_atomic_and_exact_executor_is_once_and_stale_
             1
         );
         let calls = Arc::new(AtomicUsize::new(0));
-        let execute = |id: &str| {
-            execute_execution_step(
-                id,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone(),
-                }),
-                |_| Ok(None),
-                &LocalExecutionStepTransport,
-            )
-        };
+        let execute = |id: &str| execute_counted(id, &calls, &QueuedRunTransport);
         assert_eq!(execute(&initial.intent_id).unwrap(), 0);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(execute(&current.intent_id).unwrap(), 0);
@@ -384,14 +360,8 @@ fn execution_step_failed_writer_and_sqlite_conflict_leave_no_intent_or_lifecycle
             .unwrap()
             .is_none());
 
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "step-conflict",
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
-        let initial = execution_intent_for(&store, "step-conflict");
+        prepare_empty_admission("step-conflict");
+        let initial = current_intent(&store, "step-conflict");
         let mut changed = initial.clone();
         changed.not_before = Some("2099-01-01T00:00:00Z".into());
         changed.step.wait.not_before = changed.not_before.clone();
@@ -417,12 +387,10 @@ fn execution_step_failed_writer_and_sqlite_conflict_leave_no_intent_or_lifecycle
         assert!(
             agent_task_lifecycle::rearm_unmaterialized_cook_admission("step-conflict").is_err()
         );
-        assert!(store
-            .open_observation_readonly()
-            .unwrap()
-            .work_intent_by_id("agent-task-exec:step-conflict:2:0")
-            .unwrap()
-            .is_none());
+        assert!(work_intent_absent(
+            &store,
+            "agent-task-exec:step-conflict:2:0"
+        ));
         agent_task_lifecycle::fail_next_record_write_for_test();
         assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
             &store,
@@ -430,7 +398,7 @@ fn execution_step_failed_writer_and_sqlite_conflict_leave_no_intent_or_lifecycle
             serde_json::json!({})
         )
         .is_err());
-        assert_eq!(execution_intent_for(&store, "step-conflict").epoch, 1);
+        assert_eq!(current_intent(&store, "step-conflict").epoch, 1);
         agent_task_lifecycle::submit_plan(&test_plan(), Some("step-rollback-source")).unwrap();
         agent_task_lifecycle::fail_next_record_write_for_test();
         assert!(
@@ -444,12 +412,10 @@ fn execution_step_failed_writer_and_sqlite_conflict_leave_no_intent_or_lifecycle
             .is_err()
         );
         assert!(store.read_record("step-rollback-retry").is_err());
-        assert!(store
-            .open_observation_readonly()
-            .unwrap()
-            .work_intent_by_id("agent-task-exec:step-rollback-retry:1:0")
-            .unwrap()
-            .is_none());
+        assert!(work_intent_absent(
+            &store,
+            "agent-task-exec:step-rollback-retry:1:0"
+        ));
     });
 }
 
@@ -457,25 +423,10 @@ fn execution_step_failed_writer_and_sqlite_conflict_leave_no_intent_or_lifecycle
 fn execution_step_drain_lost_ack_reuses_the_same_durable_step_job() {
     with_isolated_home(|home| {
         let store = test_lifecycle_store();
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "step-drain",
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
+        prepare_empty_admission("step-drain");
         register_execution_step_hooks();
         let path = home.path().join("step-job-store.json");
-        let intent = execution_intent_for(&store, "step-drain");
-        let mut holder = intent.step.clone();
-        holder.key = "stage-a-lease-holder".into();
-        let harness = homeboy_core::test_support::ControllerJobHarness::durable_queued(
-            Arc::new(homeboy_core::daemon::step_job::StepJobDriver),
-            serde_json::to_value(holder).unwrap(),
-            &path,
-            "stage-a-daemon-lease",
-        )
-        .unwrap();
+        let harness = step_harness(&current_intent(&store, "step-drain"), &path, "drain-lease");
         let jobs = harness.store().clone();
         let original_jobs = jobs.list().len();
         let submit = |payload: &Value| {
@@ -504,16 +455,6 @@ fn execution_step_drain_lost_ack_reuses_the_same_durable_step_job() {
             .unwrap()["scheduled"],
             false
         );
-        let restart_harness = harness
-            .reopen(&path, "stage-a-restarted-daemon-lease")
-            .unwrap();
-        let intent = execution_intent_for(&store, "step-drain");
-        let again =
-            schedule_execution_intent_with(&serde_json::to_value(intent).unwrap(), |submission| {
-                Ok(restart_harness.admit_keyed(submission)?.id.to_string())
-            })
-            .unwrap();
-        assert_eq!(again, receipt);
     });
 }
 
@@ -521,13 +462,7 @@ fn execution_step_drain_lost_ack_reuses_the_same_durable_step_job() {
 fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
     with_isolated_home(|home| {
         let store = test_lifecycle_store();
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "step-terminal-ack",
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
+        prepare_empty_admission("step-terminal-ack");
         let before = store.read_record("step-terminal-ack").unwrap();
         register_execution_step_hooks();
         let request = homeboy_core::daemon::step_job::StepJobRequest::new(
@@ -535,7 +470,7 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
             "/bin/sh",
             vec!["-c".into(), "exit 23".into()],
             home.path().display().to_string(),
-            execution_intent_for(&store, "step-terminal-ack").step.env,
+            current_intent(&store, "step-terminal-ack").step.env,
             EXECUTION_STEP_CONSUMER,
         )
         .with_linked_durable_run_id("step-terminal-ack");
@@ -558,7 +493,7 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
         let restarted = harness
             .reopen(&home.path().join("terminal-jobs.sqlite"), "stage-b-restart")
             .unwrap();
-        super::execution_step::consume_execution_terminal_in_store(&store, &pending[0]).unwrap();
+        consume_execution_terminal_in_store(&store, &pending[0]).unwrap();
         let recovered = store.read_record("step-terminal-ack").unwrap();
         let lost_ack = restarted
             .reopen(
@@ -589,69 +524,37 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
             1
         );
         assert_eq!(
-            execution_intent_for(&store, "step-terminal-ack").recovery_attempt,
+            current_intent(&store, "step-terminal-ack").recovery_attempt,
             1
         );
         assert_eq!(after.state, AgentTaskRunState::Queued);
     });
 }
 
-fn execution_terminal(
-    intent: &ExecutionStepIntent,
-) -> homeboy_core::daemon::step_job::StepTerminalDelivery {
-    homeboy_core::daemon::step_job::StepTerminalDelivery {
-        job_id: "stage-b-terminal".into(),
-        key: intent.intent_id.clone(),
-        request: intent.step.clone(),
-        checkpoint: None,
-        linked_durable_run_id: Some(intent.subject_id.clone()),
-        child: None,
-        outcome: homeboy_core::daemon::step_job::StepTerminalOutcome::SpawnInterrupted,
-        error: Some(
-            serde_json::json!({"message": "spawn interrupted before PID checkpoint", "retryable": true}),
-        ),
-        exit_code: None,
-        cancelled: false,
-        log_path: Default::default(),
-    }
-}
-
 #[test]
 fn execution_step_recovery_backoff_budget_exhaustion_and_stale_delivery() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "recovery-budget",
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
-        let original = execution_intent_for(&store, "recovery-budget");
+        prepare_empty_admission("recovery-budget");
+        let original = current_intent(&store, "recovery-budget");
         let before = store.read_record("recovery-budget").unwrap();
         agent_task_lifecycle::fail_next_record_write_for_test();
-        assert!(super::execution_step::consume_execution_terminal_in_store(
-            &store,
-            &execution_terminal(&original)
-        )
-        .is_err());
+        assert!(
+            consume_execution_terminal_in_store(&store, &terminal_delivery(&original)).is_err()
+        );
         assert_eq!(
             store.read_record("recovery-budget").unwrap().revision,
             before.revision
         );
-        assert!(store
-            .open_observation_readonly()
-            .unwrap()
-            .work_intent_by_id("agent-task-exec:recovery-budget:1:1")
-            .unwrap()
-            .is_none());
+        assert!(work_intent_absent(
+            &store,
+            "agent-task-exec:recovery-budget:1:1"
+        ));
         for failures in 0..20 {
-            let intent = execution_intent_for(&store, "recovery-budget");
-            let delivery = execution_terminal(&intent);
+            let intent = current_intent(&store, "recovery-budget");
+            let delivery = terminal_delivery(&intent);
             let now = chrono::Utc::now();
-            let receipt =
-                super::execution_step::consume_execution_terminal_in_store(&store, &delivery)
-                    .unwrap();
+            let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
             let record = store.read_record("recovery-budget").unwrap();
             assert_eq!(
                 record.metadata["execution_scheduling"]["recovery_failures"],
@@ -665,7 +568,7 @@ fn execution_step_recovery_backoff_budget_exhaustion_and_stale_delivery() {
                     "spawn interrupted before PID checkpoint"
                 );
             } else {
-                let next = execution_intent_for(&store, "recovery-budget");
+                let next = current_intent(&store, "recovery-budget");
                 assert_eq!(next.epoch, original.epoch);
                 assert_eq!(next.recovery_attempt, failures + 1);
                 assert_eq!(next.step.env, original.step.env);
@@ -682,33 +585,20 @@ fn execution_step_recovery_backoff_budget_exhaustion_and_stale_delivery() {
             }
             // Redelivery is stale once the transaction advanced the key or
             // terminalized. Neither revision nor intents can change.
-            super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
+            consume_execution_terminal_in_store(&store, &delivery).unwrap();
             assert_eq!(
                 store.read_record("recovery-budget").unwrap().revision,
                 record.revision
             );
-            assert!(store
-                .open_observation_readonly()
-                .unwrap()
-                .work_intent_by_id(&format!(
-                    "agent-task-exec:recovery-budget:1:{}",
-                    failures + 2
-                ))
-                .unwrap()
-                .is_none());
+            assert!(work_intent_absent(
+                &store,
+                &format!("agent-task-exec:recovery-budget:1:{}", failures + 2)
+            ));
         }
         let calls = Arc::new(AtomicUsize::new(0));
-        let exhausted = execution_intent_for(&store, "recovery-budget");
+        let exhausted = current_intent(&store, "recovery-budget");
         for id in [&original.intent_id, &exhausted.intent_id] {
-            execute_execution_step(
-                id,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone(),
-                }),
-                |_| Ok(None),
-                &LocalExecutionStepTransport,
-            )
-            .unwrap();
+            execute_counted(id, &calls, &QueuedRunTransport).unwrap();
         }
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -728,20 +618,14 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
             } else {
                 "terminal-invalid"
             };
-            agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-                id,
-                serde_json::json!({}),
-                "queued",
-                "test",
-            )
-            .unwrap();
-            let mut delivery = execution_terminal(&execution_intent_for(&store, id));
+            prepare_empty_admission(id);
+            let mut delivery = terminal_delivery(&current_intent(&store, id));
             delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
             delivery.cancelled = cancelled;
             delivery.error = Some(
                 serde_json::json!({"message": "immutable admission input hash mismatch", "retryable": false}),
             );
-            super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
+            consume_execution_terminal_in_store(&store, &delivery).unwrap();
             let record = store.read_record(id).unwrap();
             assert_eq!(
                 record.state,
@@ -760,15 +644,7 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
                 delivery.key
             );
             let calls = Arc::new(AtomicUsize::new(0));
-            execute_execution_step(
-                &delivery.key,
-                Arc::new(CountingExecutor {
-                    calls: calls.clone(),
-                }),
-                |_| Ok(None),
-                &LocalExecutionStepTransport,
-            )
-            .unwrap();
+            execute_counted(&delivery.key, &calls, &QueuedRunTransport).unwrap();
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     });
@@ -778,24 +654,16 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
 fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "runner-wait-budget",
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
+        prepare_empty_admission("runner-wait-budget");
         for epoch in 1..=25 {
-            let intent = execution_intent_for(&store, "runner-wait-budget");
-            let mut delivery = execution_terminal(&intent);
+            let intent = current_intent(&store, "runner-wait-budget");
+            let mut delivery = terminal_delivery(&intent);
             delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
             delivery.error = Some(serde_json::json!({
                 "message": "pinned runner stopped accepting jobs before provisioning",
                 "details": {"execution_step_disposition": "runner_ineligible"},
             }));
-            let receipt =
-                super::execution_step::consume_execution_terminal_in_store(&store, &delivery)
-                    .unwrap();
+            let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
             assert_eq!(receipt["disposition"], "runner_wait");
             let record = store.read_record("runner-wait-budget").unwrap();
             assert_eq!(record.state, AgentTaskRunState::Queued);
@@ -803,7 +671,7 @@ fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
                 record.metadata["execution_scheduling"]["recovery_failures"],
                 0
             );
-            let next = execution_intent_for(&store, "runner-wait-budget");
+            let next = current_intent(&store, "runner-wait-budget");
             assert_eq!(next.epoch, epoch + 1);
             assert_eq!(next.recovery_attempt, 0);
             assert_eq!(next.step.env, intent.step.env);
@@ -818,21 +686,15 @@ fn execution_step_interrupted_materialization_retains_the_reserved_child_and_pro
         let store = test_lifecycle_store();
         let parent = "partial-materialization";
         let child = "partial-materialization-attempt-1";
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            parent,
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
+        prepare_empty_admission(parent);
         agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
             &store, parent, child,
         )
         .unwrap();
         agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
         let before = store.read_record(child).unwrap();
-        let delivery = execution_terminal(&execution_intent_for(&store, parent));
-        super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        let delivery = terminal_delivery(&current_intent(&store, parent));
+        consume_execution_terminal_in_store(&store, &delivery).unwrap();
         let recovered = store.read_record(parent).unwrap();
         assert_eq!(
             recovered.metadata["detached_cook_handoff"]["materializing_attempt_run_id"],
@@ -852,9 +714,8 @@ fn execution_step_interrupted_materialization_retains_the_reserved_child_and_pro
                 true
             })
             .unwrap();
-        let delivery = execution_terminal(&execution_intent_for(&store, parent));
-        let receipt =
-            super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        let delivery = terminal_delivery(&current_intent(&store, parent));
+        let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
         assert_eq!(receipt["disposition"], "execution_owned");
         let after = store.read_record(parent).unwrap();
         assert_eq!(
@@ -893,7 +754,7 @@ fn execution_step_delivery_leaves_controller_staged_lab_attempt_to_its_controlle
             })
             .unwrap();
         let before = store.read_record(child).unwrap();
-        let delivery = execution_terminal(&execution_intent_for(&store, parent));
+        let delivery = terminal_delivery(&current_intent(&store, parent));
         let receipt =
             super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
         assert_eq!(receipt["disposition"], "execution_owned");
@@ -909,14 +770,8 @@ fn execution_step_published_admission_delivery_preserves_child_deferral_custody(
         let store = test_lifecycle_store();
         let parent = "published-admission";
         let child = "published-admission-attempt-1";
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            parent,
-            serde_json::json!({}),
-            "queued",
-            "test",
-        )
-        .unwrap();
-        let mut delivery = execution_terminal(&execution_intent_for(&store, parent));
+        prepare_empty_admission(parent);
+        let mut delivery = terminal_delivery(&current_intent(&store, parent));
         agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
             &store, parent, child,
         )
@@ -934,8 +789,7 @@ fn execution_step_published_admission_delivery_preserves_child_deferral_custody(
         delivery.exit_code = Some(75);
         delivery.error = None;
         assert_eq!(
-            super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap()
-                ["disposition"],
+            consume_execution_terminal_in_store(&store, &delivery).unwrap()["disposition"],
             "published"
         );
         let after = store.read_record(child).unwrap();

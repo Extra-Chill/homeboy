@@ -145,7 +145,7 @@ fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> b
         || record.has_fresh_controller_pre_provider_heartbeat()
         || (record.has_planned_runner_execution() && record.has_fresh_update())
         || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
-        || record.has_live_execution_step_owner(now)
+        || record.has_live_execution_step_owner()
         || record.owner_process_is_running()
 }
 
@@ -1005,7 +1005,6 @@ mod tests {
             let run_id = "reconcile-projected-local-retry";
             let cook_id = "reconcile-projected-local-retry-cook";
             let plan = AgentTaskPlan::new("projected-local-retry", Vec::new());
-            let now = chrono::Utc::now();
             let metadata = agent_task_lifecycle::execution_step_owner_fixture(cook_id);
             agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
                 &test_lifecycle_store(),
@@ -1019,7 +1018,7 @@ mod tests {
             .expect("reserve retry");
 
             let supervised = agent_task_lifecycle::exact_record(run_id).expect("projected");
-            assert!(supervised.has_live_execution_step_owner(now));
+            assert!(supervised.has_live_execution_step_owner());
             assert!(supervised.metadata.get("runner_pid").is_none());
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
@@ -1028,7 +1027,7 @@ mod tests {
             let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained");
             assert!(!retained.state.is_terminal());
             assert!(retained.metadata.get("cancel_reason").is_none());
-            assert!(retained.has_live_execution_step_owner(now));
+            assert!(retained.has_live_execution_step_owner());
         });
     }
 
