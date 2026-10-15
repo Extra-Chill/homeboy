@@ -24045,6 +24045,74 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
 }
 
 #[test]
+fn follow_up_baseline_accepts_verified_no_changes_empty_patch_and_rejects_bad_digest() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("repo");
+    std::fs::create_dir(&root).unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.com"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::write(root.join("base.txt"), "base\\n").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(&root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(&root)
+        .status()
+        .unwrap()
+        .success());
+    let target_head = git_output(&root, &["rev-parse", "HEAD"]).unwrap();
+    let empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let report = |sha256: &str| {
+        serde_json::from_value::<AgentTaskPromotionReport>(serde_json::json!({
+        "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
+        "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
+        "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
+        "patch_artifact":{"id":"candidate","kind":"patch","path":"","sha256":sha256},
+        "changed_files":[], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
+        "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
+    })).unwrap()
+    };
+
+    let baseline =
+        materialize_follow_up_baseline(&report(empty_sha256), "first-run", "candidate-task")
+            .expect("empty verified no-change baseline");
+    assert_eq!(
+        git_output(&baseline.path, &["rev-parse", "HEAD"]).unwrap(),
+        target_head
+    );
+    assert!(git_output(&baseline.path, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+    let error = match materialize_follow_up_baseline(
+        &report("bad-digest"),
+        "first-run",
+        "candidate-task",
+    ) {
+        Ok(_) => panic!("non-empty digest must not be accepted for empty path"),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("durable sha256"),
+        "unexpected error: {}",
+        error.message
+    );
+}
+
+#[test]
 fn follow_up_baseline_combines_adopted_candidate_with_overlapping_provider_delta() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = &temp.path().join("repo");

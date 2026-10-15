@@ -694,12 +694,16 @@ fn materialize_follow_up_baseline_at(
         ));
     }
     let parent_snapshot = parent_snapshot_from_current_process()?;
-    let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("read promoted patch artifact".to_string()),
-        )
-    })?;
+    let artifact_bytes = if promotion.patch_artifact.path.is_empty() {
+        Vec::new()
+    } else {
+        std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read promoted patch artifact".to_string()),
+            )
+        })?
+    };
     let artifact_sha256 = content_hash::sha256_hex(&artifact_bytes);
     if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
         if expected != artifact_sha256 {
