@@ -21,6 +21,7 @@ mod cook_step;
 mod cook_supervision;
 mod discovery;
 mod execution;
+mod execution_step;
 /// Read-only process-tree activity sampling for a running Cook.
 ///
 /// Lived in `homeboy-core` as a top-level module even though `cook_activity`
@@ -56,6 +57,7 @@ pub use cook_step::*;
 pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
 pub use discovery::*;
 pub use execution::*;
+pub use execution_step::*;
 pub use promotion_service::*;
 pub use reconcile::*;
 pub use status_support::*;

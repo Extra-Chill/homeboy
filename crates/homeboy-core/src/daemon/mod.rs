@@ -1813,12 +1813,14 @@ where
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
     let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
+    let (work_intent_shutdown_tx, work_intent_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let orchestration_reconciler =
         spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
+    let work_intent_deliverer = spawn_work_intent_deliverer(work_intent_shutdown_rx);
 
     const CONNECTION_WORKERS: usize = 16;
     let (connection_tx, connection_rx) = std::sync::mpsc::sync_channel::<TcpStream>(64);
@@ -1907,12 +1909,14 @@ where
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = upload_shutdown_tx.send(());
+    let _ = work_intent_shutdown_tx.send(());
     join_helpers_with_deadline(
         vec![
             ("local-child-reservation-reconciler", local_child_reconciler),
             ("completion-notifier", completion_notifier),
             ("orchestration-reconciler", orchestration_reconciler),
             ("upload-reaper", upload_reaper),
+            ("work-intent-deliverer", work_intent_deliverer),
         ],
         HELPER_DRAIN_DEADLINE,
     );
@@ -2104,15 +2108,6 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = orchestration::reconcile_stale_active_runs();
         });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_unmaterialized_cook_admissions();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_queued_retries();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::drain_work_intents();
-        });
         // Registered workflow cadences admit one instance per due slot.
         isolated_tick(|| {
             let _ = workflow_cadence::admit_due(&job_store, workflow_cadence::now_ms());
@@ -2141,6 +2136,32 @@ fn orchestration_tick_loop(
             return;
         }
     }
+}
+
+/// Outbox delivery is a progress path: a committed work intent is the only
+/// thing that starts its job, so delivery polls at a short cadence and drains
+/// every pending intent per pass. A failed delivery keeps custody and is
+/// reported; the next pass retries it.
+const WORK_INTENT_DELIVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn spawn_work_intent_deliverer(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        isolated_tick(|| loop {
+            match orchestration::drain_work_intents() {
+                Ok(receipt) if receipt["scheduled"] == true => continue,
+                Ok(_) => break,
+                Err(error) => {
+                    eprintln!("homeboy daemon: work intent delivery failed: {error}");
+                    break;
+                }
+            }
+        });
+        if shutdown.recv_timeout(WORK_INTENT_DELIVERY_INTERVAL)
+            != Err(mpsc::RecvTimeoutError::Timeout)
+        {
+            return;
+        }
+    })
 }
 
 /// Reclaim capacity even when no controller polls the daemon after a failed
@@ -4538,13 +4559,13 @@ fn parse_controller_job_request(body: Option<serde_json::Value>) -> Result<Contr
     })
 }
 
-struct ControllerJobAdmission {
-    job: crate::api_jobs::Job,
+pub(crate) struct ControllerJobAdmission {
+    pub(crate) job: crate::api_jobs::Job,
     disposition: ControllerJobSubmissionDisposition,
     compacted: bool,
 }
 
-fn admit_controller_job(
+pub(crate) fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {

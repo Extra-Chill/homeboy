@@ -175,11 +175,9 @@ pub mod lifecycle {
     };
     pub use super::super::agent_task_lifecycle::{
         cancel, claim_cook_operation_in_store, claim_detached_cook_handoff_parent_in_store,
-        claim_local_cook_retry_launch_in_store, complete_cook_operation_in_store,
-        consume_unmaterialized_cook_replay_claim, cook_attempt_run_id, cook_index_exists_in_store,
+        complete_cook_operation_in_store, cook_attempt_run_id, cook_index_exists_in_store,
         fail_claimed_detached_cook_handoff_parent_in_store, fail_cook_operation_in_store,
-        fail_detached_cook_handoff_parent_in_store,
-        fail_unmaterialized_cook_replay_claim_after_worker_exit, has_accepted_runner_handoff,
+        fail_detached_cook_handoff_parent_in_store, has_accepted_runner_handoff,
         is_unmaterialized_cook_admission, load_plan_in_store, materialize_recovered_patch_artifact,
         pin_current_controller_runtime, pinned_runtime_for_mutation,
         precheck_unmaterialized_cook_admission, prepare_unmaterialized_cook_admission,
@@ -190,12 +188,9 @@ pub mod lifecycle {
         record_claimed_detached_cook_handoff_supervision_in_store, record_cook_attempt_in_store,
         record_cook_finalization_in_store, record_cook_force_with_lease_receipt_in_store,
         record_detached_cook_handoff_child_in_store, record_detached_cook_handoff_parent_in_store,
-        record_detached_cook_supervisor_in_store,
-        record_local_cook_retry_step_supervision_in_store, record_manual_finalization_failure,
+        record_detached_cook_supervisor_in_store, record_manual_finalization_failure,
         record_pre_execution_failure_in_store, record_unmaterialized_cook_admission_in_store,
         register_acceptance_verifier, register_acceptance_verifier_from_config,
-        release_unmaterialized_cook_replay_claim_after_worker_exit,
-        renew_unmaterialized_cook_replay_claim,
         reserve_detached_cook_handoff_materialization_in_store,
         resolve_detached_cook_materializing_attempt_in_store, resolve_promotion_patch_artifact_id,
         run_record_exists_resolved_in_store, runner_diagnostic_probe,
@@ -205,7 +200,7 @@ pub mod lifecycle {
         AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunRecord,
         AgentTaskRunState, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
         AgentTaskStatusOptions, ClaimOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
-        LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
+        LabOffloadProxyPlan, RunnerPinnedRuntime,
     };
     pub use super::super::agent_task_lifecycle::{
         cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,

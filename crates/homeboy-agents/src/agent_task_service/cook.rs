@@ -6056,6 +6056,22 @@ fn run_cook_spine(
         })
         .transpose()?;
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
+    let Some(_runtime_generation) = super::execution_step::pin_execution_generation_or_defer(
+        lifecycle_store,
+        &options.identity.initial_run_id,
+    )?
+    else {
+        return Ok(cook_report(CookReportInput {
+            cook_id: options.identity.cook_id.clone(),
+            status: CookStatus::Queued.as_str(),
+            disposition: CookDisposition::InFlight,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some("queued before provisioning behind runtime promotion".into()),
+            exit_code: 75,
+            invocation_latest_run_id: Some(&options.identity.initial_run_id),
+        }));
+    };
     if cook_workspace_lookup_pending(&options.identity.initial_plan) {
         report_cook_progress(
             lifecycle_store,
@@ -6295,9 +6311,9 @@ fn run_cook_spine(
             &plan,
         )?;
     }
-    // Transport readiness can serialize on a reconnect/runtime-promotion
-    // lease. Complete it before entering the provider-attempt loop so that
-    // waiting for a shared Lab session never consumes a cook attempt.
+    // Hold the authoritative generation pin before transport preparation can
+    // provision a destination or contact a provider. Contention only commits
+    // a durable, budget-free successor above.
     if !verification_pending_continuation {
         if let Some(dispatcher) = &options.provider_transport.attempt_dispatcher {
             if let Err(error) = dispatcher.prepare_for_cook() {
@@ -6311,86 +6327,6 @@ fn run_cook_spine(
             }
         }
     }
-    // The initial attempt is the durable status/activity owner. Pin it rather
-    // than the stable cook ID, which may not itself name a lifecycle record.
-    // Runtime promotion admission is before provider-ready: a queued Cook must
-    // not advertise a resumable provider phase while it is still waiting for
-    // the shared flock.
-    let pin_run_id = options.identity.initial_run_id.clone();
-    let pin_cook_id = options.identity.cook_id.clone();
-    let runtime_record = lifecycle_store.read_record(&pin_run_id)?;
-    let runtime = &runtime_record.metadata["controller_runtime"];
-    let _runtime_generation = match homeboy_core::runtime_promotion::try_pin_cook_generation(
-        &pin_run_id,
-        runtime,
-    ) {
-        Ok(pin) => pin,
-        Err(error)
-            if error.code == homeboy_core::ErrorCode::RuntimePromotionWaitTimeout
-                && error.details["wait_stage"] == "os_lock"
-                && error.details["holder_pid"].as_u64().is_some() =>
-        {
-            let owner = serde_json::json!({
-                "pid": error.details["holder_pid"],
-                "operation": error.details["holder_operation"],
-                "operation_id": error.details["holder_operation_id"],
-                "status_command": error.details["holder_status_command"],
-                "target": error.details["target"],
-                "generation": error.details["holder_generation"],
-            });
-            if agent_task_lifecycle::defer_cook_runtime_admission_in_store(
-                lifecycle_store,
-                &pin_run_id,
-                owner,
-            )? {
-                let detail = format!(
-                    "queued before provider execution behind pid {} operation `{}`; daemon will retry runtime admission",
-                    error.details["holder_pid"],
-                    error.details["holder_operation"].as_str().unwrap_or("unknown"),
-                );
-                let _ = report_cook_progress(
-                    lifecycle_store,
-                    durable_observer,
-                    &pin_cook_id,
-                    &pin_run_id,
-                    "runtime_promotion_wait",
-                    1,
-                    Some(&detail),
-                );
-                return Ok(cook_report(CookReportInput {
-                    cook_id: pin_cook_id,
-                    status: CookStatus::Queued.as_str(),
-                    disposition: CookDisposition::InFlight,
-                    attempts: Vec::new(),
-                    finalization: None,
-                    stop_reason: Some(detail),
-                    exit_code: 0,
-                    invocation_latest_run_id: Some(&pin_run_id),
-                }));
-            }
-            return Err(error);
-        }
-        Err(error)
-            if lifecycle_store
-                .read_record(&pin_run_id)
-                .ok()
-                .is_some_and(|record| {
-                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
-                }) =>
-        {
-            return Ok(cook_report(CookReportInput {
-                cook_id: pin_cook_id,
-                status: CookStatus::Cancelled.as_str(),
-                disposition: CookDisposition::Terminal,
-                attempts: Vec::new(),
-                finalization: None,
-                stop_reason: Some(error.to_string()),
-                exit_code: 1,
-                invocation_latest_run_id: Some(&pin_run_id),
-            }));
-        }
-        Err(error) => return Err(error),
-    };
     report_cook_progress(
         lifecycle_store,
         durable_observer,

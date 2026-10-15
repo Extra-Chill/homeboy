@@ -314,6 +314,18 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
+        AgentTaskCommand::ExecutionStep { intent_id } => {
+            let exit_code = homeboy::agents::agent_task_service::execute_execution_step(
+                &intent_id,
+                Arc::new(homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover()),
+                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+                &crate::commands::infra::route::CliExecutionStepTransport,
+            )?;
+            Ok((
+                serde_json::json!({"intent_id": intent_id, "exit_code": exit_code}),
+                exit_code,
+            ))
+        }
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),

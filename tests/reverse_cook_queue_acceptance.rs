@@ -169,22 +169,6 @@ fn persist_record_evidence(
     let _ = std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap_or_default());
 }
 
-fn persist_replay_worker_log(
-    evidence_dir: &Path,
-    record: &homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord,
-) {
-    let Some(worker_log) = record
-        .metadata
-        .pointer("/unmaterialized_cook_admission/replay_receipt/worker_log")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return;
-    };
-    if let Ok(contents) = std::fs::read(worker_log) {
-        let _ = std::fs::write(evidence_dir.join("replay-worker.log"), contents);
-    }
-}
-
 struct LeasePublicationGuard {
     published: PathBuf,
     withheld: PathBuf,
@@ -775,17 +759,6 @@ esac
         let current = lifecycle_store
             .read_record(run_id)
             .expect("read resumed Cook admission");
-        let admission = &current.metadata["unmaterialized_cook_admission"];
-        if admission["reason"] == "replay worker exited before attempt publication" {
-            let worker_log = admission["replay_receipt"]["worker_log"]
-                .as_str()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .unwrap_or_else(|| "<unavailable>".to_string());
-            persist_record_evidence(&evidence_dir, "parent-before-replay-exit", &current);
-            persist_replay_worker_log(&evidence_dir, &current);
-            replay_evidence_dir_guard.retain();
-            panic!("replay worker exited before publication after lease recovery\nrecord={current:#?}\nworker log={worker_log}");
-        }
         let attempt = current.metadata["detached_cook_handoff"]["attempt_run_id"]
             .as_str()
             .and_then(|attempt_id| lifecycle_store.read_record(attempt_id).ok());
@@ -796,7 +769,6 @@ esac
                 "attempt-before-terminal-diagnostics",
                 &attempt,
             );
-            persist_replay_worker_log(&evidence_dir, &current);
             std::fs::write(
                 evidence_dir.join("daemon.stderr"),
                 std::fs::read(&daemon_stderr_path).unwrap_or_default(),
@@ -824,7 +796,6 @@ esac
                 .as_deref()
                 .and_then(|attempt_id| lifecycle_store.read_record(attempt_id).ok());
             persist_record_evidence(&evidence_dir, "parent-before-diagnostics", &parent);
-            persist_replay_worker_log(&evidence_dir, &parent);
             if let Some(attempt) = attempt.as_ref() {
                 persist_record_evidence(&evidence_dir, "attempt-before-diagnostics", attempt);
             }
@@ -845,22 +816,11 @@ esac
                 .args(["agent-task", "status", run_id])
                 .output()
                 .expect("inspect stalled controller parent");
-            let worker_log = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .ok()
-                .and_then(|store| store.read_record(run_id).ok())
-                .and_then(|record| {
-                    record.metadata["unmaterialized_cook_admission"]["replay_receipt"]["worker_log"]
-                        .as_str()
-                        .map(str::to_string)
-                })
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .unwrap_or_else(|| "<unavailable>".to_string());
             panic!(
-                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\nparent={parent:#?}\nattempt={attempt:#?}\nworker stderr={}\ndaemon stderr={}",
+                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\nparent={parent:#?}\nattempt={attempt:#?}\ndaemon stderr={}",
                 ledger.render(),
                 String::from_utf8_lossy(&status.stdout),
                 String::from_utf8_lossy(&status.stderr),
-                worker_log,
                 std::fs::read_to_string(&daemon_stderr_path)
                     .unwrap_or_else(|error| format!("<unavailable: {error}>")),
             );

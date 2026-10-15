@@ -1055,9 +1055,12 @@ fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_sele
             "the routing layer must return a Cook retry to its controller before Lab preflight"
         );
         assert!(
-            materialize_agent_task_retry_handoff(&executable_retry, &executable_retry_args,)
-                .expect("Cook retry handoff decision")
-                .is_none(),
+            super::dispatch::reserved_retry_transport_fixture(
+                &executable_retry,
+                &executable_retry_args,
+            )
+            .expect("Cook retry handoff decision")
+            .is_none(),
             "Cook retries are replayed by their controller lifecycle, not generic Lab routing"
         );
     });

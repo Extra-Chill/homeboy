@@ -5328,7 +5328,7 @@ mod tests {
             // `connect_reverse` is the runner-side registration protocol. The
             // controller observes that runner through its controller-role
             // session record, just as the two production processes do.
-            let controller_session = crate::RunnerSession {
+            let mut controller_session = crate::RunnerSession {
                 runner_id: "lab".to_string(),
                 mode: crate::RunnerTunnelMode::Reverse,
                 role: crate::RunnerSessionRole::Controller,
@@ -5357,7 +5357,7 @@ mod tests {
             std::fs::create_dir_all(controller_session_path.parent().expect("session parent"))
                 .expect("create controller session parent");
             std::fs::write(
-                controller_session_path,
+                &controller_session_path,
                 serde_json::to_vec(&controller_session).expect("serialize controller session"),
             )
             .expect("write controller session");
@@ -5461,6 +5461,18 @@ mod tests {
             request.job_overrides.secret_env_names.clear();
             request.job_overrides.workspace_root =
                 Some(home.path().join("runner-workspaces").display().to_string());
+            // Building the deliberately oversized Git source can outlast the
+            // session heartbeat window under load. Model a connected runner at
+            // admission, rather than testing an accidentally expired fixture.
+            let mut refresh_controller_session = || {
+                controller_session.last_seen_at = Some(chrono::Utc::now().to_rfc3339());
+                std::fs::write(
+                    &controller_session_path,
+                    serde_json::to_vec(&controller_session).expect("serialize fresh session"),
+                )
+                .expect("refresh controller session before admission");
+            };
+            refresh_controller_session();
             let receipt = submit_detached_staging_with_daemon_ensure(
                 run_id,
                 "lab",
@@ -5588,6 +5600,7 @@ mod tests {
             // must reject the changed Git baseline rather than execute it.
             let tampered_run_id = "authenticated-reverse-staging-tampered-run";
             submit_recipe_run(tampered_run_id);
+            refresh_controller_session();
             let tampered_receipt = submit_detached_staging_with_daemon_ensure(
                 tampered_run_id,
                 "lab",
@@ -6595,6 +6608,15 @@ mod tests {
         };
 
         let _serial = global_state_lock().lock().expect("lock");
+        // This fixture owns the explicit outbox drain below. Register the
+        // agents scheduling seam without submitting a second controller job.
+        homeboy_agents::agent_task_service::register_terminal_cook_scheduler(Arc::new(|request| {
+            assert_eq!(
+                request["schema"],
+                "homeboy/terminal-cook-continuation-request/v1"
+            );
+            Ok(json!({"scheduled": false}))
+        }));
         // Both production recovery paths must publish completion custody; neither
         // may depend on a later status read or re-observe the remote provider.
         for replay_observer in [false, true] {

@@ -231,6 +231,18 @@ impl ControllerJobHarness {
         &self.store
     }
 
+    /// Admit a keyed request through the production registry into this owned
+    /// SQLite store, without starting a child or requiring a daemon process.
+    pub fn admit_keyed(&self, submission: serde_json::Value) -> Result<Job> {
+        let request = serde_json::from_value(submission)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        Ok(crate::daemon::admit_controller_job(request, &self.store)?.job)
+    }
+
+    pub fn cancel_keyed(&self, job_id: Uuid, reason: &str) -> Result<Job> {
+        crate::daemon::cancel_controller_job(job_id, reason, &self.store)
+    }
+
     pub fn reopen(&self, path: &Path, lease_id: &str) -> Result<Self> {
         Ok(Self {
             store: JobStore::open_without_reconciliation(path)?

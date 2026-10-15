@@ -25,7 +25,23 @@ pub(crate) const METADATA_KEY_RUNNER_LIVENESS: &str = "runner_liveness";
 pub(crate) const METADATA_KEY_RETRYABLE: &str = "retryable";
 pub(crate) const METADATA_KEY_RECLAIMED_STALE_RUNNING: &str = "reclaimed_stale_running";
 pub(crate) const METADATA_KEY_CANCELLED_STALE_RUNNING: &str = "cancelled_stale_running";
-pub(crate) const LOCAL_COOK_SUPERVISOR_LEASE_SECONDS: i64 = 30;
+#[cfg(test)]
+pub(crate) fn execution_step_owner_fixture(cook_id: &str) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([
+        ("cook_id".into(), json!(cook_id)),
+        (
+            "execution_scheduling".into(),
+            json!({"epoch": 1, "current_intent_id": "fixture-step", "recovery_failures": 0}),
+        ),
+        (
+            "execution_step_owner".into(),
+            json!({
+                "intent_id": "fixture-step", "job_id": "fixture-job", "pid": std::process::id(),
+                "process_start_identity": homeboy_core::process::process_start_identity(std::process::id()).unwrap().unwrap(),
+            }),
+        ),
+    ])
+}
 
 /// Reconciled local ownership evidence for a running record.
 ///
@@ -521,7 +537,7 @@ impl AgentTaskRunRecord {
             && self.local_owner_liveness() == LocalOwnerLiveness::Absent
             && !self.has_planned_runner_execution()
             && !super::has_live_pending_runner_submission_intent(self, now)
-            && !self.has_live_pending_local_cook_supervisor(now)
+            && !self.has_live_execution_step_owner(now)
             && self.aggregate_path.is_none()
             && self.totals.is_none()
             && self.artifact_refs.is_empty()
@@ -638,7 +654,7 @@ impl AgentTaskRunRecord {
         // same write that makes the queued successor visible. The daemon job id
         // arrives later, so do not classify that intentional interval as an
         // ownerless runner.
-        if self.has_live_pending_local_cook_supervisor(chrono::Utc::now()) {
+        if self.has_live_execution_step_owner(chrono::Utc::now()) {
             return;
         }
 
@@ -716,41 +732,46 @@ impl AgentTaskRunRecord {
         self.local_owner_liveness() == LocalOwnerLiveness::Live
     }
 
-    pub(crate) fn has_live_pending_local_cook_supervisor(
+    /// Durable step custody replaces the caller's expiring retry lease.
+    pub(crate) fn has_live_execution_step_owner(
         &self,
-        now: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        let supervisor = &self.metadata["local_cook_supervisor"];
-        let Some(started_at) = supervisor["lease_started_at"]
-            .as_str()
-            .and_then(parse_rfc3339)
-        else {
+        let scheduling = &self.metadata["execution_scheduling"];
+        if !scheduling["current_intent_id"].is_string()
+            || self.state == AgentTaskRunState::Cancelled
+        {
             return false;
-        };
-        let Some(expires_at) = supervisor["lease_expires_at"]
-            .as_str()
-            .and_then(parse_rfc3339)
-        else {
+        }
+        if self.state == AgentTaskRunState::Queued {
+            return true;
+        }
+        let owner = &self.metadata["execution_step_owner"];
+        // Provider completion can precede the same child's promotion/gates.
+        // Preserve that live exact owner until its kernel identity exits.
+        if owner["intent_id"] != scheduling["current_intent_id"] || !owner["job_id"].is_string() {
             return false;
+        }
+        let Some(pid) = owner["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+        else {
+            return true;
         };
-        // A lease that has advanced to `supervising` is holding this exact run,
-        // which is stronger ownership evidence than one still requesting it.
-        // Admitting only `pending` cancelled every detached local Cook the
-        // moment its supervisor started supervising and before it published an
-        // owner pid. The lease window below is what keeps an abandoned lease
-        // from protecting a genuinely dead run, and it bounds both states
-        // identically.
+        let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+            owner["process_start_identity"].clone(),
+        ) else {
+            return true;
+        };
         matches!(
-            supervisor["state"].as_str(),
-            Some("pending" | "supervising")
-        ) && self.metadata["cook_id"]
-            .as_str()
-            .is_some_and(|cook_id| !cook_id.trim().is_empty())
-            && supervisor["pinned_run_id"] == self.run_id
-            && started_at <= now
-            && now < expires_at
-            && expires_at
-                <= started_at + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)
+            homeboy_core::process::process_identity_state_with_start_identity(
+                pid,
+                None,
+                Some(&identity)
+            ),
+            homeboy_core::process::ProcessIdentityState::Live
+                | homeboy_core::process::ProcessIdentityState::Unverifiable
+        )
     }
 
     /// Reconcile every local ownership projection before a caller classifies a
@@ -1182,17 +1203,8 @@ mod tests {
     }
 
     #[test]
-    fn pending_local_retry_supervisor_survives_reconciliation_before_job_projection() {
-        let lease_started_at = chrono::Utc::now();
-        let mut record = legacy_record(json!({
-            "cook_id": "cook",
-            "local_cook_supervisor": {
-                "state": "pending",
-                "pinned_run_id": "legacy-handoff",
-                "lease_started_at": lease_started_at.to_rfc3339(),
-                "lease_expires_at": (lease_started_at + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339(),
-            }
-        }));
+    fn exact_step_owner_survives_reconciliation_without_a_caller_lease() {
+        let mut record = legacy_record(Value::Object(execution_step_owner_fixture("cook")));
         record.state = AgentTaskRunState::Running;
 
         record.annotate_stale_running();
@@ -1202,6 +1214,16 @@ mod tests {
             .metadata
             .get(METADATA_KEY_STALE_RUNNING_REASON)
             .is_none());
+        assert!(
+            record.has_live_execution_step_owner(chrono::Utc::now() + chrono::Duration::days(1))
+        );
+        record.metadata["execution_step_owner"]["intent_id"] = json!("superseded-step");
+        assert!(!record.has_live_execution_step_owner(chrono::Utc::now()));
+        record.metadata["execution_step_owner"]["intent_id"] = json!("fixture-step");
+        record.state = AgentTaskRunState::Succeeded;
+        assert!(record.has_live_execution_step_owner(chrono::Utc::now()));
+        record.state = AgentTaskRunState::Cancelled;
+        assert!(!record.has_live_execution_step_owner(chrono::Utc::now()));
     }
 
     #[test]

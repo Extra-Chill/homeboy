@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, LazyLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,12 +35,6 @@ use super::session::{
 };
 use super::{load, load_in_roots, remote_runner_homeboy_path, Runner, RunnerKind};
 
-const ADMISSION_WAKE_IDLE: u8 = 0;
-const ADMISSION_WAKE_RUNNING: u8 = 1;
-const ADMISSION_WAKE_PENDING: u8 = 2;
-static ADMISSION_WAKE_STATE: LazyLock<Arc<AtomicU8>> =
-    LazyLock::new(|| Arc::new(AtomicU8::new(ADMISSION_WAKE_IDLE)));
-
 /// Collision-resistant, bounded path/unit component for controller ownership.
 /// Keep this shared by every direct-SSH and service-managed daemon location.
 pub(super) fn controller_scope_segment(controller_id: &str) -> String {
@@ -59,48 +51,6 @@ pub(super) fn controller_scope_segment(controller_id: &str) -> String {
     format!("{prefix}-{digest}")
 }
 
-fn wake_unmaterialized_admission_reconciliation() -> bool {
-    wake_unmaterialized_admission_reconciliation_with(
-        Arc::clone(&ADMISSION_WAKE_STATE),
-        Arc::new(|| {
-            let _ = homeboy_core::daemon::orchestration::reconcile_unmaterialized_cook_admissions();
-        }),
-    )
-}
-
-fn wake_unmaterialized_admission_reconciliation_with(
-    state: Arc<AtomicU8>,
-    reconcile: Arc<dyn Fn() + Send + Sync + 'static>,
-) -> bool {
-    if state
-        .compare_exchange(
-            ADMISSION_WAKE_IDLE,
-            ADMISSION_WAKE_RUNNING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_err()
-    {
-        state.store(ADMISSION_WAKE_PENDING, Ordering::Release);
-        return false;
-    }
-    std::thread::spawn(move || loop {
-        reconcile();
-        if state
-            .compare_exchange(
-                ADMISSION_WAKE_RUNNING,
-                ADMISSION_WAKE_IDLE,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            break;
-        }
-        state.store(ADMISSION_WAKE_RUNNING, Ordering::Release);
-    });
-    true
-}
 use homeboy_core::broker_auth;
 
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
@@ -1671,7 +1621,6 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     // without agent-task support resolve this as an inert no-op.
     drop(promotion_lease);
     super::runner_probe_gate::invalidate_runner_probes(runner_id);
-    wake_unmaterialized_admission_reconciliation();
     Ok((
         RunnerConnectReport {
             runner_id: runner.id,

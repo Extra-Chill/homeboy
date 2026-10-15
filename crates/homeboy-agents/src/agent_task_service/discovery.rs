@@ -1091,7 +1091,7 @@ fn classify_liveness(
     // A bounded local Cook supervisor lease is ownership for both initial
     // submissions and retries until runner identity is published. Honor it
     // regardless of queued/running so discovery cannot cancel a live lease.
-    if record.has_live_pending_local_cook_supervisor(now) {
+    if record.has_live_execution_step_owner(now) {
         return AgentTaskLiveness::Active;
     }
     // A completed Retry action intentionally leaves its successor queued until
@@ -1474,7 +1474,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn queued_record(supervisor: Value) -> AgentTaskRunRecord {
+    fn queued_record(scheduling: Value) -> AgentTaskRunRecord {
         serde_json::from_value(json!({
             "schema": "homeboy/agent-task-run/v1",
             "run_id": "retry-attempt",
@@ -1485,45 +1485,33 @@ mod tests {
             "plan_path": "plan.json",
             "metadata": {
                 "cook_id": "cook",
-                "local_cook_supervisor": supervisor,
+                "execution_scheduling": scheduling,
             },
         }))
         .expect("queued record")
     }
 
     #[test]
-    fn queued_retry_honors_only_a_valid_bounded_pending_supervisor_lease() {
+    fn queued_retry_is_owned_by_its_durable_step_without_a_caller_lease() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
             .expect("timestamp")
             .with_timezone(&chrono::Utc);
         let valid = queued_record(json!({
-            "state": "pending",
-            "pinned_run_id": "retry-attempt",
-            "lease_started_at": "2026-01-01T00:00:45Z",
-            "lease_expires_at": "2026-01-01T00:01:15Z",
+            "epoch": 1,
+            "current_intent_id": "agent-task-exec:retry-attempt:1:0",
+            "recovery_failures": 0,
         }));
         assert_eq!(
             classify_liveness(&valid, Some(10), now),
             AgentTaskLiveness::Active
         );
 
-        let expired = queued_record(json!({
-            "state": "pending",
-            "pinned_run_id": "retry-attempt",
-            "lease_started_at": "2026-01-01T00:00:00Z",
-            "lease_expires_at": "2026-01-01T00:00:30Z",
-        }));
         assert_eq!(
-            classify_liveness(&expired, Some(10), now),
-            AgentTaskLiveness::Stale
+            classify_liveness(&valid, Some(10), now + chrono::Duration::days(1)),
+            AgentTaskLiveness::Active
         );
 
-        let invalid = queued_record(json!({
-            "state": "pending",
-            "pinned_run_id": "retry-attempt",
-            "lease_started_at": "2026-01-01T00:00:00Z",
-            "lease_expires_at": "2026-01-01T00:10:00Z",
-        }));
+        let invalid = queued_record(json!({}));
         assert_eq!(
             classify_liveness(&invalid, Some(10), now),
             AgentTaskLiveness::Stale

@@ -4438,7 +4438,7 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
-    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, false)
+    continue_cook_execution(args, executor, reconstruct_dispatcher)
 }
 
 fn explicit_local_continuation_decision(
@@ -4525,14 +4525,13 @@ fn cook_provider_route_override(
     }
 }
 
-/// `retry --run` owns a fresh queued replacement attempt. It may dispatch that
-/// attempt through the immutable Cook recipe; ordinary `cook-continue` remains
-/// observation-only until the attempt becomes terminal.
-fn continue_cook_with_queued_execution<F>(
+/// Queued replacement attempts belong to their committed execution step.
+/// Continuation observes them until terminal, when the existing terminal Cook
+/// continuation path can advance promotion, gates and finalization.
+fn continue_cook_execution<F>(
     args: CookContinueArgs,
     executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
-    execute_queued_attempt: bool,
 ) -> CmdResult<Value>
 where
     F: Fn(
@@ -4571,15 +4570,6 @@ where
             uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
-        if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
-            return dispatch_queued_cook_retry(
-                &recipe,
-                &retry.record.run_id,
-                args.full,
-                executor,
-                reconstruct_dispatcher,
-            );
-        }
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
     let review_form_only = recipe
@@ -4637,15 +4627,6 @@ where
             uuid::Uuid::new_v4().to_string(),
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
-        if retry.record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
-            return dispatch_queued_cook_retry(
-                &recipe,
-                &retry.record.run_id,
-                args.full,
-                executor,
-                reconstruct_dispatcher,
-            );
-        }
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
     if record.state.is_terminal()
@@ -4673,17 +4654,6 @@ where
         )?;
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
-    }
-    if (execute_queued_attempt || record.metadata["cook_runtime_admission"].is_object())
-        && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
-    {
-        return dispatch_queued_cook_retry(
-            &recipe,
-            &run_id,
-            args.full,
-            executor,
-            reconstruct_dispatcher,
-        );
     }
     if !record.state.is_terminal() {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
@@ -4864,126 +4834,6 @@ where
         super::status::compact_cook_report(value, args.full),
         result.exit_code,
     ))
-}
-
-#[cfg(test)]
-pub(crate) fn consume_queued_cook_retry_with<F>(
-    args: CookContinueArgs,
-    executor: SharedAgentTaskExecutor,
-    reconstruct_dispatcher: F,
-) -> CmdResult<Value>
-where
-    F: Fn(
-            &Value,
-        ) -> homeboy::core::Result<
-            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
-        > + Copy,
-{
-    continue_cook_with_queued_execution(args, executor, reconstruct_dispatcher, true)
-}
-
-/// A retry reservation creates a queued record before its external dispatch.
-/// Claim that effect separately so competing `retry --run` consumers converge
-/// on one dispatcher invocation.
-fn dispatch_queued_cook_retry<F>(
-    recipe: &homeboy::agents::agent_task_service::AgentTaskCookRecipe,
-    run_id: &str,
-    full: bool,
-    executor: SharedAgentTaskExecutor,
-    reconstruct_dispatcher: F,
-) -> CmdResult<Value>
-where
-    F: Fn(
-            &Value,
-        ) -> homeboy::core::Result<
-            Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
-        > + Copy,
-{
-    let operation_key = format!("retry-run:{run_id}");
-    // Claim, completion, and failure are one exactly-once operation-claim
-    // protocol, so all three have to name the same installation (#7505).
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    match agent_task_lifecycle::claim_cook_operation_in_store(
-        &lifecycle_store,
-        run_id,
-        &operation_key,
-        Duration::from_secs(30),
-    )? {
-        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
-        | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
-            let record = agent_task_lifecycle::reconcile_status_in_store(
-                &lifecycle_store,
-                run_id,
-                agent_task_lifecycle::AgentTaskStatusOptions::default(),
-                false,
-            )?
-            .record;
-            Ok((cook_continuation_status(&recipe.cook_id, &record), 0))
-        }
-        agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let dispatched: CmdResult<Value> = (|| {
-                let record = agent_task_service::rebind_queued_cook_runtime_in_store(
-                    recipe,
-                    &lifecycle_store,
-                    run_id,
-                )?;
-                let dispatcher =
-                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-                let attempt = recipe
-                    .attempts
-                    .iter()
-                    .find(|attempt| attempt.run_id == run_id)
-                    .ok_or_else(|| {
-                        homeboy::core::Error::validation_invalid_argument(
-                            "cook_or_attempt_id",
-                            "selected attempt is absent from its durable Cook recipe",
-                            Some(run_id.to_string()),
-                            None,
-                        )
-                    })?;
-                let mut options =
-                    agent_task_service::reconstruct_options_for_record_with_dispatcher(
-                        recipe, &record, dispatcher,
-                    )?;
-                options.identity.initial_run_id = attempt.run_id.clone();
-                options.identity.initial_plan = attempt.plan.clone();
-                agent_task_service::authorize_cook_continue_route(&options)?;
-                let result = run_cook_explicit(
-                    options,
-                    executor,
-                    agent_task_service::CookMode::RecoverPreExecution,
-                )?;
-                let value = cook_report_with_continuation(
-                    serde_json::to_value(result.value).unwrap_or(Value::Null),
-                );
-                Ok((
-                    super::status::compact_cook_report(value, full),
-                    result.exit_code,
-                ))
-            })();
-            match dispatched {
-                Ok((value, exit_code)) => {
-                    agent_task_lifecycle::complete_cook_operation_in_store(
-                        &lifecycle_store,
-                        run_id,
-                        &operation_key,
-                        serde_json::json!({ "exit_code": exit_code }),
-                    )?;
-                    Ok((value, exit_code))
-                }
-                Err(error) => {
-                    agent_task_lifecycle::fail_cook_operation_in_store(
-                        &lifecycle_store,
-                        run_id,
-                        &operation_key,
-                        serde_json::json!({ "error": error.message.clone() }),
-                    )?;
-                    Err(error)
-                }
-            }
-        }
-    }
 }
 
 /// Probe the continuation admission boundary without claiming a continuation or
@@ -11355,7 +11205,7 @@ fn reserve_retry_through_action(
     homeboy_control_plane_contract::ControlPlaneActionAcknowledgement,
     homeboy::agents::agent_task_action_result::RetryActionResult,
 )> {
-    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+    let acknowledgement = homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
         run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
@@ -11386,6 +11236,8 @@ fn reserve_retry_through_action(
             },
             confirmed: true,
         },
+        true,
+        crate::commands::infra::route::validate_generic_lab_command_replay_workspace,
     )?;
     let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
     Ok((acknowledgement, retry))
@@ -11393,7 +11245,7 @@ fn reserve_retry_through_action(
 
 pub(super) fn retry_with<F>(
     args: RetryArgs,
-    executor: SharedAgentTaskExecutor,
+    _executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
 ) -> CmdResult<Value>
 where
@@ -11430,37 +11282,10 @@ where
         None,
         idempotency_key,
     )?;
-    // Reservation is acknowledged independently from execution. Only the call
-    // that created the successor may dispatch it; a replayed acknowledgement
-    // must be inspected or resumed through the durable lifecycle instead.
-    let execute = args.run && retry.created;
-    if execute {
-        let record = retry.record;
-        if record.metadata["cook_id"].is_string() {
-            // The retry acknowledgement is already durable, so this dispatch is
-            // free to report the Cook outcome it produced. Returning the
-            // acknowledgement instead would exit 0 and hide a durable failure
-            // from `agent-task retry --run`.
-            return continue_cook_with_queued_execution(
-                CookContinueArgs {
-                    cook_or_attempt_id: record.run_id,
-                    preflight: false,
-                    rearm: false,
-                    artifact_id: None,
-                    timeout_ms: None,
-                    review_form_timeout_ms: None,
-                    backend: None,
-                    selector: None,
-                    model: None,
-                    acknowledge_model_override: false,
-                    full: false,
-                },
-                executor,
-                reconstruct_dispatcher,
-                true,
-            );
-        }
-        let _ = run_submitted_with_executor(record.run_id, None, executor)?;
+    // The first reservation already committed the exact execution intent.
+    // Waiting observes its durable outcome, including on action redelivery.
+    if args.run {
+        return super::status::wait_for_terminal_status(&retry.record.run_id);
     }
     Ok((
         serde_json::to_value(acknowledgement)

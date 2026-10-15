@@ -294,67 +294,6 @@ fn concurrent_queue_consumers_bind_only_the_winning_preflight_plan() {
     );
 }
 
-#[test]
-fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "persisted-plan-local-retry";
-    let cook_id = "persisted-plan-cook";
-    let plan = test_plan();
-    let now = chrono::Utc::now();
-    let mut metadata = supervising_submission_metadata(run_id);
-    metadata.insert("cook_id".to_string(), json!(cook_id));
-    metadata["local_cook_supervisor"]["state"] = json!("pending");
-    metadata["local_cook_supervisor"]["lease_started_at"] = json!(now.to_rfc3339());
-    metadata["local_cook_supervisor"]["lease_expires_at"] =
-        json!((now + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS)).to_rfc3339());
-    submit_plan_with_runtime_admission_in_store(
-        &store,
-        &plan,
-        Some(run_id),
-        None,
-        Some(metadata),
-        None,
-        |_| Ok(json!({ "build": "test" })),
-    )
-    .expect("persist retry plan");
-
-    record_local_cook_retry_step_supervision_in_store(
-        &store,
-        run_id,
-        cook_id,
-        &uuid::Uuid::new_v4().to_string(),
-        std::process::id(),
-        homeboy_core::process::process_start_identity(std::process::id())
-            .unwrap()
-            .unwrap(),
-    )
-    .expect("project retry step supervision");
-    let supervised = store.read_record(run_id).expect("supervised retry");
-    assert!(supervised.has_live_pending_local_cook_supervisor(now));
-    assert!(supervised.metadata.get("runner_pid").is_none());
-
-    let persisted_plan = store
-        .read_controller_plan(run_id)
-        .expect("persisted retry plan");
-    let resumed = submit_plan_with_runtime_admission_in_store(
-        &store,
-        &persisted_plan,
-        Some(run_id),
-        None,
-        None,
-        None,
-        |_| Ok(json!({ "build": "test" })),
-    )
-    .expect("resume persisted retry plan");
-    assert_eq!(resumed.metadata["runner_pid"], std::process::id());
-    assert!(resumed.owner_process_is_running());
-    assert_eq!(
-        resumed.metadata["local_cook_supervisor"]["state"],
-        "supervising"
-    );
-}
-
 fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id: &str) {
     store
         .submit_plan_with_runtime_admission(&test_plan(), cook_id, |_| Ok(json!({})))
@@ -373,133 +312,6 @@ fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id
             true
         })
         .expect("seed admission parent");
-}
-
-#[test]
-fn pending_local_retry_launcher_claim_converges_live_owner_then_reclaims_dead_owner() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "pending-local-retry";
-    let cook_id = "pending-local-retry-cook";
-    store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit pending retry");
-    let mut owner = Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn distinct launcher owner");
-    let owner_identity = homeboy_core::process::process_start_identity(owner.id())
-        .expect("inspect launcher owner")
-        .expect("launcher owner identity");
-    store
-        .mutate_record(run_id, |record| {
-            record.metadata["cook_id"] = json!(cook_id);
-            record.metadata["local_cook_supervisor"] = json!({
-                "state": "pending",
-                "pinned_run_id": run_id,
-                "lease_started_at": chrono::Utc::now().to_rfc3339(),
-                "lease_expires_at": (chrono::Utc::now()
-                    + chrono::Duration::seconds(LOCAL_COOK_SUPERVISOR_LEASE_SECONDS))
-                    .to_rfc3339(),
-                "launcher_pid": owner.id(),
-                "launcher_process_start_identity": owner_identity,
-            });
-            true
-        })
-        .expect("persist pending launcher");
-
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id).expect("live owner claim"),
-        LocalCookRetryLaunchClaim::OwnedElsewhere,
-        "a live launcher remains the sole process allowed to spawn"
-    );
-    owner.kill().expect("kill initial launcher");
-    owner.wait().expect("reap initial launcher");
-
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id)
-            .expect("dead owner takeover"),
-        LocalCookRetryLaunchClaim::Acquired,
-        "a dead launcher is atomically replaced by this caller"
-    );
-    let record = store.read_record(run_id).expect("read reclaimed retry");
-    assert_eq!(
-        record.metadata["local_cook_supervisor"]["launcher_pid"].as_u64(),
-        Some(u64::from(std::process::id()))
-    );
-    assert!(
-        !record.metadata["local_cook_supervisor"]["launcher_reclaimed_at"].is_null(),
-        "takeover remains durable evidence"
-    );
-}
-
-#[test]
-fn a_retry_step_binds_only_its_own_pending_reservation() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let run_id = "step-local-retry";
-    let cook_id = "step-local-retry-cook";
-    store
-        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
-        .expect("submit pending retry");
-    store
-        .mutate_record(run_id, |record| {
-            record.metadata["cook_id"] = json!(cook_id);
-            record.metadata["local_cook_supervisor"] = json!({
-                "state": "pending",
-                "pinned_run_id": run_id,
-            });
-            true
-        })
-        .expect("seed pending retry");
-    let identity = homeboy_core::process::process_start_identity(std::process::id())
-        .unwrap()
-        .unwrap();
-
-    assert!(record_local_cook_retry_step_supervision_in_store(
-        &store,
-        run_id,
-        "another-cook",
-        "step-job",
-        std::process::id(),
-        identity.clone(),
-    )
-    .is_err());
-    record_local_cook_retry_step_supervision_in_store(
-        &store,
-        run_id,
-        cook_id,
-        "step-job",
-        std::process::id(),
-        identity.clone(),
-    )
-    .expect("bind pending reservation");
-    let record = store.read_record(run_id).expect("bound retry");
-    let supervisor = &record.metadata["local_cook_supervisor"];
-    assert_eq!(supervisor["state"], "supervising");
-    assert_eq!(supervisor["job_id"], "step-job");
-    assert_eq!(
-        supervisor["job_type"],
-        homeboy_core::daemon::step_job::STEP_JOB_TYPE
-    );
-    assert_eq!(supervisor["child_pid"], std::process::id());
-    assert!(
-        record_local_cook_retry_step_supervision_in_store(
-            &store,
-            run_id,
-            cook_id,
-            "second-step",
-            std::process::id(),
-            identity,
-        )
-        .is_err(),
-        "a bound reservation cannot be adopted by a second step"
-    );
-    assert_eq!(
-        claim_local_cook_retry_launch_in_store(&store, run_id, cook_id).expect("claim"),
-        LocalCookRetryLaunchClaim::NotPending,
-        "a bound reservation has no launcher left to claim"
-    );
 }
 
 #[test]
@@ -652,7 +464,7 @@ fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution
             "schema": "homeboy/unmaterialized-cook-binding/v1",
             "request_ref": "request-1",
             "placement": { "requested": "auto", "local_fallback": false },
-            "replay_intent": { "argv": ["homeboy", "agent-task", "cook"] },
+            "admission_inputs": { "argv": ["homeboy", "agent-task", "cook"] },
         }),
         "blocked_runner_unavailable",
         "runner unavailable",
@@ -672,7 +484,7 @@ fn queued_cook_placement_update_preserves_binding_identity_and_refuses_execution
         "local"
     );
     assert!(
-        updated.metadata["unmaterialized_cook_admission"]["binding"]["replay_intent"]["argv"]
+        updated.metadata["unmaterialized_cook_admission"]["binding"]["admission_inputs"]["argv"]
             .as_array()
             .expect("argv")
             .iter()
@@ -703,7 +515,7 @@ fn unmaterialized_admission_initial_submission_includes_retry_lineage_metadata()
         "schema": "homeboy/unmaterialized-cook-binding/v1",
         "request_ref": "sha256:request",
         "worktree_ref": "repo@branch",
-        "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+        "admission_inputs": { "cook_id": source_run_id, "argv": ["cook"] },
     });
     record_unmaterialized_cook_admission_in_store(
         &store,
@@ -755,7 +567,7 @@ fn concurrent_unmaterialized_retries_reserve_one_non_force_successor() {
             "worktree_ref": "repo@branch",
             "provider_runtime_refs": { "backend": "fixture" },
             "retry": { "provider_rotations": 0 },
-            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+            "admission_inputs": { "cook_id": source_run_id, "argv": ["cook"] },
         }),
         "blocked_runner_unavailable",
         "runner unavailable",
@@ -813,7 +625,7 @@ fn unmaterialized_retry_lineage_requires_force_and_retains_its_root() {
             "worktree_ref": "repo@branch",
             "provider_runtime_refs": { "backend": "fixture" },
             "retry": { "provider_rotations": 0 },
-            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+            "admission_inputs": { "cook_id": source_run_id, "argv": ["cook"] },
         }),
         "blocked_runner_unavailable",
         "runner unavailable",
@@ -882,7 +694,7 @@ fn concurrent_unmaterialized_retries_from_root_and_descendant_share_the_root_loc
             "worktree_ref": "repo@branch",
             "provider_runtime_refs": { "backend": "fixture" },
             "retry": { "provider_rotations": 0 },
-            "replay_intent": { "cook_id": source_run_id, "argv": ["cook"] },
+            "admission_inputs": { "cook_id": source_run_id, "argv": ["cook"] },
         }),
         "blocked_runner_unavailable",
         "runner unavailable",
@@ -990,179 +802,6 @@ fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_
         "cancelled"
     );
     assert!(cancelled.metadata["detached_cook_handoff"]["child_pid"].is_null());
-}
-
-#[test]
-fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-replay-consume";
-        record_unmaterialized_cook_admission_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
-            "queued",
-            "eligible",
-        )
-        .expect("admitted");
-        rewrite_record_for_test(cook_id, |record| {
-            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(7);
-            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
-                "state": "claimed",
-                "fence": 7,
-                "token": "token-7",
-                "expires_at": "2999-01-01T00:00:00+00:00",
-            });
-        })
-        .expect("claim replay");
-
-        assert!(
-            !consume_unmaterialized_cook_replay_claim(cook_id, 6, "token-7")
-                .expect("wrong fence rejected")
-        );
-        assert!(
-            !consume_unmaterialized_cook_replay_claim(cook_id, 7, "wrong")
-                .expect("wrong token rejected")
-        );
-        assert!(
-            consume_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
-                .expect("exact claim consumed")
-        );
-        assert!(
-            renew_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
-                .expect("exact claim renewed at materialization")
-        );
-        assert!(
-            !renew_unmaterialized_cook_replay_claim(cook_id, 8, "token-7")
-                .expect("superseded fence rejected at materialization")
-        );
-        assert!(
-            !consume_unmaterialized_cook_replay_claim(cook_id, 7, "token-7")
-                .expect("duplicate consumption rejected")
-        );
-        let record = exact_record(cook_id).expect("consumed record");
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["state"],
-            "materializing"
-        );
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
-            "materializing"
-        );
-        assert!(record.metadata["unmaterialized_cook_admission"]["lease"]
-            .get("expires_at")
-            .is_none());
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["owner"]["pid"],
-            std::process::id()
-        );
-        assert_eq!(
-            serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-                record.metadata["unmaterialized_cook_admission"]["lease"]["owner"]
-                    ["process_start_identity"]
-                    .clone(),
-            )
-            .expect("persisted process identity"),
-            homeboy_core::process::process_start_identity(std::process::id())
-                .expect("inspect test process")
-                .expect("test process identity"),
-        );
-        assert!(record.tasks.is_empty());
-    });
-}
-
-#[test]
-fn replay_claim_consumption_rejects_an_expired_lease_without_extending_it() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-replay-expired-consume";
-        record_unmaterialized_cook_admission_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
-            "queued",
-            "eligible",
-        )
-        .expect("admitted");
-        rewrite_record_for_test(cook_id, |record| {
-            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(9);
-            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
-                "state": "claimed",
-                "fence": 9,
-                "token": "expired-token",
-                "expires_at": "2000-01-01T00:00:00+00:00",
-            });
-        })
-        .expect("seed expired claim");
-
-        assert!(
-            !consume_unmaterialized_cook_replay_claim(cook_id, 9, "expired-token")
-                .expect("expired claim is rejected")
-        );
-        let record = exact_record(cook_id).expect("read unchanged expired claim");
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["state"],
-            "queued"
-        );
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
-            "claimed"
-        );
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
-            "2000-01-01T00:00:00+00:00"
-        );
-    });
-}
-
-#[test]
-fn replay_claim_renewal_rejects_an_expired_lease_without_materializing_it() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-replay-expired-renew";
-        record_unmaterialized_cook_admission_in_store(
-            &test_lifecycle_store(),
-            cook_id,
-            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
-            "queued",
-            "eligible",
-        )
-        .expect("admitted");
-        rewrite_record_for_test(cook_id, |record| {
-            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(10);
-            record.metadata["unmaterialized_cook_admission"]["state"] = json!("replaying");
-            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
-                "state": "consumed",
-                "fence": 10,
-                "token": "expired-token",
-                "owner": {
-                    "pid": std::process::id(),
-                    "process_start_identity": homeboy_core::process::process_start_identity(
-                        std::process::id(),
-                    )
-                    .expect("inspect test process")
-                    .expect("test process identity"),
-                },
-                "expires_at": "2000-01-01T00:00:00+00:00",
-            });
-        })
-        .expect("seed expired consumed claim");
-
-        assert!(
-            !renew_unmaterialized_cook_replay_claim(cook_id, 10, "expired-token")
-                .expect("expired claim cannot be renewed")
-        );
-        let record = exact_record(cook_id).expect("read unchanged expired lease");
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["state"],
-            "replaying"
-        );
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
-            "consumed"
-        );
-        assert_eq!(
-            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
-            "2000-01-01T00:00:00+00:00"
-        );
-    });
 }
 
 #[test]
@@ -1482,12 +1121,14 @@ fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners(
             )
             .expect("admitted");
         }
-        rewrite_record_for_test("resume-materializing", |record| {
-            record.metadata["unmaterialized_cook_admission"]["state"] = json!("materializing");
-            record.metadata["unmaterialized_cook_admission"]["lease"] =
-                json!({ "state": "materializing", "fence": 1, "token": "owner" });
-        })
+        let store = test_lifecycle_store();
+        let _owner = crate::agent_task_service::try_execution_subject_lock_in_store(
+            &store,
+            "resume-materializing",
+        )
+        .unwrap()
         .unwrap();
+        let original = exact_record("resume-materializing").unwrap();
         cancel_run("resume-terminal", Some("cancelled by operator")).unwrap();
 
         let blocked = rearm_unmaterialized_cook_admission("resume-blocked").unwrap();
@@ -1497,8 +1138,12 @@ fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners(
         );
         let materializing = rearm_unmaterialized_cook_admission("resume-materializing").unwrap();
         assert_eq!(
-            materializing.metadata["unmaterialized_cook_admission"]["lease"]["token"],
-            "owner"
+            materializing.revision, original.revision,
+            "live subject ownership fences rearm"
+        );
+        assert_eq!(
+            materializing.metadata["execution_scheduling"],
+            original.metadata["execution_scheduling"]
         );
         let terminal = rearm_unmaterialized_cook_admission("resume-terminal").unwrap();
         assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
@@ -1671,18 +1316,10 @@ fn retry_lineage_refuses_an_active_successor_and_requires_force_after_terminal_s
     );
 }
 
-/// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). The whole claim is that a runner's re-submission reads the lineage
-/// off the record already there and writes it back, so the reservation, the
-/// descendant, the re-submission and the read-back all have to be one home —
-/// lineage carried forward from another installation's record would satisfy
-/// every assertion below while proving nothing.
-///
-/// The retries use `retry_with_runtime_admission_in_store` and the runner
-/// re-submission uses `submit_plan_with_runtime_admission_in_store` with a stub
-/// admission, for the reason given on the retry-lineage proof above.
+/// The exact intent claim preserves the reserved run's complete lineage in
+/// the same rooted store, while an ordinary resubmission cannot steal it.
 #[test]
-fn runner_resubmission_preserves_existing_retry_lineage_metadata() {
+fn execution_step_claim_preserves_existing_retry_lineage_metadata() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -1714,7 +1351,7 @@ fn runner_resubmission_preserves_existing_retry_lineage_metadata() {
     )
     .expect("record descendant retry");
 
-    let resubmitted = submit_plan_with_runtime_admission_in_store(
+    let error = submit_plan_with_runtime_admission_in_store(
         &lifecycle_store,
         &plan,
         Some(first_retry_id),
@@ -1723,7 +1360,22 @@ fn runner_resubmission_preserves_existing_retry_lineage_metadata() {
         None,
         |_| Ok(json!({ "runner": "fixture-runtime" })),
     )
-    .expect("runner resubmits the existing retry record");
+    .expect_err("manual resubmission cannot steal an intent-owned run");
+    assert!(error.message.contains("execution intent owns this run"));
+    let record = lifecycle_store.read_record(first_retry_id).unwrap();
+    let intent = crate::agent_task_service::load_execution_intent(
+        &lifecycle_store,
+        record.metadata["execution_scheduling"]["current_intent_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let resubmitted = lifecycle_store
+        .bind_controller_plan_and_claim_queued_run_when(first_retry_id, &plan, |record| {
+            intent.authorizes(record)
+        })
+        .unwrap()
+        .expect("exact intent claims the reserved retry");
 
     assert_eq!(resubmitted.metadata["retried_from"], source_id);
     assert_eq!(resubmitted.metadata["retry_root"], source_id);
