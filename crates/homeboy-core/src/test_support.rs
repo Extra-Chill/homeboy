@@ -3265,8 +3265,13 @@ mod tests {
             "TMP",
             crate::paths::HOMEBOY_DATA_DIR_ENV,
         ];
+        // Temp roots are process-global and read by every concurrently running
+        // test's `tempfile` calls, so they keep their real values; replacing
+        // them with sentinels breaks unrelated tests mid-run (#15973).
+        const TEMP_ROOTS: [&str; 3] = ["TMPDIR", "TEMP", "TMP"];
+        let ambient_temp_roots = TEMP_ROOTS.map(std::env::var_os);
         let mut scope = HomeGuardTestScope::new(&names, || {
-            for name in names {
+            for name in names.into_iter().filter(|name| !TEMP_ROOTS.contains(name)) {
                 std::env::set_var(name, format!("/ambient/{name}"));
             }
         });
@@ -3292,10 +3297,10 @@ mod tests {
                 );
             }
             let command = guard.context.command(TestBinary::CurrentTest);
-            for name in ["TMPDIR", "TEMP", "TMP"] {
+            for (name, ambient) in TEMP_ROOTS.into_iter().zip(&ambient_temp_roots) {
                 assert_eq!(
-                    std::env::var(name).expect("ambient temp root"),
-                    format!("/ambient/{name}"),
+                    &std::env::var_os(name),
+                    ambient,
                     "{name} must remain process-global"
                 );
                 assert_eq!(
@@ -3314,12 +3319,15 @@ mod tests {
             !expected.exists(),
             "the isolated root is dropped after restoration"
         );
-        for name in names {
+        for name in names.into_iter().filter(|name| !TEMP_ROOTS.contains(name)) {
             assert_eq!(
                 std::env::var(name).expect("sentinel environment"),
                 format!("/ambient/{name}"),
                 "{name} was restored to its immediate sentinel"
             );
+        }
+        for (name, ambient) in TEMP_ROOTS.into_iter().zip(&ambient_temp_roots) {
+            assert_eq!(&std::env::var_os(name), ambient, "{name} is untouched");
         }
 
         scope.restore_real_environment_and_assert();
@@ -3447,18 +3455,11 @@ mod tests {
 
     #[cfg(unix)]
     fn set_dir_mtime(path: &Path, when: std::time::SystemTime) {
-        // Best-effort mtime backdating via `touch -d`. Skips silently if the
-        // platform `touch` is unavailable; the assertion on `stale` would then
-        // catch a real regression on hosts where the sweep must work.
-        let secs = when
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = Command::new("touch")
-            .arg("-d")
-            .arg(format!("@{secs}"))
-            .arg(path)
-            .status();
+        // Portable backdating: `touch -d @secs` is GNU-only and silently
+        // fails on macOS BSD `touch`.
+        fs::File::open(path)
+            .and_then(|dir| dir.set_modified(when))
+            .expect("backdate directory mtime");
     }
 
     #[test]
@@ -3676,15 +3677,21 @@ mod tests {
             "a base whose allocated state leaf exceeds the budget must be rejected"
         );
 
-        let fixture = tempfile::tempdir_in("/tmp").expect("short fixture root");
-        let fixture_len = fixture.path().to_string_lossy().len();
+        // The budget measures the canonical path, and macOS resolves `/tmp`
+        // to `/private/tmp`, so the fixture root is kept minimal and the
+        // modeled base starts from its canonical form.
+        let fixture = tempfile::Builder::new()
+            .prefix("")
+            .rand_bytes(4)
+            .tempdir_in("/tmp")
+            .expect("short fixture root");
+        let fixture_root = fs::canonicalize(fixture.path()).expect("canonical fixture root");
+        let fixture_len = fixture_root.to_string_lossy().len();
         assert!(
             fixture_len < max_base_len,
             "fixture root must leave room for the modeled base"
         );
-        let base = fixture
-            .path()
-            .join("a".repeat(max_base_len - fixture_len - 1));
+        let base = fixture_root.join("a".repeat(max_base_len - fixture_len - 1));
         fs::create_dir(&base).expect("create exact-budget base");
         let state_root = tempfile::Builder::new()
             .prefix(&owned_tempdir_prefix())

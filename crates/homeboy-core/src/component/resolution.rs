@@ -2368,30 +2368,34 @@ mod tests {
         // absolute so it agrees with what `component set` persists and `deploy`
         // resolves — a relative value here is later rejected by
         // `validate_local_path` ("has relative local_path ... cannot be resolved").
-        let dir = tempfile::tempdir().expect("temp dir");
-        let repo = dir.path().join("studio-native");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
+        // An isolated home keeps an operator's real `studio-native`
+        // registration from shadowing the bare-directory fixture.
+        crate::test_support::with_isolated_home(|_| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let repo = dir.path().join("studio-native");
+            std::fs::create_dir_all(&repo).expect("create repo dir");
 
-        let component = with_cwd(dir.path(), || {
-            resolve_effective(Some("studio-native"), None, None)
-                .expect("relative bare directory should resolve")
+            let component = with_cwd(dir.path(), || {
+                resolve_effective(Some("studio-native"), None, None)
+                    .expect("relative bare directory should resolve")
+            });
+
+            assert!(
+                Path::new(&component.local_path).is_absolute(),
+                "bare-directory local_path must be absolute, got {:?}",
+                component.local_path
+            );
+            // And it must resolve to the real checkout, matching `component set`'s
+            // write-side normalization of the same relative value.
+            assert_eq!(
+                Path::new(&component.local_path)
+                    .canonicalize()
+                    .expect("canonical resolved path"),
+                repo.canonicalize().expect("canonical repo path"),
+            );
+            // release's own validation must now accept it.
+            assert!(validate_local_path(&component).is_ok());
         });
-
-        assert!(
-            Path::new(&component.local_path).is_absolute(),
-            "bare-directory local_path must be absolute, got {:?}",
-            component.local_path
-        );
-        // And it must resolve to the real checkout, matching `component set`'s
-        // write-side normalization of the same relative value.
-        assert_eq!(
-            Path::new(&component.local_path)
-                .canonicalize()
-                .expect("canonical resolved path"),
-            repo.canonicalize().expect("canonical repo path"),
-        );
-        // release's own validation must now accept it.
-        assert!(validate_local_path(&component).is_ok());
     }
 
     #[test]

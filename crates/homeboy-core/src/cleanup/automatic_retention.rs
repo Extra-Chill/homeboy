@@ -378,12 +378,19 @@ mod tests {
 
     #[test]
     fn runtime_temp_retention_reclaims_stale_roots_and_protects_live_owners() {
+        // The runtime temp root is process-global environment that other
+        // tests set under the shared env guard; hold it so they cannot
+        // redirect the live owner mid-test. The guard restores it on drop.
+        let _env = crate::test_support::home_env_guard();
         let _serial = TEST_SERIAL
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let data = TempDir::new().unwrap();
-        let runtime = TempDir::new().unwrap();
+        // The live owner must land in this root, which requires a socket-safe
+        // path: under the long per-run test TMPDIR (always on macOS) the owner
+        // falls back to the invocation runtime root and is never inspected.
+        let runtime = tempfile::tempdir_in("/tmp").unwrap();
         let env_name = crate::product_identity::PRODUCT_IDENTITY.env_var("RUNTIME_TMPDIR");
         std::env::set_var(&env_name, runtime.path());
         let stale = runtime.path().join("stale-ownerless");
@@ -416,7 +423,6 @@ mod tests {
         assert!(live.path().exists());
         assert!(second_runtime.reclaimable_bytes >= b"stale payload".len() as u64);
         assert!(second_runtime.reclaimed_bytes >= b"stale payload".len() as u64);
-        std::env::remove_var(env_name);
     }
 
     #[test]

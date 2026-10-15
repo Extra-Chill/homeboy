@@ -773,7 +773,7 @@ mod tests {
 
     #[cfg(unix)]
     fn with_delayed_git_and_pid(
-        _root: &tempfile::TempDir,
+        root: &tempfile::TempDir,
         seconds: u64,
         pid_file: &Path,
         test: impl FnOnce(),
@@ -789,10 +789,15 @@ mod tests {
             .find(|path| path.is_file())
             .unwrap();
         let wrapper = bin.path().join("git");
+        // PATH is process-global, so concurrently running tests resolve this
+        // wrapper too. Only this fixture's split is delayed; every other git
+        // call passes straight through to the real binary (#15973).
+        let fixture = std::fs::canonicalize(root.path()).unwrap();
         std::fs::write(
             &wrapper,
             format!(
-                "#!/bin/sh\ncase \"$*\" in\n  *subtree*split*)\n    echo \"$*\" > '{}.args'\n    sleep {seconds} &\n    sleep_pid=$!\n    echo $sleep_pid > '{}'\n    wait $sleep_pid\n    ;;\nesac\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\ncase \"$(pwd -P)|$*\" in\n  '{}'*\"|\"*subtree*split*)\n    echo \"$*\" > '{}.args'\n    sleep {seconds} &\n    sleep_pid=$!\n    echo $sleep_pid > '{}'\n    wait $sleep_pid\n    ;;\nesac\nexec '{}' \"$@\"\n",
+                fixture.display(),
                 pid_file.display(),
                 pid_file.display(),
                 real_git.display()

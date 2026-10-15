@@ -1837,67 +1837,17 @@ mod failure_output_tests {
 mod tests {
     use super::*;
     use crate::component::Component;
-    use crate::component_script_provider::{ComponentScriptOutput, ComponentScriptRunner};
     use crate::paths;
     use homeboy_extension_contract::ExtensionCapability;
     use std::fs;
     use tempfile::tempdir;
 
-    struct FixtureRunner;
-
-    impl ComponentScriptRunner for FixtureRunner {
-        fn run_component_scripts_with_env(
-            &self,
-            _component: &Component,
-            _capability: ExtensionCapability,
-            _source_path: &Path,
-            _passthrough: bool,
-            _extra_env: &[(String, String)],
-            _script_args: &[String],
-            _control: &CooperativeControl,
-        ) -> Result<ComponentScriptOutput> {
-            unreachable!("extension dependency providers use their resolved context")
-        }
-
-        fn run_with_context(
-            &self,
-            _context: &ExtensionExecutionContext,
-            _component: &Component,
-            _path_override: Option<String>,
-            script_args: &[String],
-            _control: &CooperativeControl,
-        ) -> Result<ComponentScriptOutput> {
-            self.output(script_args)
-        }
-    }
-
-    impl FixtureRunner {
-        fn output(&self, script_args: &[String]) -> Result<ComponentScriptOutput> {
-            let stdout = match script_args {
-                [action] if action == "status" => {
-                    "{\"package_manager\":\"fixture\",\"packages\":[]}\n"
-                }
-                [action] if action == "install-command" => {
-                    "{\"command\":[\"fixture-pm\",\"install\",\"--locked\"],\"outputs\":[{\"path\":\"deps\",\"kind\":\"directory\"}]}\n"
-                }
-                _ => unreachable!("unexpected fixture command: {script_args:?}"),
-            };
-            Ok(ComponentScriptOutput {
-                exit_code: 0,
-                success: true,
-                stdout: stdout.to_string(),
-                stderr: String::new(),
-                timed_out: false,
-                child_resource: None,
-                extension_phase_timings: Vec::new(),
-                cargo_target: None,
-            })
-        }
-    }
-
     #[test]
     fn extension_provider_reports_runner_safe_install_command() {
-        crate::component_script_provider::register_component_script_runner(Box::new(FixtureRunner));
+        // The registry is process-global, so register the production runner
+        // (idempotent for every other test) and let it execute `deps.sh`
+        // rather than installing a stub that concurrent tests would inherit.
+        crate::extension::component_script::register_component_script_runner();
         let dir = tempdir().unwrap();
         let extension_path = dir.path().join("fixture-deps");
         let component_path = dir.path().join("component");
@@ -1917,7 +1867,7 @@ mod tests {
             r#"#!/bin/sh
 case "$1" in
   status) printf '{"package_manager":"fixture","packages":[]}\n' ;;
-  install-command) printf '{"command":["fixture-pm","install","--locked"]}\n' ;;
+  install-command) printf '{"command":["fixture-pm","install","--locked"],"outputs":[{"path":"deps","kind":"directory"}]}\n' ;;
   *) exit 64 ;;
 esac
 "#,

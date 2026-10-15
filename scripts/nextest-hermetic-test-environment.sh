@@ -49,17 +49,23 @@ unset HOMEBOY_CALLER_CONTEXT
 # resolved its isolated workspace to the homeboy checkout itself. `target/` is
 # kept only as a last resort, for a host where no system temp directory can
 # execute anything at all.
+#
+# The probe executable is persistent per user and reused, not rewritten per
+# run: macOS scans every newly written executable on its first exec (~100ms),
+# which every test process would otherwise pay. It is published atomically, so
+# a concurrent run only ever executes a complete probe.
 hermetic_exec_probe() {
     probe_dir="$1"
     [ -d "$probe_dir" ] && [ -w "$probe_dir" ] || return 1
-    probe="${probe_dir}/.homeboy-exec-probe.$$"
-    printf '#!/bin/sh\nexit 0\n' > "$probe" 2>/dev/null || return 1
-    if chmod +x "$probe" 2>/dev/null && "$probe" 2>/dev/null; then
-        rm -f "$probe"
-        return 0
+    probe="${probe_dir}/.homeboy-exec-probe-$(id -u)"
+    if [ ! -x "$probe" ]; then
+        staged="${probe}.$$"
+        printf '#!/bin/sh\nexit 0\n' > "$staged" 2>/dev/null &&
+            chmod +x "$staged" 2>/dev/null &&
+            mv -f "$staged" "$probe" 2>/dev/null
+        rm -f "$staged"
     fi
-    rm -f "$probe"
-    return 1
+    "$probe" 2>/dev/null
 }
 
 hermetic_workspace_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -208,18 +214,22 @@ exec perl -MPOSIX=setsid,WNOHANG -MTime::HiRes=time -e '
         $discard_tmpdir->();
         exit 143;
     };
-    my $started = time;
-    my $status;
-    while (($status = waitpid $child, WNOHANG) == 0) {
-        if (defined($timeout_seconds) && time - $started >= $timeout_seconds) {
+    # Block on the child instead of polling: on macOS a short poll sleep is
+    # coalesced to ~100ms or more, which every test process would pay. The
+    # suite deadline is an alarm, so it still fires while waitpid blocks.
+    if (defined $timeout_seconds) {
+        $SIG{ALRM} = sub {
             my $binary = $ARGV[0] // "test binary";
             print STDERR "hermetic test environment: test binary $binary exceeded suite deadline ${timeout_seconds}s; terminating its process group\n";
             $cleanup->();
             $discard_tmpdir->();
             exit 124;
-        }
-        select undef, undef, undef, 0.05;
+        };
+        alarm $timeout_seconds;
     }
+    my $reaped;
+    do { $reaped = waitpid $child, 0 } while ($reaped == -1 && $!{EINTR});
+    alarm 0;
     my $exit = $?;
     $cleanup->();
     $discard_tmpdir->();

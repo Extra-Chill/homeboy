@@ -1911,9 +1911,12 @@ mod tests {
         cancelled: Arc<AtomicBool>,
         progress: Arc<Mutex<Vec<String>>>,
     ) -> DependencyHydrationPolicy {
+        // Fixtures exec freshly written scripts, whose first launch on macOS
+        // waits on a code-signing scan that can exceed a sub-second window
+        // under load. Only the stall test opts into a short no-progress bound.
         DependencyHydrationPolicy {
             timeout: Duration::from_secs(3),
-            no_progress_timeout: Duration::from_millis(150),
+            no_progress_timeout: Duration::from_secs(3),
             heartbeat_interval: Duration::from_millis(10),
             is_cancelled: Arc::new(move || cancelled.load(Ordering::SeqCst)),
             on_progress: Arc::new(move |event| {
@@ -2070,10 +2073,13 @@ mod tests {
                 root.path(),
                 "fixture",
                 ".",
-                &hydration_policy(
-                    Arc::new(AtomicBool::new(false)),
-                    Arc::new(Mutex::new(Vec::new())),
-                ),
+                &DependencyHydrationPolicy {
+                    no_progress_timeout: Duration::from_millis(150),
+                    ..hydration_policy(
+                        Arc::new(AtomicBool::new(false)),
+                        Arc::new(Mutex::new(Vec::new())),
+                    )
+                },
             )
             .expect("bounded hydration outcome");
 
@@ -2082,7 +2088,10 @@ mod tests {
                 outcomes[0].termination,
                 DependencyHydrationTermination::NoProgress
             );
-            assert!(started.elapsed() < Duration::from_secs(2));
+            // NoProgress (asserted above) proves which bound fired; the elapsed
+            // check only proves it fired before the 3s total timeout and the 5s
+            // stall, leaving room for process teardown under a loaded host.
+            assert!(started.elapsed() < Duration::from_secs(3));
         });
     }
 
