@@ -1141,7 +1141,7 @@ mod tests {
             .expect("create private upload parent through protocol");
             let id = uuid::Uuid::new_v4();
             let destination = private_parent.join("evidence.bin");
-            fs::write(&destination, b"previous generation").expect("previous evidence");
+            fs::write(&destination, b"previous evidence").expect("previous evidence");
             let digest = format!("{:x}", sha2::Sha256::digest(&payload));
             let chunks = if payload.is_empty() {
                 vec![&[][..]]
@@ -1166,7 +1166,7 @@ mod tests {
                 offset += chunk.len();
                 assert_eq!(result["size_bytes"], json!(offset));
                 if !final_chunk {
-                    assert_eq!(fs::read(&destination).unwrap(), b"previous generation");
+                    assert_eq!(fs::read(&destination).unwrap(), b"previous evidence");
                 }
             }
             assert_eq!(fs::read(&destination).expect("published bytes"), payload);
@@ -1214,7 +1214,7 @@ mod tests {
         let runner = format!("chunk-wrong-digest-{}", uuid::Uuid::new_v4());
         let id = uuid::Uuid::new_v4();
         let destination = workspace.path().join("evidence.bin");
-        fs::write(&destination, b"previous generation").expect("previous evidence");
+        fs::write(&destination, b"previous evidence").expect("previous evidence");
         let mut body = request(workspace.path(), &runner, id);
         body["content_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(b"x"));
         body["final"] = json!(true);
@@ -1222,7 +1222,7 @@ mod tests {
         let error = upload_runner_file_chunk(Some(body), &trusted())
             .expect_err("wrong digest must reject publication");
         assert!(error.message.contains("declared digest or size"));
-        assert_eq!(fs::read(&destination).unwrap(), b"previous generation");
+        assert_eq!(fs::read(&destination).unwrap(), b"previous evidence");
         let staging = upload_staging_root().expect("staging");
         assert!(!staging.join(format!("{id}.payload")).exists());
         assert!(!staging.join(format!("{id}.json")).exists());

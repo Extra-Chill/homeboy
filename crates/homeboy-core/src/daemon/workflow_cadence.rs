@@ -13,16 +13,15 @@
 //! - **Exactly once per slot.** A slot's instance name is derived from the
 //!   slot, so its instance id is deterministic. Before admitting it the tick
 //!   records the slot as pending, with the job store it is admitted into;
-//!   after a crash the next tick finds it there (in this generation or a dead
-//!   or draining one) and completes the slot instead of admitting it again.
+//!   after a crash the restarted daemon finds it in that same store and
+//!   completes the slot instead of admitting it again.
 //!   Every registration write is a compare-and-set on the due time.
 //!
-//! Registrations outlive daemon generations, so they live in one SQLite file
-//! beside the generation registry rather than in a generation's job store. An
-//! instance is looked up in the store that admitted it, read-only, so overlap
-//! holds across daemon restarts and build rotations.
+//! Registrations outlive any one daemon process, so they live in one SQLite
+//! file beside the daemon's single job store. Every instance is admitted into
+//! and looked up in that one store, so overlap holds across daemon restarts.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -391,21 +390,21 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
     let workflow = cadence.workflow.clone();
     // A crash left this slot pending: complete it where it was admitted.
     if let Some(pending) = cadence.pending.clone() {
-        let admitted =
-            if instance_activity(store, pending.store.as_deref(), &pending.instance).is_some() {
-                Ok((pending.store.clone(), "existing"))
-            } else {
-                admit_slot(
-                    store,
-                    &slot_request(&cadence.request, &pending.instance_name),
-                )
-            };
+        let admitted = if instance_activity(store, &pending.instance).is_some() {
+            Ok((pending.store.clone(), "existing"))
+        } else {
+            admit_slot(
+                store,
+                &slot_request(&cadence.request, &pending.instance_name),
+            )
+        };
         finish(&workflow, due, &pending, &admitted)?;
         return Ok(fired(&workflow, &pending.instance, &admitted));
     }
-    let previous_active = cadence.last_instance.as_deref().is_some_and(|instance| {
-        instance_activity(store, cadence.last_instance_store.as_deref(), instance) == Some(true)
-    });
+    let previous_active = cadence
+        .last_instance
+        .as_deref()
+        .is_some_and(|instance| instance_activity(store, instance) == Some(true));
     match decide(&cadence, now_ms, previous_active) {
         Decision::NotDue => Ok(Value::Null),
         Decision::Skip {
@@ -484,19 +483,11 @@ fn admit_slot(store: &JobStore, request: &WorkflowJobRequest) -> Admission {
 }
 
 /// Whether `instance` is running (`Some(true)`), terminal (`Some(false)`), or
-/// unknown (`None`), asked of the store that admitted it: this daemon's own
-/// store, or another generation's store read without opening it.
-fn instance_activity(store: &JobStore, admitted_in: Option<&Path>, instance: &str) -> Option<bool> {
-    if let Some(job) = store.controller_job_for_key(instance) {
-        return Some(!job.status.is_terminal());
-    }
-    let path = admitted_in?;
-    if store.persistence_path().as_deref() == Some(path) {
-        return None;
-    }
-    JobStore::controller_job_active_at_path(path, instance)
-        .ok()
-        .flatten()
+/// unknown (`None`) in the daemon's one job store.
+fn instance_activity(store: &JobStore, instance: &str) -> Option<bool> {
+    store
+        .controller_job_for_key(instance)
+        .map(|job| !job.status.is_terminal())
 }
 
 // ---------------------------------------------------------------------------

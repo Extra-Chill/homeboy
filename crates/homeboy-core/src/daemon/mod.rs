@@ -42,8 +42,6 @@ pub mod controller_job_driver;
 #[cfg(test)]
 mod controller_terminal_regression;
 mod daemon_lease;
-pub mod lifecycle;
-pub mod lifecycle_apply;
 pub mod lifecycle_plan;
 mod lifetime;
 pub mod orchestration;
@@ -179,7 +177,7 @@ impl ExecLiveness {
 
 fn heartbeat_only_stall_reason(timeout: Duration) -> String {
     format!(
-        "heartbeat_only_stall: no child output, semantic progress, or advancing CPU for {}s; cancellation requested so daemon generation draining can converge",
+        "heartbeat_only_stall: no child output, semantic progress, or advancing CPU for {}s; cancellation requested so the daemon can converge",
         timeout.as_secs()
     )
 }
@@ -191,7 +189,7 @@ pub struct LocalControllerJobClient {
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
-    // different build cannot replace this generation after preflight.
+    // different build cannot replace this daemon after preflight.
     _admission_guard: Option<DaemonAdmissionGuard>,
 }
 
@@ -312,7 +310,7 @@ impl LocalControllerJobClient {
                     .then_some("homeboy daemon recover --yes");
                 let mut mismatch = Error::validation_invalid_argument(
                     "daemon_build_identity",
-                    "controller jobs require a current daemon generation",
+                    "controller jobs require a daemon running the current build",
                     daemon_identity.clone(),
                     None,
                 );
@@ -361,9 +359,10 @@ impl LocalControllerJobClient {
 
     /// Connect to an existing controller job served from `config_root`. This
     /// is the lifecycle-store transport: an injected lifecycle root cannot
-    /// route by consulting ambient HOME.
+    /// route by consulting ambient HOME. The daemon directory below it is
+    /// resolved exactly as the daemon itself resolves its one state directory.
     pub fn connect_existing_job_in_root(job_id: &str, config_root: &Path) -> Result<Self> {
-        Self::connect_to_serving_lease(job_id, config_root.join("daemon").join("state.json"))
+        Self::connect_to_serving_lease(job_id, paths::daemon_state_file_in_root(config_root))
     }
 
     fn connect_to_serving_lease(job_id: &str, state_path: PathBuf) -> Result<Self> {
@@ -751,7 +750,7 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
 
     // The lifecycle plan is the shared gate (#15557 C4): never rotate beside
     // a live workload process or an unleased daemon that may own the store.
-    if let Some(reason) = lifecycle_apply::mutation_refusal(&lifecycle_apply::plan_local()) {
+    if let Some(reason) = lifecycle_plan::mutation_refusal(&lifecycle_plan::plan_local()) {
         let mut error = Error::validation_invalid_argument(
             "daemon_build_identity",
             format!(
@@ -1181,7 +1180,7 @@ pub struct DaemonExactOrphanRecoveryResult {
     pub ownership_proof: Vec<String>,
     /// The daemon started after recovery. `None` when the caller asked for no
     /// replacement (`--no-replacement`), as the remote attested reconcile does
-    /// for a generation that is being retired.
+    /// when the controller owns what serves next.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement: Option<DaemonStartResult>,
 }
@@ -1491,7 +1490,7 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     let selected_owner_unverified = !validation.running && daemon_owner_lock_is_held_at(&path)?;
     let stale_reason = if selected_owner_unverified {
         let message = format!(
-            "selected daemon generation owner lock is held without a valid live lease at {}; replacement is blocked",
+            "daemon owner lock is held without a valid live lease at {}; replacement is blocked",
             path.display()
         );
         freshness.restartable = false;
@@ -5791,7 +5790,7 @@ mod tests {
             .is_some_and(|reason| reason.contains("heartbeat_only_stall")));
         assert!(
             store.active_runner_jobs().is_empty(),
-            "cancelled jobs cannot pin a draining generation"
+            "cancelled jobs cannot pin the daemon"
         );
     }
 
@@ -7496,7 +7495,7 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
     try_acquire_daemon_owner_lock_at(&state)
 }
 
-/// Inspect only the selected generation's existing lock. Status must not create
+/// Inspect only the daemon store's existing lock. Status must not create
 /// a store or a lock file while diagnosing a missing lease.
 fn daemon_owner_lock_is_held_at(state: &Path) -> Result<bool> {
     let path = state.with_file_name("owner.lock");

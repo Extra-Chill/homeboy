@@ -1698,6 +1698,37 @@ mod config_root_tests {
             resolved.display()
         );
     }
+
+    /// There is one daemon state directory. A relative one would resolve its
+    /// store and `admission.lock` against the caller's current directory, so
+    /// every ambient daemon path refuses it instead of guessing.
+    #[test]
+    fn the_daemon_state_dir_is_never_relative_to_the_current_dir() {
+        let env = guard();
+        let prior_state_dir = env::var(DAEMON_STATE_DIR_ENV).ok();
+
+        env.set(DAEMON_STATE_DIR_ENV, "daemon");
+        let override_error = daemon_state_file().expect_err("relative override");
+        env.remove(DAEMON_STATE_DIR_ENV);
+        env.set(HOMEBOY_CONFIG_ROOT_ENV, "relative-root");
+        let root_error = daemon_jobs_file().expect_err("relative config root");
+        env.set(HOMEBOY_CONFIG_ROOT_ENV, "/tmp/hb-daemon-root");
+        let absolute = daemon_state_file().expect("absolute state file");
+
+        match prior_state_dir {
+            Some(value) => env.set(DAEMON_STATE_DIR_ENV, &value),
+            None => env.remove(DAEMON_STATE_DIR_ENV),
+        }
+        assert!(
+            override_error.message.contains("relative"),
+            "{override_error:?}"
+        );
+        assert!(root_error.message.contains("relative"), "{root_error:?}");
+        assert_eq!(
+            absolute,
+            PathBuf::from("/tmp/hb-daemon-root/daemon/state.json")
+        );
+    }
 }
 
 #[cfg(test)]

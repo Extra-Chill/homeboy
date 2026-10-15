@@ -825,25 +825,25 @@ mod command_state_dir_tests {
 
     #[test]
     fn accepts_equals_state_dir_before_linux_ps_environment_suffix() {
-        let command = "homeboy daemon serve --state-dir=/tmp/generation HOME=/home/chubes";
+        let command = "homeboy daemon serve --state-dir=/tmp/selected-store HOME=/home/chubes";
 
         assert!(matches!(
             command_state_dir(command),
-            CommandStateDir::Proven("/tmp/generation")
+            CommandStateDir::Proven("/tmp/selected-store")
         ));
     }
 
     #[test]
     fn rejects_ordinary_trailing_argv_after_state_dir() {
         assert!(matches!(
-            command_state_dir("homeboy daemon serve --state-dir /tmp/generation trailing"),
+            command_state_dir("homeboy daemon serve --state-dir /tmp/selected-store trailing"),
             CommandStateDir::Ambiguous
         ));
     }
 
     #[test]
-    fn existing_daemon_with_ps_environment_suffix_is_unrelated_to_generation_store() {
-        let jobs_path = Path::new("/tmp/generation/jobs.json");
+    fn existing_daemon_with_ps_environment_suffix_is_unrelated_to_another_store() {
+        let jobs_path = Path::new("/tmp/selected-store/jobs.json");
         let candidate = parse_daemon_process_candidate(
             "42 /usr/bin/homeboy /usr/bin/homeboy daemon serve --addr 127.0.0.1:0 --startup-token token --state-dir /tmp/conventional HOME=/home/chubes",
             jobs_path,
@@ -1917,9 +1917,9 @@ pub fn reconcile_dead_lease_orphans(
                 )?;
                 store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
             },
-            // A remote attested reconcile targets one dead generation that is
-            // being retired; starting a daemon in its directory would revive
-            // it. The controller's own reconcile owns what serves next (#15556).
+            // A remote attested reconcile only terminalizes one dead lease's
+            // exact job set; the controller's own reconcile owns what serves
+            // next (#15556), so it may ask for no replacement here.
             start: || {
                 if start_replacement {
                     start_or_return_live_unlocked(addr).map(Some)
@@ -2361,7 +2361,7 @@ pub fn reconcile_unleased_candidates(
             .map(|candidate| candidate.pid)
             .collect();
         evidence.push(format!(
-            "{} active durable job(s) retain all candidate generations",
+            "{} active durable job(s) retain every candidate daemon process",
             result.active_jobs
         ));
         result.evidence = evidence;
@@ -2753,14 +2753,14 @@ fn start_or_return_live_unlocked_with_idle_timeout(
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
-        stop_stale_generation_for_start,
+        stop_stale_daemon_for_start,
         || spawn_and_wait_for_lease_attempt(addr, startup_token, idle_timeout, true, Vec::new()),
     )
 }
 
-/// Startup cleanup can retire a stale generation, so it must not pass a Cook
-/// that has verified that generation but not submitted.
-fn stop_stale_generation_for_start() -> Result<()> {
+/// Startup cleanup can stop a stale daemon, so it must not pass a Cook that
+/// has verified that daemon but not submitted.
+fn stop_stale_daemon_for_start() -> Result<()> {
     let _admission_fence = acquire_daemon_job_admission_fence()?;
     stop_unlocked().map(|_| ())
 }
