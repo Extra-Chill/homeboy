@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.3] - 2026-10-15
+
+### Changed
+- prove execution-step crash recovery with real processes
+
+### Fixed
+- let a live typed owner supersede a foreign terminal stamp; refuse silent drops
+- cook homeboy
+
 ## [0.428.2] - 2026-10-15
 
 ### Fixed
