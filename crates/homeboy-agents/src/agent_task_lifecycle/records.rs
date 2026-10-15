@@ -890,6 +890,20 @@ impl AgentTaskRunRecord {
             .filter(|value| !value.trim().is_empty())
     }
 
+    /// The controller job that owns this attempt's Lab staging, if any.
+    pub fn lab_staging_controller_job_id(&self) -> Option<&str> {
+        self.metadata
+            .get("lab_staging_controller_job_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Whether a runner job or a controller staging job owns execution. Such
+    /// an attempt has no local provider owner whose loss could interrupt it.
+    pub fn has_remote_execution_owner(&self) -> bool {
+        self.runner_job_id().is_some() || self.lab_staging_controller_job_id().is_some()
+    }
+
     pub fn runner_id(&self) -> Option<&str> {
         if let Some(handoff) = self.lab_handoff.as_ref() {
             if handoff.is_valid() {

@@ -480,13 +480,8 @@ pub(super) fn consume_execution_terminal_in_store(
         let zero = super::cook_recipe::has_unambiguous_zero_execution(&execution_record);
         if !delivery.cancelled && !zero {
             disposition = "execution_owned";
-            if execution_record.runner_job_id().is_none()
-                && execution_record.lab_handoff.as_ref().is_none_or(|handoff| {
-                    handoff.state != crate::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                })
-            {
-                reconcile = Some(execution_record.run_id.clone());
-            }
+            // Interrupted-owner recovery leaves remotely owned attempts alone.
+            reconcile = Some(execution_record.run_id.clone());
             return None;
         }
         if !delivery.cancelled && stored.metadata["detached_cook_handoff"]["state"] == "redirected"

@@ -5320,6 +5320,30 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
     });
 }
 
+/// A runner job or controller staging job owns a Lab attempt. A local
+/// observer exiting (detached launcher, execution step) must not interrupt it.
+#[test]
+fn interrupted_local_owner_leaves_remotely_owned_attempts_running() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        for (run_id, key) in [
+            ("remote-runner-job", "runner_job_id"),
+            ("remote-staging-job", "lab_staging_controller_job_id"),
+        ] {
+            submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+            mark_running(run_id).expect("running");
+            rewrite_record_for_test(run_id, |record| {
+                record.metadata[key] = json!("remote-owner");
+            })
+            .expect("remote owner fixture");
+            let before = store.read_record(run_id).expect("record");
+            let after = record_interrupted_local_owner_in_store(&store, run_id).expect("observed");
+            assert_eq!(after.state, AgentTaskRunState::Running, "{key}");
+            assert_eq!(after.revision, before.revision, "{key}");
+        }
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The durable provider success the recovery must preserve is recorded
 /// in the same store the dead-owner fixture is planted in and the recovery reads

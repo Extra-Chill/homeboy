@@ -7024,11 +7024,7 @@ fn run_cook_spine(
                 rooted_status(lifecycle_store, &run_id)?
             };
         }
-        let controller_owned_staging = record
-            .metadata
-            .get("lab_staging_controller_job_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|job_id| !job_id.is_empty());
+        let controller_owned_staging = record.lab_staging_controller_job_id().is_some();
         // This invocation owns the exact attempt, not its mission's latest
         // retry. Cancellation must end the observer and release its pin.
         if record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled {

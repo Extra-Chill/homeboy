@@ -148,10 +148,9 @@ fn sql_rows(path: &Path, sql: &str) -> Vec<Value> {
         .collect()
 }
 
+/// The daemon job store shares the observation database.
 fn job_db(context: &HermeticTestContext) -> PathBuf {
-    context
-        .daemon_dir()
-        .join("jobs.json.replay-tombstones.sqlite")
+    homeboy_core::paths::observation_db_in_root(&context.data_dir())
 }
 
 fn intents(context: &HermeticTestContext) -> Vec<Value> {
