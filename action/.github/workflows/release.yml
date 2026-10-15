@@ -505,17 +505,20 @@ jobs:
             --arg bump "${BUMP}" \
             --arg sha "${TAG_SHA}" \
             --arg run_url "${RUN_URL}" \
-            '{component:$component,repository:$repository,version:$version,tag:$tag,bump:$bump,sha:$sha,run_url:$run_url}' \
-            > "${RUNNER_TEMP}/client_payload.json"
+            --arg event_type "${DISPATCH_EVENT}" \
+            '{event_type:$event_type,client_payload:{component:$component,repository:$repository,version:$version,tag:$tag,bump:$bump,sha:$sha,run_url:$run_url}}' \
+            > "${RUNNER_TEMP}/dispatch_body.json"
 
           echo "Dispatching ${DISPATCH_EVENT} to ${DISPATCH_REPO} using ${source}"
-          cat "${RUNNER_TEMP}/client_payload.json"
+          cat "${RUNNER_TEMP}/dispatch_body.json"
 
+          # Send the whole body as JSON. `gh api -F key=@file` posts the file
+          # contents as a string, which GitHub rejects with HTTP 422
+          # ("client_payload ... is not an object").
           GH_TOKEN="${token}" gh api \
             --method POST \
             "repos/${DISPATCH_REPO}/dispatches" \
-            -f "event_type=${DISPATCH_EVENT}" \
-            -F "client_payload=@${RUNNER_TEMP}/client_payload.json"
+            --input "${RUNNER_TEMP}/dispatch_body.json"
 
   # ── Record failed SHA to prevent retry loops ──
   record-failure:
