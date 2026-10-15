@@ -130,6 +130,14 @@ pub(crate) fn promotion_cancellation() -> Arc<dyn Fn() -> bool + Send + Sync> {
     })
 }
 
+/// The gate supervision scope the innermost `with_gate_supervision` opened on
+/// this thread, if any. The shared gate runner consults it when a call site
+/// did not thread explicit supervision, so a Lab gate request never silently
+/// replaces the operator's declared budgets with built-in defaults (#15856).
+pub(crate) fn active_gate_supervision() -> Option<Arc<crate::agent_task_gate::GateSupervision>> {
+    GATE_SUPERVISION.with(|slot| slot.borrow().clone())
+}
+
 pub(crate) fn with_gate_supervision<T>(
     supervision: crate::agent_task_gate::GateSupervision,
     operation: impl FnOnce() -> Result<T>,

@@ -428,6 +428,21 @@ impl VerifyGateOptions {
         Duration::from_secs(self.gate_no_progress_timeout_seconds.max(1))
     }
 
+    /// Supervision carrying exactly the declared gate budgets with no-op
+    /// callbacks. Verified-base differential replays and replacement gates run
+    /// under this scope so a Lab runner enforces the operator's declared
+    /// budgets instead of its built-in defaults (#15856).
+    pub(crate) fn declared_supervision(&self) -> GateSupervision {
+        GateSupervision {
+            timeout: self.gate_timeout(),
+            no_progress_timeout: self.gate_no_progress_timeout(),
+            heartbeat_interval: self.gate_heartbeat_interval(),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(|| false),
+        }
+    }
+
     /// Toolchain preflight is opt-in. Gate commands are shell programs and may
     /// be shell builtins, provider-owned aliases, or compound expressions, so
     /// treating their first token as an executable changes their semantics.
@@ -2009,6 +2024,14 @@ fn run_gate_argv(
             placement::declared_runner(command).map(|runner| runner.unwrap_or_default())
         })?;
     if !runner_id.is_empty() {
+        // Call sites that do not thread explicit supervision (for example the
+        // verified-base differential replays) still run inside the declared
+        // `with_gate_supervision` scope. Fall back to that scope before any
+        // built-in default so the request the Lab runner enforces carries the
+        // operator's declared budgets instead of silently replacing them
+        // with 300s/1800s (#15856).
+        let scope = crate::agent_task_promotion::active_gate_supervision();
+        let supervision = execution.supervision.or(scope.as_deref());
         let request = placement::LabGateRequest {
             preflight_only: false,
             toolchains: vec![],
@@ -2026,14 +2049,14 @@ fn run_gate_argv(
             declared_plan: declared_plan.cloned(),
             timeout_seconds: execution
                 .timeout
+                .or_else(|| supervision.map(|policy| policy.timeout))
                 .unwrap_or(Duration::from_secs(1800))
                 .as_secs(),
-            no_progress_timeout_seconds: execution
-                .supervision
+            no_progress_timeout_seconds: supervision
                 .map(|policy| policy.no_progress_timeout.as_secs())
                 .unwrap_or(300),
         };
-        return placement::dispatch(cwd, &request, execution.supervision);
+        return placement::dispatch(cwd, &request, supervision);
     }
     run_gate_argv_local(
         cwd,
@@ -5248,6 +5271,80 @@ mod tests {
     }
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// `--gate-no-progress-timeout-seconds` (and the wall-clock budget) must
+    /// reach a Lab runner even for gate runs that do not thread explicit
+    /// supervision, such as the verified-base differential replays. Those runs
+    /// execute inside the declared `with_gate_supervision` scope; the request
+    /// builder previously ignored that scope and silently replaced the
+    /// declared budgets with hardcoded 300s/1800s defaults the runner then
+    /// enforced (Extra-Chill/homeboy#15856).
+    #[test]
+    fn lab_gate_request_budgets_inherit_the_declared_supervision_scope() {
+        struct CapturingTransport {
+            previous: Arc<dyn placement::LabGateTransport>,
+            captured: Arc<Mutex<Vec<placement::LabGateRequest>>>,
+        }
+        impl placement::LabGateTransport for CapturingTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &placement::LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<placement::LabGateReceipt> {
+                if request.runner_id != "budget-capture-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                self.captured.lock().unwrap().push(request.clone());
+                Err(Error::new(
+                    homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                    "request captured; execution not required",
+                    serde_json::json!({"gate_disposition": "unavailable"}),
+                ))
+            }
+        }
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        placement::register_lab_gate_transport(Arc::new(CapturingTransport {
+            previous: placement::active_transport(),
+            captured: Arc::clone(&captured),
+        }));
+        let workspace = tempfile::tempdir().expect("gate workspace");
+        let environment = AgentTaskGateEnvironmentPolicy {
+            lab_runner: Some("budget-capture-runner".to_string()),
+            ..Default::default()
+        };
+        let declared = VerifyGateOptions {
+            gate_timeout_seconds: 2100,
+            gate_no_progress_timeout_seconds: 1500,
+            ..Default::default()
+        };
+        // The verified-base differential replay shape: an explicit wall-clock
+        // deadline, no explicit supervision, inside the declared scope.
+        crate::agent_task_promotion::with_gate_supervision(declared.declared_supervision(), || {
+            run_gate_command_with_timeout(
+                workspace.path(),
+                1,
+                "true",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                workspace.path(),
+                declared.gate_timeout(),
+                &environment,
+                &[],
+            )
+        })
+        .expect("a refused transport yields a non-execution gate report");
+        let requests = captured.lock().expect("captured requests");
+        let request = requests.last().expect("captured Lab gate request");
+        assert_eq!(
+            (request.timeout_seconds, request.no_progress_timeout_seconds),
+            (2100, 1500),
+            "the Lab request must carry the declared budgets, not defaults"
+        );
+    }
 
     /// #14731: `homeboy review test` and equivalent portable-Lab-route
     /// commands exit `0` and print the runner-wait marker when they

@@ -7748,18 +7748,26 @@ fn run_cook_spine(
                     None,
                 )
             })?;
-            compare_gate_failures_to_verified_base(
-                &mut promotion,
-                std::path::Path::new(&repository_root),
-                std::path::Path::new(&repository_root),
-                &base_sha,
-                options.gates.gate_timeout(),
-                options
-                    .gates
-                    .gate_environment
-                    .admitted_component_id
-                    .as_deref(),
-                |_compared, _total| Ok(()),
+            // The differential replays run after the promotion's supervision
+            // scope closed. Reopen the declared scope so a Lab runner enforces
+            // the declared gate budgets instead of its defaults (#15856).
+            crate::agent_task_promotion::with_gate_supervision(
+                options.gates.declared_supervision(),
+                || {
+                    compare_gate_failures_to_verified_base(
+                        &mut promotion,
+                        std::path::Path::new(&repository_root),
+                        std::path::Path::new(&repository_root),
+                        &base_sha,
+                        options.gates.gate_timeout(),
+                        options
+                            .gates
+                            .gate_environment
+                            .admitted_component_id
+                            .as_deref(),
+                        |_compared, _total| Ok(()),
+                    )
+                },
             )?;
             lifecycle_store.record_promotion(
                 &run_id,
