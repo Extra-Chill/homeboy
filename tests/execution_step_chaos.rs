@@ -127,10 +127,10 @@ fn start_daemon(context: &HermeticTestContext, delivery_gate: bool) -> i32 {
     started["data"]["pid"].as_u64().unwrap() as i32
 }
 
+/// A killed daemon group can be orphaned onto this test binary when it is a
+/// child subreaper; the production probe reads such a zombie as exited.
 fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 only probes existence. Daemons are reparented away
-    // from libtest when their launcher exits, so no zombie lingers here.
-    unsafe { libc::kill(pid, 0) == 0 }
+    homeboy_core::process::pid_is_running(pid as u32)
 }
 
 fn sql_rows(path: &Path, sql: &str) -> Vec<Value> {
