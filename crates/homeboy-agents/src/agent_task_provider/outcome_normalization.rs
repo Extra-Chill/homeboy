@@ -181,7 +181,7 @@ const HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY: &str = "homeboy_empty_change_with_
 ///   `CandidateRecoverable` so a capture failure cannot discard real work
 ///   (#7719);
 /// - a `no_op` whose change set is known empty, including a provider `no_op`
-///   without any change artifact once [`materialize_verified_no_op_change_set`]
+///   without any change artifact once [`materialize_verified_no_change_set`]
 ///   recorded its empty patch (#15855).
 ///
 /// When the attempt checkout itself proves nothing changed (HEAD is still the
@@ -209,20 +209,34 @@ pub(crate) fn accept_verified_unchanged_empty_attempt(
     record_verified_unchanged_empty_attempt(outcome);
 }
 
-/// A provider may declare `no_op` without any change artifact, e.g. the local
-/// shell executor finishing without edits (#15855). When the attempt checkout
-/// proves nothing changed, Homeboy records that empty change set as its own
-/// empty patch in the executor artifact root, before artifact finalization, so
-/// the attempt carries the same durable patch identity as a provider's empty
-/// patch and follows the verified no-change path end to end.
-pub(super) fn materialize_verified_no_op_change_set(
+/// A provider may finish without any change artifact: declaring `no_op`, e.g.
+/// the local shell executor finishing without edits (#15855), or ending a
+/// clean turn as `succeeded` without editing, e.g. a CLI runtime whose patch
+/// Homeboy captures from the workspace. When the attempt checkout proves
+/// nothing changed, Homeboy records that empty change set as its own empty
+/// patch in the executor artifact root, before artifact finalization, so the
+/// attempt carries the same durable patch identity as a provider's empty patch
+/// and follows the verified no-change path end to end. Without it, a
+/// `succeeded` attempt that must produce a patch fails its required-artifact
+/// check and is reported as a provider failure although the provider ran
+/// cleanly.
+pub(super) fn materialize_verified_no_change_set(
     outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskRequest,
     artifact_root: &std::path::Path,
     provenance: &AgentTaskArtifactsPathProvenance,
     workspace_root: Option<&std::path::Path>,
     attempt_base: Option<&str>,
 ) {
-    if outcome.status != AgentTaskOutcomeStatus::NoOp
+    let claims_no_change = match outcome.status {
+        AgentTaskOutcomeStatus::NoOp => true,
+        AgentTaskOutcomeStatus::Succeeded => request
+            .canonical_artifact_declarations()
+            .iter()
+            .any(|declaration| declaration.required && declaration.name == "patch"),
+        _ => false,
+    };
+    if !claims_no_change
         || provenance.owner != "homeboy"
         || provenance.locality != "runner"
         || outcome.artifacts.iter().any(is_change_artifact)

@@ -1647,8 +1647,9 @@ fn run_materialized_provider_command_once_contained(
                 .attempt
                 .as_ref()
                 .map(|attempt| attempt.base_ref.as_str());
-            super::outcome_normalization::materialize_verified_no_op_change_set(
+            super::outcome_normalization::materialize_verified_no_change_set(
                 &mut outcome,
+                &request.request,
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
                 workspace_root,
