@@ -56,6 +56,7 @@ pub use records::{
     RUNNING_HEARTBEAT_STALE_MINUTES,
 };
 pub use run_failure_causes::{nested_failure_causes_from_run_detail, RunFailureCause};
+pub use store::coordination;
 pub use store::{
     directory_tree_sha256, ArtifactListFilter, ArtifactListPage, ArtifactPublication,
     ArtifactPublicationType, BoundedArtifactProjection, ControlPlaneActionClaim,

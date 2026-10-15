@@ -672,18 +672,15 @@ mod tests {
                 response.output.map(|output| output.stdout),
                 Some("arg".to_string())
             );
-            let records = home
-                .path()
-                .join(".local/share/homeboy/extension-execute-idempotency");
-            let record_path = fs::read_dir(records)
-                .expect("idempotency records")
-                .next()
-                .expect("idempotency record")
-                .expect("idempotency entry")
-                .path();
-            assert!(!fs::read_to_string(record_path)
-                .expect("idempotency record contents")
-                .contains("private-input-value"));
+            let store = homeboy_core::observation::ObservationStore::open_readonly_in_roots(
+                &homeboy_core::paths::PathRoots::from_environment().expect("roots"),
+            )
+            .expect("observation store");
+            let record = store
+                .coordination_record(execute_idempotency::NAMESPACE, &request.idempotency_key)
+                .expect("read idempotency record")
+                .expect("idempotency record");
+            assert!(!record.payload.to_string().contains("private-input-value"));
         });
     }
 

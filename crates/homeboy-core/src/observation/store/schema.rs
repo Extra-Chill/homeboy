@@ -17,7 +17,7 @@ use crate::{paths, Result};
 /// Changing the schema means editing the baseline, bumping this version, and
 /// renaming [`paths::OBSERVATION_DB_FILENAME`] to match, so the new schema gets
 /// its own store file while binaries on the old schema keep theirs.
-pub(crate) const SCHEMA_VERSION: i64 = 29;
+pub(crate) const SCHEMA_VERSION: i64 = 30;
 
 /// The full observation-store schema at [`SCHEMA_VERSION`].
 ///
@@ -306,6 +306,62 @@ CREATE TABLE control_plane_work_intents (
 );
 CREATE INDEX idx_control_plane_work_intents_pending
     ON control_plane_work_intents(created_at, id) WHERE state = 'pending';
+
+-- Generic coordination primitives (#15947). Each domain owns a namespace;
+-- none of these rows reference runs, so coordination outlives run retention.
+-- Mutable keyed state guarded by revision compare-and-set.
+CREATE TABLE coordination_records (
+    namespace TEXT NOT NULL,
+    record_key TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER,
+    PRIMARY KEY(namespace, record_key),
+    CHECK(revision > 0)
+);
+-- Claims, exclusive leases and counting semaphores: one row per holder.
+-- Exclusivity or capacity is decided inside one IMMEDIATE transaction.
+CREATE TABLE coordination_leases (
+    namespace TEXT NOT NULL,
+    lease_key TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    fence INTEGER NOT NULL,
+    owner_pid INTEGER,
+    owner_host TEXT,
+    owner_start_identity_json TEXT,
+    acquired_at_ms INTEGER NOT NULL,
+    renewed_at_ms INTEGER NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    weight_json TEXT NOT NULL DEFAULT '{}',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(namespace, lease_key, holder_token),
+    CHECK(fence > 0)
+);
+CREATE INDEX idx_coordination_leases_expiry
+    ON coordination_leases(namespace, expires_at_ms);
+-- The last fence issued per lease key. It survives lease deletion so a fence
+-- never repeats across release and reacquire.
+CREATE TABLE coordination_fences (
+    namespace TEXT NOT NULL,
+    lease_key TEXT NOT NULL,
+    last_fence INTEGER NOT NULL,
+    PRIMARY KEY(namespace, lease_key),
+    CHECK(last_fence > 0)
+);
+-- Append-only coordination audit trail.
+CREATE TABLE coordination_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_coordination_audit_subject
+    ON coordination_audit(namespace, subject_key, sequence DESC);
 "#;
 
 static SCHEMA_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -749,10 +805,10 @@ mod tests {
     /// baseline_schema_matches_the_pinned_fixture` after an intended change.
     const SCHEMA_FIXTURE_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/observation-schema/v29-baseline-schema.json"
+        "/tests/fixtures/observation-schema/v30-baseline-schema.json"
     );
     const MIGRATED_SCHEMA_FIXTURE: &str =
-        include_str!("../../../tests/fixtures/observation-schema/v29-baseline-schema.json");
+        include_str!("../../../tests/fixtures/observation-schema/v30-baseline-schema.json");
 
     fn migrated_schema_fixture() -> serde_json::Value {
         serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("schema fixture")
