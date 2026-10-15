@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.0] - 2026-10-15
+
+### Added
+- add v30 coordination primitive and migrate extension execute idempotency
+
+### Changed
+- collapse local controller generations into one state dir and job store
+
+### Fixed
+- harvest committed candidates regardless of outcome status
+
 ## [0.427.5] - 2026-10-15
 
 ### Fixed
