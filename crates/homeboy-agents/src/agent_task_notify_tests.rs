@@ -889,3 +889,113 @@ fn undelivered_continuation_failure_stays_eligible() {
             .unwrap());
     });
 }
+
+/// A transport that records each delivery, so a test can tell an announcement
+/// that was withheld from one that reached the operator.
+fn install_counting_transport(home: &std::path::Path) -> std::path::PathBuf {
+    let marker = home.join("deliveries");
+    let script = format!("echo delivered >> '{}'", marker.display());
+    install_transport("test.cook", vec!["sh", "-c", &script]);
+    set_default_transport("test.cook");
+    marker
+}
+
+fn deliveries(marker: &std::path::Path) -> usize {
+    std::fs::read_to_string(marker)
+        .map(|raw| raw.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn needs_attention_for_a_resolved_tracker_is_recorded_but_not_delivered() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        let tracker = "https://github.com/o/r/issues/628";
+
+        cook_terminal_with(&report("durable_failure", None), None, 1, |cook_id| {
+            assert_eq!(cook_id, "cook-abc");
+            Some(tracker.to_string())
+        });
+
+        assert_eq!(deliveries(&marker), 0, "resolved work must not page anyone");
+        let outcome = latest_delivery("cook-abc");
+        assert_eq!(outcome["status"], "suppressed");
+        assert_eq!(outcome["suppression_reason"], "tracker_resolved");
+        assert_eq!(outcome["tracker"], tracker);
+        assert_eq!(outcome["event_kind"], "needs_attention");
+        assert!(cook_terminal_announced("cook-abc"));
+        assert!(
+            !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-abc",
+                "test"
+            )
+            .unwrap(),
+            "a withheld announcement still consumes the once marker"
+        );
+    });
+}
+
+#[test]
+fn needs_attention_for_an_open_tracker_is_delivered() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        cook_terminal_with(&report("durable_failure", None), None, 1, |_| None);
+        assert_eq!(deliveries(&marker), 1);
+        assert_eq!(latest_delivery("cook-abc")["status"], "delivered");
+        assert!(cook_terminal_announced("cook-abc"));
+    });
+}
+
+#[test]
+fn success_is_announced_without_asking_the_tracker() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        let finalization = serde_json::json!({
+            "status": "review_ready",
+            "pr_url": "https://github.com/o/r/pull/9",
+            "pr_action": "created",
+        });
+        cook_terminal_with(&report("succeeded", Some(finalization)), None, 0, |_| {
+            panic!("a success never consults the tracker")
+        });
+        assert_eq!(deliveries(&marker), 1);
+    });
+}
+
+#[test]
+fn continuation_failure_for_a_resolved_tracker_is_not_delivered() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let marker = install_counting_transport(home.path());
+        let store = test_lifecycle_store();
+        let (cook_id, run_id) = ("cook-resolved", "cook-resolved-attempt-1-abcd1234");
+
+        cook_continuation_failed_with(cook_id, run_id, "internal.io_error", |_| {
+            Some("https://github.com/o/r/issues/628".to_string())
+        });
+
+        assert_eq!(deliveries(&marker), 0);
+        assert!(
+            !store
+                .claim_cook_continuation_failed_notification(cook_id, run_id)
+                .unwrap(),
+            "the withheld announcement consumes its once marker"
+        );
+
+        cook_continuation_failed_with(cook_id, "cook-resolved-attempt-2", "failed", |_| None);
+        assert_eq!(deliveries(&marker), 1, "open work still pages");
+    });
+}
+
+#[test]
+fn terminal_announced_ignores_undelivered_outcomes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        assert!(!cook_terminal_announced("cook-abc"), "no outcome yet");
+        cook_terminal(&report("durable_failure", None), None, 1);
+        assert_eq!(latest_delivery("cook-abc")["status"], "not_configured");
+        assert!(
+            !cook_terminal_announced("cook-abc"),
+            "an undelivered terminal leaves the continuation alert as the only signal"
+        );
+    });
+}
