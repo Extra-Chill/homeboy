@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.427.5] - 2026-10-15
+
+### Fixed
+- leave typed agent-task rows to their lifecycle reconciler
+- treat a committed candidate on the destination as already applied
+
 ## [0.427.4] - 2026-10-15
 
 ### Fixed
