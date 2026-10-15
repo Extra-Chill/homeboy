@@ -44,7 +44,7 @@ const STEP_EXIT_SCHEMA: &str = "homeboy/step-exit/v1";
 /// The daemon job id, injected into every step child so the child can bind
 /// its own durable records to the job that supervises it.
 pub const STEP_JOB_ID_ENV: &str = "HOMEBOY_STEP_JOB_ID";
-/// Exact supervising store, including a pinned daemon generation.
+/// Exact path of the supervising daemon job store.
 pub const STEP_JOB_STORE_ENV: &str = "HOMEBOY_STEP_JOB_STORE";
 /// Combined stdout/stderr of the child, below the job's artifact directory.
 pub const STEP_LOG_FILE: &str = "step.log";
@@ -1501,7 +1501,7 @@ mod tests {
             assert_eq!(
                 crate::api_jobs::JobStore::active_count_at_path(&path).unwrap(),
                 1,
-                "pending custody pins its daemon generation"
+                "pending custody keeps its job active in the daemon store"
             );
             let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let count = delivered.clone();

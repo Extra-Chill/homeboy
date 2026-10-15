@@ -671,14 +671,6 @@ impl JobStore {
             .map(|persistence| persistence.path.clone())
     }
 
-    /// Whether the controller job admitted under `key` in the store at `path`
-    /// is still active, read without opening the store, so another daemon
-    /// generation's store (live or dead) can answer. `None` when no submission
-    /// in that store names `key`.
-    pub(crate) fn controller_job_active_at_path(path: &Path, key: &str) -> Result<Option<bool>> {
-        sql_store::controller_job_active_readonly(path, key)
-    }
-
     /// Whether a durable job store exists for `path`: either the SQL store or
     /// a legacy `jobs.json` that has not been migrated yet. Never creates one.
     pub fn exists_at_path(path: &Path) -> bool {

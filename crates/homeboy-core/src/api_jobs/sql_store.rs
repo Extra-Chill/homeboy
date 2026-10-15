@@ -786,51 +786,6 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
     Ok(Some(jobs))
 }
 
-/// Whether the controller job admitted under `key` is active: its job row's
-/// status, else the retained or tombstoned terminal projection (terminal).
-/// `None` when the store does not exist or no submission names `key`.
-pub(super) fn controller_job_active_readonly(path: &Path, key: &str) -> Result<Option<bool>> {
-    let Some(connection) = open_sql_store_readonly(path)? else {
-        return Ok(None);
-    };
-    let invalid =
-        |error| Error::config_invalid_json(tombstone_path(path).display().to_string(), error);
-    let submission = connection
-        .query_row(
-            "SELECT body FROM daemon_job_submissions WHERE kind = ?1 AND key = ?2",
-            params![CONTROLLER_KIND, key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| store_error(path, "read controller submission", error))?
-        .map(|body| serde_json::from_str::<ControllerJobSubmission>(&body).map_err(invalid))
-        .transpose()?;
-    let Some(submission) = submission else {
-        let tombstoned = connection
-            .query_row(
-                "SELECT 1 FROM replay_tombstones WHERE kind = ?1 AND key = ?2",
-                params![CONTROLLER_KIND, key],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|error| store_error(path, "read replay tombstone", error))?;
-        return Ok(tombstoned.map(|()| false));
-    };
-    let stored = connection
-        .query_row(
-            "SELECT body FROM daemon_jobs WHERE job_id = ?1",
-            [submission.job_id.to_string()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| store_error(path, "read daemon job", error))?
-        .map(|body| serde_json::from_str::<StoredJob>(&body).map_err(invalid))
-        .transpose()?;
-    Ok(Some(
-        stored.is_some_and(|stored| !stored.job.status.is_terminal()),
-    ))
-}
-
 /// One job (without events) and the controller submissions that name it, for
 /// exact terminal-custody lookups.
 pub(super) fn read_job_and_controller_submissions(

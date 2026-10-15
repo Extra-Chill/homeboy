@@ -10,18 +10,25 @@
 //! These are the *local* frame. A report that has crossed an SSH boundary must
 //! be restated in controller frame first — running `homeboy daemon stop` on the
 //! controller stops the controller's daemon, not the runner's.
+//!
+//! [`plan_recovery`] is the one daemon recovery planner. There is one daemon
+//! state directory and one job store, so one authoritative status read decides
+//! both the executable repair and the single next lifecycle action
+//! ([`DaemonRecoveryPlan::lifecycle`]) that `daemon plan`, the mutation gate,
+//! and `daemon recover` all follow.
 
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{DaemonRepairStep, DaemonStatus};
+use super::lifecycle_plan::{Attestation, BlockCause, Plan, Step, WaitCause};
+use super::{DaemonProcessOwnership, DaemonRepairStep, DaemonStaleReasonCode, DaemonStatus};
 use crate::error::{ActionSafety, ExecutableAction};
 
 /// Stop the daemon recorded in the local state file.
 pub const DAEMON_STOP: &str = "daemon_stop";
 /// Start a replacement daemon.
 pub const DAEMON_START: &str = "daemon_start";
-/// Replace or reuse the daemon selected by the generation admission authority.
+/// Replace or reuse the daemon that owns the local store.
 pub const DAEMON_ENSURE_RUNNING: &str = "daemon_ensure_running";
 /// Adopt one proven-dead lease and reconcile the jobs it owned.
 pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
@@ -92,7 +99,7 @@ pub fn start() -> ExecutableAction {
 pub fn ensure_running() -> ExecutableAction {
     action(
         "daemon.ensure_running",
-        "ensure a fresh daemon for the current admission generation".to_string(),
+        "ensure a fresh daemon for the local store".to_string(),
         ["daemon".to_string(), "ensure-running".to_string()],
         ActionSafety::Mutating,
     )
@@ -208,34 +215,88 @@ pub struct DaemonRecoveryPlan {
     pub required_confirmations: Vec<String>,
     /// Whether every step is a mutation the plan can carry out on its own.
     pub executable: bool,
+    /// The same decision as the single next lifecycle action. `daemon plan`
+    /// and the mutating entry points' safety gate read this, so they can never
+    /// disagree with what `daemon recover` executes.
+    pub lifecycle: Plan,
 }
 
 impl DaemonRecoveryPlan {
-    fn nothing(reason: impl Into<String>) -> Self {
+    fn nothing(reason: impl Into<String>, lifecycle: impl FnOnce(String) -> Plan) -> Self {
+        let reason = reason.into();
         Self {
             steps: Vec::new(),
-            reason: reason.into(),
+            lifecycle: lifecycle(reason.clone()),
+            reason,
+            required_confirmations: Vec::new(),
+            executable: false,
+        }
+    }
+
+    /// A read-only plan: re-read the evidence, carry out nothing.
+    fn diagnose(reason: String, lifecycle: impl FnOnce(String) -> Plan) -> Self {
+        Self {
+            steps: vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
+            lifecycle: lifecycle(reason.clone()),
+            reason,
             required_confirmations: Vec::new(),
             executable: false,
         }
     }
 }
 
+/// Live daemon processes that hold no lease but may own this store. The
+/// recorded lease's own PID is excluded: it is the store's daemon.
+fn live_unleased_candidates(status: &DaemonStatus) -> Vec<u32> {
+    let lease_pid = status.state.as_ref().map(|state| state.pid);
+    status
+        .process_candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.ownership,
+                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
+            ) && Some(candidate.pid) != lease_pid
+                && crate::process::pid_is_running(candidate.pid)
+        })
+        .map(|candidate| candidate.pid)
+        .collect()
+}
+
 /// Resolve the recovery for one daemon status report.
 ///
-/// The freshness report already computes the local-frame repair for every case
-/// it can authorize, so this dispatches to that plan rather than restating the
-/// table. It adds the two cases the freshness report deliberately leaves empty:
-/// an exact PID-less job set behind a dead lease, which needs an operator
-/// attestation, and the unauthorized remainder, which gets an explicit reason
-/// and a read-only step instead of nothing at all.
+/// This is the one daemon recovery planner. The freshness report already
+/// computes the local-frame repair for every case it can authorize, so this
+/// dispatches to that plan rather than restating the table. It adds what the
+/// freshness report deliberately leaves out: a dead lease whose workload is
+/// still running (wait), a live daemon process that holds no lease (blocked),
+/// an exact PID-less job set behind a dead lease (operator attestation), and
+/// the unauthorized remainder, which gets an explicit reason and a read-only
+/// step instead of nothing at all. Each outcome carries its lifecycle verdict.
 pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
+    let mut plan = plan_recovery_steps(status);
+    // A lease that cannot be decoded is not a lifecycle verdict anyone may
+    // act on beyond the corrupt-lease repair the freshness report authorizes.
+    if status.freshness.stale_reason_code == Some(DaemonStaleReasonCode::LeaseCorrupt)
+        && !plan.executable
+    {
+        plan.lifecycle = Plan::Blocked {
+            cause: BlockCause::Unreadable,
+            reason: plan.reason.clone(),
+        };
+    }
+    plan
+}
+
+fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
     let freshness = &status.freshness;
     if freshness.fresh && freshness.stale_reason_code.is_none() {
         return DaemonRecoveryPlan::nothing(
             "daemon lease is fresh; there is nothing to recover".to_string(),
+            |_| Plan::Converged,
         );
     }
+    let pid_dead = freshness.stale_reason_code == Some(DaemonStaleReasonCode::PidDead);
 
     // A live or unverifiable recorded owner is never eligible for automatic
     // adoption or operator-attested PID-less recovery. The freshness report
@@ -244,7 +305,7 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // A job whose recorded child process is still alive is not orphaned: it is
     // finishing. Recommending the attested reconcile would only be refused at
     // apply, so say what to wait for instead (#15556).
-    if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead) {
+    if pid_dead {
         let live = status
             .active_job_recovery_evidence
             .iter()
@@ -258,11 +319,51 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
             })
             .collect::<Vec<_>>();
         if !live.is_empty() {
-            return DaemonRecoveryPlan {
-                steps: vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
-                reason: format!(
+            return DaemonRecoveryPlan::diagnose(
+                format!(
                     "dead daemon lease still has running workload process(es) for job(s) {}; wait for them to exit, then recover",
                     live.join(", ")
+                ),
+                |reason| Plan::Wait {
+                    cause: WaitCause::LiveWorkload,
+                    reason,
+                },
+            );
+        }
+    }
+
+    // Nothing serves the store, yet a live daemon process that holds no lease
+    // may own it. Any start, adoption, or stop could race that process, so
+    // nothing proceeds until the typed candidate set is reviewed. A dead
+    // lease's own jobs are decided first: their recovery re-proves ownership
+    // under the owner lock.
+    let dead_lease_jobs = status.state.is_some()
+        && !status.running
+        && !status.active_job_recovery_evidence.is_empty();
+    if !status.running
+        && !dead_lease_jobs
+        && freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseCorrupt)
+    {
+        let unleased = live_unleased_candidates(status);
+        if !unleased.is_empty() {
+            let pids = unleased
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return DaemonRecoveryPlan {
+                steps: vec![DaemonRepairStep::executable(
+                    DAEMON_RECONCILE_UNLEASED_CANDIDATES,
+                    reconcile_unleased_candidates(),
+                )],
+                lifecycle: Plan::Blocked {
+                    cause: BlockCause::UnleasedProcess,
+                    reason: format!(
+                        "live daemon process(es) {pids} hold no lease; no process is signaled and no daemon is started while ownership is unresolved"
+                    ),
+                },
+                reason: format!(
+                    "live daemon process(es) {pids} hold no lease; review the typed candidate set before explicit apply"
                 ),
                 required_confirmations: Vec::new(),
                 executable: false,
@@ -270,8 +371,7 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         }
     }
 
-    let requires_exact_dead_lease_recovery = freshness.stale_reason_code
-        == Some(super::DaemonStaleReasonCode::PidDead)
+    let requires_exact_dead_lease_recovery = pid_dead
         && status.active_job_recovery_evidence.iter().any(|evidence| {
             matches!(
                 evidence.disposition,
@@ -294,6 +394,16 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
             .flat_map(|action| action.required_confirmations.iter().cloned())
             .collect();
         return DaemonRecoveryPlan {
+            lifecycle: Plan::Transition {
+                step: Step::Repair {
+                    lease_id: freshness.lease_id.clone(),
+                    codes: freshness
+                        .repair_plan
+                        .iter()
+                        .map(|step| step.code.clone())
+                        .collect(),
+                },
+            },
             steps: freshness.repair_plan.clone(),
             reason,
             required_confirmations,
@@ -308,27 +418,41 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // filled from the report, while the workload attestation cannot be.
     //
     // Jobs with durable terminal evidence (a terminal linked durable run or a
-    // recorded terminal result) prove no workload remains, so they are
-    // reconciled by the stop gate and never require the attestation.
-    let job_ids: Vec<Uuid> = status
-        .active_job_recovery_evidence
-        .iter()
-        .filter(|evidence| {
-            evidence.disposition
-                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-        })
-        .map(|evidence| evidence.job_id)
-        .collect();
-    if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead) {
+    // recorded terminal result) prove no workload remains, so they never
+    // require the attestation on their own. They are still active in the
+    // store, so the compare-and-swap names them with the rest.
+    let unproven = status.active_job_recovery_evidence.iter().any(|evidence| {
+        evidence.disposition
+            != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+    });
+    if pid_dead {
         let Some(lease_id) = freshness.lease_id.as_deref() else {
             return DaemonRecoveryPlan::nothing(
                 "daemon PID is dead but the recorded lease identity is unavailable".to_string(),
+                |reason| Plan::Blocked {
+                    cause: BlockCause::Unreadable,
+                    reason,
+                },
             );
         };
-        if !job_ids.is_empty() {
+        if unproven {
+            let job_ids: Vec<Uuid> = status
+                .active_job_recovery_evidence
+                .iter()
+                .map(|evidence| evidence.job_id)
+                .collect();
             let action = reconcile_dead_lease_orphans(lease_id, &job_ids);
             let required_confirmations = action.required_confirmations.clone();
             return DaemonRecoveryPlan {
+                lifecycle: Plan::NeedsAttestation(Attestation {
+                    lease_id: lease_id.to_string(),
+                    state_dir: std::path::Path::new(&status.state_path)
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_default(),
+                    job_ids: job_ids.clone(),
+                    confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
+                }),
                 steps: vec![DaemonRepairStep::executable(
                     DAEMON_RECONCILE_DEAD_LEASE_ORPHANS,
                     action,
@@ -355,16 +479,21 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         && status.process_candidates.iter().any(|candidate| {
             matches!(
                 candidate.ownership,
-                super::DaemonProcessOwnership::Owning | super::DaemonProcessOwnership::Ambiguous
+                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
             )
         })
     {
+        let reason = "lease recovery exposed unleased foreground daemon candidates; review the typed candidate set before explicit apply".to_string();
         return DaemonRecoveryPlan {
             steps: vec![DaemonRepairStep::executable(
                 DAEMON_RECONCILE_UNLEASED_CANDIDATES,
                 reconcile_unleased_candidates(),
             )],
-            reason: "lease recovery exposed unleased foreground daemon candidates; review the typed candidate set before explicit apply".to_string(),
+            lifecycle: Plan::Blocked {
+                cause: BlockCause::Unauthorized,
+                reason: reason.clone(),
+            },
+            reason,
             required_confirmations: Vec::new(),
             executable: false,
         };
@@ -382,12 +511,21 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         ),
         None => "daemon is not fresh and recorded no stale reason code".to_string(),
     };
-    DaemonRecoveryPlan {
-        steps: vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
-        reason,
-        required_confirmations: Vec::new(),
-        executable: false,
-    }
+    // A live stale daemon that still owns jobs is replaced once they finish.
+    let busy = status.running && freshness.active_jobs > 0;
+    DaemonRecoveryPlan::diagnose(reason, |reason| {
+        if busy {
+            Plan::Wait {
+                cause: WaitCause::BusyStaleDaemon,
+                reason,
+            }
+        } else {
+            Plan::Blocked {
+                cause: BlockCause::Unauthorized,
+                reason,
+            }
+        }
+    })
 }
 
 /// Whether an admission preflight may apply this daemon's canonical idle
@@ -395,7 +533,7 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 ///
 /// This policy is intentionally independent of the command requesting daemon
 /// admission. It trusts only the authoritative status report and accepts only
-/// the bounded generation-replacement plan: an explicitly restartable lease whose active
+/// the bounded in-place replacement plan: an explicitly restartable lease whose active
 /// jobs all carry durable terminal evidence (so no workload remains), no
 /// attestations, and no other mutation mixed into the plan.
 pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
@@ -602,6 +740,7 @@ mod tests {
         assert!(plan.steps.is_empty());
         assert!(!plan.executable);
         assert!(plan.reason.contains("fresh"), "{}", plan.reason);
+        assert_eq!(plan.lifecycle, Plan::Converged);
     }
 
     /// #11105: a report the freshness table authorizes nothing for used to
@@ -621,6 +760,13 @@ mod tests {
             !plan.executable,
             "a read-only diagnosis is not a repair to apply"
         );
+        assert!(matches!(
+            plan.lifecycle,
+            Plan::Blocked {
+                cause: BlockCause::Unauthorized,
+                ..
+            }
+        ));
         assert!(
             plan.reason.contains("authorizes no automatic recovery"),
             "{}",
@@ -660,6 +806,19 @@ mod tests {
         );
         assert!(args.contains(&Uuid::from_u128(1).to_string()));
         assert!(args.contains(&LEASE_ID.to_string()));
+        // The lifecycle verdict names the same exact set in the store's frame.
+        let Plan::NeedsAttestation(attestation) = &plan.lifecycle else {
+            panic!("expected an attestation verdict: {:?}", plan.lifecycle);
+        };
+        assert_eq!(attestation.lease_id, LEASE_ID);
+        assert_eq!(
+            attestation.job_ids,
+            vec![Uuid::from_u128(1), Uuid::from_u128(2)]
+        );
+        assert_eq!(
+            attestation.state_dir,
+            std::path::Path::new(&status.state_path).parent().unwrap()
+        );
         assert_eq!(
             plan.required_confirmations,
             vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
@@ -668,9 +827,10 @@ mod tests {
     }
 
     /// #13619: durable terminal evidence proves no workload remains, so those
-    /// jobs are reconciled by the stop gate without an operator attestation
-    /// and are excluded from the attestation job set. Only the genuinely
-    /// ambiguous live workload still demands the confirmation.
+    /// jobs never demand an operator attestation on their own. Only the
+    /// genuinely ambiguous live workload does. The store's compare-and-swap
+    /// covers the complete active set, so once an attestation is required it
+    /// names the terminal-evidence job too.
     #[test]
     fn terminal_evidence_jobs_are_reconciled_without_workload_attestation() {
         let mut status = status(
@@ -688,8 +848,8 @@ mod tests {
         assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
         let args = &plan.steps[0].action.as_ref().expect("argv").args;
         assert!(
-            !args.contains(&Uuid::from_u128(7).to_string()),
-            "terminal-evidence job never requires attestation: {args:?}"
+            args.contains(&Uuid::from_u128(7).to_string()),
+            "the compare-and-swap names the complete active set: {args:?}"
         );
         assert!(
             args.contains(&Uuid::from_u128(8).to_string()),
@@ -786,6 +946,7 @@ mod tests {
         assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
         assert!(plan.reason.contains("child pid 4242"), "{}", plan.reason);
         assert!(plan.required_confirmations.is_empty());
+        assert!(super::super::lifecycle_plan::mutation_refusal(&plan.lifecycle).is_some());
     }
 
     #[test]
@@ -805,6 +966,15 @@ mod tests {
         assert!(plan.executable);
         assert_eq!(plan.steps[0].code, DAEMON_ADOPT_ORPHAN);
         assert!(plan.required_confirmations.is_empty());
+        assert_eq!(
+            plan.lifecycle,
+            Plan::Transition {
+                step: Step::Repair {
+                    lease_id: Some(LEASE_ID.to_string()),
+                    codes: vec![DAEMON_ADOPT_ORPHAN.to_string()],
+                },
+            }
+        );
     }
 
     #[test]
@@ -835,6 +1005,13 @@ mod tests {
         assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
         assert!(!plan.executable);
         assert!(plan.required_confirmations.is_empty());
+        assert!(matches!(
+            plan.lifecycle,
+            Plan::Wait {
+                cause: WaitCause::BusyStaleDaemon,
+                ..
+            }
+        ));
         assert!(plan.steps.iter().all(|step| {
             step.code != DAEMON_RECONCILE_DEAD_LEASE_ORPHANS
                 && !step.command.contains(CONFIRM_WORKLOAD_PROCESSES_ABSENT)
@@ -859,6 +1036,21 @@ mod tests {
         assert!(plan.executable);
         assert!(plan.required_confirmations.is_empty());
         assert!(authorizes_automatic_idle_restart(&status));
+    }
+
+    fn unleased_candidate() -> super::super::DaemonProcessCandidate {
+        super::super::DaemonProcessCandidate {
+            pid: 0,
+            process_start_identity: None,
+            executable: "homeboy".to_string(),
+            executable_digest: None,
+            cmdline: "homeboy daemon serve".to_string(),
+            bind_endpoint: None,
+            durable_store_path: None,
+            build_identity: None,
+            startup_token: None,
+            ownership: DaemonProcessOwnership::Unrelated,
+        }
     }
 
     fn recovery_evidence(job_id: Uuid) -> crate::api_jobs::DaemonActiveJobRecoveryEvidence {
@@ -892,6 +1084,40 @@ mod tests {
             disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence,
             ..recovery_evidence(job_id)
         }
+    }
+
+    /// Nothing serves the store but a live daemon process holds no lease: the
+    /// adoption the freshness report offers would race that process, so the
+    /// one planner blocks it and the mutation gate refuses.
+    #[test]
+    fn a_live_unleased_process_blocks_a_dead_lease_without_jobs() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::PidDead),
+            vec![DaemonRepairStep::executable(
+                DAEMON_ADOPT_ORPHAN,
+                adopt_orphan(LEASE_ID),
+            )],
+            0,
+        );
+        status.running = false;
+        status.process_candidates = vec![super::super::DaemonProcessCandidate {
+            pid: std::process::id(),
+            ownership: DaemonProcessOwnership::Ambiguous,
+            ..unleased_candidate()
+        }];
+
+        let plan = plan_recovery(&status);
+
+        assert!(!plan.executable);
+        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_UNLEASED_CANDIDATES);
+        assert!(matches!(
+            plan.lifecycle,
+            Plan::Blocked {
+                cause: BlockCause::UnleasedProcess,
+                ..
+            }
+        ));
+        assert!(super::super::lifecycle_plan::mutation_refusal(&plan.lifecycle).is_some());
     }
 
     #[test]

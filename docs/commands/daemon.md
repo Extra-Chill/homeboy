@@ -15,6 +15,7 @@ homeboy daemon <COMMAND>
 - `stop` — gracefully stop the background daemon recorded in the state file
 - `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
 - `recover` — resolve and run the right recovery from the current status report
+- `plan` — print the one next lifecycle action (read-only; schema `homeboy/daemon-lifecycle-plan/v1`)
 - `broker-config` — render a deployable reverse-runner broker service recipe
 
 ## Daemon lifetime
@@ -30,13 +31,25 @@ durable store. Disposable clients do not need to leave a resident process behind
 appropriate for workflow cadences and services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
 window for a supervised launch, or `0` for a resident automatic launch. Foreground
-`serve` lifetime is owned by its calling service manager. Superseded resident generations
-also become bounded once their own durable work drains.
+`serve` lifetime is owned by its calling service manager.
 
-Only the admission-owning generation runs global scheduling, notification, and
-orchestration passes. Older generations maintain their own jobs while draining.
-One blocked generation retirement does not prevent independent idle generations
-from being retired; failed entries retain their evidence and are retried.
+## One daemon store
+
+Homeboy runs one local daemon per state directory, with one durable SQLite job
+store. The state directory is `HOMEBOY_DAEMON_STATE_DIR` when set, otherwise
+`<config root>/daemon` (normally `~/.config/homeboy/daemon/`). It must be an
+absolute path; a relative one is refused rather than resolved against the
+current directory. The lease (`state.json`), job store, `owner.lock`, and
+`admission.lock` all live there.
+
+Every reader and writer resolves that same store: `daemon status`, `daemon
+plan`, `daemon recover`, `daemon jobs`, the Activity daemon-jobs provider,
+`self`, discovery, and controller completion custody. A second
+`ensure-running` while a live daemon owns the store returns that daemon.
+
+The only continuity mechanism is restart-resume: a replacement daemon in the
+same directory recovers the store's controller jobs at startup and re-adopts
+still-running step-job children.
 
 ## Controller completion custody
 
@@ -72,13 +85,11 @@ candidate command lines, runtime-path, termination, and job-recovery evidence.
 
 `homeboy daemon status` already computes the repair its own evidence
 authorizes and reports it as `freshness.repair_plan`. `homeboy daemon recover`
-is the dispatcher for that plan: the status resolves the selected generation,
-store, lease, and protected jobs. Before mutation, recovery re-reads that same
-authority identity and refuses with `stale_daemon_recovery_plan` and a dry-run
-handoff if the authority or protected job set changed. Restartable stale
-generations use `daemon ensure-running` so replacement is rotated through the
-admission registry; recovery does not stop a registered-generation store and
-then start in the caller's legacy state directory. After `--yes` applies every
+is the dispatcher for that plan: the status resolves the store, lease, and
+protected jobs. Before mutation, recovery re-reads that same authority identity
+and refuses with `stale_daemon_recovery_plan` and a dry-run handoff if the
+authority or protected job set changed. A restartable stale daemon is replaced
+in place through `daemon ensure-running`. After `--yes` applies every
 step, a final authoritative status read must prove the selected daemon fresh
 before the command succeeds. Nothing is transcribed by hand between commands.
 
@@ -98,6 +109,15 @@ plan and any applied-step evidence.
 A report the evidence authorizes nothing for does not produce an empty plan. It
 produces the read-only `daemon_diagnose` step and `blocked_on`, stating in the
 evidence's own words why no mutation was resolved.
+
+One planner decides both the executable steps and the single next lifecycle
+action. `recover` reports that action as `lifecycle_plan`, and `homeboy daemon
+plan` prints it: `converged`, `transition` (the authorized repair),
+`needs_attestation` (the exact dead-lease job set), `wait` (a live workload
+process, or a busy stale daemon), or `blocked`. The explicit mutating
+subcommands (`adopt-orphan`, `reconcile-dead-lease-orphans`,
+`reconcile-leaseless-orphans`) refuse while that plan waits on a live workload
+or is blocked by a live daemon process that holds no lease.
 
 The explicit subcommands below remain available as escape hatches for cases the
 dispatcher cannot resolve — notably `recover-missing-lease-state`, whose
@@ -123,9 +143,9 @@ the lease that last claimed its execution. The directory's exclusive owner lock
 admits one replacement, so concurrent adopters converge on one driver.
 
 The next daemon-backed command starts the replacement, and its startup
-recovery adopts the dead lease's work. `homeboy daemon recover --yes` follows
-the lifecycle plan (`start_daemon`, `reconcile_proven_jobs`, or
-`resume_driver_work`) immediately, and `homeboy daemon adopt-orphan
+recovery adopts the dead lease's work. `homeboy daemon recover --yes` applies
+the status report's repair (orphan adoption or `ensure-running`) immediately,
+and `homeboy daemon adopt-orphan
 --lease-id <lease>` adopts one exact dead lease. A dead daemon with a live
 workload process waits for it; one that needs an operator attestation still
 requires `--confirm-workload-processes-absent`.
@@ -321,4 +341,4 @@ preview/apply rules for future write endpoints.
 
 ## Workflow cadences
 
-A running daemon admits due [workflow cadences](workflow.md#cadence-every) without an external timer. The admitting daemon's orchestration tick (every 60 seconds by default, `HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS`) admits one instance per due slot; `0` disables the tick and with it every cadence. Registrations live in `workflow-cadences.sqlite` in the daemon state directory, so they survive daemon restarts and build rotations. At start the daemon registers the built-in `homeboy.retention` cadence unless the operator cancelled it.
+A running daemon admits due [workflow cadences](workflow.md#cadence-every) without an external timer. The admitting daemon's orchestration tick (every 60 seconds by default, `HOMEBOY_DAEMON_ORCHESTRATION_TICK_SECS`) admits one instance per due slot; `0` disables the tick and with it every cadence. Registrations live in `workflow-cadences.sqlite` in the daemon state directory, so they survive daemon restarts and upgrades. At start the daemon registers the built-in `homeboy.retention` cadence unless the operator cancelled it.

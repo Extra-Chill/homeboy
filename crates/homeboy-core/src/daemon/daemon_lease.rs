@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn daemon_state_identity_binds_the_store_paths_even_when_bytes_match() {
         let root = tempfile::tempdir().expect("identity root");
-        let a = root.path().join("generation-a");
+        let a = root.path().join("store-a");
         let b = root.path().join("legacy");
         std::fs::create_dir_all(&a).unwrap();
         std::fs::create_dir_all(&b).unwrap();
@@ -465,11 +465,10 @@ mod tests {
         );
     }
 
-    /// A stale but idle report routes replacement through the generation-aware
-    /// lifecycle rather than composing a stop in one store and a start in
-    /// another.
+    /// A stale but idle report routes replacement through `ensure-running`
+    /// on the one store rather than composing a separate stop and start.
     #[test]
-    fn a_restartable_report_uses_generation_aware_ensure_running() {
+    fn a_restartable_report_uses_ensure_running() {
         let report = freshness_report_from_validation(
             &restartable_validation(Some("lease-restartable".to_string())),
             0,

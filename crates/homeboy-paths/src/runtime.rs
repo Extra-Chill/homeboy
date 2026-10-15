@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use homeboy_error::Result;
+use homeboy_error::{Error, Result};
 
 use super::{homeboy, homeboy_data, sanitize_path_segment};
 
 /// Daemon runtime state directory (~/.config/homeboy/daemon/).
 /// Override only the daemon's lease/job store. This deliberately leaves HOME
-/// and normal config resolution intact for generation-scoped daemon processes.
+/// and normal config resolution intact for a daemon serving an explicit store.
 pub const DAEMON_STATE_DIR_ENV: &str = "HOMEBOY_DAEMON_STATE_DIR";
 
 /// The startup token a daemon persists into its own session lease
@@ -43,13 +43,36 @@ fn daemon_state_dir_in_root(config_root: &Path) -> PathBuf {
 /// When `DAEMON_STATE_DIR_ENV` is set, `daemon_state_dir_in_root` replaces the
 /// whole daemon directory and never joins its `config_root` argument into a
 /// path — so home resolution is skipped rather than run and discarded. That
-/// keeps a generation-scoped daemon carrying an explicit state directory from
-/// newly failing on an unresolvable home, which is the pre-injection behavior.
+/// keeps a daemon carrying an explicit state directory from failing on an
+/// unresolvable home.
+///
+/// There is one daemon state directory, and every lease, job store, and lock
+/// (`owner.lock`, `admission.lock`) hangs from it. A relative directory would
+/// silently resolve against whatever the caller's current directory happens
+/// to be, splitting the store and its fences, so it is refused.
 fn ambient_daemon_config_root() -> Result<PathBuf> {
-    if daemon_state_dir_override().is_some() {
+    if let Some(state_dir) = daemon_state_dir_override() {
+        require_absolute_daemon_dir(&state_dir, DAEMON_STATE_DIR_ENV)?;
         return Ok(PathBuf::new());
     }
-    homeboy()
+    let root = homeboy()?;
+    require_absolute_daemon_dir(&root.join("daemon"), "config_root")?;
+    Ok(root)
+}
+
+fn require_absolute_daemon_dir(state_dir: &Path, field: &str) -> Result<()> {
+    if state_dir.is_absolute() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        field,
+        format!(
+            "daemon state directory `{}` is relative; it must be absolute so every daemon reader and lock resolves the same store",
+            state_dir.display()
+        ),
+        Some(state_dir.display().to_string()),
+        None,
+    ))
 }
 
 /// Daemon runtime state file below an already-resolved config root.

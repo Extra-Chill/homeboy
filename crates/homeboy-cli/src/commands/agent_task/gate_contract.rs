@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn preview_validates_cargo_shape_without_compiling_the_workspace() {
         let entries = validate_cargo_gate_contracts(
-            ["cargo test generation_store".to_string()],
+            ["cargo test job_store".to_string()],
             Some(Path::new("/workspace-without-a-cargo-manifest")),
         )
         .expect("module gate shape");

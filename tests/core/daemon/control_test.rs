@@ -68,7 +68,7 @@ fn stale_start_cleanup_waits_for_cook_generation_admission() {
         let (finished_tx, finished_rx) = mpsc::channel();
         std::thread::spawn(move || {
             attempt_tx.send(()).expect("report startup cleanup attempt");
-            super::stop_stale_generation_for_start().expect("stale startup cleanup");
+            super::stop_stale_daemon_for_start().expect("stale startup cleanup");
             finished_tx
                 .send(())
                 .expect("report startup cleanup completion");

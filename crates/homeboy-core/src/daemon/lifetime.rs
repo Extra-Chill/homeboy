@@ -131,7 +131,7 @@ pub(super) fn running_executable_replaced() -> bool {
 }
 
 /// Whether `installed` now names a different file than `running_image`.
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "linux", test)))]
 fn replaced_relative_to(running_image: &std::path::Path, installed: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let (Ok(running), Ok(installed)) = (

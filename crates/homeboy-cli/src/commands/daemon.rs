@@ -178,10 +178,10 @@ enum DaemonCommand {
         #[arg(long, requires = "lease_id")]
         force: bool,
     },
-    /// Show the daemon lifecycle view and its one next action (read-only).
+    /// Show the daemon's one next lifecycle action and its recovery plan (read-only).
     ///
-    /// The same planner `daemon recover` follows. Runners are evaluated by
-    /// running this in their remote daemon frame (#15557).
+    /// The same planner `daemon recover` follows, over the one daemon store.
+    /// Runners are evaluated by running this in their remote daemon frame.
     Plan,
     /// Show daemon health and actionable recovery state
     Status {
@@ -227,7 +227,7 @@ enum DaemonJobsCommand {
     Show(DaemonJobsShowArgs),
     /// Wait for one daemon job to reach a terminal state
     Watch(DaemonJobsWatchArgs),
-    /// Preview or remove exact terminal jobs of one controller driver generation
+    /// Preview or remove exact terminal jobs of one controller driver type and version
     Prune(DaemonJobsPruneArgs),
 }
 
@@ -299,7 +299,10 @@ pub const DAEMON_PLAN_SCHEMA: &str = "homeboy/daemon-lifecycle-plan/v1";
 pub struct DaemonPlanOutput {
     pub schema: &'static str,
     pub plan: daemon::lifecycle_plan::Plan,
-    pub view: daemon::lifecycle::DaemonView,
+    /// The recovery the same planner resolved, with its executable steps.
+    pub recovery: daemon::recovery_actions::DaemonRecoveryPlan,
+    /// The one daemon state file every reader and writer resolves.
+    pub state_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -403,8 +406,8 @@ pub struct DaemonRecoverOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_on: Option<String>,
     pub next_command: String,
-    /// The lifecycle planner's single next action (#15557). It gates the
-    /// direct recovery plan: a `blocked` or `wait` lifecycle plan never executes.
+    /// The planner's single next lifecycle action, from the same decision as
+    /// `plan`: a `blocked` or `wait` verdict never executes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle_plan: Option<daemon::lifecycle_plan::Plan>,
 }
@@ -457,7 +460,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             // The shared lifecycle gate (#15557 C4): `daemon recover` is the
             // primary entry point; this explicit step still never runs beside
             // live workload or an unleased daemon process.
-            daemon::lifecycle_apply::ensure_mutation_allowed("daemon adopt-orphan")?;
+            daemon::lifecycle_plan::ensure_mutation_allowed("daemon adopt-orphan")?;
             Ok((
                 DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
                     &lease_id,
@@ -479,9 +482,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             // The shared lifecycle gate (#15557 C4): `daemon recover` is the
             // primary entry point; this explicit step still never runs beside
             // live workload or an unleased daemon process.
-            daemon::lifecycle_apply::ensure_mutation_allowed(
-                "daemon reconcile-dead-lease-orphans",
-            )?;
+            daemon::lifecycle_plan::ensure_mutation_allowed("daemon reconcile-dead-lease-orphans")?;
             Ok((
                 DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
                     &lease_id,
@@ -500,7 +501,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             // The shared lifecycle gate (#15557 C4): `daemon recover` is the
             // primary entry point; this explicit step still never runs beside
             // live workload or an unleased daemon process.
-            daemon::lifecycle_apply::ensure_mutation_allowed("daemon reconcile-leaseless-orphans")?;
+            daemon::lifecycle_plan::ensure_mutation_allowed("daemon reconcile-leaseless-orphans")?;
             Ok((
                 DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
                     &addr,
@@ -590,13 +591,14 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             Ok((DaemonOutput::Stop(result), 0))
         }
         DaemonCommand::Plan => {
-            let view = daemon::lifecycle::observe_local();
-            let plan = daemon::lifecycle_plan::plan(&view);
+            let status = daemon::read_status()?;
+            let recovery = daemon::recovery_actions::plan_recovery(&status);
             Ok((
                 DaemonOutput::Plan(DaemonPlanOutput {
                     schema: DAEMON_PLAN_SCHEMA,
-                    plan,
-                    view,
+                    plan: recovery.lifecycle.clone(),
+                    recovery,
+                    state_path: status.state_path,
                 }),
                 0,
             ))
@@ -978,151 +980,16 @@ fn bounded_text(value: &str) -> String {
 ///
 /// The planning `read_status()` supplies every argument. A successful execution
 /// requires a second authoritative read that proves freshness. Dispatch is on
-/// the typed step code, never on the rendered command string (#11105).
-/// How `daemon recover` acts on the lifecycle plan (#15557, slice C3).
-#[derive(Debug, PartialEq, Eq)]
-enum RecoveryRoute {
-    /// The direct recovery executor applies its own plan.
-    Direct,
-    /// The lifecycle plan forbids any mutation right now.
-    Refuse(String),
-    /// The lifecycle executor applies the lifecycle plan.
-    Lifecycle,
-}
-
-/// The lifecycle plan is the authority on whether recovery may mutate, and it
-/// fills the gaps the direct recovery plan dead-ends on. The direct executor still
-/// carries out the transitions it already knows.
-fn recovery_route(
-    lifecycle: &daemon::lifecycle_plan::Plan,
-    direct: &daemon::recovery_actions::DaemonRecoveryPlan,
-) -> RecoveryRoute {
-    use daemon::lifecycle_plan::{BlockCause, Plan};
-    match lifecycle {
-        // Unreadable state is not a lifecycle verdict: the direct executor
-        // owns corrupt-lease handling.
-        Plan::Blocked {
-            cause: BlockCause::Unreadable,
-            ..
-        } => RecoveryRoute::Direct,
-        Plan::Blocked { reason, .. } => {
-            RecoveryRoute::Refuse(format!("lifecycle_blocked: {reason}"))
-        }
-        Plan::Wait { reason, .. } => RecoveryRoute::Refuse(format!("lifecycle_wait: {reason}")),
-        // One attestation over the complete job set, applied by the lifecycle
-        // executor so its scope matches what the store will accept.
-        Plan::NeedsAttestation(_) => RecoveryRoute::Lifecycle,
-        planned if daemon::lifecycle_apply::applies(planned) && !direct.executable => {
-            RecoveryRoute::Lifecycle
-        }
-        _ => RecoveryRoute::Direct,
-    }
-}
-
+/// the typed step code, never on the rendered command string (#11105). There is
+/// one planner, so the reported lifecycle verdict is the same decision the
+/// executor follows.
 fn recover(
     dry_run: bool,
     confirm_workload_processes_absent: bool,
     addr: &str,
 ) -> CmdResult<DaemonOutput> {
-    let lifecycle = daemon::lifecycle_apply::plan_local();
     let status = daemon::read_status()?;
-    let route = recovery_route(
-        &lifecycle,
-        &daemon::recovery_actions::plan_recovery(&status),
-    );
-    let (output, exit_code) = match route {
-        RecoveryRoute::Direct => {
-            recover_direct(status, dry_run, confirm_workload_processes_absent, addr)?
-        }
-        RecoveryRoute::Refuse(reason) => {
-            // Report the direct plan for context, but never run it.
-            let (output, _) = recover_direct(status, true, false, addr)?;
-            let DaemonOutput::Recover(mut output) = output else {
-                unreachable!("recover_from_status returns a recover output");
-            };
-            output.blocked_on = Some(reason);
-            if output.plan.executable {
-                output.next_command = "homeboy daemon status".to_string();
-            }
-            (DaemonOutput::Recover(output), 1)
-        }
-        RecoveryRoute::Lifecycle => recover_lifecycle(
-            &lifecycle,
-            status,
-            dry_run,
-            confirm_workload_processes_absent,
-            addr,
-        )?,
-    };
-    let DaemonOutput::Recover(mut output) = output else {
-        return Ok((output, exit_code));
-    };
-    output.lifecycle_plan = Some(lifecycle);
-    Ok((DaemonOutput::Recover(output), exit_code))
-}
-
-/// Apply a lifecycle-executor plan: preview it, require its attestation, or
-/// apply it and prove the daemon fresh afterwards.
-fn recover_lifecycle(
-    lifecycle: &daemon::lifecycle_plan::Plan,
-    status: DaemonStatus,
-    dry_run: bool,
-    confirm_workload_processes_absent: bool,
-    addr: &str,
-) -> CmdResult<DaemonOutput> {
-    use daemon::lifecycle_plan::Plan;
-    let attestation = matches!(lifecycle, Plan::NeedsAttestation(_));
-    let (output, _) = recover_direct(status, true, false, addr)?;
-    let DaemonOutput::Recover(mut output) = output else {
-        unreachable!("recover_from_status returns a recover output");
-    };
-    let apply_command = if attestation {
-        "homeboy daemon recover --yes --confirm-workload-processes-absent"
-    } else {
-        "homeboy daemon recover --yes"
-    };
-    output.blocked_on = None;
-    if dry_run {
-        output.next_command = apply_command.to_string();
-        return Ok((DaemonOutput::Recover(output), 0));
-    }
-    if attestation && !confirm_workload_processes_absent {
-        output.blocked_on = Some(
-            "this recovery requires operator attestation that no report can supply: --confirm-workload-processes-absent".to_string(),
-        );
-        output.next_command = apply_command.to_string();
-        return Ok((DaemonOutput::Recover(output), 1));
-    }
-    output.applied_steps =
-        match daemon::lifecycle_apply::apply(lifecycle, confirm_workload_processes_absent, addr) {
-            Ok(applied) => applied,
-            Err(error) if error.details["classification"] == "stale_daemon_recovery_plan" => {
-                output.blocked_on = Some(error.message);
-                output.next_command = "homeboy daemon recover --dry-run".to_string();
-                return Ok((DaemonOutput::Recover(output), 1));
-            }
-            Err(error) => return Err(error),
-        };
-    output.executed = true;
-    output.next_command = "homeboy daemon status".to_string();
-    let postcondition = daemon::read_status()?;
-    output.fresh = postcondition.fresh;
-    output.stale_reason_code = postcondition.freshness.stale_reason_code;
-    output.lease_id = postcondition.freshness.lease_id.clone();
-    output.store_path = postcondition.state_path.clone();
-    output.active_jobs = postcondition.freshness.active_jobs;
-    if !daemon_is_fresh(&postcondition) {
-        output.blocked_on = Some(format!(
-            "recovery executed but the authoritative status remains stale{}",
-            postcondition
-                .stale_reason
-                .as_deref()
-                .map(|reason| format!(": {reason}"))
-                .unwrap_or_default()
-        ));
-        return Ok((DaemonOutput::Recover(output), 1));
-    }
-    Ok((DaemonOutput::Recover(output), 0))
+    recover_direct(status, dry_run, confirm_workload_processes_absent, addr)
 }
 
 fn recover_direct(
@@ -1220,8 +1087,8 @@ where
         applied_steps: Vec::new(),
         blocked_on: None,
         next_command: String::new(),
+        lifecycle_plan: Some(plan.lifecycle.clone()),
         plan,
-        lifecycle_plan: None,
     };
 
     if output.plan.steps.is_empty() {
@@ -1297,6 +1164,7 @@ where
             output.store_path = converged.state_path.clone();
             output.active_jobs = converged.freshness.active_jobs;
             output.plan = actions::plan_recovery(&converged);
+            output.lifecycle_plan = Some(output.plan.lifecycle.clone());
             output.blocked_on = Some(format!(
                 "daemon_unleased_process_conflict: {}; review the exact candidates with `homeboy daemon reconcile-unleased-candidates` before applying",
                 output.plan.reason
@@ -1562,112 +1430,6 @@ mod tests {
 
     use super::*;
 
-    mod lifecycle_route {
-        use super::super::{recovery_route, RecoveryRoute};
-        use homeboy::core::daemon::lifecycle_plan::{Attestation, BlockCause, Plan, Step};
-        use homeboy::core::daemon::recovery_actions::DaemonRecoveryPlan;
-
-        fn direct(executable: bool) -> DaemonRecoveryPlan {
-            DaemonRecoveryPlan {
-                steps: Vec::new(),
-                reason: "direct".to_string(),
-                required_confirmations: Vec::new(),
-                executable,
-            }
-        }
-
-        #[test]
-        fn wait_and_safety_blocks_never_execute_even_when_direct_would() {
-            for lifecycle in [
-                Plan::Wait {
-                    cause: homeboy::core::daemon::lifecycle_plan::WaitCause::LiveWorkload,
-                    reason: "child 42 is live".to_string(),
-                },
-                Plan::Blocked {
-                    cause: BlockCause::UnleasedProcess,
-                    reason: "pid 7 holds no lease".to_string(),
-                },
-                Plan::Blocked {
-                    cause: BlockCause::UnknownSupervision,
-                    reason: "unknown".to_string(),
-                },
-            ] {
-                assert!(matches!(
-                    recovery_route(&lifecycle, &direct(true)),
-                    RecoveryRoute::Refuse(_)
-                ));
-            }
-        }
-
-        #[test]
-        fn unreadable_state_defers_to_the_direct_repairs() {
-            let lifecycle = Plan::Blocked {
-                cause: BlockCause::Unreadable,
-                reason: "corrupt lease".to_string(),
-            };
-            assert_eq!(
-                recovery_route(&lifecycle, &direct(true)),
-                RecoveryRoute::Direct
-            );
-        }
-
-        #[test]
-        fn an_attestation_is_applied_by_the_lifecycle_executor() {
-            let lifecycle = Plan::NeedsAttestation(Attestation {
-                lease_id: "DEAD".to_string(),
-                state_dir: std::path::PathBuf::from("/daemon"),
-                job_ids: vec![uuid::Uuid::nil()],
-                confirmation: "confirm-workload-processes-absent".to_string(),
-            });
-            for executable in [false, true] {
-                assert_eq!(
-                    recovery_route(&lifecycle, &direct(executable)),
-                    RecoveryRoute::Lifecycle
-                );
-            }
-        }
-
-        /// The dead-end class: the direct plan authorizes nothing but the view
-        /// proves a safe transition.
-        #[test]
-        fn lifecycle_fills_direct_dead_ends_and_otherwise_defers() {
-            for step in [
-                Step::StartDaemon,
-                // #15830: a dead daemon's work is adopted in place.
-                Step::ReconcileProvenJobs {
-                    lease_id: "DEAD".to_string(),
-                    job_ids: vec![uuid::Uuid::nil()],
-                },
-                Step::ResumeDriverWork {
-                    lease_id: "DEAD".to_string(),
-                    job_ids: vec![uuid::Uuid::nil()],
-                },
-            ] {
-                let lifecycle = Plan::Transition { step };
-                assert_eq!(
-                    recovery_route(&lifecycle, &direct(false)),
-                    RecoveryRoute::Lifecycle
-                );
-                assert_eq!(
-                    recovery_route(&lifecycle, &direct(true)),
-                    RecoveryRoute::Direct
-                );
-            }
-            for lifecycle in [
-                Plan::Converged,
-                Plan::Transition {
-                    step: Step::StopByLease {
-                        lease_id: "OLD".to_string(),
-                    },
-                },
-            ] {
-                assert_eq!(
-                    recovery_route(&lifecycle, &direct(false)),
-                    RecoveryRoute::Direct
-                );
-            }
-        }
-    }
     use crate::cli_surface::{Cli, Commands};
 
     #[test]
@@ -1969,7 +1731,7 @@ mod tests {
         ));
 
         current.active_job_recovery_evidence.clear();
-        current.state_identity = "different-generation-store".to_string();
+        current.state_identity = "different-daemon-store".to_string();
         assert!(!recovery_authority_matches(
             &planned,
             &current,
@@ -2390,6 +2152,7 @@ mod tests {
             reason: "dead lease with PID-less durable jobs".to_string(),
             required_confirmations: vec![actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
             executable: true,
+            lifecycle: daemon::lifecycle_plan::Plan::Converged,
         };
 
         assert_eq!(
@@ -2574,6 +2337,7 @@ mod tests {
             reason: "version mismatch".to_string(),
             required_confirmations: Vec::new(),
             executable: true,
+            lifecycle: daemon::lifecycle_plan::Plan::Converged,
         };
 
         assert!(unmet_confirmations(&plan, false).is_empty());
