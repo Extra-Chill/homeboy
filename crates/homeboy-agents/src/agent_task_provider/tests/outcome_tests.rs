@@ -759,6 +759,98 @@ fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patc
     assert_untouched(&normalize(&patch_request));
 }
 
+/// #16002: a provider that stops cleanly without editing and without its
+/// review_form fails only its completion contract. On an unchanged checkout
+/// Homeboy records the empty change set, so the scheduler classifies it as a
+/// verified no-change attempt rather than deferring a candidate that does not
+/// exist and then failing the required `patch` artifact.
+#[test]
+fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        homeboy_core::test_support::git_command_output(cwd, args)
+    }
+    let workspace = tempfile::tempdir().expect("attempt checkout");
+    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
+    git(workspace.path(), &["add", "lib.rs"]);
+    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
+    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "review-form-gap".to_string(),
+        attempt: 1,
+    };
+    let form_request = |requires_patch: bool| {
+        let (mut request, _) = request("review-form-gap", String::new());
+        if requires_patch {
+            request.expected_artifacts = vec!["patch".to_string()];
+        }
+        request
+            .output_declarations
+            .push(crate::agent_task_review_dossier::review_form_output_declaration());
+        request
+    };
+    let normalize = |request: &AgentTaskRequest| {
+        let root = tempfile::tempdir().expect("artifact root");
+        let mut outcome = AgentTaskOutcome {
+            task_id: "review-form-gap".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            failure_classification: Some(AgentTaskFailureClassification::Provider),
+            summary: Some(
+                "Pi completed without required structured output(s): review_form.".to_string(),
+            ),
+            ..Default::default()
+        };
+        super::super::outcome_normalization::materialize_verified_no_change_set(
+            &mut outcome,
+            request,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+            Some(&base),
+        );
+        normalize_homeboy_local_artifact_sizes(
+            &mut outcome,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+        );
+        outcome
+    };
+    let patch_count = |outcome: &AgentTaskOutcome| {
+        outcome
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.kind == "patch")
+            .count()
+    };
+
+    // Clean checkout: the empty change set is known, which is what the
+    // scheduler's review_form deferral consults before deferring.
+    let clean = normalize(&form_request(true));
+    assert_eq!(patch_count(&clean), 1, "{:?}", clean.artifacts);
+    assert!(
+        super::super::outcome_normalization::has_known_empty_change_set(&clean),
+        "{:?}",
+        clean.artifacts
+    );
+
+    // Without a required patch there is no change set to record.
+    assert_eq!(patch_count(&normalize(&form_request(false))), 0);
+
+    // Uncommitted work keeps the ordinary review_form deferral path.
+    fs::write(workspace.path().join("lib.rs"), "changed\n").expect("dirty");
+    assert_eq!(patch_count(&normalize(&form_request(true))), 0);
+}
+
 #[test]
 fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_checkout() {
     let workspace = tempfile::tempdir().expect("workspace");

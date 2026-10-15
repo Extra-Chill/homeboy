@@ -228,12 +228,25 @@ pub(super) fn materialize_verified_no_change_set(
     workspace_root: Option<&std::path::Path>,
     attempt_base: Option<&str>,
 ) {
-    let claims_no_change = match outcome.status {
-        AgentTaskOutcomeStatus::NoOp => true,
-        AgentTaskOutcomeStatus::Succeeded => request
+    let requires_patch = || {
+        request
             .canonical_artifact_declarations()
             .iter()
-            .any(|declaration| declaration.required && declaration.name == "patch"),
+            .any(|declaration| declaration.required && declaration.name == "patch")
+    };
+    // A provider that stopped without editing and without its review_form
+    // claims no change exactly like a clean `succeeded` turn (#16002); the
+    // scheduler's review_form deferral needs a candidate to defer.
+    let claims_no_change = match outcome.status {
+        AgentTaskOutcomeStatus::NoOp => true,
+        AgentTaskOutcomeStatus::Succeeded => requires_patch(),
+        AgentTaskOutcomeStatus::Failed => {
+            requires_patch()
+                && crate::agent_task_scheduler::AgentTaskScheduleSupport::review_form_only_deferral_gap(
+                    outcome, request,
+                )
+                .is_some()
+        }
         _ => false,
     };
     if !claims_no_change
