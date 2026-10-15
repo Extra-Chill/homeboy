@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.20] - 2026-10-15
+
+### Fixed
+- send repository_dispatch body as JSON so client_payload is an object
+
 ## [2.20.19] - 2026-10-11
 
 ### Changed
