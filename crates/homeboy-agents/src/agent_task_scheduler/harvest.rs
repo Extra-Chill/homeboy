@@ -256,10 +256,13 @@ fn harvest_committed_patch_with_metadata(
     running: &RunningTask,
     collect_metadata: impl FnOnce(&Path, &str) -> Result<Vec<serde_json::Value>, HarvestError>,
 ) -> Result<(), HarvestError> {
-    if outcome.status != AgentTaskOutcomeStatus::Succeeded
-        || outcome.artifacts.iter().any(|artifact| {
-            is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact)
-        })
+    // Commits are the attempt's candidate whatever the provider reported, just
+    // like uncommitted edits. A declared-output miss, timeout, or provider
+    // failure must not discard a committed change set. (#15980)
+    if outcome
+        .artifacts
+        .iter()
+        .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
     {
         return Ok(());
     }
@@ -1551,6 +1554,45 @@ mod committed_harvest_tests {
         let reaped_scratch = temp.path().join("nonexistent-scratch-workspace");
         assert!(!reaped_scratch.exists());
 
+        let running =
+            committed_harvest_running_task(temp.path(), &reaped_scratch, Some(&source), base);
+
+        let mut outcome = committed_harvest_preflight_outcome("reaped-task".to_string());
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+
+        // The harvest must fall back to the durable source and produce the patch.
+        harvest_committed_patch_with_metadata(&mut outcome, &running, |cwd, range| {
+            committed_change_metadata_for_range(cwd, range)
+        })
+        .expect("harvest falls back to source workspace");
+
+        assert!(
+            !outcome.artifacts.is_empty(),
+            "a committed patch artifact must be produced"
+        );
+        let patch_artifact = &outcome.artifacts[0];
+        assert_eq!(patch_artifact.kind, "patch");
+        let patch_path = patch_artifact.path.as_ref().expect("patch path");
+        let patch = std::fs::read_to_string(patch_path).expect("read patch");
+        assert!(
+            patch.contains("agent change"),
+            "patch must contain the agent's change: {patch}"
+        );
+        assert!(
+            !outcome
+                .diagnostics
+                .iter()
+                .any(|d| d.class == "agent_task.committed_harvest_git_failed"),
+            "no harvest git failure diagnostic expected"
+        );
+    }
+
+    fn committed_harvest_running_task(
+        temp: &Path,
+        attempt_root: &Path,
+        source_root: Option<&Path>,
+        base: String,
+    ) -> RunningTask {
         let request = AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
             task_id: "reaped-task".to_string(),
@@ -1569,8 +1611,7 @@ mod committed_harvest_tests {
             inputs: serde_json::Value::Null,
             source_refs: Vec::new(),
             workspace: AgentTaskWorkspace {
-                // The attempt scratch workspace root points at a reaped path.
-                root: Some(reaped_scratch.display().to_string()),
+                root: Some(attempt_root.display().to_string()),
                 ..Default::default()
             },
             component_contracts: Vec::new(),
@@ -1602,8 +1643,7 @@ mod committed_harvest_tests {
             provider_capacity_key: "test-capacity".to_string(),
             candidate_artifacts: Vec::new(),
             retry_attempts: Vec::new(),
-            // The durable source workspace is the real, persistent checkout.
-            source_workspace_root: Some(source.display().to_string()),
+            source_workspace_root: source_root.map(|root| root.display().to_string()),
             _attempt_workspace: None,
             run_id: Some("reaped-harvest-test".to_string()),
             artifact_root: None,
@@ -1611,42 +1651,55 @@ mod committed_harvest_tests {
             task_base_sha: Some(base),
             source_provenance: None,
             scratch: crate::controller_scratch::ControllerScratchAllocation {
-                path: temp.path().join("controller-scratch"),
+                path: temp.join("controller-scratch"),
                 lease_id: "test-lease-1".to_string(),
-                index_path: temp.path().join("resources.json"),
+                index_path: temp.join("resources.json"),
             },
             adoption: None,
             join_handle: None,
         };
         std::fs::create_dir_all(&running.scratch.path).expect("scratch dir");
+        running
+    }
 
+    #[test]
+    fn committed_candidate_is_harvested_when_declared_output_is_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("attempt-workspace");
+        std::fs::create_dir(&workspace).expect("attempt workspace dir");
+        git(&workspace, &["init", "--quiet", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(workspace.join("file.txt"), "base\n").expect("base file");
+        git(&workspace, &["add", "file.txt"]);
+        git(&workspace, &["commit", "--quiet", "-m", "base"]);
+        let base = git(&workspace, &["rev-parse", "HEAD"]);
+        std::fs::write(workspace.join("file.txt"), "agent change\n").expect("agent edit");
+        git(&workspace, &["commit", "--quiet", "-am", "agent change"]);
+        let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+
+        // The provider committed a real change, but its declared review form
+        // missed the structural schema, so the executor reported a recoverable
+        // candidate rather than success.
         let mut outcome = committed_harvest_preflight_outcome("reaped-task".to_string());
-        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        outcome.summary =
+            Some("output 'review_form' did not satisfy its declared schema".to_string());
 
-        // The harvest must fall back to the durable source and produce the patch.
-        harvest_committed_patch_with_metadata(&mut outcome, &running, |cwd, range| {
-            committed_change_metadata_for_range(cwd, range)
-        })
-        .expect("harvest falls back to source workspace");
+        harvest_uncommitted_patch(&mut outcome, &running)
+            .and_then(|_| harvest_committed_patch(&mut outcome, &running))
+            .expect("harvest committed candidate");
 
-        assert!(
-            !outcome.artifacts.is_empty(),
-            "a committed patch artifact must be produced"
-        );
-        let patch_artifact = &outcome.artifacts[0];
-        assert_eq!(patch_artifact.kind, "patch");
-        let patch_path = patch_artifact.path.as_ref().expect("patch path");
-        let patch = std::fs::read_to_string(patch_path).expect("read patch");
-        assert!(
-            patch.contains("agent change"),
-            "patch must contain the agent's change: {patch}"
-        );
-        assert!(
-            !outcome
-                .diagnostics
-                .iter()
-                .any(|d| d.class == "agent_task.committed_harvest_git_failed"),
-            "no harvest git failure diagnostic expected"
-        );
+        let patch = outcome
+            .artifacts
+            .iter()
+            .find(|artifact| is_actionable_patch_artifact(artifact))
+            .expect("the committed change set must be materialized as a patch artifact");
+        assert_eq!(patch.metadata["change_source"], "local_commits");
+        let contents =
+            std::fs::read_to_string(patch.path.as_deref().expect("patch path")).expect("patch");
+        assert!(contents.contains("agent change"), "{contents}");
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
     }
 }
