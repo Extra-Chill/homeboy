@@ -430,16 +430,24 @@ fn invocation_dir_permission_error_names_runtime_root_and_remediation() {
 fn invocation_drop_retains_managed_temp_directory() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
-        let (state_dir, artifact_dir, tmp_dir, managed_tmp_dir) = {
+        let (state_dir, artifact_dir, tmp_dir, managed_tmp_dir, tmp_is_alias) = {
             let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
                 .expect("invocation guard");
             let env = guard.env_vars();
             let tmp_dir = std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR"));
+            // A data root within the socket budget exports a short alias to the
+            // managed temp; a longer one (e.g. macOS isolated homes) places the
+            // managed temp directly under the invocation runtime root instead.
+            let tmp_is_alias = std::fs::symlink_metadata(&tmp_dir)
+                .expect("exported temp")
+                .file_type()
+                .is_symlink();
             (
                 std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")),
                 std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")),
                 tmp_dir.clone(),
                 std::fs::canonicalize(&tmp_dir).expect("managed temp target"),
+                tmp_is_alias,
             )
         };
         for path in [&state_dir, &artifact_dir] {
@@ -453,8 +461,15 @@ fn invocation_drop_retains_managed_temp_directory() {
             managed_tmp_dir.is_dir(),
             "managed temp survives for lifecycle cleanup"
         );
-        #[cfg(unix)]
-        assert!(!tmp_dir.exists(), "short temp alias is removed on drop");
+        if tmp_is_alias {
+            assert!(!tmp_dir.exists(), "short temp alias is removed on drop");
+        } else {
+            assert_eq!(
+                std::fs::canonicalize(&tmp_dir).expect("exported managed temp"),
+                managed_tmp_dir,
+                "without an alias the exported temp is the managed temp itself"
+            );
+        }
         let owner: serde_json::Value = serde_json::from_slice(
             &std::fs::read(managed_tmp_dir.join(".homeboy-run-owner-v1.json"))
                 .expect("owner record"),

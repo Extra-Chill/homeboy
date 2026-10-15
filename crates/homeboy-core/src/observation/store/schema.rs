@@ -552,9 +552,7 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
         "open observation store {}",
         path.display()
     )))?;
-    connection
-        .busy_timeout(super::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
-        .map_err(sqlite_error("configure observation store busy timeout"))?;
+    super::install_control_plane_busy_wait(&connection)?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)
 }
@@ -652,11 +650,7 @@ pub(crate) fn open_bounded_writer_connection(path: &Path) -> Result<Connection> 
         "open bounded observation scheduler store {}",
         path.display()
     )))?;
-    connection
-        .busy_timeout(super::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
-        .map_err(sqlite_error(
-            "configure bounded observation scheduler store",
-        ))?;
+    super::install_control_plane_busy_wait(&connection)?;
     enforce_foreign_keys(&connection)?;
     Ok(connection)
 }

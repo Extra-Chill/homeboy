@@ -470,6 +470,46 @@ pub(crate) const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
 /// individual transaction, so a failed admission cannot leak timeout state.
 pub(crate) const SQLITE_CONTROL_PLANE_WRITE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
+
+/// Install the [`SQLITE_CONTROL_PLANE_WRITE_TIMEOUT`] busy wait, measured in
+/// wall-clock time.
+///
+/// SQLite's built-in `busy_timeout` sums its *requested* sleeps, not elapsed
+/// time. Sleeps overshoot (macOS timer slack adds ~10%), so a nominal 10s wait
+/// really lasts longer and can outlive a competing writer it was meant to give
+/// up on. This handler checks the real deadline before every sleep.
+pub(crate) fn install_control_plane_busy_wait(connection: &rusqlite::Connection) -> Result<()> {
+    connection
+        .busy_handler(Some(control_plane_busy_wait))
+        .map_err(sqlite_error("configure observation store busy wait"))
+}
+
+fn control_plane_busy_wait(attempt: i32) -> bool {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    // SQLite calls the handler on the blocked thread with `attempt == 0` at the
+    // start of each busy episode, so a thread-local marks that episode's start.
+    thread_local!(static EPISODE_STARTED: Cell<Option<Instant>> = const { Cell::new(None) });
+    const BACKOFF_MS: [u64; 7] = [1, 2, 5, 10, 25, 50, 100];
+
+    let now = Instant::now();
+    let started = EPISODE_STARTED.with(|started| {
+        if attempt == 0 || started.get().is_none() {
+            started.set(Some(now));
+        }
+        started.get().unwrap_or(now)
+    });
+    let remaining = SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.saturating_sub(now - started);
+    if remaining.is_zero() {
+        return false;
+    }
+    let step = BACKOFF_MS[usize::try_from(attempt)
+        .unwrap_or(0)
+        .min(BACKOFF_MS.len() - 1)];
+    std::thread::sleep(remaining.min(Duration::from_millis(step)));
+    true
+}
 /// Begin a control-plane write using the connection's canonical bounded
 /// SQLite busy handler and RAII transaction ownership. `BEGIN IMMEDIATE`
 /// acquires the single-writer slot before any reads, so SQLite never promotes
