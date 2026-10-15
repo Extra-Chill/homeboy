@@ -193,9 +193,12 @@ execution engine once per accepted key. A repeated request with the same key
 and fingerprint returns the stored success or failure response without
 executing again. A repeated key with a different fingerprint returns
 `idempotency_conflict`. An accepted key that has not finished returns
-`invocation_in_progress`. Completed records survive process restarts within the
-same Homeboy data root. An interrupted invocation remains explicitly in
-progress rather than risking a second execution; a later slice can add recovery
+`invocation_in_progress`. Claims are coordination records in the observation
+store, in the execute API's own namespace with state `in_progress` or
+`completed`, created through a revision compare-and-set. Completed records
+survive process restarts within the same Homeboy data root. An interrupted
+invocation remains explicitly in progress rather than risking a second
+execution; a later slice can add recovery
 through cancel or reconcile. This slice does not advertise those operations or
 daemon transport.
 

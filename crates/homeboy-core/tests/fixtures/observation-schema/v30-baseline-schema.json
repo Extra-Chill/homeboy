@@ -648,6 +648,70 @@
         }
       ]
     },
+    "idx_coordination_audit_subject": {
+      "columns": [
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "namespace",
+          "seqno": 0
+        },
+        {
+          "cid": 2,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "subject_key",
+          "seqno": 1
+        },
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 1,
+          "key": 1,
+          "name": "sequence",
+          "seqno": 2
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 3
+        }
+      ]
+    },
+    "idx_coordination_leases_expiry": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "namespace",
+          "seqno": 0
+        },
+        {
+          "cid": 9,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "expires_at_ms",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
     "idx_findings_fingerprint": {
       "columns": [
         {
@@ -1232,6 +1296,98 @@
         }
       ]
     },
+    "sqlite_autoindex_coordination_fences_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "namespace",
+          "seqno": 0
+        },
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "lease_key",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
+    "sqlite_autoindex_coordination_leases_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "namespace",
+          "seqno": 0
+        },
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "lease_key",
+          "seqno": 1
+        },
+        {
+          "cid": 2,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "holder_token",
+          "seqno": 2
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 3
+        }
+      ]
+    },
+    "sqlite_autoindex_coordination_records_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "namespace",
+          "seqno": 0
+        },
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "record_key",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
     "sqlite_autoindex_findings_1": {
       "columns": [
         {
@@ -1435,6 +1591,18 @@
       "type": "index"
     },
     {
+      "name": "idx_coordination_audit_subject",
+      "sql": "CREATE INDEX idx_coordination_audit_subject\n    ON coordination_audit(namespace, subject_key, sequence DESC)",
+      "tbl_name": "coordination_audit",
+      "type": "index"
+    },
+    {
+      "name": "idx_coordination_leases_expiry",
+      "sql": "CREATE INDEX idx_coordination_leases_expiry\n    ON coordination_leases(namespace, expires_at_ms)",
+      "tbl_name": "coordination_leases",
+      "type": "index"
+    },
+    {
       "name": "idx_findings_fingerprint",
       "sql": "CREATE INDEX idx_findings_fingerprint\n    ON findings(fingerprint)",
       "tbl_name": "findings",
@@ -1567,6 +1735,24 @@
       "type": "index"
     },
     {
+      "name": "sqlite_autoindex_coordination_fences_1",
+      "sql": null,
+      "tbl_name": "coordination_fences",
+      "type": "index"
+    },
+    {
+      "name": "sqlite_autoindex_coordination_leases_1",
+      "sql": null,
+      "tbl_name": "coordination_leases",
+      "type": "index"
+    },
+    {
+      "name": "sqlite_autoindex_coordination_records_1",
+      "sql": null,
+      "tbl_name": "coordination_records",
+      "type": "index"
+    },
+    {
       "name": "sqlite_autoindex_findings_1",
       "sql": null,
       "tbl_name": "findings",
@@ -1633,6 +1819,30 @@
       "type": "table"
     },
     {
+      "name": "coordination_audit",
+      "sql": "CREATE TABLE coordination_audit (\n    sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n    namespace TEXT NOT NULL,\n    subject_key TEXT NOT NULL,\n    at_ms INTEGER NOT NULL,\n    event TEXT NOT NULL,\n    payload_json TEXT NOT NULL DEFAULT '{}'\n)",
+      "tbl_name": "coordination_audit",
+      "type": "table"
+    },
+    {
+      "name": "coordination_fences",
+      "sql": "CREATE TABLE coordination_fences (\n    namespace TEXT NOT NULL,\n    lease_key TEXT NOT NULL,\n    last_fence INTEGER NOT NULL,\n    PRIMARY KEY(namespace, lease_key),\n    CHECK(last_fence > 0)\n)",
+      "tbl_name": "coordination_fences",
+      "type": "table"
+    },
+    {
+      "name": "coordination_leases",
+      "sql": "CREATE TABLE coordination_leases (\n    namespace TEXT NOT NULL,\n    lease_key TEXT NOT NULL,\n    holder_token TEXT NOT NULL,\n    fence INTEGER NOT NULL,\n    owner_pid INTEGER,\n    owner_host TEXT,\n    owner_start_identity_json TEXT,\n    acquired_at_ms INTEGER NOT NULL,\n    renewed_at_ms INTEGER NOT NULL,\n    expires_at_ms INTEGER NOT NULL,\n    weight_json TEXT NOT NULL DEFAULT '{}',\n    payload_json TEXT NOT NULL DEFAULT '{}',\n    PRIMARY KEY(namespace, lease_key, holder_token),\n    CHECK(fence > 0)\n)",
+      "tbl_name": "coordination_leases",
+      "type": "table"
+    },
+    {
+      "name": "coordination_records",
+      "sql": "CREATE TABLE coordination_records (\n    namespace TEXT NOT NULL,\n    record_key TEXT NOT NULL,\n    revision INTEGER NOT NULL,\n    state TEXT NOT NULL,\n    payload_json TEXT NOT NULL DEFAULT '{}',\n    created_at_ms INTEGER NOT NULL,\n    updated_at_ms INTEGER NOT NULL,\n    expires_at_ms INTEGER,\n    PRIMARY KEY(namespace, record_key),\n    CHECK(revision > 0)\n)",
+      "tbl_name": "coordination_records",
+      "type": "table"
+    },
+    {
       "name": "findings",
       "sql": "CREATE TABLE findings (\n    id TEXT PRIMARY KEY,\n    run_id TEXT NOT NULL,\n    tool TEXT NOT NULL,\n    rule TEXT,\n    file TEXT,\n    line INTEGER,\n    severity TEXT,\n    fingerprint TEXT,\n    message TEXT NOT NULL,\n    fixable INTEGER,\n    metadata_json TEXT NOT NULL DEFAULT '{}',\n    created_at TEXT NOT NULL,\n    FOREIGN KEY(run_id) REFERENCES runs(id)\n)",
       "tbl_name": "findings",
@@ -1670,9 +1880,9 @@
     }
   ],
   "recorded_versions": [
-    29
+    30
   ],
-  "schema_version": 29,
+  "schema_version": 30,
   "tables": {
     "artifact_publication_intents": {
       "columns": [
@@ -2544,6 +2754,325 @@
         },
         {
           "name": "sqlite_autoindex_control_plane_work_intents_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "coordination_audit": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "sequence",
+          "notnull": 0,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "namespace",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "subject_key",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "event",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 5,
+          "dflt_value": "'{}'",
+          "hidden": 0,
+          "name": "payload_json",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_coordination_audit_subject",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        }
+      ]
+    },
+    "coordination_fences": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "namespace",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "lease_key",
+          "notnull": 1,
+          "pk": 2,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "last_fence",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_coordination_fences_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "coordination_leases": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "namespace",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "lease_key",
+          "notnull": 1,
+          "pk": 2,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "holder_token",
+          "notnull": 1,
+          "pk": 3,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "fence",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "owner_pid",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "owner_host",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 6,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "owner_start_identity_json",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 7,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "acquired_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 8,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "renewed_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 9,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "expires_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 10,
+          "dflt_value": "'{}'",
+          "hidden": 0,
+          "name": "weight_json",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 11,
+          "dflt_value": "'{}'",
+          "hidden": 0,
+          "name": "payload_json",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "idx_coordination_leases_expiry",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        },
+        {
+          "name": "sqlite_autoindex_coordination_leases_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "coordination_records": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "namespace",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "record_key",
+          "notnull": 1,
+          "pk": 2,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "revision",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "state",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 4,
+          "dflt_value": "'{}'",
+          "hidden": 0,
+          "name": "payload_json",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 5,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "created_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 6,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "updated_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 7,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "expires_at_ms",
+          "notnull": 0,
+          "pk": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_coordination_records_1",
           "origin": "pk",
           "partial": 0,
           "unique": 1

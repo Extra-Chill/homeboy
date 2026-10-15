@@ -8,6 +8,7 @@ use crate::paths::PathRoots;
 mod artifacts;
 mod control_plane_actions;
 mod control_plane_events;
+pub mod coordination;
 mod findings;
 mod helpers;
 mod runs;
