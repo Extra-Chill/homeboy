@@ -905,7 +905,7 @@ mod tests {
             finished_at: None,
         }];
         heavy.state_conflicts = vec![ActivityStateConflict {
-            source_store: "daemon.jobs-json".to_string(),
+            source_store: "daemon.jobs".to_string(),
             id: "job-9".to_string(),
             state: ActivityState::Succeeded,
         }];
@@ -1099,7 +1099,7 @@ mod tests {
                 })
                 .expect("adopt workspace");
             }
-            let job_store_path = paths::daemon_jobs_file().expect("jobs path");
+            let job_store_path = paths::observation_db().expect("jobs path");
             let job_store =
                 api_jobs::JobStore::open_without_reconciliation(&job_store_path).expect("jobs");
             let job = job_store.create("runner.exec");
@@ -1151,7 +1151,7 @@ mod tests {
                 provenance: None,
             })
             .expect("adopt workspace");
-            let job_store_path = paths::daemon_jobs_file().expect("jobs path");
+            let job_store_path = paths::observation_db().expect("jobs path");
             let job_store =
                 api_jobs::JobStore::open_without_reconciliation(&job_store_path).expect("jobs");
             let job = job_store.create("runner.exec");
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn daemon_job_activity_collection_does_not_reconcile_running_jobs() {
         with_isolated_home(|_| {
-            let path = paths::daemon_jobs_file().expect("jobs path");
+            let path = paths::observation_db().expect("jobs path");
             let store =
                 api_jobs::JobStore::open_without_reconciliation(&path).expect("open durable store");
             let job = store.create("runner.exec");

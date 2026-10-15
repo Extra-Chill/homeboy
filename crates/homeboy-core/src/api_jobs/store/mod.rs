@@ -17,8 +17,8 @@ use uuid::Uuid;
 use super::persistence::reconcile_stale_jobs;
 use super::persistence::{
     apply_event_retention, compact_terminal_jobs, expire_submission_keys, job_not_found,
-    lookup_tombstone, prepare_tombstone_store, recovered_terminal_from_result, timestamp_ms,
-    tombstone_store_report, validate_transition, JobStoreCompactionEvidence, ReplayTombstoneKind,
+    lookup_tombstone, recovered_terminal_from_result, timestamp_ms, tombstone_store_report,
+    validate_transition, JobStoreCompactionEvidence, ReplayTombstoneKind,
     DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
     DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
@@ -451,7 +451,7 @@ impl JobStore {
             .path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("jobs.json");
+            .unwrap_or("daemon-jobs");
         let path = parent.join(format!(".{name}.transaction.lock"));
         let file = OpenOptions::new()
             .read(true)
@@ -671,10 +671,10 @@ impl JobStore {
             .map(|persistence| persistence.path.clone())
     }
 
-    /// Whether a durable job store exists for `path`: either the SQL store or
-    /// a legacy `jobs.json` that has not been migrated yet. Never creates one.
+    /// Whether the observation store at `path` holds a durable job ledger.
+    /// Never creates one.
     pub fn exists_at_path(path: &Path) -> bool {
-        path.exists() || sql_store::sql_store_initialized(path).unwrap_or(false)
+        sql_store::sql_store_initialized(path).unwrap_or(false)
     }
 
     /// Exact private controller authorization, read without migration or writes.
@@ -699,23 +699,22 @@ impl JobStore {
     }
 
     /// Commit counter of the SQL job store at `path`: it advances on every
-    /// committed mutation and is `None` before the store has been migrated.
+    /// committed mutation and is `None` before the ledger is first opened.
     pub(crate) fn store_generation_at_path(path: &Path) -> Result<Option<i64>> {
         sql_store::store_generation_at_path(path)
     }
 
-    /// The durable store rendered in the legacy `jobs.json` document shape,
-    /// without opening, migrating or reconciling it. Used for operator
-    /// evidence snapshots; it is not a persistence format.
-    pub(crate) fn export_legacy_snapshot_at_path(path: &Path) -> Result<Vec<u8>> {
-        sql_store::export_legacy_snapshot(path)
+    /// The durable job ledger rendered as one JSON document, without
+    /// initializing or reconciling it. Used for operator evidence snapshots;
+    /// it is not a persistence format.
+    pub(crate) fn ledger_snapshot_at_path(path: &Path) -> Result<Vec<u8>> {
+        sql_store::ledger_snapshot(path)
     }
 
-    /// Replace the whole durable store with a legacy-shaped document. Test
-    /// fixtures use this to tamper with persisted state now that the store is
-    /// no longer a file they can edit directly.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn replace_with_legacy_snapshot_at_path(path: &Path, bytes: &[u8]) -> Result<()> {
+    /// Replace the whole durable ledger with a [`Self::ledger_snapshot_at_path`]
+    /// document. Test fixtures use this to tamper with persisted state.
+    #[cfg(test)]
+    pub(crate) fn replace_ledger_at_path(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut durable: DurableJobStore = serde_json::from_slice(bytes)
             .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
         sql_store::commit_sql_store(
@@ -906,43 +905,8 @@ impl JobStore {
     /// Open durable jobs without treating active records as an implicit daemon
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
-        let path = path.into();
-        prepare_tombstone_store(&path)?;
-        let raw = Self::legacy_open_bytes(&path)?;
-        Self::open_without_reconciliation_from_bytes(path, &raw)
-    }
-
-    /// The legacy-shaped bytes an open validates before the transaction. Once
-    /// the store has moved into SQLite the SQL store is authoritative and no
-    /// file at the legacy path is read.
-    fn legacy_open_bytes(path: &Path) -> Result<Vec<u8>> {
-        const EMPTY: &[u8] = b"{\"jobs\":[]}";
-        if sql_store::sql_store_initialized(path)? {
-            return Ok(EMPTY.to_vec());
-        }
-        let raw = fs::read(path).unwrap_or_else(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                EMPTY.to_vec()
-            } else {
-                Vec::new()
-            }
-        });
-        if raw.is_empty() && path.exists() {
-            return Err(Error::internal_io(
-                "read durable job store",
-                Some(path.display().to_string()),
-            ));
-        }
-        Ok(raw)
-    }
-
-    pub fn open_without_reconciliation_from_bytes(
-        path: impl Into<PathBuf>,
-        raw: &[u8],
-    ) -> Result<Self> {
-        Self::open_without_reconciliation_from_bytes_with_retention(
+        Self::open_without_reconciliation_with_retention_and_terminal_byte_limit(
             path,
-            raw,
             DEFAULT_EVENT_RETENTION_LIMIT,
             DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
             DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
@@ -963,7 +927,6 @@ impl JobStore {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn open_without_reconciliation_with_retention_and_terminal_byte_limit(
         path: impl Into<PathBuf>,
         event_retention_limit: usize,
@@ -971,30 +934,6 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
-        let raw = Self::legacy_open_bytes(&path)?;
-        Self::open_without_reconciliation_from_bytes_with_retention(
-            path,
-            &raw,
-            event_retention_limit,
-            terminal_job_retention_limit,
-            terminal_job_retention_bytes,
-        )
-    }
-
-    fn open_without_reconciliation_from_bytes_with_retention(
-        path: impl Into<PathBuf>,
-        raw: &[u8],
-        event_retention_limit: usize,
-        terminal_job_retention_limit: usize,
-        terminal_job_retention_bytes: usize,
-    ) -> Result<Self> {
-        let path = path.into();
-        // The caller's bytes are a legacy-shaped snapshot read from this path.
-        // They are validated here so an unreadable store still fails closed;
-        // the SQL store is the only source of truth the transaction below
-        // reads, importing a not-yet-migrated `jobs.json` exactly once.
-        serde_json::from_slice::<DurableJobStore>(raw)
-            .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
         let terminal_job_retention_bytes = terminal_job_retention_bytes.max(1);
@@ -2758,10 +2697,9 @@ impl JobStore {
         // effort so an authority-store I/O failure cannot hide its outcome.
         if let Some(lease) = terminal_owner_lease.1 {
             // Release through the exact factory that registered the lease.
-            // `JobStore` carries no data root -- its `persistence.path` hangs
-            // off the daemon *config* root (`daemon_jobs_file`), not the data
-            // root the claim authority lives under -- so this reach stays
-            // ambient. It must at least not rebuild the store name by hand:
+            // `JobStore` carries no data root -- its `persistence.path` names
+            // the observation store file, not the root the claim authority
+            // lives under -- so this reach stays ambient. It must at least not rebuild the store name by hand:
             // a duplicated literal here is a release addressing a store the
             // register never wrote to.
             if let Ok(store) = crate::daemon::daemon_workspace_claim_store() {
@@ -3780,7 +3718,7 @@ mod local_child_tests {
     #[test]
     fn local_child_reservation_persists_before_running_visibility() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("jobs.json");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open(&path).expect("open durable store");
         let job = store.create("runner.exec");
 

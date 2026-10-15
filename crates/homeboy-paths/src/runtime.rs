@@ -108,16 +108,6 @@ pub fn runtime_promotion_dir() -> Result<PathBuf> {
     Ok(runtime_promotion_dir_in_root(&homeboy_data()?))
 }
 
-/// Daemon durable job state file below an already-resolved config root.
-pub fn daemon_jobs_file_in_root(config_root: &Path) -> PathBuf {
-    daemon_state_dir_in_root(config_root).join("jobs.json")
-}
-
-/// Daemon durable job state file (~/.config/homeboy/daemon/jobs.json).
-pub fn daemon_jobs_file() -> Result<PathBuf> {
-    Ok(daemon_jobs_file_in_root(&ambient_daemon_config_root()?))
-}
-
 /// Latest bounded launcher-owned termination evidence below an already-resolved
 /// config root.
 pub fn daemon_termination_file_in_root(config_root: &Path) -> PathBuf {

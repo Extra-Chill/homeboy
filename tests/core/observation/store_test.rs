@@ -101,7 +101,7 @@ mod store_init_tests {
         // 9 run-owned and support tables, two resource projections, the work
         // outbox, and the 4 coordination tables (records, leases, fences,
         // audit). Missions are derived from `runs.mission_id`.
-        assert_eq!(status.table_count, 16);
+        assert_eq!(status.table_count, 24);
     }
 
     #[test]
@@ -117,7 +117,7 @@ mod store_init_tests {
         assert_eq!(status.migration_count, BASELINE_SCHEMA_RECORDS);
         // Reasserted after a second initialization: the control-plane resource
         // tables are created once and idempotent re-init adds nothing.
-        assert_eq!(status.table_count, 16);
+        assert_eq!(status.table_count, 24);
     }
 
     #[test]

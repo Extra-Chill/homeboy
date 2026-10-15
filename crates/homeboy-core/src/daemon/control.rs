@@ -47,18 +47,15 @@ const ENSURE_RUNNING_STARTUP_WAIT: Duration = Duration::from_secs(15);
 
 /// Enumerate foreground daemon processes without inferring ownership from a
 /// command substring. A candidate is an owner only when its explicit state
-/// store resolves to this durable store and its executable is the active binary;
+/// state directory is this daemon's and its executable is the active binary;
 /// absent evidence remains ambiguous.
-pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonProcessCandidate>> {
+pub(super) fn daemon_process_candidates(state_dir: &Path) -> Result<Vec<DaemonProcessCandidate>> {
     // Never request process environments here: candidates are serialized into
     // operator diagnostics. Linux recovers bounded store identity from procfs;
     // other platforms retain fail-closed argv-only evidence.
     let test_namespace = cfg!(debug_assertions)
-        && std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE").is_some_and(|namespace| {
-            jobs_path
-                .parent()
-                .is_some_and(|state_dir| Path::new(&namespace) == state_dir)
-        });
+        && std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE")
+            .is_some_and(|namespace| Path::new(&namespace) == state_dir);
     let output = Command::new("ps")
         .args(["-axww", "-o", "pid=", "-o", "comm=", "-o", "command="])
         .output()
@@ -82,7 +79,7 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
         .filter_map(|line| {
             parse_daemon_process_candidate_with_digest(
                 line,
-                jobs_path,
+                state_dir,
                 current_exe.as_deref(),
                 current_digest.as_deref(),
             )
@@ -90,9 +87,9 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
         .filter_map(|candidate| {
             attribute_scanned_candidate(
                 candidate,
-                jobs_path,
+                state_dir,
                 test_namespace,
-                process_durable_store_path,
+                process_state_dir,
                 candidate_process_is_live,
             )
         })
@@ -150,7 +147,7 @@ fn candidate_process_is_live(pid: u32) -> bool {
 /// stays fail-closed `Ambiguous`.
 fn attribute_scanned_candidate(
     mut candidate: DaemonProcessCandidate,
-    jobs_path: &Path,
+    state_dir: &Path,
     test_namespace: bool,
     resolve_store: impl FnOnce(u32, bool) -> Option<PathBuf>,
     is_running: impl FnOnce(u32) -> bool,
@@ -162,14 +159,14 @@ fn attribute_scanned_candidate(
     };
     recover_candidate_store_from_process_environment(
         &mut candidate,
-        jobs_path,
+        state_dir,
         process_store_fallback,
         resolve_store,
     );
     if !is_running(candidate.pid) {
         return None;
     }
-    if test_namespace && candidate.durable_store_path.as_deref() != jobs_path.to_str() {
+    if test_namespace && candidate.state_dir.as_deref() != state_dir.to_str() {
         candidate.ownership = DaemonProcessOwnership::Unrelated;
     }
     Some(candidate)
@@ -357,7 +354,7 @@ fn supervise_child_with_lifetime(
         lease_id: state.as_ref().map(|state| state.lease_id.clone()).or_else(|| prior.and_then(|evidence| evidence.lease_id)),
         pid: Some(pid),
         binary_identity: state.as_ref().map(|state| state.build_identity.display.clone()),
-        active_jobs: super::JobStore::active_count_at_path(crate::paths::daemon_jobs_file()?)?,
+        active_jobs: super::JobStore::active_count_at_path(crate::paths::observation_db()?)?,
         resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
         os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
         exit_code, signal,
@@ -400,9 +397,9 @@ fn wait_for_daemon_with_lifetime(
             .and_then(|validation| validation.state)
             .filter(|state| state.pid == child.id());
         if let Some(state) = state {
-            let idle_jobs =
-                super::JobStore::active_count_at_path(state_path.with_file_name("jobs.json"))
-                    .is_ok_and(|count| count == 0);
+            let idle_jobs = crate::paths::observation_db()
+                .and_then(super::JobStore::active_count_at_path)
+                .is_ok_and(|count| count == 0);
             if !idle_jobs || launcher.as_ref().is_some_and(|launcher| launcher.is_live()) {
                 idle.touch();
             } else if idle.expired()
@@ -573,15 +570,15 @@ fn running_image_matches_current(pid: u32, current_digest: Option<&str>) -> Opti
 #[cfg(test)]
 fn parse_daemon_process_candidate(
     line: &str,
-    jobs_path: &Path,
+    state_dir: &Path,
     current_exe: Option<&Path>,
 ) -> Option<DaemonProcessCandidate> {
-    parse_daemon_process_candidate_with_digest(line, jobs_path, current_exe, None)
+    parse_daemon_process_candidate_with_digest(line, state_dir, current_exe, None)
 }
 
 fn parse_daemon_process_candidate_with_digest(
     line: &str,
-    jobs_path: &Path,
+    state_dir: &Path,
     current_exe: Option<&Path>,
     current_digest: Option<&str>,
 ) -> Option<DaemonProcessCandidate> {
@@ -611,8 +608,8 @@ fn parse_daemon_process_candidate_with_digest(
         .collect::<Vec<_>>()
         .windows(2)
         .find_map(|pair| (pair[0] == "--addr").then(|| pair[1].to_string()));
-    let durable_store_path = match command_state_dir(&cmdline) {
-        CommandStateDir::Proven(state_dir) => Some(durable_store_path(Path::new(state_dir))),
+    let candidate_state_dir = match command_state_dir(&cmdline) {
+        CommandStateDir::Proven(dir) => Some(PathBuf::from(dir)),
         // `ps` command text cannot preserve an argv boundary inside a quoted or
         // whitespace-bearing path. Do not substitute a lower-priority store.
         CommandStateDir::Ambiguous => None,
@@ -621,13 +618,13 @@ fn parse_daemon_process_candidate_with_digest(
             &executable,
             crate::paths::DAEMON_STATE_DIR_ENV,
         ) {
-            CommandTextValue::Proven(state_dir) => Some(durable_store_path(Path::new(state_dir))),
+            CommandTextValue::Proven(dir) => Some(PathBuf::from(dir)),
             CommandTextValue::Ambiguous => None,
             CommandTextValue::Absent => {
                 match command_environment_value(&cmdline, &executable, "HOME") {
-                    CommandTextValue::Proven(home) => Some(durable_store_path(
-                        &Path::new(home).join(".config/homeboy/daemon"),
-                    )),
+                    CommandTextValue::Proven(home) => {
+                        Some(Path::new(home).join(".config/homeboy/daemon"))
+                    }
                     CommandTextValue::Absent | CommandTextValue::Ambiguous => None,
                 }
             }
@@ -652,15 +649,15 @@ fn parse_daemon_process_candidate_with_digest(
             .flatten(),
         cmdline: normalize_cmdline(&cmdline),
         bind_endpoint,
-        durable_store_path: durable_store_path
+        state_dir: candidate_state_dir
             .as_ref()
             .map(|path| path.display().to_string()),
         build_identity: executable_matches.then_some("current_executable".to_string()),
         startup_token: command_value(&cmdline, "--startup-token"),
         ownership: DaemonProcessOwnership::Ambiguous,
     };
-    if let Some(store) = durable_store_path {
-        candidate.ownership = classify_candidate_store(&candidate, jobs_path, &store);
+    if let Some(store) = candidate_state_dir {
+        candidate.ownership = classify_candidate_store(&candidate, state_dir, &store);
     }
     Some(candidate)
 }
@@ -679,7 +676,7 @@ fn daemon_executable_from_cmdline(cmdline: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn candidate_is_unchanged_before_signal(
     candidate: &DaemonProcessCandidate,
-    jobs_path: &Path,
+    state_dir: &Path,
 ) -> bool {
     let Some(identity) = candidate.process_start_identity.as_ref() else {
         return false;
@@ -689,7 +686,7 @@ fn candidate_is_unchanged_before_signal(
     {
         return false;
     }
-    let Ok(current) = daemon_process_candidates(jobs_path) else {
+    let Ok(current) = daemon_process_candidates(state_dir) else {
         return false;
     };
     let Some(current) = current
@@ -707,7 +704,7 @@ fn candidate_is_unchanged_before_signal(
         });
     current.process_start_identity.as_ref() == Some(identity)
         && current.executable == candidate.executable
-        && current.durable_store_path == candidate.durable_store_path
+        && current.state_dir == candidate.state_dir
         && current.bind_endpoint == candidate.bind_endpoint
         && current.startup_token == candidate.startup_token
         && current.ownership == DaemonProcessOwnership::Owning
@@ -843,18 +840,15 @@ mod command_state_dir_tests {
 
     #[test]
     fn existing_daemon_with_ps_environment_suffix_is_unrelated_to_another_store() {
-        let jobs_path = Path::new("/tmp/selected-store/jobs.json");
+        let state_dir = Path::new("/tmp/selected-store");
         let candidate = parse_daemon_process_candidate(
             "42 /usr/bin/homeboy /usr/bin/homeboy daemon serve --addr 127.0.0.1:0 --startup-token token --state-dir /tmp/conventional HOME=/home/chubes",
-            jobs_path,
+            state_dir,
             None,
         )
         .expect("daemon candidate");
 
-        assert_eq!(
-            candidate.durable_store_path.as_deref(),
-            Some("/tmp/conventional/jobs.json")
-        );
+        assert_eq!(candidate.state_dir.as_deref(), Some("/tmp/conventional"));
         assert_eq!(candidate.ownership, DaemonProcessOwnership::Unrelated);
     }
 }
@@ -889,7 +883,7 @@ mod process_candidate_tests {
     fn parser_uses_the_full_command_executable_when_comm_is_truncated() {
         let candidate = parse_daemon_process_candidate(
             "42 /Users/chubes/.c /Users/chubes/.config/homeboy/bin/homeboy daemon serve --addr 127.0.0.1:0 --state-dir /tmp/daemon",
-            Path::new("/tmp/daemon/jobs.json"),
+            Path::new("/tmp/daemon"),
             None,
         )
         .expect("daemon candidate");
@@ -908,11 +902,11 @@ mod process_candidate_tests {
     /// fail-closed.
     #[test]
     fn candidate_that_exits_before_attribution_is_dropped_but_live_one_stays_ambiguous() {
-        let jobs_path = Path::new("/tmp/fresh-home/.config/homeboy/daemon/jobs.json");
+        let state_dir = Path::new("/tmp/fresh-home/.config/homeboy/daemon");
         let scanned = || {
             parse_daemon_process_candidate(
                 "4242 homeboy /opt/homeboy daemon serve --addr 127.0.0.1:0 --startup-token foreign",
-                jobs_path,
+                state_dir,
                 None,
             )
             .expect("daemon candidate")
@@ -923,7 +917,7 @@ mod process_candidate_tests {
         assert_eq!(
             attribute_scanned_candidate(
                 scanned(),
-                jobs_path,
+                state_dir,
                 false,
                 unreadable_environment,
                 |_| false,
@@ -934,14 +928,14 @@ mod process_candidate_tests {
 
         let live = attribute_scanned_candidate(
             scanned(),
-            jobs_path,
+            state_dir,
             false,
             unreadable_environment,
             |_| true,
         )
         .expect("a live candidate is retained");
         assert_eq!(live.ownership, DaemonProcessOwnership::Ambiguous);
-        assert_eq!(live.durable_store_path, None);
+        assert_eq!(live.state_dir, None);
     }
 
     #[cfg(target_os = "linux")]
@@ -1017,24 +1011,18 @@ fn quoted_command_environment_value(value: &str) -> Option<&str> {
     value.get(1..value.len().checked_sub(1)?)
 }
 
-fn durable_store_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("jobs.json")
-}
-
-fn normalize_durable_store_path(store: &Path) -> PathBuf {
-    let parent = store.parent().expect("jobs file has a parent");
-    parent
+fn normalize_state_dir(state_dir: &Path) -> PathBuf {
+    state_dir
         .canonicalize()
-        .map(|parent| parent.join("jobs.json"))
-        .unwrap_or_else(|_| store.to_path_buf())
+        .unwrap_or_else(|_| state_dir.to_path_buf())
 }
 
 fn classify_candidate_store(
     candidate: &DaemonProcessCandidate,
-    jobs_path: &Path,
+    state_dir: &Path,
     store: &Path,
 ) -> DaemonProcessOwnership {
-    if normalize_durable_store_path(store) != normalize_durable_store_path(jobs_path) {
+    if normalize_state_dir(store) != normalize_state_dir(state_dir) {
         DaemonProcessOwnership::Unrelated
     } else if candidate.build_identity.is_some() {
         DaemonProcessOwnership::Owning
@@ -1045,7 +1033,7 @@ fn classify_candidate_store(
 
 fn recover_candidate_store_from_process_environment(
     candidate: &mut DaemonProcessCandidate,
-    jobs_path: &Path,
+    state_dir: &Path,
     allow_home: Option<bool>,
     resolve: impl FnOnce(u32, bool) -> Option<PathBuf>,
 ) {
@@ -1056,8 +1044,8 @@ fn recover_candidate_store_from_process_environment(
     // An explicit state-dir environment may therefore resolve ambiguous command
     // text; HOME remains a fallback only when argv has no competing signal.
     if let Some(store) = resolve(candidate.pid, allow_home) {
-        candidate.durable_store_path = Some(store.display().to_string());
-        candidate.ownership = classify_candidate_store(candidate, jobs_path, &store);
+        candidate.state_dir = Some(store.display().to_string());
+        candidate.ownership = classify_candidate_store(candidate, state_dir, &store);
     }
 }
 
@@ -1065,7 +1053,7 @@ fn recover_candidate_store_from_process_environment(
 /// inherited environment via procfs; other platforms retain an ambiguous,
 /// fail-closed candidate when argv lacks a durable-store identity.
 #[cfg(target_os = "linux")]
-fn process_durable_store_path(pid: u32, allow_home: bool) -> Option<PathBuf> {
+fn process_state_dir(pid: u32, allow_home: bool) -> Option<PathBuf> {
     let environment = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     let assignment = |key: &str| {
         environment
@@ -1076,17 +1064,17 @@ fn process_durable_store_path(pid: u32, allow_home: bool) -> Option<PathBuf> {
     if let Some(state_dir) =
         assignment(crate::paths::DAEMON_STATE_DIR_ENV).filter(|value| !value.is_empty())
     {
-        return Some(durable_store_path(Path::new(state_dir)));
+        return Some(PathBuf::from(state_dir));
     }
     allow_home
         .then(|| assignment("HOME"))
         .flatten()
         .filter(|value| !value.is_empty())
-        .map(|value| durable_store_path(&Path::new(value).join(".config/homeboy/daemon")))
+        .map(|value| Path::new(value).join(".config/homeboy/daemon"))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_durable_store_path(_pid: u32, _allow_home: bool) -> Option<PathBuf> {
+fn process_state_dir(_pid: u32, _allow_home: bool) -> Option<PathBuf> {
     None
 }
 
@@ -1194,11 +1182,9 @@ pub fn recover_missing_lease_state(
                 None,
             )
         })?;
-        let jobs_path = crate::paths::daemon_jobs_file()?;
-        let raw_store = read_job_store_bytes(&jobs_path)?;
-        let snapshot_path = snapshot_job_store(&jobs_path, &raw_store)?;
-        let store =
-            super::JobStore::open_without_reconciliation_from_bytes(&jobs_path, &raw_store)?;
+        let jobs_path = crate::paths::observation_db()?;
+        let snapshot_path = snapshot_job_store(&jobs_path)?;
+        let store = super::JobStore::open_without_reconciliation(&jobs_path)?;
         let diagnostics = store.daemon_lease_job_diagnostics(lease_id);
         if diagnostics.unowned_count() > 0
             || !diagnostics.other_lease_job_ids.is_empty()
@@ -1858,7 +1844,7 @@ pub fn adopt_orphaned_lease(
         try_acquire_daemon_owner_lock,
         || {
             let store =
-                super::JobStore::open_without_reconciliation(crate::paths::daemon_jobs_file()?)?;
+                super::JobStore::open_without_reconciliation(crate::paths::observation_db()?)?;
             if confirmed_no_pid_job_ids.is_empty() {
                 store.reconcile_dead_daemon_lease_jobs(lease_id)
             } else {
@@ -1912,9 +1898,8 @@ pub fn reconcile_dead_lease_orphans(
             acquire_owner: try_acquire_daemon_owner_lock,
             prove_no_owner: || prove_no_daemon_owner(addr),
             reconcile: |pid| {
-                let store = super::JobStore::open_without_reconciliation(
-                    crate::paths::daemon_jobs_file()?,
-                )?;
+                let store =
+                    super::JobStore::open_without_reconciliation(crate::paths::observation_db()?)?;
                 store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
             },
             // A remote attested reconcile only terminalizes one dead lease's
@@ -2195,10 +2180,9 @@ pub fn reconcile_leaseless_orphans(
         )
     })?;
     let ownership_proof = prove_no_daemon_owner(addr)?;
-    let jobs_path = crate::paths::daemon_jobs_file()?;
-    let raw_store = read_job_store_bytes(&jobs_path)?;
-    let snapshot_path = snapshot_job_store(&jobs_path, &raw_store)?;
-    let store = super::JobStore::open_without_reconciliation_from_bytes(&jobs_path, &raw_store)?;
+    let jobs_path = crate::paths::observation_db()?;
+    let snapshot_path = snapshot_job_store(&jobs_path)?;
+    let store = super::JobStore::open_without_reconciliation(&jobs_path)?;
     let receipt_path = crate::paths::daemon_leaseless_recovery_receipt_file()?;
     let mut receipt = LeaselessRecoveryReceipt {
         affected_job_ids: Vec::new(),
@@ -2334,10 +2318,7 @@ pub fn reconcile_unleased_candidates(
                 "pid {} ownership={:?} store={} binary={} endpoint={} startup_token={}",
                 candidate.pid,
                 candidate.ownership,
-                candidate
-                    .durable_store_path
-                    .as_deref()
-                    .unwrap_or("unavailable"),
+                candidate.state_dir.as_deref().unwrap_or("unavailable"),
                 candidate.build_identity.as_deref().unwrap_or("unproven"),
                 candidate.bind_endpoint.as_deref().unwrap_or("unavailable"),
                 candidate.startup_token.as_deref().unwrap_or("unavailable"),
@@ -2368,7 +2349,9 @@ pub fn reconcile_unleased_candidates(
         return Ok(result);
     }
 
-    let jobs_path = crate::paths::daemon_jobs_file()?;
+    let jobs_path = crate::paths::observation_db()?;
+    let state_path = crate::paths::daemon_state_file()?;
+    let state_dir = state_path.parent().unwrap_or(&state_path);
     let legacy_candidates = legacy_review_candidates(&result.candidates);
     let legacy_review_token = legacy_review_token(&legacy_candidates);
     for candidate in &result.candidates {
@@ -2485,7 +2468,7 @@ pub fn reconcile_unleased_candidates(
                 continue;
             }
         };
-        if !candidate_is_unchanged_before_signal(candidate, &jobs_path) {
+        if !candidate_is_unchanged_before_signal(candidate, state_dir) {
             result.blocked_pids.push(candidate.pid);
             evidence.push(format!(
                 "pid {} changed PID, start identity, executable, durable store, endpoint, or startup token before apply and was not signaled",
@@ -2554,7 +2537,7 @@ fn legacy_review_candidates(candidates: &[DaemonProcessCandidate]) -> Vec<&Daemo
                 && candidate.executable_digest.is_some()
                 && candidate.process_start_identity.is_some()
                 && candidate.bind_endpoint.is_some()
-                && candidate.durable_store_path.is_some()
+                && candidate.state_dir.is_some()
         })
         .collect()
 }
@@ -2567,7 +2550,7 @@ fn legacy_review_token(candidates: &[&DaemonProcessCandidate]) -> Option<String>
         for value in [
             candidate.executable.as_str(),
             candidate.executable_digest.as_deref().unwrap_or_default(),
-            candidate.durable_store_path.as_deref().unwrap_or_default(),
+            candidate.state_dir.as_deref().unwrap_or_default(),
             candidate.bind_endpoint.as_deref().unwrap_or_default(),
             candidate.startup_token.as_deref().unwrap_or_default(),
             &candidate
@@ -2614,7 +2597,7 @@ mod unleased_candidate_platform_tests {
 fn prove_no_daemon_owner(addr: &str) -> Result<Vec<String>> {
     // The owner lock proves no serving daemon owns this store. Refuse any
     // matching process or configured listener as additional ambiguous ownership.
-    let candidates = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?;
+    let candidates = daemon_process_candidates(&crate::paths::observation_db()?)?;
     let parsed: SocketAddr = addr.parse().map_err(|_| {
         Error::validation_invalid_argument("addr", "invalid daemon address", None, None)
     })?;
@@ -2660,26 +2643,18 @@ fn pid_is_proven_dead(pid: u32, is_running: impl FnOnce(u32) -> bool) -> bool {
     !is_running(pid)
 }
 
-/// The durable job store as a legacy-shaped document for the evidence
-/// snapshot. The store lives in SQLite; an export reads it without migrating
-/// or reconciling anything, and a store that has not been migrated yet is
-/// still read from its `jobs.json`.
-fn read_job_store_bytes(path: &Path) -> Result<Vec<u8>> {
-    super::JobStore::export_legacy_snapshot_at_path(path)
-}
-
-fn snapshot_job_store(path: &Path, raw: &[u8]) -> Result<PathBuf> {
-    let snapshot = path.with_file_name(format!(
-        "{}.leaseless-orphan-{}.snapshot",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("jobs.json"),
+/// Write the durable job ledger as one JSON evidence document beside the
+/// daemon lease, before recovery mutates it.
+fn snapshot_job_store(path: &Path) -> Result<PathBuf> {
+    let raw = super::JobStore::ledger_snapshot_at_path(path)?;
+    let snapshot = crate::paths::daemon_state_file()?.with_file_name(format!(
+        "daemon-jobs.leaseless-orphan-{}.snapshot.json",
         uuid::Uuid::new_v4()
     ));
     std::fs::write(&snapshot, raw).map_err(|err| {
         Error::internal_io(
             err.to_string(),
-            Some(format!("snapshot {}", path.display())),
+            Some(format!("snapshot {}", snapshot.display())),
         )
     })?;
     Ok(snapshot)
@@ -2771,7 +2746,7 @@ fn stop_stale_daemon_for_start() -> Result<()> {
 /// evidence immediately and never signal a process we cannot prove we own.
 fn refuse_unleased_process_conflict() -> Result<()> {
     let state_path = crate::paths::daemon_state_file()?;
-    let candidates = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?
+    let candidates = daemon_process_candidates(&crate::paths::observation_db()?)?
         .into_iter()
         .filter(|candidate| {
             matches!(
@@ -2824,7 +2799,7 @@ fn reattach_exact_live_owner() -> Result<()> {
     if state_path.exists() {
         return Ok(());
     }
-    let candidates = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?;
+    let candidates = daemon_process_candidates(&crate::paths::observation_db()?)?;
     let owners: Vec<_> = candidates
         .into_iter()
         .filter(|candidate| candidate.ownership == DaemonProcessOwnership::Owning)
@@ -2849,7 +2824,7 @@ fn reattach_exact_live_owner() -> Result<()> {
     }
     // Re-read the exact candidate immediately before persisting a lease so PID
     // reuse cannot turn a previously attributable process into an owner.
-    let revalidated = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?
+    let revalidated = daemon_process_candidates(&crate::paths::observation_db()?)?
         .into_iter()
         .any(|candidate| {
             candidate.pid == owner.pid
@@ -3081,17 +3056,16 @@ fn cleanup_startup_attempt_at_path(
     }
     // Lease publication is not guaranteed on a failed launch. Discover only
     // serving children carrying this exact random attempt token and store.
-    let candidates = daemon_process_candidates(&state_path.with_file_name("jobs.json"))
-        .unwrap_or_else(|error| {
-            cleanup.push(format!(
-                "startup child discovery could not complete: {error}"
-            ));
-            Vec::new()
-        });
+    let state_dir = state_path.parent().unwrap_or(state_path);
+    let candidates = daemon_process_candidates(state_dir).unwrap_or_else(|error| {
+        cleanup.push(format!(
+            "startup child discovery could not complete: {error}"
+        ));
+        Vec::new()
+    });
     for candidate in candidates {
         if candidate.startup_token.as_deref() == Some(startup_token)
-            && candidate.durable_store_path.as_deref()
-                == state_path.with_file_name("jobs.json").to_str()
+            && candidate.state_dir.as_deref() == state_dir.to_str()
             && pid_is_running(candidate.pid)
         {
             let outcome = terminate_token_owned_startup_process(candidate.pid, startup_token);

@@ -110,7 +110,7 @@ fn source_store_precedence(source_store: &str) -> u8 {
     match source_store {
         "agent-task.lifecycle" => 4,
         "runner.session" => 3,
-        "daemon.jobs-json" => 2,
+        "daemon.jobs" => 2,
         "observation.sqlite" => 1,
         _ => 0,
     }

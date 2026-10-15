@@ -302,11 +302,10 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
 
 fn serving_daemon() -> (DaemonState, JobStore) {
     let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
-    let store = JobStore::open_without_reconciliation(
-        &crate::paths::daemon_jobs_file().expect("jobs path"),
-    )
-    .expect("durable store")
-    .with_daemon_lease(state.lease_id.clone());
+    let store =
+        JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
+            .expect("durable store")
+            .with_daemon_lease(state.lease_id.clone());
     (state, store)
 }
 
@@ -1313,7 +1312,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     let mut state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
     state.lease_id = "evidence-lease".to_string();
     write_daemon_state_for_test(&state);
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(state.lease_id.clone());
@@ -1343,7 +1342,7 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.lease_id = "live-evidence-lease".to_string();
     write_daemon_state_for_test(&state);
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(state.lease_id);
@@ -1363,7 +1362,7 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
 fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
     let mut state = daemon_state_for_test(4242, "127.0.0.1:49152");
     state.startup_token = "recorded-token".to_string();
-    let jobs_path = std::path::PathBuf::from("/tmp/homeboy-daemon/jobs.json");
+    let state_dir = std::path::PathBuf::from("/tmp/homeboy-daemon");
     let candidate = DaemonProcessCandidate {
         pid: state.pid,
         process_start_identity: None,
@@ -1371,13 +1370,13 @@ fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
         executable_digest: None,
         cmdline: "daemon serve".to_string(),
         bind_endpoint: Some(state.address.clone()),
-        durable_store_path: Some(jobs_path.display().to_string()),
+        state_dir: Some(state_dir.display().to_string()),
         build_identity: None,
         startup_token: Some(state.startup_token.clone()),
         ownership: DaemonProcessOwnership::Ambiguous,
     };
 
-    assert!(candidate_matches_live_lease(&candidate, &state, &jobs_path));
+    assert!(candidate_matches_live_lease(&candidate, &state, &state_dir));
     for candidate in [
         DaemonProcessCandidate {
             pid: 4243,
@@ -1393,7 +1392,7 @@ fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
         },
     ] {
         assert!(!candidate_matches_live_lease(
-            &candidate, &state, &jobs_path
+            &candidate, &state, &state_dir
         ));
     }
 }
@@ -1727,7 +1726,7 @@ fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false
     state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
     state.lease_id = "live-stale-lease".to_string();
     write_daemon_state_for_test(&state);
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
+    let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease(state.lease_id.clone());
@@ -1964,7 +1963,7 @@ fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attributi
         executable_digest: None,
         cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
-        durable_store_path: Some("/tmp/home/.config/homeboy/daemon/jobs.json".to_string()),
+        state_dir: Some("/tmp/home/.config/homeboy/daemon".to_string()),
         build_identity: None,
         startup_token: None,
         ownership: DaemonProcessOwnership::Ambiguous,
@@ -2289,11 +2288,10 @@ fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid(
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     write_daemon_state_for_test(&state);
-    let store = JobStore::open_without_reconciliation(
-        &crate::paths::daemon_jobs_file().expect("jobs path"),
-    )
-    .expect("store")
-    .with_daemon_lease(state.lease_id.clone());
+    let store =
+        JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
+            .expect("store")
+            .with_daemon_lease(state.lease_id.clone());
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
@@ -2622,11 +2620,10 @@ fn lease_bound_stop_reconciles_an_absent_lease_idempotently_without_jobs() {
 #[test]
 fn lease_bound_stop_with_an_absent_lease_leaves_active_jobs_to_resume() {
     let _home = HomeGuard::new();
-    let store = JobStore::open_without_reconciliation(
-        &crate::paths::daemon_jobs_file().expect("jobs path"),
-    )
-    .expect("store")
-    .with_daemon_lease("stale-lease".to_string());
+    let store =
+        JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
+            .expect("store")
+            .with_daemon_lease("stale-lease".to_string());
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
 
@@ -2638,10 +2635,9 @@ fn lease_bound_stop_with_an_absent_lease_leaves_active_jobs_to_resume() {
         assert!(result.already_absent);
         assert!(!result.stopped);
     }
-    let reopened = JobStore::open_without_reconciliation(
-        &crate::paths::daemon_jobs_file().expect("jobs path"),
-    )
-    .expect("store");
+    let reopened =
+        JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
+            .expect("store");
     assert_eq!(
         reopened.get(job.id).expect("job").status,
         JobStatus::Running
@@ -2791,7 +2787,7 @@ fn routes_health_version_and_config_paths() {
     assert!(paths.body["daemon_jobs"]
         .as_str()
         .unwrap()
-        .ends_with("daemon/jobs.json"));
+        .ends_with(crate::paths::OBSERVATION_DB_FILENAME));
 }
 
 #[test]
@@ -3801,7 +3797,7 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
     super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::open_without_reconciliation(
-        crate::paths::daemon_jobs_file().expect("daemon jobs path"),
+        crate::paths::observation_db().expect("daemon jobs path"),
     )
     .expect("durable job store");
     let workspace = crate::workspace_claim::WorkspaceIdentity::new(
@@ -3898,7 +3894,7 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
             .is_empty()
     );
     assert!(JobStore::open_without_reconciliation(
-        crate::paths::daemon_jobs_file().expect("daemon jobs path")
+        crate::paths::observation_db().expect("daemon jobs path")
     )
     .expect("reopen durable jobs")
     .list()

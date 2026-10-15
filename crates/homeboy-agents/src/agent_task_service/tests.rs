@@ -542,7 +542,7 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
         let harness = homeboy_core::test_support::ControllerJobHarness::durable_queued(
             Arc::new(homeboy_core::daemon::step_job::StepJobDriver),
             serde_json::to_value(request).unwrap(),
-            &home.path().join("terminal-jobs.json"),
+            &home.path().join("terminal-jobs.sqlite"),
             "stage-a-terminal-lease",
         )
         .unwrap();
@@ -556,13 +556,13 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
         // Exited is durable before the consumer runs. Reopen the daemon store
         // at this boundary, then lose the ACK after the lifecycle commit.
         let restarted = harness
-            .reopen(&home.path().join("terminal-jobs.json"), "stage-b-restart")
+            .reopen(&home.path().join("terminal-jobs.sqlite"), "stage-b-restart")
             .unwrap();
         super::execution_step::consume_execution_terminal_in_store(&store, &pending[0]).unwrap();
         let recovered = store.read_record("step-terminal-ack").unwrap();
         let lost_ack = restarted
             .reopen(
-                &home.path().join("terminal-jobs.json"),
+                &home.path().join("terminal-jobs.sqlite"),
                 "stage-b-lost-ack-restart",
             )
             .unwrap();
@@ -2820,7 +2820,7 @@ fn cook_step_reconciliation_failure_retains_delivery_until_lifecycle_is_availabl
             home.path(),
             Default::default(),
         );
-        let path = home.path().join("cook-jobs.json");
+        let path = home.path().join("cook-jobs.sqlite");
         let harness = ControllerJobHarness::durable_queued(
             std::sync::Arc::new(StepJobDriver),
             serde_json::to_value(request).unwrap(),
@@ -2892,7 +2892,7 @@ fn cook_step_missing_redirected_index_settles_and_acks_after_daemon_restart() {
             home.path(),
             Default::default(),
         );
-        let path = home.path().join("missing-index-jobs.json");
+        let path = home.path().join("missing-index-jobs.sqlite");
         let harness = ControllerJobHarness::durable_queued(
             std::sync::Arc::new(StepJobDriver),
             serde_json::to_value(request).unwrap(),

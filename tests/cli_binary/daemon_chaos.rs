@@ -410,7 +410,7 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
     );
 
     let mut stores = Vec::new();
-    let mut dirs = vec![home.path().join(".config/homeboy/daemon")];
+    let mut dirs = vec![home.path().to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -418,7 +418,7 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
                 dirs.push(path);
             } else if path
                 .file_name()
-                .is_some_and(|name| name == "jobs.json.replay-tombstones.sqlite")
+                .is_some_and(|name| name == homeboy_core::paths::OBSERVATION_DB_FILENAME)
             {
                 stores.push(path);
             }

@@ -1155,7 +1155,7 @@ mod tests {
             .unwrap_or(artifact.path)
             .clone();
 
-        let jobs_path = homeboy::core::paths::daemon_jobs_file().expect("daemon jobs path");
+        let jobs_path = homeboy::core::paths::observation_db().expect("daemon jobs path");
         let jobs = homeboy::core::api_jobs::JobStore::open_without_reconciliation(&jobs_path)
             .expect("durable daemon job store");
         let job_ids = (0..backlog)

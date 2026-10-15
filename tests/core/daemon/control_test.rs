@@ -159,7 +159,7 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
 #[test]
 fn daemon_process_attribution_falls_back_to_conventional_home_store() {
     let home = tempfile::tempdir().expect("home");
-    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let jobs = home.path().join(".config/homeboy/daemon");
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4242 {} HOME={} {} daemon serve --addr 127.0.0.1:7421",
@@ -175,14 +175,14 @@ fn daemon_process_attribution_falls_back_to_conventional_home_store() {
         super::super::DaemonProcessOwnership::Owning
     );
     assert_eq!(candidate.bind_endpoint.as_deref(), Some("127.0.0.1:7421"));
-    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+    assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
 }
 
 #[test]
 fn daemon_process_attribution_matches_explicit_state_directory_store() {
     let home = tempfile::tempdir().expect("home");
     let state_dir = tempfile::tempdir().expect("state directory");
-    let jobs = state_dir.path().join("jobs.json");
+    let jobs = state_dir.path().to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4243 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={} {} daemon serve --addr 127.0.0.1:7421",
@@ -198,14 +198,14 @@ fn daemon_process_attribution_matches_explicit_state_directory_store() {
         candidate.ownership,
         super::super::DaemonProcessOwnership::Owning
     );
-    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+    assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
 }
 
 #[test]
 fn daemon_process_attribution_classifies_multiple_quoted_generation_state_directory_stores() {
     let home = tempfile::tempdir().expect("home");
     let generation_root = tempfile::tempdir().expect("generation root");
-    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let jobs = home.path().join(".config/homeboy/daemon");
     let executable = std::env::current_exe().expect("current executable");
 
     for (generation, quote) in [("generation-a", '\''), ("generation-b", '"')] {
@@ -225,8 +225,8 @@ fn daemon_process_attribution_classifies_multiple_quoted_generation_state_direct
             "{line}"
         );
         assert_eq!(
-            candidate.durable_store_path.as_deref(),
-            state_dir.join("jobs.json").to_str()
+            candidate.state_dir.as_deref(),
+            state_dir.to_path_buf().to_str()
         );
     }
 }
@@ -234,7 +234,7 @@ fn daemon_process_attribution_classifies_multiple_quoted_generation_state_direct
 #[test]
 fn daemon_process_attribution_keeps_quoted_same_store_ambiguous_without_binary_proof() {
     let state_dir = tempfile::tempdir().expect("state directory");
-    let jobs = state_dir.path().join("jobs.json");
+    let jobs = state_dir.path().to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4243 {} HOMEBOY_DAEMON_STATE_DIR=\"{}\" {} daemon serve --addr 127.0.0.1:7421",
@@ -248,7 +248,7 @@ fn daemon_process_attribution_keeps_quoted_same_store_ambiguous_without_binary_p
         candidate.ownership,
         super::super::DaemonProcessOwnership::Ambiguous
     );
-    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+    assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn daemon_process_attribution_keeps_whitespace_environment_assignments_ambiguous
         );
         let candidate = super::parse_daemon_process_candidate(
             &line,
-            &state_dir.join("jobs.json"),
+            &state_dir.to_path_buf(),
             Some(&executable),
         )
         .expect("candidate");
@@ -281,14 +281,14 @@ fn daemon_process_attribution_keeps_whitespace_environment_assignments_ambiguous
             super::super::DaemonProcessOwnership::Ambiguous,
             "{assignment}"
         );
-        assert_eq!(candidate.durable_store_path, None, "{assignment}");
+        assert_eq!(candidate.state_dir, None, "{assignment}");
     }
 }
 
 #[test]
 fn daemon_process_attribution_matches_state_directory_argument() {
     let state_dir = tempfile::tempdir().expect("state directory");
-    let jobs = state_dir.path().join("jobs.json");
+    let jobs = state_dir.path().to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
 
     for state_dir_argument in [
@@ -308,7 +308,7 @@ fn daemon_process_attribution_matches_state_directory_argument() {
             super::super::DaemonProcessOwnership::Owning,
             "{state_dir_argument}"
         );
-        assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+        assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
     }
 }
 
@@ -317,7 +317,7 @@ fn daemon_process_attribution_keeps_whitespace_state_directory_arguments_ambiguo
     let root = tempfile::tempdir().expect("state root");
     let state_dir = root.path().join("state directory");
     std::fs::create_dir(&state_dir).expect("state directory");
-    let jobs = state_dir.join("jobs.json");
+    let jobs = state_dir.to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
 
     for state_dir_argument in [
@@ -339,14 +339,14 @@ fn daemon_process_attribution_keeps_whitespace_state_directory_arguments_ambiguo
             super::super::DaemonProcessOwnership::Ambiguous,
             "{state_dir_argument}"
         );
-        assert_eq!(candidate.durable_store_path, None, "{state_dir_argument}");
+        assert_eq!(candidate.state_dir, None, "{state_dir_argument}");
     }
 }
 
 #[test]
 fn daemon_process_attribution_keeps_same_state_directory_argument_ambiguous_without_binary_proof() {
     let state_dir = tempfile::tempdir().expect("state directory");
-    let jobs = state_dir.path().join("jobs.json");
+    let jobs = state_dir.path().to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4243 {} {} daemon serve --state-dir {}",
@@ -360,7 +360,7 @@ fn daemon_process_attribution_keeps_same_state_directory_argument_ambiguous_with
         candidate.ownership,
         super::super::DaemonProcessOwnership::Ambiguous
     );
-    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+    assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
 }
 
 #[test]
@@ -368,7 +368,7 @@ fn daemon_process_attribution_state_directory_argument_overrides_environment_and
     let home = tempfile::tempdir().expect("home");
     let environment_state_dir = tempfile::tempdir().expect("environment state directory");
     let argument_state_dir = tempfile::tempdir().expect("argument state directory");
-    let jobs = argument_state_dir.path().join("jobs.json");
+    let jobs = argument_state_dir.path().to_path_buf();
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4243 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={} {} daemon serve --state-dir {}",
@@ -385,14 +385,14 @@ fn daemon_process_attribution_state_directory_argument_overrides_environment_and
         candidate.ownership,
         super::super::DaemonProcessOwnership::Owning
     );
-    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+    assert_eq!(candidate.state_dir.as_deref(), jobs.to_str());
 }
 
 #[test]
 fn daemon_process_attribution_proves_explicit_different_state_directory_unrelated() {
     let home = tempfile::tempdir().expect("home");
     let other_state_dir = tempfile::tempdir().expect("other state directory");
-    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let jobs = home.path().join(".config/homeboy/daemon");
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4244 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={} {} daemon serve --addr 127.0.0.1:7421",
@@ -409,8 +409,8 @@ fn daemon_process_attribution_proves_explicit_different_state_directory_unrelate
         super::super::DaemonProcessOwnership::Unrelated
     );
     assert_eq!(
-        candidate.durable_store_path.as_deref(),
-        other_state_dir.path().join("jobs.json").to_str()
+        candidate.state_dir.as_deref(),
+        other_state_dir.path().to_path_buf().to_str()
     );
 }
 
@@ -418,7 +418,7 @@ fn daemon_process_attribution_proves_explicit_different_state_directory_unrelate
 fn daemon_process_attribution_proves_state_directory_argument_different_store_unrelated() {
     let home = tempfile::tempdir().expect("home");
     let other_state_dir = tempfile::tempdir().expect("other state directory");
-    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let jobs = home.path().join(".config/homeboy/daemon");
     let executable = std::env::current_exe().expect("current executable");
     let line = format!(
         "4244 {} HOME={} {} daemon serve --state-dir={}",
@@ -435,8 +435,8 @@ fn daemon_process_attribution_proves_state_directory_argument_different_store_un
         super::super::DaemonProcessOwnership::Unrelated
     );
     assert_eq!(
-        candidate.durable_store_path.as_deref(),
-        other_state_dir.path().join("jobs.json").to_str()
+        candidate.state_dir.as_deref(),
+        other_state_dir.path().to_path_buf().to_str()
     );
 }
 
@@ -444,7 +444,7 @@ fn daemon_process_attribution_proves_state_directory_argument_different_store_un
 fn daemon_process_attribution_proves_unrelated_and_keeps_unbound_daemon_ambiguous() {
     let home = tempfile::tempdir().expect("home");
     let other_home = tempfile::tempdir().expect("other home");
-    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let jobs = home.path().join(".config/homeboy/daemon");
     let executable = std::env::current_exe().expect("current executable");
     let unrelated = format!(
         "4243 {} HOME={} {} daemon serve --addr 127.0.0.1:7421",
@@ -484,7 +484,7 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     let store = loop {
-        if let Some(store) = super::process_durable_store_path(process.id(), false) {
+        if let Some(store) = super::process_state_dir(process.id(), false) {
             break store;
         }
         assert!(Instant::now() < deadline, "procfs store path");
@@ -493,7 +493,7 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
     process.kill().expect("stop process");
     process.wait().expect("reap process");
 
-    assert_eq!(store, state_dir.path().join("jobs.json"));
+    assert_eq!(store, state_dir.path().to_path_buf());
 }
 
 #[cfg(unix)]
@@ -517,8 +517,8 @@ fn daemon_process_scan_never_serializes_inherited_environment() {
         .spawn()
         .expect("daemon-shaped process");
 
-    let candidates = super::daemon_process_candidates(&state_dir.path().join("jobs.json"))
-        .expect("candidate scan");
+    let candidates =
+        super::daemon_process_candidates(&state_dir.path().to_path_buf()).expect("candidate scan");
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.pid == process.id())
@@ -544,10 +544,10 @@ fn ambiguous_command_state_uses_explicit_process_store_without_home_fallback() {
         executable.display(),
         executable.display()
     );
-    let selected_jobs = selected_state.path().join("jobs.json");
+    let selected_jobs = selected_state.path().to_path_buf();
     let mut candidate =
         super::parse_daemon_process_candidate(&line, &selected_jobs, None).expect("candidate");
-    assert_eq!(candidate.durable_store_path, None);
+    assert_eq!(candidate.state_dir, None);
 
     let mut allow_home_seen = None;
     super::recover_candidate_store_from_process_environment(
@@ -557,14 +557,14 @@ fn ambiguous_command_state_uses_explicit_process_store_without_home_fallback() {
         |pid, allow_home| {
             assert_eq!(pid, 4243);
             allow_home_seen = Some(allow_home);
-            Some(candidate_state.path().join("jobs.json"))
+            Some(candidate_state.path().to_path_buf())
         },
     );
 
     assert_eq!(allow_home_seen, Some(false));
     assert_eq!(
-        candidate.durable_store_path.as_deref(),
-        candidate_state.path().join("jobs.json").to_str()
+        candidate.state_dir.as_deref(),
+        candidate_state.path().to_path_buf().to_str()
     );
     assert_eq!(
         candidate.ownership,
@@ -581,7 +581,7 @@ fn absent_command_state_allows_process_home_fallback_but_keeps_same_store_safe()
         executable.display(),
         executable.display()
     );
-    let jobs = state.path().join("jobs.json");
+    let jobs = state.path().to_path_buf();
     let mut candidate =
         super::parse_daemon_process_candidate(&line, &jobs, None).expect("candidate");
 
@@ -626,22 +626,22 @@ fn ambiguous_ps_state_dir_uses_only_explicit_procfs_state_identity() {
         .spawn()
         .expect("candidate process");
 
-    let candidates = super::daemon_process_candidates(&selected_state.path().join("jobs.json"))
+    let candidates = super::daemon_process_candidates(&selected_state.path().to_path_buf())
         .expect("candidate scan");
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.pid == process.id())
         .expect("spawned candidate");
     assert_eq!(
-        candidate.durable_store_path.as_deref(),
-        candidate_state.path().join("jobs.json").to_str()
+        candidate.state_dir.as_deref(),
+        candidate_state.path().to_path_buf().to_str()
     );
     assert_eq!(
         candidate.ownership,
         super::super::DaemonProcessOwnership::Unrelated
     );
 
-    let candidates = super::daemon_process_candidates(&candidate_state.path().join("jobs.json"))
+    let candidates = super::daemon_process_candidates(&candidate_state.path().to_path_buf())
         .expect("same-store candidate scan");
     let candidate = candidates
         .iter()
@@ -677,14 +677,13 @@ fn ambiguous_ps_state_dir_does_not_fall_back_to_procfs_home() {
         .spawn()
         .expect("candidate process");
 
-    let candidates =
-        super::daemon_process_candidates(&home.path().join(".config/homeboy/daemon/jobs.json"))
-            .expect("candidate scan");
+    let candidates = super::daemon_process_candidates(&home.path().join(".config/homeboy/daemon"))
+        .expect("candidate scan");
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.pid == process.id())
         .expect("spawned candidate");
-    assert_eq!(candidate.durable_store_path, None);
+    assert_eq!(candidate.state_dir, None);
     assert_eq!(
         candidate.ownership,
         super::super::DaemonProcessOwnership::Ambiguous
@@ -703,7 +702,7 @@ fn multiple_ambiguous_candidates_block_recovery_and_pid_reuse_blocks_adoption() 
         executable_digest: None,
         cmdline: "homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
-        durable_store_path: None,
+        state_dir: None,
         build_identity: None,
         startup_token: None,
         ownership: super::super::DaemonProcessOwnership::Ambiguous,
@@ -728,7 +727,7 @@ fn dead_persisted_lease_with_ambiguous_candidates_refuses_replacement_before_spa
         executable_digest: None,
         cmdline: "homeboy daemon serve --addr 127.0.0.1:0".to_string(),
         bind_endpoint: Some("127.0.0.1:0".to_string()),
-        durable_store_path: None,
+        state_dir: None,
         build_identity: None,
         startup_token: None,
         ownership: super::super::DaemonProcessOwnership::Ambiguous,
@@ -772,14 +771,16 @@ fn artifact_content_url_builds_encoded_daemon_byte_alias() {
 }
 
 #[test]
-fn leaseless_snapshot_uses_the_exact_bytes_opened_for_reconciliation() {
-    with_isolated_home(|home| {
-        let path = home.path().join("jobs.json");
-        let raw = br#"{"jobs":[]}"#;
-        std::fs::write(&path, raw).expect("write store");
-        let snapshot = super::snapshot_job_store(&path, raw).expect("snapshot");
-        assert_eq!(std::fs::read(snapshot).expect("read snapshot"), raw);
-        assert!(super::super::JobStore::open_without_reconciliation_from_bytes(&path, raw).is_ok());
+fn leaseless_snapshot_records_the_ledger_before_reconciliation() {
+    with_isolated_home(|_| {
+        let path = crate::paths::observation_db().expect("observation db");
+        let store = JobStore::open_without_reconciliation(&path).expect("store");
+        let job = store.create("runner.exec");
+        let snapshot = super::snapshot_job_store(&path).expect("snapshot");
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(snapshot).expect("read snapshot"))
+                .expect("snapshot JSON");
+        assert_eq!(recorded["jobs"][0]["job"]["id"], serde_json::json!(job.id));
     });
 }
 
@@ -793,7 +794,7 @@ fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
         std::fs::write(&state_path, serde_json::to_vec(&state).expect("state json"))
             .expect("state");
 
-        let jobs_path = crate::paths::daemon_jobs_file().expect("jobs path");
+        let jobs_path = crate::paths::observation_db().expect("jobs path");
         let store = JobStore::open_without_reconciliation(&jobs_path)
             .expect("store")
             .with_daemon_lease("lease-dead".to_string());

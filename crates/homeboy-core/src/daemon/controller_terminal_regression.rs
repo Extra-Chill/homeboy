@@ -41,7 +41,7 @@ fn controller_terminal_winner_stops_stale_success_worker_with_owned_deadline() {
         JobStatus::Cancelled,
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         let id = running_controller(&store, "test.terminal-winner");
         let winner = JobStore::open_without_reconciliation(&path).unwrap();
@@ -105,7 +105,7 @@ fn controller_terminal_winner_stops_stale_success_worker_with_owned_deadline() {
 #[test]
 fn controller_terminal_duplicate_observes_other_store_without_rewriting_snapshot() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("jobs.json");
+    let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).unwrap();
     let id = running_controller(&store, "test.terminal-duplicate");
     let winner = JobStore::open_without_reconciliation(&path).unwrap();

@@ -17,7 +17,7 @@ use crate::{paths, Result};
 /// Changing the schema means editing the baseline, bumping this version, and
 /// renaming [`paths::OBSERVATION_DB_FILENAME`] to match, so the new schema gets
 /// its own store file while binaries on the old schema keep theirs.
-pub(crate) const SCHEMA_VERSION: i64 = 30;
+pub(crate) const SCHEMA_VERSION: i64 = 31;
 
 /// The full observation-store schema at [`SCHEMA_VERSION`].
 ///
@@ -362,6 +362,72 @@ CREATE TABLE coordination_audit (
 );
 CREATE INDEX idx_coordination_audit_subject
     ON coordination_audit(namespace, subject_key, sequence DESC);
+
+-- The daemon's durable job ledger (`api_jobs::sql_store`). Ledger writers run
+-- with `PRAGMA synchronous=FULL` on their own connections.
+-- Compacted submission keys: permanent exactly-once replay evidence.
+CREATE TABLE replay_tombstones (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    terminal_job TEXT,
+    PRIMARY KEY (kind, key)
+);
+CREATE INDEX replay_tombstones_job_identity
+    ON replay_tombstones (kind, job_id);
+CREATE TABLE controller_completions (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE step_terminal_deliveries (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ms INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    receipt TEXT
+);
+CREATE INDEX step_terminal_deliveries_pending
+    ON step_terminal_deliveries(next_attempt_ms) WHERE receipt IS NULL;
+CREATE TABLE daemon_store_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL,
+    compaction TEXT
+);
+CREATE TABLE daemon_jobs (
+    job_id TEXT PRIMARY KEY NOT NULL,
+    status TEXT NOT NULL,
+    active INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    body TEXT NOT NULL
+);
+CREATE INDEX daemon_jobs_active ON daemon_jobs (active);
+CREATE TABLE daemon_job_events (
+    job_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (job_id, sequence)
+) WITHOUT ROWID;
+CREATE INDEX daemon_job_events_sequence
+    ON daemon_job_events (sequence);
+CREATE TABLE daemon_job_submissions (
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (kind, key)
+);
+CREATE INDEX daemon_job_submissions_job
+    ON daemon_job_submissions (kind, job_id);
+
+-- Workflow cadence registrations (`daemon::workflow_cadence`).
+CREATE TABLE workflow_cadences (
+    workflow TEXT PRIMARY KEY NOT NULL,
+    next_due_ms INTEGER NOT NULL,
+    body TEXT NOT NULL
+);
 "#;
 
 static SCHEMA_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -799,10 +865,10 @@ mod tests {
     /// baseline_schema_matches_the_pinned_fixture` after an intended change.
     const SCHEMA_FIXTURE_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/observation-schema/v30-baseline-schema.json"
+        "/tests/fixtures/observation-schema/v31-baseline-schema.json"
     );
     const MIGRATED_SCHEMA_FIXTURE: &str =
-        include_str!("../../../tests/fixtures/observation-schema/v30-baseline-schema.json");
+        include_str!("../../../tests/fixtures/observation-schema/v31-baseline-schema.json");
 
     fn migrated_schema_fixture() -> serde_json::Value {
         serde_json::from_str(MIGRATED_SCHEMA_FIXTURE).expect("schema fixture")
@@ -1007,15 +1073,10 @@ mod tests {
             .collect();
         let mut contents = serde_json::Map::new();
         for table in tables {
-            contents.insert(
-                table.clone(),
-                query_rows(
-                    &connection,
-                    &format!("SELECT * FROM \"{table}\" ORDER BY rowid"),
-                    None,
-                )
-                .into(),
-            );
+            // Some tables are WITHOUT ROWID, so order rows by their content.
+            let mut rows = query_rows(&connection, &format!("SELECT * FROM \"{table}\""), None);
+            rows.sort_by_key(|row| row.to_string());
+            contents.insert(table.clone(), rows.into());
         }
         snapshot["contents"] = contents.into();
         snapshot

@@ -14,7 +14,7 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     let Ok(job_id) = uuid::Uuid::parse_str(id) else {
         return Ok(None);
     };
-    let path = paths::daemon_jobs_file()?;
+    let path = paths::observation_db()?;
     if !api_jobs::JobStore::exists_at_path(&path) {
         return Ok(None);
     }
@@ -26,7 +26,7 @@ pub(super) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
 }
 
 pub(super) fn collect(collector: &mut ActivityCollector, filter: &ActivityFilter) -> Result<()> {
-    let path = paths::daemon_jobs_file()?;
+    let path = paths::observation_db()?;
     if !api_jobs::JobStore::exists_at_path(&path) {
         return Ok(());
     }
@@ -49,7 +49,7 @@ pub(super) fn item_from_job(store: &api_jobs::JobStore, job: Job) -> Result<Acti
     Ok(ActivityItem {
         id: job_id.clone(),
         kind: job.operation.clone(),
-        source_store: "daemon.jobs-json".to_string(),
+        source_store: "daemon.jobs".to_string(),
         state,
         created_at: ms_to_rfc3339(job.created_at_ms),
         updated_at: Some(ms_to_rfc3339(job.updated_at_ms)),

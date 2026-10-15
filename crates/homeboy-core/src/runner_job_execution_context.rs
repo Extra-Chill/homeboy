@@ -396,7 +396,7 @@ impl RunnerJobExecutionContext {
                 .as_deref(),
             &crate::build_identity::current().display,
         )?;
-        let jobs_file = crate::paths::daemon_jobs_file()?;
+        let jobs_file = crate::paths::observation_db()?;
         let deadline = std::time::Instant::now() + DAEMON_CHILD_IDENTITY_WAIT;
         let evidence = loop {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)?;
@@ -565,9 +565,8 @@ fn context_id(dispatch_receipt: &str) -> String {
 }
 
 /// A direct daemon child must be the daemon's own build: the two share a
-/// durable store whose format changes between releases (jobs.json became
-/// SQLite in 0.418.0). A skewed child would otherwise open a store the daemon
-/// never wrote and fail with a misleading "job not found". A daemon that
+/// durable store whose schema changes between releases. A skewed child would
+/// otherwise open a store the daemon never wrote and fail with a misleading "job not found". A daemon that
 /// predates the stamp sets no value; that child proceeds as before.
 fn verify_daemon_child_build(daemon_build: Option<&str>, child_build: &str) -> Result<()> {
     let Some(daemon_build) = daemon_build
@@ -760,7 +759,7 @@ mod tests {
     fn daemon_child_environment_resolves_runner_job_with_distinct_durable_and_attempt_ids() {
         with_isolated_home(|_| {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(
-                crate::paths::daemon_jobs_file().expect("jobs path"),
+                crate::paths::observation_db().expect("jobs path"),
             )
             .expect("job store");
             let durable_run_id = "controller-cook-run";
@@ -842,7 +841,7 @@ mod tests {
     #[test]
     fn daemon_child_waits_for_parent_to_record_its_identity() {
         with_isolated_home(|_| {
-            let jobs_file = crate::paths::daemon_jobs_file().expect("jobs path");
+            let jobs_file = crate::paths::observation_db().expect("jobs path");
             let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)
                 .expect("job store");
             let runner_id = "runner-1";

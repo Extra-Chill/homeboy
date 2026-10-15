@@ -10907,7 +10907,7 @@ fn execution_step_reservation_before_recipe_and_index_repairs_and_executes_provi
                 .unwrap(),
         )
         .unwrap();
-        let path = store.data_root().join("reservation-jobs.json");
+        let path = store.data_root().join("reservation-jobs.sqlite");
         let mut holder = intent.step.clone();
         holder.key = "reservation-holder".into();
         let harness = homeboy_core::test_support::ControllerJobHarness::durable_queued(

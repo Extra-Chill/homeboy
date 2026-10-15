@@ -20,8 +20,6 @@ use crate::api_jobs::{
 use crate::daemon::controller_job_driver::{ControllerJobDriver, ControllerJobHandle};
 use crate::error::{Error, Result};
 
-/// The durable daemon job store at `path` in its legacy `jobs.json` document
-/// shape. Fixtures compare these bytes to prove a read did not mutate state.
 /// Every row of the named observation tables, keyed `table:index`, read
 /// through a read-only connection. Two equal snapshots mean no row in those
 /// tables changed in between. Used to prove reads never write (#15718).
@@ -57,16 +55,6 @@ pub fn observation_table_snapshot(
         }
     }
     state
-}
-
-pub fn durable_job_store_snapshot(path: &Path) -> Result<Vec<u8>> {
-    JobStore::export_legacy_snapshot_at_path(path)
-}
-
-/// Replace the durable daemon job store at `path` with a legacy-shaped
-/// document, for fixtures that tamper with persisted job state.
-pub fn replace_durable_job_store(path: &Path, bytes: &[u8]) -> Result<()> {
-    JobStore::replace_with_legacy_snapshot_at_path(path, bytes)
 }
 
 /// Encode a runner job request as the daemon's direct `/exec` body: the
@@ -3193,7 +3181,7 @@ mod tests {
         assert_eq!(response["data"]["body"]["stale_runner_job_count"], 0);
 
         let temp = tempfile::tempdir().expect("job store directory");
-        let path = temp.path().join("jobs.json");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open(&path).expect("open durable store");
         let stale = store
             .submit_runner_api_fixture(

@@ -60,7 +60,6 @@ fn cadence(anchor_ms: u64, interval_ms: u64, next_due_ms: u64) -> Cadence {
             next_due_ms,
             cancelled_at_ms: None,
             last_instance: None,
-            last_instance_store: None,
             pending: None,
             last_fired_at_ms: None,
             fired: 0,
@@ -220,7 +219,7 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
             runs = runs.display(),
             gate = gate.display()
         );
-        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
+        let store = JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap())
             .unwrap()
             .with_daemon_lease("cadence-test".to_string());
         let base = 1_791_900_000_000;
@@ -261,7 +260,6 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
             slot_ms: base + 4 * MINUTE,
             instance_name: slot_instance_name(base + 4 * MINUTE),
             instance: second.clone(),
-            store: store.persistence_path(),
             next_due_ms: base + 6 * MINUTE,
         });
         write(&open().unwrap(), &rewound).unwrap();

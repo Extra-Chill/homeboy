@@ -487,7 +487,7 @@ When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
 and unavailable recovery evidence, run the explicit daemon reconciliation on the
 configured runner host. It acquires the daemon lifecycle lock, requires the
 affirmative confirmation flag, independently checks for a `homeboy daemon serve`
-process and Homeboy TCP listener, snapshots `jobs.json`, retains all job events
+process and Homeboy TCP listener, snapshots the durable job ledger, retains all job events
 and artifact references, terminalizes every active job as control-plane-lost, and
 returns each original lease ID plus the affected job mapping before starting one
 replacement daemon. Historical lease IDs do not establish a current owner. Live

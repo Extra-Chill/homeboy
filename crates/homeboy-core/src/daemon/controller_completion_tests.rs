@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicUsize;
 #[test]
 fn controller_completion_permanent_rejection_stops_without_retrying_or_rewriting() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("jobs.json");
+    let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).unwrap();
     let job = store.create("not-a-controller");
     store.start(job.id).unwrap();
@@ -30,7 +30,10 @@ fn controller_completion_permanent_rejection_stops_without_retrying_or_rewriting
 #[test]
 fn controller_completion_cancellation_before_result_retains_the_cancellation_owner() {
     let directory = tempfile::tempdir().unwrap();
-    let store = JobStore::open_without_reconciliation(directory.path().join("jobs.json")).unwrap();
+    let store = JobStore::open_without_reconciliation(
+        directory.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+    )
+    .unwrap();
     let id = running_controller(&store, "test.cancellation-before-result");
     store
         .request_controller_cancellation(id, "cancel first".to_string())
@@ -92,7 +95,7 @@ impl ControllerJobDriver for CompletedDriver {
 #[test]
 fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_effects() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("jobs.json");
+    let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
         &path,
         16,
@@ -146,10 +149,7 @@ fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_e
         }
         assert_eq!(JobStore::store_generation_at_path(&path).unwrap(), before);
         assert!(
-            JobStore::export_legacy_snapshot_at_path(&path)
-                .unwrap()
-                .len()
-                < 80 * 1024,
+            JobStore::ledger_snapshot_at_path(&path).unwrap().len() < 80 * 1024,
             "primary queue stays bounded independently of completed history"
         );
     }
@@ -164,7 +164,7 @@ fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_e
     #[cfg(target_os = "linux")]
     {
         let growth = rss_bytes().saturating_sub(initial_rss);
-        eprintln!("15327 soak: 50 completions, 800 duplicate observations; RSS growth {growth} bytes; queue bytes {}", JobStore::export_legacy_snapshot_at_path(&path).unwrap().len());
+        eprintln!("15327 soak: 50 completions, 800 duplicate observations; RSS growth {growth} bytes; queue bytes {}", JobStore::ledger_snapshot_at_path(&path).unwrap().len());
         assert!(
             growth < 64 * 1024 * 1024,
             "bounded completion soak cannot retain historical snapshots"
@@ -231,7 +231,7 @@ fn requested_stop_rearms_the_one_resume_fence_for_its_own_lease_only() {
         REGISTERED.get_or_init(|| {
             controller_job_driver::register_controller_job_driver(Arc::new(InThreadDriver)).unwrap()
         });
-        let path = home.path().join("rearm-jobs.json");
+        let path = home.path().join("rearm-jobs.sqlite");
         let harness = crate::test_support::ControllerJobHarness::durable(
             Arc::new(InThreadDriver),
             json!({}),

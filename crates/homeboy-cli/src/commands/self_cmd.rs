@@ -232,7 +232,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                     serde_json::to_value(host_resources)
                         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
                 );
-                let daemon_memory_owners = paths::daemon_jobs_file()
+                let daemon_memory_owners = paths::observation_db()
                     .and_then(JobStore::retained_owner_report_at_path)
                     .unwrap_or_else(|error| serde_json::json!({
                         "error": error.to_string(),

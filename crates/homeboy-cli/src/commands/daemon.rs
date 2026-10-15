@@ -675,7 +675,7 @@ fn jobs_prune(args: DaemonJobsPruneArgs) -> CmdResult<DaemonOutput> {
 }
 
 fn job_store() -> homeboy::core::Result<JobStore> {
-    JobStore::open_without_reconciliation(homeboy::core::paths::daemon_jobs_file()?)
+    JobStore::open_without_reconciliation(homeboy::core::paths::observation_db()?)
 }
 
 fn jobs_list(args: DaemonJobsListArgs) -> CmdResult<DaemonOutput> {
@@ -886,7 +886,7 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
                 "ownership": candidate.ownership,
                 "executable": bounded_text(&candidate.executable),
                 "endpoint": candidate.bind_endpoint.as_deref().map(bounded_text),
-                "store": candidate.durable_store_path.as_deref().map(bounded_text),
+                "store": candidate.state_dir.as_deref().map(bounded_text),
             })
         })
         .collect::<Vec<_>>();
@@ -1508,7 +1508,7 @@ mod tests {
                     executable_digest: None,
                     cmdline: "evidence ".repeat(2048),
                     bind_endpoint: Some("127.0.0.1:7421".to_string()),
-                    durable_store_path: Some(format!("/tmp/{pid}/jobs.json")),
+                    state_dir: Some(format!("/tmp/{pid}")),
                     build_identity: None,
                     startup_token: Some("token".repeat(512)),
                     ownership: daemon::DaemonProcessOwnership::Unrelated,
@@ -2040,7 +2040,7 @@ mod tests {
                 executable_digest: None,
                 cmdline: "homeboy daemon serve".to_string(),
                 bind_endpoint: Some("127.0.0.1:0".to_string()),
-                durable_store_path: Some("test/jobs.json".to_string()),
+                state_dir: Some("test".to_string()),
                 build_identity: Some("current_executable".to_string()),
                 startup_token: None,
                 ownership: daemon::DaemonProcessOwnership::Owning,

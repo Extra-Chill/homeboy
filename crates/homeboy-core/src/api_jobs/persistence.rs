@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,24 +46,6 @@ pub(super) enum ReplayTombstoneKind {
     Controller,
 }
 
-pub(super) fn tombstone_path(path: &Path) -> std::path::PathBuf {
-    path.with_file_name(format!(
-        "{}.replay-tombstones.sqlite",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("jobs.json")
-    ))
-}
-
-fn legacy_tombstone_path(path: &Path) -> std::path::PathBuf {
-    path.with_file_name(format!(
-        "{}.replay-tombstones.jsonl",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("jobs.json")
-    ))
-}
-
 fn tombstone_kind_name(kind: ReplayTombstoneKind) -> &'static str {
     match kind {
         ReplayTombstoneKind::RemoteRunner => "remote_runner",
@@ -79,9 +60,12 @@ pub(super) fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Err
     )
 }
 
-pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
-    let journal = tombstone_path(path);
-    if let Some(parent) = journal.parent() {
+/// Open the observation store at `path` for a ledger write. The observation
+/// store's own open creates the schema and WAL and installs its busy wait;
+/// ledger commits are fsynced, so this connection runs `synchronous=FULL`
+/// (a per-connection setting).
+pub(crate) fn open_ledger(path: &Path) -> Result<Connection> {
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -89,88 +73,32 @@ pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
             )
         })?;
     }
-    let connection = Connection::open(&journal)
-        .map_err(|error| tombstone_error(&journal, "open replay tombstone index", error))?;
+    let connection = crate::observation::store::open_initialized_connection(path)?;
     connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| tombstone_error(&journal, "configure replay tombstone index", error))?;
-    // Retention deletes rows constantly, so a database created now reclaims
-    // freed pages instead of keeping its high-water mark. The mode can only be
-    // chosen before the first table exists (and re-asserting it rewrites the
-    // header on every open); an older database is converted once, when the job
-    // store moves into it.
-    let is_new: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get(0))
-        .map_err(|error| tombstone_error(&journal, "inspect replay tombstone index", error))?;
-    if is_new == 0 {
-        connection
-            .execute_batch("PRAGMA auto_vacuum=FULL;")
-            .map_err(|error| {
-                tombstone_error(&journal, "configure replay tombstone index", error)
-            })?;
-    }
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
-             CREATE TABLE IF NOT EXISTS replay_tombstones (
-                 kind TEXT NOT NULL,
-                 key TEXT NOT NULL,
-                 fingerprint TEXT NOT NULL,
-                 job_id TEXT NOT NULL,
-                 terminal_job TEXT,
-                 PRIMARY KEY (kind, key)
-              );
-               CREATE INDEX IF NOT EXISTS replay_tombstones_job_identity
-                   ON replay_tombstones (kind, job_id);
-               CREATE TABLE IF NOT EXISTS controller_completions (
-                  job_id TEXT PRIMARY KEY NOT NULL,
-                  payload TEXT NOT NULL
-               );
-               CREATE TABLE IF NOT EXISTS step_terminal_deliveries (
-                  job_id TEXT PRIMARY KEY NOT NULL,
-                  payload TEXT NOT NULL,
-                  attempts INTEGER NOT NULL DEFAULT 0,
-                  next_attempt_ms INTEGER NOT NULL DEFAULT 0,
-                  last_error TEXT,
-                  receipt TEXT
-               );
-               CREATE INDEX IF NOT EXISTS step_terminal_deliveries_pending
-                  ON step_terminal_deliveries(next_attempt_ms) WHERE receipt IS NULL;
-               CREATE TABLE IF NOT EXISTS daemon_store_state (
-                  id INTEGER PRIMARY KEY CHECK (id = 1),
-                  generation INTEGER NOT NULL,
-                  compaction TEXT,
-                  legacy_import_pending INTEGER NOT NULL DEFAULT 0
-              );
-               CREATE TABLE IF NOT EXISTS daemon_jobs (
-                  job_id TEXT PRIMARY KEY NOT NULL,
-                  status TEXT NOT NULL,
-                  active INTEGER NOT NULL,
-                  created_at_ms INTEGER NOT NULL,
-                  updated_at_ms INTEGER NOT NULL,
-                  body TEXT NOT NULL
-              );
-               CREATE INDEX IF NOT EXISTS daemon_jobs_active ON daemon_jobs (active);
-               CREATE TABLE IF NOT EXISTS daemon_job_events (
-                  job_id TEXT NOT NULL,
-                  sequence INTEGER NOT NULL,
-                  body TEXT NOT NULL,
-                  PRIMARY KEY (job_id, sequence)
-              ) WITHOUT ROWID;
-               CREATE INDEX IF NOT EXISTS daemon_job_events_sequence
-                  ON daemon_job_events (sequence);
-               CREATE TABLE IF NOT EXISTS daemon_job_submissions (
-                  kind TEXT NOT NULL,
-                  key TEXT NOT NULL,
-                  job_id TEXT NOT NULL,
-                  body TEXT NOT NULL,
-                  PRIMARY KEY (kind, key)
-              );
-               CREATE INDEX IF NOT EXISTS daemon_job_submissions_job
-                  ON daemon_job_submissions (kind, job_id);",
-        )
-        .map_err(|error| tombstone_error(&journal, "initialize replay tombstone index", error))?;
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|error| tombstone_error(path, "configure daemon job ledger", error))?;
     Ok(connection)
+}
+
+/// Open the observation store at `path` read-only, without creating or
+/// initializing anything. `None` means there is no ledger yet: no jobs.
+pub(super) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = crate::observation::store::open_readonly_connection(path)?;
+    // The baseline schema is created in one transaction, so one ledger table
+    // stands for all of them.
+    let initialized = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daemon_store_state'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| tombstone_error(path, "inspect daemon job ledger", error))?
+        .is_some();
+    Ok(initialized.then_some(connection))
 }
 
 pub(super) fn insert_tombstone(
@@ -178,7 +106,6 @@ pub(super) fn insert_tombstone(
     path: &Path,
     tombstone: &ReplayTombstone,
 ) -> Result<()> {
-    let journal = tombstone_path(path);
     let terminal_job = tombstone
         .terminal_job
         .as_ref()
@@ -202,7 +129,7 @@ pub(super) fn insert_tombstone(
                 terminal_job,
             ],
         )
-        .map_err(|error| tombstone_error(&journal, "insert replay tombstone", error))?;
+        .map_err(|error| tombstone_error(path, "insert replay tombstone", error))?;
     if changed == 0 {
         let existing =
             lookup_tombstone_in_connection(connection, path, tombstone.kind, &tombstone.key)?
@@ -228,61 +155,12 @@ pub(super) fn insert_tombstone(
     Ok(())
 }
 
-/// Migrate the short-lived JSONL format introduced by this branch before any
-/// lookup. Renaming only after the SQLite transaction commits makes a crash
-/// repeat migration safely instead of ever treating an accepted key as absent.
-pub(super) fn prepare_tombstone_store(path: &Path) -> Result<()> {
-    let legacy = legacy_tombstone_path(path);
-    if !legacy.exists() {
-        return Ok(());
-    }
-    let connection = open_tombstone_store(path)?;
-    let transaction = connection.unchecked_transaction().map_err(|error| {
-        tombstone_error(
-            &tombstone_path(path),
-            "begin replay tombstone migration",
-            error,
-        )
-    })?;
-    let file = fs::File::open(&legacy).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("read {}", legacy.display())),
-        )
-    })?;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", legacy.display())),
-            )
-        })?;
-        let tombstone: ReplayTombstone = serde_json::from_str(&line)
-            .map_err(|error| Error::config_invalid_json(legacy.display().to_string(), error))?;
-        insert_tombstone(&transaction, path, &tombstone)?;
-    }
-    transaction.commit().map_err(|error| {
-        tombstone_error(
-            &tombstone_path(path),
-            "commit replay tombstone migration",
-            error,
-        )
-    })?;
-    fs::rename(&legacy, legacy.with_extension("jsonl.migrated")).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("migrate {}", legacy.display())),
-        )
-    })
-}
-
 fn lookup_tombstone_in_connection(
     connection: &Connection,
     path: &Path,
     kind: ReplayTombstoneKind,
     key: &str,
 ) -> Result<Option<ReplayTombstone>> {
-    let journal = tombstone_path(path);
     let row = connection
         .query_row(
             "SELECT fingerprint, job_id, terminal_job FROM replay_tombstones WHERE kind = ?1 AND key = ?2",
@@ -290,22 +168,19 @@ fn lookup_tombstone_in_connection(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
         )
         .optional()
-        .map_err(|error| tombstone_error(&journal, "lookup replay tombstone", error))?;
+        .map_err(|error| tombstone_error(path, "lookup replay tombstone", error))?;
     row.map(|(fingerprint, job_id, terminal_job)| {
         Ok(ReplayTombstone {
             kind,
             key: key.to_string(),
             fingerprint,
             job_id: Uuid::parse_str(&job_id).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", journal.display())),
-                )
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
             })?,
             terminal_job: terminal_job
                 .map(|value| {
                     serde_json::from_str(&value).map_err(|error| {
-                        Error::config_invalid_json(journal.display().to_string(), error)
+                        Error::config_invalid_json(path.display().to_string(), error)
                     })
                 })
                 .transpose()?,
@@ -321,24 +196,16 @@ pub(super) fn lookup_tombstone(
     kind: ReplayTombstoneKind,
     key: &str,
 ) -> Result<Option<ReplayTombstone>> {
-    prepare_tombstone_store(path)?;
-    let connection = open_tombstone_store(path)?;
+    let connection = open_ledger(path)?;
     lookup_tombstone_in_connection(&connection, path, kind, key)
 }
 
 /// Read permanent terminal custody by exact identity, without replaying an
 /// admission or interpreting an absent row as proof of workload absence.
 pub(super) fn lookup_terminal_controller_job(path: &Path, job_id: Uuid) -> Result<Option<Job>> {
-    if !tombstone_path(path).exists() {
+    let Some(connection) = open_ledger_readonly(path)? else {
         return Ok(None);
-    }
-    let journal = tombstone_path(path);
-    let connection =
-        Connection::open_with_flags(&journal, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|error| tombstone_error(path, "open terminal custody read-only", error))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| tombstone_error(path, "bound terminal custody read", error))?;
+    };
     let mut statement = connection.prepare(
         "SELECT terminal_job FROM replay_tombstones WHERE kind = 'controller' AND job_id = ?1 AND terminal_job IS NOT NULL",
     ).map_err(|error| tombstone_error(path, "lookup terminal controller identity", error))?;
@@ -349,9 +216,8 @@ pub(super) fn lookup_terminal_controller_job(path: &Path, job_id: Uuid) -> Resul
     for raw in rows {
         let raw =
             raw.map_err(|error| tombstone_error(path, "read terminal controller custody", error))?;
-        let job: Job = serde_json::from_str(&raw).map_err(|error| {
-            Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-        })?;
+        let job: Job = serde_json::from_str(&raw)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
         validate_terminal_controller_identity(&job, job_id)?;
         if winner.as_ref().is_some_and(|prior| {
             serde_json::to_value(prior).ok() != serde_json::to_value(&job).ok()
@@ -374,27 +240,20 @@ pub(super) fn validate_terminal_controller_identity(job: &Job, job_id: Uuid) -> 
     Ok(())
 }
 
+/// The replay tombstone count and the bytes their rows hold.
 pub(super) fn tombstone_store_report(path: &Path) -> Result<(usize, u64)> {
-    prepare_tombstone_store(path)?;
-    let journal = tombstone_path(path);
-    if !journal.exists() {
+    let Some(connection) = open_ledger_readonly(path)? else {
         return Ok((0, 0));
-    }
-    let connection = open_tombstone_store(path)?;
-    let count = connection
-        .query_row("SELECT COUNT(*) FROM replay_tombstones", [], |row| {
-            row.get(0)
-        })
-        .map_err(|error| tombstone_error(&journal, "count replay tombstones", error))?;
-    let bytes = fs::metadata(&journal)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", journal.display())),
-            )
-        })?
-        .len();
-    Ok((count, bytes))
+    };
+    connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(kind) + length(key) + length(fingerprint)
+                 + length(job_id) + COALESCE(length(terminal_job), 0)), 0)
+             FROM replay_tombstones",
+            [],
+            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as u64)),
+        )
+        .map_err(|error| tombstone_error(path, "count replay tombstones", error))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

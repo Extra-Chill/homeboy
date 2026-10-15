@@ -65,7 +65,7 @@ fn admit_execution_intent(
     intent: &ExecutionStepIntent,
 ) {
     register_execution_step_hooks();
-    let path = store.data_root().join("boundary-jobs.json");
+    let path = store.data_root().join("boundary-jobs.sqlite");
     let mut holder = intent.step.clone();
     holder.key = "materializer-holder".into();
     let harness = ControllerJobHarness::durable_queued(
@@ -226,7 +226,7 @@ fn execution_step_concurrent_drain_reuses_one_submission_and_executes_once() {
         let intent = execution_intent_for(&store, subject);
         let mut holder = intent.step.clone();
         holder.key = "drain-holder".into();
-        let path = store.data_root().join("boundary-jobs.json");
+        let path = store.data_root().join("boundary-jobs.sqlite");
         let harness = ControllerJobHarness::durable_queued(
             Arc::new(StepJobDriver),
             serde_json::to_value(holder).unwrap(),
@@ -371,7 +371,7 @@ fn execution_step_rearm_cancels_superseded_waiting_job_and_lost_cleanup_ack_is_i
         let initial = execution_intent_for(&store, subject);
         let mut holder = initial.step.clone();
         holder.key = "cleanup-holder".into();
-        let path = home.path().join("cleanup-jobs.json");
+        let path = home.path().join("cleanup-jobs.sqlite");
         let harness = ControllerJobHarness::durable_queued(
             Arc::new(StepJobDriver),
             serde_json::to_value(holder).unwrap(),
@@ -484,7 +484,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
         .unwrap();
         let intent = execution_intent_for(&store, "gate-retry");
         register_execution_step_hooks();
-        let path = home.path().join("gate-jobs.json");
+        let path = home.path().join("gate-jobs.sqlite");
         let harness = ControllerJobHarness::durable(
             Arc::new(StepJobDriver),
             serde_json::to_value(&intent.step).unwrap(),
@@ -600,7 +600,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
         request.wait.not_before = None;
         request.wait.runner_eligible = Some("boundary-runner".into());
         register_execution_step_hooks();
-        let path = home.path().join("runner-jobs.json");
+        let path = home.path().join("runner-jobs.sqlite");
         let harness = ControllerJobHarness::durable(
             Arc::new(StepJobDriver),
             serde_json::to_value(&request).unwrap(),

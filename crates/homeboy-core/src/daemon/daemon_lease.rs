@@ -36,29 +36,27 @@ pub(crate) struct DaemonLeaseValidation {
 
 pub(crate) fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
-    for (label, path) in [
-        (b"daemon-state\0".as_slice(), state_path),
-        (b"daemon-jobs\0".as_slice(), jobs_path),
-    ] {
-        hasher.update(label);
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        match fs::read(path) {
-            Ok(bytes) => {
-                hasher.update([1]);
-                hasher.update(bytes);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", path.display())),
-                ))
-            }
+    hasher.update(b"daemon-state\0");
+    hasher.update(state_path.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    match fs::read(state_path) {
+        Ok(bytes) => {
+            hasher.update([1]);
+            hasher.update(bytes);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", state_path.display())),
+            ))
         }
     }
-    // The job store lives in SQLite; its commit counter stands in for the
-    // document bytes so the identity still changes with every job mutation.
+    hasher.update(b"daemon-jobs\0");
+    hasher.update(jobs_path.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    // The job ledger lives in the observation store; its commit counter
+    // changes with every job mutation.
     hasher.update(b"daemon-jobs-generation\0");
     match crate::api_jobs::JobStore::store_generation_at_path(jobs_path)? {
         Some(generation) => {
@@ -455,12 +453,19 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         for directory in [&a, &b] {
             std::fs::write(directory.join("state.json"), b"same lease bytes").unwrap();
-            std::fs::write(directory.join("jobs.json"), b"same jobs bytes").unwrap();
         }
 
         assert_ne!(
-            daemon_state_identity(&a.join("state.json"), &a.join("jobs.json")).unwrap(),
-            daemon_state_identity(&b.join("state.json"), &b.join("jobs.json")).unwrap(),
+            daemon_state_identity(
+                &a.join("state.json"),
+                &a.join(crate::paths::OBSERVATION_DB_FILENAME)
+            )
+            .unwrap(),
+            daemon_state_identity(
+                &b.join("state.json"),
+                &b.join(crate::paths::OBSERVATION_DB_FILENAME)
+            )
+            .unwrap(),
             "identity must fence authority/store changes even when files happen to match"
         );
     }

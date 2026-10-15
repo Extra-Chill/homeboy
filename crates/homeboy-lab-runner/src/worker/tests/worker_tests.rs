@@ -1047,7 +1047,9 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
             &[],
         )
         .expect("configure named runner secrets");
-        let path = temp.path().join("jobs.json");
+        let path = temp
+            .path()
+            .join(homeboy_core::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
         let mut request = run_id_echo_request();
         request.command = vec![
@@ -1070,9 +1072,9 @@ fn reverse_worker_executes_from_envelope_dispatch_fields() {
         store
             .submit_runner_api_fixture(request)
             .expect("submit job");
-        // The durable store is the SQLite file next to the legacy document path.
-        let durable = std::fs::read(path.with_file_name("jobs.json.replay-tombstones.sqlite"))
-            .expect("read durable job store");
+        // The durable store is the observation store file and its WAL.
+        let mut durable = std::fs::read(&path).expect("read durable job store");
+        durable.extend(std::fs::read(path.with_extension("sqlite-wal")).unwrap_or_default());
         assert!(!String::from_utf8_lossy(&durable).contains("secret-b"));
         drop(store);
         let store = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
@@ -1102,7 +1104,7 @@ fn reverse_worker_executes_a_verified_staged_source_package() {
         let path = tempfile::tempdir()
             .expect("tempdir")
             .path()
-            .join("jobs.json");
+            .join(homeboy_core::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).expect("open durable store");
         let transfer = SourceArtifactTransfer::from_bytes("staged-source-1", b"staged output");
         let artifact = transfer.descriptor();

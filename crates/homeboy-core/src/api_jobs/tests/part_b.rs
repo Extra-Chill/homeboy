@@ -67,7 +67,7 @@ fn terminal_controller_job_releases_active_key_for_next_retry_epoch() {
 #[test]
 fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombstones() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let request = json!({ "cook_id": "cook", "run_id": "run" });
     let submission = || ControllerJobState {
@@ -206,7 +206,7 @@ fn confirmed_recovery_fails_closed_for_unresolved_linked_durable_run() {
 #[test]
 fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease("lease-dead".to_string());
@@ -1022,7 +1022,7 @@ fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
 #[test]
 fn leaseless_recovery_terminalizes_one_historical_lease_and_retains_evidence() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let leased = JobStore::open_without_reconciliation(&path)
         .expect("open leased store")
         .with_daemon_lease("lease-owned".to_string());
@@ -1067,7 +1067,7 @@ fn leaseless_recovery_terminalizes_one_historical_lease_and_retains_evidence() {
 #[test]
 fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let first = JobStore::open_without_reconciliation(&path)
         .expect("open first")
         .with_daemon_lease("lease-first".to_string());
@@ -1115,7 +1115,7 @@ fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
 #[test]
 fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_once() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let unowned = JobStore::open_without_reconciliation(&path).expect("open unowned store");
     let unowned_job = unowned.create("runner.exec");
     record_test_local_child(&unowned, unowned_job.id, u32::MAX);
@@ -1164,7 +1164,7 @@ fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_onc
 #[test]
 fn leaseless_recovery_fails_before_historical_mutation_when_unowned_work_is_ambiguous() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let unowned = JobStore::open_without_reconciliation(&path).expect("open unowned store");
     let unowned_job = unowned.create("runner.exec");
     unowned.start(unowned_job.id).expect("start unowned job");
@@ -1240,7 +1240,7 @@ fn leaseless_recovery_preserves_queued_remote_jobs_and_expires_claims_through_br
 #[test]
 fn daemon_job_acceptance_stamps_current_lease_and_old_job_json_remains_readable() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path)
         .expect("open daemon store")
         .with_daemon_lease("lease-current".to_string());
@@ -1259,7 +1259,7 @@ fn daemon_job_acceptance_stamps_current_lease_and_old_job_json_remains_readable(
 #[test]
 fn durable_store_stale_restart_classification_preserves_last_child_evidence() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
         .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
@@ -1327,7 +1327,7 @@ fn durable_store_stale_restart_classification_preserves_last_child_evidence() {
 #[test]
 fn durable_store_recovers_succeeded_job_from_result_event_after_restart() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store.create("runner.exec");
     store.start(job.id).expect("job starts");
@@ -1365,7 +1365,7 @@ fn durable_store_recovers_succeeded_job_from_result_event_after_restart() {
 #[test]
 fn durable_store_recovers_failed_job_from_nonzero_result_after_restart() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store.create("runner.exec");
     store.start(job.id).expect("job starts");
@@ -1404,7 +1404,7 @@ fn durable_store_recovers_failed_job_from_nonzero_result_after_restart() {
 #[test]
 fn durable_store_recovers_cancelled_job_from_result_after_restart() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store.create("runner.exec");
     store.start(job.id).expect("job starts");
@@ -1469,7 +1469,7 @@ fn recovered_terminal_from_result_handles_missing_and_present_results() {
 #[test]
 fn test_open_with_event_retention() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_event_retention(&path, 3).expect("durable store opens");
     let job = store.create("test");
     store.start(job.id).expect("job starts");
@@ -1500,7 +1500,7 @@ fn test_open_with_event_retention() {
 #[test]
 fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery_evidence() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
     let queued = store.create("queued");
     let running = store.create("running");
@@ -1572,48 +1572,9 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
 }
 
 #[test]
-fn legacy_compaction_evidence_without_retained_bytes_reopens() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
-    let job = store.create("terminal");
-    store.start(job.id).expect("terminal job starts");
-    store
-        .complete(job.id, None)
-        .expect("terminal job completes");
-
-    let mut durable = super::durable_snapshot(&path);
-    durable["compaction"] = json!({
-        "timestamp_ms": 100,
-        "removed_terminal_jobs": 1,
-        "retained_terminal_jobs": 1,
-        "active_jobs": 0
-    });
-    super::install_legacy_store(&path, &durable);
-
-    let reopened = JobStore::open_without_reconciliation(&path)
-        .expect("legacy compaction evidence remains readable");
-    assert_eq!(
-        reopened.get(job.id).expect("job survives").status,
-        JobStatus::Succeeded
-    );
-    assert_eq!(
-        reopened
-            .inner
-            .lock()
-            .expect("job store mutex")
-            .compaction
-            .as_ref()
-            .expect("compaction evidence survives")
-            .retained_terminal_bytes,
-        0
-    );
-}
-
-#[test]
 fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_persists() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store opens");
     let queued = store.create("queued");
     let running = store.create("running");
@@ -1664,10 +1625,7 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
         .get(*terminal.last().expect("terminal jobs"))
         .is_ok());
     assert!(
-        fs::metadata(super::super::persistence::tombstone_path(&path))
-            .expect("compacted store metadata")
-            .len()
-            < 160_000,
+        super::ledger_bytes(&path) < 160_000,
         "the persisted store remains bounded despite high-payload terminal events"
     );
 
@@ -1682,10 +1640,7 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
             .as_ref()
             .is_some_and(|data| data["phase"] == "spawned")));
     assert!(
-        fs::metadata(super::super::persistence::tombstone_path(&path))
-            .expect("reserved child store metadata")
-            .len()
-            < 160_000,
+        super::ledger_bytes(&path) < 160_000,
         "reservation and PID persistence do not rewrite historical payloads"
     );
 }
@@ -1693,7 +1648,7 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
 #[test]
 fn oversized_terminal_result_remains_observable_when_it_exceeds_the_byte_budget() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let terminal_job_retention_bytes = 64;
     let store = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
         &path,
@@ -1775,7 +1730,7 @@ fn remote_runner_job_submit_targets_runner_and_project() {
 #[test]
 fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.env.insert(
@@ -1855,7 +1810,7 @@ fn remote_runner_job_with_provider_credential_plan_accepts_value_free_env() {
     // and provider credential provenance — never values) must pass durable
     // reverse-runner validation and persist as a queued job.
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.secret_env_names = vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()];
@@ -1903,7 +1858,7 @@ fn remote_runner_job_rejects_inline_values_for_provider_credential_plan_names() 
 #[test]
 fn remote_runner_submission_key_replays_one_redacted_durable_job() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.secret_env_names = vec!["RUNNER_SECRET_TOKEN".to_string()];
@@ -1959,7 +1914,7 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
 #[test]
 fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.secret_env_names = vec!["TOKEN".to_string()];
@@ -2037,7 +1992,7 @@ fn envelope_submission_replays_and_persists_no_legacy_execution_request() {
 #[test]
 fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let request = remote_runner_request("homeboy-lab", None);
     store
@@ -2046,11 +2001,7 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
     let mut dual = super::durable_snapshot(&path);
     dual["jobs"][0]["remote_runner"]["request"] =
         serde_json::to_value(&request).expect("request JSON");
-    assert!(JobStore::open_without_reconciliation_from_bytes(
-        temp.path().join("dual.json"),
-        &serde_json::to_vec(&dual).expect("dual JSON"),
-    )
-    .is_err());
+    assert!(serde_json::from_value::<super::super::store::DurableJobStore>(dual.clone()).is_err());
 
     let mut empty = dual;
     empty["jobs"][0]["remote_runner"]
@@ -2061,17 +2012,13 @@ fn durable_remote_runner_representation_rejects_dual_or_empty_payloads() {
         .as_object_mut()
         .expect("remote job")
         .remove("request");
-    assert!(JobStore::open_without_reconciliation_from_bytes(
-        temp.path().join("empty.json"),
-        &serde_json::to_vec(&empty).expect("empty JSON"),
-    )
-    .is_err());
+    assert!(serde_json::from_value::<super::super::store::DurableJobStore>(empty).is_err());
 }
 
 #[test]
 fn request_only_remote_runner_record_is_refused_with_a_typed_store_error() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let request = remote_runner_request("homeboy-lab", None);
     let job = store
@@ -2099,17 +2046,9 @@ fn request_only_remote_runner_record_is_refused_with_a_typed_store_error() {
         "request".to_string(),
         serde_json::to_value(&request).expect("request JSON"),
     );
-    let snapshot_error = JobStore::open_without_reconciliation_from_bytes(
-        temp.path().join("request-only.json"),
-        &serde_json::to_vec(&persisted).expect("request-only store JSON"),
-    )
-    .expect_err("a request-only snapshot is refused");
-    assert_typed_refusal(snapshot_error);
-
-    // The same record as a row of the SQLite store refuses the load instead of
+    // As a row of the SQLite store the record refuses the load instead of
     // panicking or being silently dropped.
-    let connection = rusqlite::Connection::open(super::persistence::tombstone_path(&path))
-        .expect("open SQL job store");
+    let connection = rusqlite::Connection::open(&path).expect("open SQL job store");
     let updated = connection
         .execute(
             "UPDATE daemon_jobs SET body = ?1 WHERE job_id = ?2",
@@ -2129,7 +2068,7 @@ fn request_only_remote_runner_record_is_refused_with_a_typed_store_error() {
 #[test]
 fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("broker store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "write-failure" }));
@@ -2178,7 +2117,7 @@ fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
 #[test]
 fn remote_runner_submission_key_survives_restart_and_rejects_conflicts() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({
@@ -2230,7 +2169,7 @@ fn remote_runner_submission_key_concurrent_replay_creates_one_job() {
 #[test]
 fn remote_runner_submission_key_concurrent_independent_stores_create_one_job() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let first_store = JobStore::open_without_reconciliation(&path).expect("first broker store");
     let second_store = JobStore::open_without_reconciliation(&path).expect("second broker store");
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -2264,7 +2203,7 @@ fn remote_runner_submission_key_concurrent_independent_stores_create_one_job() {
 #[test]
 fn remote_runner_submission_retry_preserves_concurrent_claim() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let submitter = JobStore::open_without_reconciliation(&path).expect("submitter store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:claim-interleaving" }));
@@ -2304,7 +2243,7 @@ fn remote_runner_submission_retry_preserves_concurrent_claim() {
 #[test]
 fn remote_runner_submission_terminal_replay_returns_original_projection_without_progress() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("broker store");
     let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
     request.metadata = Some(json!({ "submission_key": "agent-task:v1:terminal-lost-response" }));
@@ -2410,7 +2349,7 @@ fn remote_runner_submission_key_conflicts_on_all_execution_semantic_inputs() {
 #[test]
 fn compacted_submission_key_expires_without_creating_a_duplicate() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_retention(&path, 10, 1).expect("durable store");
     let mut requests = Vec::new();
     for key in ["agent-task:v1:compact-one", "agent-task:v1:compact-two"] {
@@ -2428,7 +2367,7 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
         requests.push((key.to_string(), request));
     }
     let expired_key = "agent-task:v1:compact-one".to_string();
-    assert!(super::super::persistence::tombstone_path(&path).exists());
+    assert!(path.exists());
     assert!(
         store
             .inner
@@ -2455,7 +2394,7 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
 #[test]
 fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_retention(&path, 3, 1).expect("durable store");
     let mut first = None;
     for index in 0..128 {
@@ -2489,10 +2428,7 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
         .is_empty());
     assert!(super::durable_snapshot(&path).to_string().len() < 40_000);
     assert!(
-        fs::metadata(super::super::persistence::tombstone_path(&path))
-            .expect("tombstone index metadata")
-            .len()
-            < 256_000,
+        super::ledger_bytes(&path) < 256_000,
         "128 compacted 32 KiB requests retain identity records, not 4 MiB of payloads"
     );
 
@@ -2510,7 +2446,7 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
 #[test]
 fn corrupt_replay_tombstone_journal_fails_closed() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_retention(&path, 3, 1).expect("durable store");
     let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
     first.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-one" }));
@@ -2544,11 +2480,9 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
     store
         .durable_transaction(|_| Ok(()))
         .expect("compact first");
-    fs::write(
-        super::super::persistence::tombstone_path(&path),
-        "not json\n",
-    )
-    .expect("corrupt journal");
+    fs::write(&path, "not json\n").expect("corrupt store");
+    let _ = fs::remove_file(path.with_extension("sqlite-wal"));
+    let _ = fs::remove_file(path.with_extension("sqlite-shm"));
     // The job rows share this database, so a damaged index fails the whole
     // store closed at open instead of admitting a key as absent.
     assert!(
@@ -2565,39 +2499,6 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
             .is_err(),
         "a live handle also refuses to admit against a corrupt index"
     );
-}
-
-#[test]
-fn jsonl_replay_tombstones_migrate_before_restart_lookup() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
-    let legacy = path.with_file_name("jobs.json.replay-tombstones.jsonl");
-    let job_id = Uuid::new_v4();
-    let tombstone = super::super::persistence::ReplayTombstone {
-        kind: super::super::persistence::ReplayTombstoneKind::RemoteRunner,
-        key: "agent-task:v1:legacy".to_string(),
-        fingerprint: "sha256:legacy".to_string(),
-        job_id,
-        terminal_job: None,
-    };
-    fs::write(
-        &legacy,
-        format!(
-            "{}\n",
-            serde_json::to_string(&tombstone).expect("serialize legacy tombstone")
-        ),
-    )
-    .expect("write legacy journal");
-
-    let store = JobStore::open_with_retention(&path, 3, 1).expect("migrate legacy journal");
-    assert!(super::super::persistence::tombstone_path(&path).exists());
-    assert!(legacy.with_extension("jsonl.migrated").exists());
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.metadata = Some(json!({ "submission_key": "agent-task:v1:legacy" }));
-    let error = store
-        .submit_runner_api_fixture(request)
-        .expect_err("migrated key remains exactly-once evidence");
-    assert_eq!(error.details["expired_job_id"], json!(job_id));
 }
 
 #[test]
