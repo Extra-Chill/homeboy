@@ -2083,14 +2083,7 @@ pub fn verify_replacement_gates(
 fn replacement_gate_supervision(
     gates: &crate::agent_task_gate::VerifyGateOptions,
 ) -> crate::agent_task_gate::GateSupervision {
-    crate::agent_task_gate::GateSupervision {
-        timeout: gates.gate_timeout(),
-        no_progress_timeout: gates.gate_no_progress_timeout(),
-        heartbeat_interval: gates.gate_heartbeat_interval(),
-        on_spawn: Arc::new(|_, _| Ok(())),
-        on_heartbeat: Arc::new(|_| Ok(())),
-        is_cancelled: Arc::new(|| false),
-    }
+    gates.declared_supervision()
 }
 
 fn verify_replacement_gates_owned(
@@ -2202,9 +2195,12 @@ fn verify_replacement_gates_owned(
     // Replacement gates run under the same declared supervision as Cook
     // promotion. Without this scope the gate runner falls back to its default
     // no-progress budget and silently drops the operator's declaration (#15856).
+    // The verified-base differential replays below must run inside the same
+    // scope: they reach the gate runner without explicit supervision and rely
+    // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
     let mut replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
-        resume_promoted_patch_replacement_gates_in_observation_store(
+        let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
             AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some(run_id.to_string()),
@@ -2238,19 +2234,20 @@ fn verify_replacement_gates_owned(
                 // candidate validation are retryable; durable gates are not.
                 mark_replacement_gate_execution_started(lifecycle_store, run_id)
             },
-        )
+        )?;
+        super::cook_baseline::compare_gate_failures_to_verified_base(
+            &mut replacement,
+            &target_path,
+            replacement_gate_workspace
+                .as_deref()
+                .unwrap_or(&target_path),
+            &verified_base.sha,
+            gate_timeout,
+            admitted_component_id.as_deref(),
+            |_, _| Ok(()),
+        )?;
+        Ok(replacement)
     })?;
-    super::cook_baseline::compare_gate_failures_to_verified_base(
-        &mut replacement,
-        &target_path,
-        replacement_gate_workspace
-            .as_deref()
-            .unwrap_or(&target_path),
-        &verified_base.sha,
-        gate_timeout,
-        admitted_component_id.as_deref(),
-        |_, _| Ok(()),
-    )?;
     // #11290's import boundary requires command evidence for each accepted gate.
     // The shared gate runner retains that evidence in detailed gate reports, so
     // project it into the typed promotion command-evidence view before recording.

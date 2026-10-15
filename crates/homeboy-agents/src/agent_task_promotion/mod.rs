@@ -24,7 +24,7 @@ pub use fingerprint::{
 };
 pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
-pub(crate) use promote::with_gate_supervision;
+pub(crate) use promote::{active_gate_supervision, with_gate_supervision};
 pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub(crate) use promote::{
     canonical_recoverable_patch_artifacts_in_observation_store, outcome_has_patch_artifacts,
