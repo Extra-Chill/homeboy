@@ -101,6 +101,36 @@ fn deliver(event: NotifyEvent, run_id: &str) {
     let _ = notify_outbox::dispatch_with_outbox(&event.with_route(route.as_ref()), None);
 }
 
+/// The persisted outcome of a terminal announcement withheld because the
+/// Cook's tracker already shows the work resolved.
+fn suppressed_outcome(cook_id: &str, kind: NotifyEventKind, tracker: &str) -> Value {
+    json!({
+        "schema": "homeboy/cook-notification-delivery/v1",
+        "cook_id": cook_id,
+        "event_id": "terminal",
+        "event_kind": kind,
+        "transport": null,
+        "status": "suppressed",
+        "suppression_reason": "tracker_resolved",
+        "tracker": tracker,
+    })
+}
+
+/// Whether this Cook's terminal outcome already reached the operator, or was
+/// deliberately withheld. A daemon continuation reads this before and after its
+/// run so a failure the run itself announced is not announced twice.
+pub fn cook_terminal_announced(cook_id: &str) -> bool {
+    crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+        .ok()
+        .flatten()
+        .is_some_and(|outcome| {
+            matches!(
+                outcome["status"].as_str(),
+                Some("delivered" | "queued" | "suppressed")
+            )
+        })
+}
+
 fn terminal_outcome(
     cook_id: &str,
     explicit_route: bool,
@@ -469,6 +499,15 @@ fn terminal_payload(
 /// terminal boundary — a `--continue` over an already-terminal cook, an adopted
 /// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
+    cook_terminal_with(report, component, exit_code, tracker::resolved_tracker);
+}
+
+fn cook_terminal_with(
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+    resolved_tracker: impl FnOnce(&str) -> Option<String>,
+) {
     // Resolve one lifecycle store for the whole claim/record/confirm/release
     // protocol. These four steps are a single exactly-once transaction, and a
     // step that lands in a different home than the claim cannot fail while
@@ -506,6 +545,23 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
         .filter(|run_id| !run_id.trim().is_empty())
         .unwrap_or_else(|| report.cook_id.clone());
     let payload = terminal_payload(report, component, exit_code);
+    // Work its tracker already shows done needs no one's attention (#15984).
+    // Consuming the claim keeps a later observer from announcing it either.
+    if payload.kind == NotifyEventKind::NeedsAttention {
+        if let Some(tracker) = resolved_tracker(&report.cook_id) {
+            let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
+                &lifecycle_store,
+                &report.cook_id,
+                suppressed_outcome(&report.cook_id, payload.kind, &tracker),
+            );
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
+                &lifecycle_store,
+                &report.cook_id,
+                COOK_TERMINAL_DELIVERED_BY,
+            );
+            return;
+        }
+    }
     let event = NotifyEvent::lifecycle(payload.kind, &report.cook_id, &report.status)
         .with_title(format!(
             "cook {} — {}",
@@ -628,6 +684,15 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
 /// happened to run `cook-continue`. Delivered at most once per attempt through
 /// its own marker, so it never consumes the Cook's terminal announcement.
 pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
+    cook_continuation_failed_with(cook_id, run_id, diagnostic, tracker::resolved_tracker);
+}
+
+fn cook_continuation_failed_with(
+    cook_id: &str,
+    run_id: &str,
+    diagnostic: &str,
+    resolved_tracker: impl FnOnce(&str) -> Option<String>,
+) {
     let Ok(lifecycle_store) =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
     else {
@@ -637,6 +702,10 @@ pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
         .claim_cook_continuation_failed_notification(cook_id, run_id)
         .unwrap_or(false);
     if !claimed {
+        return;
+    }
+    if resolved_tracker(cook_id).is_some() {
+        let _ = lifecycle_store.confirm_cook_continuation_failed_notification(cook_id, run_id);
         return;
     }
     let payload = continuation_failed_payload(cook_id, run_id, diagnostic);
@@ -762,6 +831,9 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
         }
     }
 }
+
+#[path = "agent_task_notify_tracker.rs"]
+mod tracker;
 
 #[cfg(test)]
 #[path = "agent_task_notify_tests.rs"]
