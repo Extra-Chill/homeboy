@@ -2095,10 +2095,21 @@ fn refresh_execution_route(
     if admission.summary.safe_to_rotate {
         return Ok(RefreshExecutionRoute::DiagnosticSsh);
     }
+    let live_jobs = admission
+        .summary
+        .active_job_count
+        .filter(|count| *count > 0)
+        .map(|count| {
+            format!(
+                ": {count} live job(s) must finish or be cancelled (`homeboy runner job cancel {} <job-id>`) first",
+                runner.id
+            )
+        })
+        .unwrap_or_default();
     Err(Error::validation_invalid_argument(
         "reconnect",
         format!(
-            "runner `{}` cannot bootstrap over diagnostic SSH until its authoritative admission snapshot permits daemon rotation",
+            "runner `{}` cannot bootstrap over diagnostic SSH until its authoritative admission snapshot permits daemon rotation{live_jobs}",
             runner.id
         ),
         Some(runner.id.clone()),

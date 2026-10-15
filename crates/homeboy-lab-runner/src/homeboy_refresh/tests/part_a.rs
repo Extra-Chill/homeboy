@@ -2148,6 +2148,18 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
         .expect_err("connected stale daemon with active work remains fenced");
     assert_eq!(error.code.as_str(), "validation.invalid_argument");
     assert!(error.message.contains("permits daemon rotation"));
+    // #15995: the fence names the jobs, and its hint leads somewhere other than
+    // the refresh it just refused.
+    assert!(
+        error.message.contains("1 live job(s)")
+            && error.message.contains("homeboy runner job cancel lab"),
+        "{}",
+        error.message
+    );
+    assert!(!error
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("refresh-homeboy")));
 
     let ambiguous_stale = stale_daemon_admission_snapshot(0, None, None);
     assert!(refresh_execution_route(&runner, &ambiguous_stale).is_err());
