@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.4] - 2026-10-15
+
+### Fixed
+- refuse controller version changes that would strand live runner jobs
+- carry declared gate budgets to Lab runners
+- never interrupt a remotely owned Cook attempt on observer exit
+
 ## [0.428.3] - 2026-10-15
 
 ### Changed
