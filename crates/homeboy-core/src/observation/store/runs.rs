@@ -98,6 +98,19 @@ const MISSIONS_SQL: &str = r#"
     GROUP BY r.mission_id
 "#;
 
+/// The terminal-row guard of an imported-run upsert: a live (`running`) write
+/// must not reopen a row that already finished.
+///
+/// A row carrying a typed agent-task lifecycle record is the exception when
+/// that record is itself still live. The lifecycle projects the row status
+/// from the record state in the same statement, so a terminal row status over
+/// a `queued`/`running` record was stamped by someone other than the owner —
+/// typically an older binary's generic stale-run reconciler sharing the store
+/// (#15978). The owner is demonstrably alive (it is writing), so its write
+/// supersedes that verdict instead of being dropped.
+const TERMINAL_ROW_GUARD: &str = "(runs.status = 'running' OR ?6 != 'running' \
+    OR json_extract(runs.metadata_json, '$.agent_task_run.state') IN ('queued', 'running'))";
+
 fn apply_imported_run_in_tx(
     transaction: &rusqlite::Transaction<'_>,
     run: &RunRecord,
@@ -109,7 +122,7 @@ fn apply_imported_run_in_tx(
 ) -> rusqlite::Result<bool> {
     let mut conditions = Vec::new();
     if preserve_terminal {
-        conditions.push("(runs.status = 'running' OR ?6 != 'running')");
+        conditions.push(TERMINAL_ROW_GUARD);
     }
     let metadata_update = match revision {
         Some(revision) if revision.increment => "json_set(excluded.metadata_json, ?13, COALESCE(json_extract(runs.metadata_json, ?13), 0) + 1)",
@@ -2805,6 +2818,51 @@ mod tests {
                 current.metadata_json["homeboy_ownership_handoff"]["state"],
                 "transferring"
             );
+        });
+    }
+
+    #[test]
+    fn terminal_row_guard_yields_only_to_a_live_typed_agent_task_owner() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let row = |id: &str, status: &str, metadata: serde_json::Value| RunRecord {
+                id: id.to_string(),
+                kind: "agent-task".to_string(),
+                component_id: None,
+                started_at: "2026-10-15T12:41:03Z".to_string(),
+                finished_at: (status != "running").then(|| "2026-10-15T13:11:41Z".to_string()),
+                status: status.to_string(),
+                command: None,
+                cwd: None,
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: metadata,
+            };
+            let live = serde_json::json!({ "agent_task_run": { "state": "running" } });
+            let cases = [
+                // A foreign stale stamp over a live typed record (#15978).
+                ("foreign-stale", "stale", live.clone(), "running"),
+                // A row the lifecycle itself finished stays finished.
+                (
+                    "lifecycle-terminal",
+                    "pass",
+                    serde_json::json!({ "agent_task_run": { "state": "succeeded" } }),
+                    "pass",
+                ),
+                // Rows without a typed record keep the plain guard.
+                ("untyped-stale", "stale", serde_json::json!({}), "stale"),
+            ];
+            for (id, stored, metadata, expected) in cases {
+                store
+                    .upsert_imported_run(&row(id, stored, metadata))
+                    .expect("seed");
+                store
+                    .upsert_imported_run_preserving_terminal(&row(id, "running", live.clone()))
+                    .expect("guarded write");
+                let current = store.get_run(id).expect("read").expect("row");
+                assert_eq!(current.status, expected, "{id}");
+            }
         });
     }
 

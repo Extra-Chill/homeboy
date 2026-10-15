@@ -181,6 +181,68 @@ fn provider_terminal_survives_observation_reconcile_of_a_long_run() {
     );
 }
 
+/// #15978 recurrence: a store shared with an older binary whose generic
+/// reconciler predates the agent-task skip still stamps a live agent-task row
+/// `stale` at 30 minutes. The owner's later `running` writes must supersede
+/// that foreign verdict rather than being dropped by the terminal-row guard.
+#[test]
+fn provider_terminal_survives_a_foreign_stale_stamp_on_a_live_run() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "durable-provider-foreign-stale";
+    let plan = test_plan();
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    reserve_provider_execution_in_store(&lifecycle_store, run_id, &plan.tasks[0], 1)
+        .expect("reserved");
+
+    // Exactly what a pre-#15979 reconciler writes: status `stale` plus its
+    // marker, leaving the typed record untouched.
+    let observation = lifecycle_store
+        .open_observation_initialized()
+        .expect("observation");
+    let mut metadata = observation
+        .get_run(run_id)
+        .expect("row")
+        .expect("row exists")
+        .metadata_json;
+    metadata["homeboy_reconciled"] = json!({
+        "status": "stale",
+        "reason": "owner_metadata_missing",
+        "owner_pid": null,
+    });
+    observation
+        .finish_run(
+            run_id,
+            homeboy_core::observation::RunStatus::Stale,
+            Some(metadata),
+        )
+        .expect("foreign stale stamp");
+
+    record_provider_execution_terminal_in_store(
+        &lifecycle_store,
+        run_id,
+        &plan.tasks[0].task_id,
+        1,
+        "succeeded",
+    )
+    .expect("terminal");
+
+    let record = lifecycle_store.read_record(run_id).expect("record");
+    assert_eq!(
+        record.metadata["provider_executions"][0]["state"],
+        "succeeded"
+    );
+    let row = observation
+        .get_run(run_id)
+        .expect("row")
+        .expect("row exists");
+    assert_eq!(row.status, "running");
+    assert!(row.finished_at.is_none());
+    assert!(row.metadata_json.get("homeboy_reconciled").is_none());
+}
+
 #[test]
 fn cancel_appends_terminal_provider_progress_and_resumes_from_cursor() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
