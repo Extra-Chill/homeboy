@@ -268,6 +268,54 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
     });
 }
 
+/// An empty provider patch whose candidate is already committed on the
+/// declared destination must promote that commit, not re-apply it onto itself.
+#[test]
+fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let prior_promotion_command = std::env::var_os("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
+        std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND");
+        let (temp, repo, base, candidate) = adopted_commit_repo();
+        let (source_path, source) = write_empty_patch_source(&temp);
+
+        let report = promote(AgentTaskPromotionRequest {
+            source,
+            source_run_id: Some("run-committed-on-destination".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: None,
+            task_base_sha: Some(base),
+            candidate_ref: None,
+            to_worktree: repo.display().to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
+            },
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        })
+        .expect("a candidate committed on the destination is promoted");
+
+        assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(report.patch_artifact.id, "committed-changes");
+        assert_eq!(report.changed_files, vec!["lib.rs"]);
+        assert_eq!(git_head(&repo, "HEAD"), candidate);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("lib.rs")).expect("read candidate"),
+            "candidate\n"
+        );
+        match prior_promotion_command {
+            Some(command) => std::env::set_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND", command),
+            None => std::env::remove_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND"),
+        }
+    });
+}
+
 #[test]
 fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
     let temp = tempfile::tempdir().expect("tempdir");
