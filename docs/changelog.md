@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.1] - 2026-10-15
+
+### Changed
+- follow JobStore list order for same-millisecond jobs
+- run Cook admission and retries through outbox steps
+
 ## [0.428.0] - 2026-10-15
 
 ### Added
