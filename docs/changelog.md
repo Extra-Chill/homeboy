@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.427.1] - 2026-10-15
+
+### Changed
+- realign two cli_binary tests with the collapsed daemon and SQLite Cook index
+
+### Fixed
+- drop the early follow-up fence check that blocked Cook startup
+- cancel fences the owning Cook mission
+
 ## [0.427.0] - 2026-10-14
 
 ### Added
