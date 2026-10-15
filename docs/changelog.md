@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.5] - 2026-10-15
+
+### Changed
+- read orphaned zombie daemons as exited in chaos tests
+- trim execution-step cutover
+
 ## [0.428.4] - 2026-10-15
 
 ### Fixed
