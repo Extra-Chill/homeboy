@@ -17,7 +17,7 @@ pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 /// serving controllers that upgrade at different times — each with its own
 /// store, instead of recreating a store the other refuses to open (#15944).
 /// The observation schema pins this name to its `SCHEMA_VERSION`.
-pub const OBSERVATION_DB_FILENAME: &str = "homeboy-v30.sqlite";
+pub const OBSERVATION_DB_FILENAME: &str = "homeboy-v31.sqlite";
 
 /// Immutable filesystem roots resolved at an application boundary.
 ///
@@ -1711,7 +1711,7 @@ mod config_root_tests {
         let override_error = daemon_state_file().expect_err("relative override");
         env.remove(DAEMON_STATE_DIR_ENV);
         env.set(HOMEBOY_CONFIG_ROOT_ENV, "relative-root");
-        let root_error = daemon_jobs_file().expect_err("relative config root");
+        let root_error = daemon_termination_file().expect_err("relative config root");
         env.set(HOMEBOY_CONFIG_ROOT_ENV, "/tmp/hb-daemon-root");
         let absolute = daemon_state_file().expect("absolute state file");
 

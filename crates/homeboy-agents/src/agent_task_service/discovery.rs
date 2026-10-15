@@ -1227,7 +1227,7 @@ fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
     if !daemon.reachable || !daemon.fresh {
         return false;
     }
-    let Ok(path) = homeboy_core::paths::daemon_jobs_file() else {
+    let Ok(path) = homeboy_core::paths::observation_db() else {
         return false;
     };
     let Ok(store) = JobStore::open_without_reconciliation(path) else {

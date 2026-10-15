@@ -9,12 +9,17 @@ use std::sync::{Arc, Barrier};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::api_jobs::persistence::{
-    lookup_tombstone, open_tombstone_store, tombstone_path, ReplayTombstoneKind,
-};
+use crate::api_jobs::persistence::{lookup_tombstone, open_ledger, ReplayTombstoneKind};
 
 fn sql(path: &std::path::Path) -> rusqlite::Connection {
-    open_tombstone_store(path).expect("open sql store")
+    open_ledger(path).expect("open sql store")
+}
+
+/// The observation store's bytes: the database file and its WAL.
+fn database_bytes(path: &std::path::Path) -> Vec<u8> {
+    let mut bytes = fs::read(path).expect("database bytes");
+    bytes.extend(fs::read(path.with_extension("sqlite-wal")).unwrap_or_default());
+    bytes
 }
 
 fn count(connection: &rusqlite::Connection, table: &str) -> i64 {
@@ -25,172 +30,10 @@ fn count(connection: &rusqlite::Connection, table: &str) -> i64 {
         .expect("count rows")
 }
 
-/// A `jobs.json` as an older daemon wrote it: produced by the legacy
-/// whole-document shape, with active and terminal jobs, events, a live
-/// submission key, an already-expired key and compaction evidence.
-fn legacy_document(path: &std::path::Path) -> (Value, Vec<Uuid>) {
-    let seed = JobStore::open_without_reconciliation(path).expect("seed store");
-    let queued = seed.create("queued-work");
-    let running = seed.create("runner.exec");
-    seed.start(running.id).expect("start running job");
-    seed.append_event(
-        running.id,
-        JobEventKind::Stdout,
-        Some("hello".to_string()),
-        Some(json!({ "stream": "stdout" })),
-    )
-    .expect("append stdout");
-    let done = seed.create("finished-work");
-    seed.start(done.id).expect("start finished job");
-    seed.complete(done.id, Some(json!({ "ok": true })))
-        .expect("complete finished job");
-    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
-    request.metadata = Some(json!({ "submission_key": "agent-task:v1:migrated" }));
-    let remote = seed
-        .submit_runner_api_fixture(request)
-        .expect("submit remote runner job");
-
-    let mut document = durable_snapshot(path);
-    assert_eq!(document["jobs"].as_array().expect("jobs").len(), 4);
-    document["expired_submission_keys"] = json!({
-        "agent-task:v1:long-gone": {
-            "fingerprint": "sha256:long-gone",
-            "job_id": Uuid::new_v4(),
-        }
-    });
-    document["compaction"] = json!({
-        "timestamp_ms": 1,
-        "removed_terminal_jobs": 3,
-        "retained_terminal_jobs": 1,
-        "retained_terminal_bytes": 100,
-        "active_jobs": 2,
-    });
-    (document, vec![queued.id, running.id, done.id, remote.id])
-}
-
-#[test]
-fn legacy_jobs_json_is_imported_once_then_renamed() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let seed_path = temp.path().join("seed").join("jobs.json");
-    let (document, ids) = legacy_document(&seed_path);
-
-    let path = temp.path().join("jobs.json");
-    install_legacy_store(&path, &document);
-    let legacy_bytes = fs::read(&path).expect("legacy bytes");
-    assert!(!tombstone_path(&path).exists());
-
-    let store = JobStore::open_without_reconciliation(&path).expect("import legacy store");
-    assert!(!path.exists(), "the document is renamed once imported");
-    assert_eq!(
-        fs::read(path.with_file_name("jobs.json.migrated")).expect("migrated copy"),
-        legacy_bytes,
-        "the original document is kept verbatim"
-    );
-
-    // Every job, event and submission survives the move.
-    let imported = durable_snapshot(&path);
-    for id in &ids {
-        let find = |snapshot: &Value| {
-            snapshot["jobs"]
-                .as_array()
-                .expect("jobs")
-                .iter()
-                .find(|stored| stored["job"]["id"] == json!(id))
-                .cloned()
-                .expect("job present")
-        };
-        assert_eq!(find(&imported), find(&document));
-    }
-    assert_eq!(imported["submission_keys"], document["submission_keys"]);
-    assert_eq!(
-        store.get(ids[1]).expect("running job").status,
-        JobStatus::Running,
-        "opening without reconciliation preserves active work"
-    );
-    let events = store.events(ids[1]).expect("events");
-    assert!(events
-        .iter()
-        .any(|event| event.message.as_deref() == Some("hello")));
-
-    // The already-expired key became permanent replay evidence.
-    let tombstone = lookup_tombstone(
-        &path,
-        ReplayTombstoneKind::RemoteRunner,
-        "agent-task:v1:long-gone",
-    )
-    .expect("lookup")
-    .expect("expired key tombstoned");
-    assert_eq!(tombstone.fingerprint, "sha256:long-gone");
-
-    // Rows, not a document.
-    let connection = sql(&path);
-    assert_eq!(count(&connection, "daemon_jobs"), 4);
-    assert_eq!(count(&connection, "daemon_job_submissions"), 1);
-    assert!(count(&connection, "daemon_job_events") >= 4);
-    drop(connection);
-
-    // A second open never imports again: a stray document is left alone.
-    drop(store);
-    fs::write(&path, b"{\"jobs\":[]}").expect("stray document");
-    let reopened = JobStore::open_without_reconciliation(&path).expect("reopen");
-    assert_eq!(reopened.list().len(), 4);
-    assert_eq!(
-        fs::read(path.with_file_name("jobs.json.migrated")).expect("migrated copy"),
-        legacy_bytes
-    );
-}
-
-#[test]
-fn migration_of_a_reconciling_open_matches_the_legacy_semantics() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let seed_path = temp.path().join("seed").join("jobs.json");
-    let (document, ids) = legacy_document(&seed_path);
-    let path = temp.path().join("jobs.json");
-    install_legacy_store(&path, &document);
-
-    let store = JobStore::open(&path).expect("restart over a legacy document");
-    let restarted = store.get(ids[1]).expect("running job");
-    assert_eq!(restarted.status, JobStatus::Failed);
-    assert_eq!(
-        restarted.stale_reason.as_deref(),
-        Some("control plane lost before the job reached a terminal status")
-    );
-    assert_eq!(
-        store.get(ids[2]).expect("finished job").status,
-        JobStatus::Succeeded
-    );
-}
-
-#[test]
-fn corrupt_legacy_document_is_quarantined_not_imported() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
-    fs::write(&path, b"{\"jobs\": [").expect("corrupt document");
-
-    let store = JobStore::open(&path).expect("quarantined");
-    assert!(store.list().is_empty());
-    let names = fs::read_dir(temp.path())
-        .expect("read dir")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    assert!(names
-        .iter()
-        .any(|name| name.starts_with("jobs.json.corrupt-")));
-    assert!(!names.iter().any(|name| name == "jobs.json.migrated"));
-    assert!(sql_store_has_state(&path));
-}
-
-fn sql_store_has_state(path: &std::path::Path) -> bool {
-    JobStore::store_generation_at_path(path)
-        .expect("generation")
-        .is_some()
-}
-
 #[test]
 fn appending_an_event_writes_only_that_jobs_rows() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("store");
     let first = store.create("first");
     let second = store.create("second");
@@ -280,7 +123,7 @@ fn appending_an_event_writes_only_that_jobs_rows() {
 #[test]
 fn a_mutation_that_changes_nothing_commits_nothing() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("store");
     store.create("idle");
     let generation = JobStore::store_generation_at_path(&path).expect("generation");
@@ -297,7 +140,7 @@ fn a_mutation_that_changes_nothing_commits_nothing() {
 #[test]
 fn two_handles_interleave_appends_without_losing_events() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let first = JobStore::open(&path).expect("first handle");
     let second = JobStore::open(&path).expect("second handle");
     let job = first.create("shared");
@@ -387,7 +230,7 @@ fn two_handles_interleave_appends_without_losing_events() {
 #[test]
 fn restart_recovery_runs_on_the_sql_store() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("store");
     let finished = store.create("finished");
     store.start(finished.id).expect("start");
@@ -407,8 +250,7 @@ fn restart_recovery_runs_on_the_sql_store() {
     let queued = store.create("remote.queued");
     drop(store);
 
-    assert!(!path.exists(), "no whole-store document is written");
-    assert!(tombstone_path(&path).exists());
+    assert!(path.exists(), "the jobs live in the observation store");
 
     let restarted = JobStore::open(&path).expect("restart");
     let recovered = restarted.get(interrupted.id).expect("interrupted job");
@@ -445,7 +287,7 @@ fn restart_recovery_runs_on_the_sql_store() {
 #[test]
 fn retention_deletes_rows_and_keeps_replay_tombstones() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_with_retention(&path, 100, 1).expect("store");
     let mut keys = Vec::new();
     for index in 0..4 {
@@ -495,7 +337,7 @@ fn retention_deletes_rows_and_keeps_replay_tombstones() {
 #[test]
 fn a_failed_commit_leaves_the_database_and_the_next_transaction_intact() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("store");
     let job = store.create("durable");
     let before = durable_snapshot(&path);
@@ -527,11 +369,10 @@ fn a_failed_commit_leaves_the_database_and_the_next_transaction_intact() {
 #[test]
 fn opening_and_reading_an_unchanged_store_leaves_the_database_file_untouched() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("store");
     store.create("idle");
-    let database = tombstone_path(&path);
-    let committed = fs::read(&database).expect("database bytes");
+    let committed = database_bytes(&path);
 
     store
         .durable_transaction(|_| Ok(()))
@@ -545,7 +386,7 @@ fn opening_and_reading_an_unchanged_store_leaves_the_database_file_untouched() {
     lookup_tombstone(&path, ReplayTombstoneKind::Controller, "absent").expect("lookup");
 
     assert_eq!(
-        fs::read(&database).expect("database bytes"),
+        database_bytes(&path),
         committed,
         "a status read or no-op transaction must not rewrite the store"
     );

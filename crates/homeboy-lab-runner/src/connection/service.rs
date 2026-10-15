@@ -1001,7 +1001,7 @@ mod tests {
             .join(service_state_dir_for("homeboy-lab", "controller-a"));
         std::fs::create_dir_all(&a_state).unwrap();
         std::fs::write(a_state.join("state.json"), r#"{"lease_id":"lease-a"}"#).unwrap();
-        std::fs::write(a_state.join("jobs.json"), r#"{"job":"active-a"}"#).unwrap();
+        std::fs::write(a_state.join("termination.json"), r#"{"pid":1}"#).unwrap();
         let a_state_before = std::fs::read_dir(&a_state)
             .unwrap()
             .map(|entry| {

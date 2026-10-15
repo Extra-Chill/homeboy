@@ -200,7 +200,7 @@ fn staged_direct_selection_and_reverse_claim_are_mutually_exclusive() {
 #[test]
 fn selected_staged_execution_survives_restart_and_remains_reverse_ineligible() {
     let directory = tempfile::tempdir().expect("temporary durable store");
-    let path = directory.path().join("jobs.json");
+    let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
         .submit_runner_api_fixture(staged_runner_request("homeboy-lab"))
@@ -227,7 +227,7 @@ fn selected_staged_execution_survives_restart_and_remains_reverse_ineligible() {
 #[test]
 fn new_daemon_lease_recovers_adopted_pre_worker_job_once() {
     let directory = tempfile::tempdir().expect("temporary durable store");
-    let path = directory.path().join("jobs.json");
+    let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let old = JobStore::open_without_reconciliation(&path)
         .expect("durable store")
         .with_daemon_lease("old-daemon".to_string());
@@ -603,7 +603,7 @@ fn daemon_exec_projection_survives_event_retention_and_separates_run_identity() 
 #[test]
 fn durable_remote_runner_restart_failure_moves_to_stale_runner_jobs() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
         .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
@@ -1026,7 +1026,7 @@ fn runner_api_claim_carries_the_submitted_workspace_sidecars() {
 #[test]
 fn remote_runner_context_evidence_survives_controller_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
         .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))
@@ -1063,7 +1063,7 @@ fn remote_runner_context_evidence_survives_controller_restart() {
 #[test]
 fn claimed_record_without_context_id_rejects_finish() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("durable store");
     let job = store
         .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
@@ -1091,7 +1091,7 @@ fn claimed_record_without_context_id_rejects_finish() {
         .as_object_mut()
         .expect("remote runner state")
         .remove("execution_context_id");
-    super::install_legacy_store(&path, &persisted);
+    super::replace_durable_store(&path, &persisted);
 
     let reopened = JobStore::open_without_reconciliation(&path).expect("reopen old durable store");
     let error = reopened
@@ -1567,7 +1567,7 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
 #[test]
 fn remote_runner_jobs_persist_envelope_and_claim_state() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store
         .submit_runner_api_fixture(remote_runner_request("homeboy-lab", Some("extrachill")))

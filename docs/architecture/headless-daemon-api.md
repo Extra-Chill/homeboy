@@ -66,7 +66,7 @@ VPS systemd service
   homeboy daemon serve --addr 127.0.0.1:7421
           |
           +-- /var/lib/homeboy/.config/homeboy/daemon/state.json
-          +-- /var/lib/homeboy/.config/homeboy/daemon/jobs.json
+          +-- /var/lib/homeboy/.local/share/homeboy/homeboy-v31.sqlite (job ledger)
           |
 private tunnel / private network only
           |
@@ -248,7 +248,8 @@ caller-owned `submission_key`; a body without one is refused with a
 not the sandbox-agent contract.
 
 The packaged broker service sets `HOME=/var/lib/homeboy`, so the daemon durable
-job store is `/var/lib/homeboy/.config/homeboy/daemon/jobs.json`. The store keeps
+job store is the observation store,
+`/var/lib/homeboy/.local/share/homeboy/homeboy-v31.sqlite`. The ledger keeps
 bounded per-job events and supports restart recovery for queued broker jobs. It
 is operational state, not a durable audit archive; important evidence should
 still be persisted as Homeboy observations or artifacts.

@@ -1,33 +1,29 @@
 //! SQLite-backed durable job store.
 //!
-//! The daemon's durable job queue used to be one `jobs.json` document that was
-//! re-serialized and fsynced in full by every mutation. It now lives in the
-//! daemon's existing SQLite store (the replay tombstone database opened by
-//! [`open_tombstone_store`]) as one row per job, one row per job event and one
-//! row per live submission key. A mutation commits one SQLite transaction that
-//! writes only the rows whose content changed, so appending an event to one
-//! job inserts one event row and leaves every other job row untouched.
+//! The daemon's durable job queue lives in the observation store
+//! (`homeboy-vN.sqlite`, opened through [`open_ledger`]) as one row per job,
+//! one row per job event and one row per live submission key. A mutation
+//! commits one SQLite transaction that writes only the rows whose content
+//! changed, so appending an event to one job inserts one event row and leaves
+//! every other job row untouched.
 //!
 //! `JobStoreInner` stays the in-memory view. [`SqlSyncState`] remembers what
 //! this process last read or wrote (a content digest per job, the event
 //! sequences per job, a digest per submission) so a commit can diff the
 //! in-memory view against the database without re-reading it.
 //!
-//! An existing `jobs.json` is imported exactly once, atomically with the
-//! initialization of the SQL store, and then renamed to `jobs.json.migrated`.
+//! The observation store is never migrated: a schema bump starts a fresh
+//! file, and jobs that were in flight in the previous one are dropped.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use rusqlite::{
-    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
-};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 use super::persistence::{
-    insert_tombstone, open_tombstone_store, timestamp_ms, tombstone_error, tombstone_path,
+    insert_tombstone, open_ledger, open_ledger_readonly, tombstone_error,
     JobStoreCompactionEvidence, ReplayTombstone, ReplayTombstoneKind,
 };
 use super::store::{ControllerJobSubmission, DurableJobStore, RemoteRunnerSubmission, StoredJob};
@@ -67,7 +63,7 @@ fn serialize_error(error: serde_json::Error, what: &str) -> Error {
 }
 
 fn store_error(path: &Path, operation: &str, error: rusqlite::Error) -> Error {
-    tombstone_error(&tombstone_path(path), operation, error)
+    tombstone_error(path, operation, error)
 }
 
 /// The row body of a job: the whole `StoredJob` except its events, which are
@@ -77,15 +73,6 @@ fn job_row_body(stored: &mut StoredJob) -> Result<String> {
     let body = serde_json::to_string(&*stored);
     stored.events = events;
     body.map_err(|error| serialize_error(error, "daemon job row"))
-}
-
-fn legacy_migrated_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!(
-        "{}.migrated",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("jobs.json")
-    ))
 }
 
 fn store_state_exists(connection: &Connection) -> rusqlite::Result<bool> {
@@ -107,76 +94,15 @@ fn store_state_exists(connection: &Connection) -> rusqlite::Result<bool> {
         .is_some())
 }
 
-/// Open the SQL store read-only without creating or migrating anything.
-/// `None` means the job store has not been moved into SQLite yet.
+/// Open the SQL store read-only without creating or initializing anything.
+/// `None` means no job has been stored yet.
 pub(super) fn open_sql_store_readonly(path: &Path) -> Result<Option<Connection>> {
-    let journal = tombstone_path(path);
-    if !journal.exists() {
+    let Some(connection) = open_ledger_readonly(path)? else {
         return Ok(None);
-    }
-    let rollback_journal = journal.with_file_name(format!(
-        "{}-journal",
-        journal
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-    ));
-    if rollback_journal.exists() {
-        let connection = open_sql_store_query_only(path, &journal)?;
-        let initialized = store_state_exists(&connection)
-            .map_err(|error| store_error(path, "inspect daemon job store", error))?;
-        return Ok(initialized.then_some(connection));
-    }
-    let mut connection =
-        match Connection::open_with_flags(&journal, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-            Ok(connection) => Some(connection),
-            Err(error) if is_sqlite_readonly_error(&error) => {
-                Some(open_sql_store_query_only(path, &journal)?)
-            }
-            Err(error) => return Err(store_error(path, "open daemon job store read-only", error)),
-        };
-    connection
-        .as_ref()
-        .expect("opened SQL store")
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| store_error(path, "bound daemon job store read", error))?;
-    let initialized = match store_state_exists(connection.as_ref().expect("opened SQL store")) {
-        Ok(initialized) => initialized,
-        Err(error) if is_sqlite_readonly_error(&error) => {
-            connection = Some(open_sql_store_query_only(path, &journal)?);
-            store_state_exists(connection.as_ref().expect("recovered SQL store"))
-                .map_err(|error| store_error(path, "inspect daemon job store", error))?
-        }
-        Err(error) => return Err(store_error(path, "inspect daemon job store", error)),
     };
-    Ok(if initialized { connection } else { None })
-}
-
-fn is_sqlite_readonly_error(error: &rusqlite::Error) -> bool {
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(code, _)
-            if code.code == rusqlite::ErrorCode::ReadOnly
-    )
-}
-
-fn open_sql_store_query_only(path: &Path, journal: &Path) -> Result<Connection> {
-    let connection = Connection::open_with_flags(
-        journal,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| store_error(path, "recover daemon job store", error))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .and_then(|_| connection.execute_batch("PRAGMA query_only=ON"))
-        .map_err(|error| {
-            store_error(
-                path,
-                "configure recovered daemon job store read-only",
-                error,
-            )
-        })?;
-    Ok(connection)
+    let initialized = store_state_exists(&connection)
+        .map_err(|error| store_error(path, "inspect daemon job store", error))?;
+    Ok(initialized.then_some(connection))
 }
 
 pub(super) fn sql_store_initialized(path: &Path) -> Result<bool> {
@@ -193,7 +119,7 @@ pub(super) fn read_store_generation(connection: &Connection) -> rusqlite::Result
         .optional()
 }
 
-/// Commit counter of the SQL store, `None` before the migration.
+/// Commit counter of the SQL store, `None` before its first open.
 pub(super) fn store_generation_at_path(path: &Path) -> Result<Option<i64>> {
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
@@ -202,146 +128,21 @@ pub(super) fn store_generation_at_path(path: &Path) -> Result<Option<i64>> {
         .map_err(|error| store_error(path, "read daemon job store generation", error))
 }
 
-/// Open the SQL store for writing, importing a legacy `jobs.json` the first
-/// time. A corrupt legacy file is quarantined and the store starts empty.
+/// Open the SQL store for writing, creating its state row the first time.
 pub(super) fn open_sql_store(path: &Path) -> Result<Connection> {
-    super::persistence::prepare_tombstone_store(path)?;
-    let mut connection = open_tombstone_store(path)?;
+    let connection = open_ledger(path)?;
     let initialized = store_state_exists(&connection)
         .map_err(|error| store_error(path, "inspect daemon job store", error))?;
-    if initialized {
-        finish_legacy_rename(&connection, path)?;
-        return Ok(connection);
-    }
-    ensure_space_is_reclaimed(&connection, path)?;
-    import_legacy_store(&mut connection, path)?;
-    Ok(connection)
-}
-
-/// Retention deletes rows constantly. Without auto-vacuum SQLite would keep
-/// every page the store ever used, so the file would stay at its high-water
-/// mark instead of following the bounded retained history. A database created
-/// by this version starts in this mode; one that predates it (it only held
-/// replay tombstones) is converted once, before the jobs move in.
-fn ensure_space_is_reclaimed(connection: &Connection, path: &Path) -> Result<()> {
-    let mode: i64 = connection
-        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
-        .map_err(|error| store_error(path, "read daemon job store vacuum mode", error))?;
-    if mode == 0 {
-        connection
-            .execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;")
-            .map_err(|error| store_error(path, "convert daemon job store vacuum mode", error))?;
-    }
-    Ok(())
-}
-
-/// A crash between the import commit and the rename leaves the flag set; the
-/// next open completes the rename instead of importing the file again.
-fn finish_legacy_rename(connection: &Connection, path: &Path) -> Result<()> {
-    let pending: i64 = connection
-        .query_row(
-            "SELECT legacy_import_pending FROM daemon_store_state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| store_error(path, "read legacy import state", error))?;
-    if pending == 0 {
-        return Ok(());
-    }
-    rename_imported_legacy_file(path)?;
-    connection
-        .execute(
-            "UPDATE daemon_store_state SET legacy_import_pending = 0 WHERE id = 1",
-            [],
-        )
-        .map_err(|error| store_error(path, "clear legacy import state", error))?;
-    Ok(())
-}
-
-fn rename_imported_legacy_file(path: &Path) -> Result<()> {
-    match fs::rename(path, legacy_migrated_path(path)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("migrate {}", path.display())),
-        )),
-    }
-}
-
-fn quarantine_corrupt_legacy_store(path: &Path, parse_error: serde_json::Error) -> Result<()> {
-    let quarantine_path = path.with_file_name(format!(
-        "{}.corrupt-{}",
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("jobs.json"),
-        timestamp_ms()
-    ));
-    fs::rename(path, &quarantine_path).map_err(|rename_err| {
-        Error::config_invalid_json(path.display().to_string(), parse_error).with_hint(format!(
-            "Homeboy could not quarantine the corrupt durable job store to {}: {}",
-            quarantine_path.display(),
-            rename_err
-        ))
-    })?;
-    eprintln!(
-        "Homeboy quarantined corrupt daemon job store {} to {} and started with an empty queue",
-        path.display(),
-        quarantine_path.display()
-    );
-    Ok(())
-}
-
-fn import_legacy_store(connection: &mut Connection, path: &Path) -> Result<()> {
-    // The write lock serializes concurrent importers: the loser observes the
-    // initialized store below and imports nothing.
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| store_error(path, "begin daemon job store migration", error))?;
-    if store_state_exists(&transaction)
-        .map_err(|error| store_error(path, "inspect daemon job store", error))?
-    {
-        return Ok(());
-    }
-    let mut legacy = None;
-    match fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str::<DurableJobStore>(&content) {
-            Ok(durable) => legacy = Some(durable),
-            Err(error) => quarantine_corrupt_legacy_store(path, error)?,
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", path.display())),
-            ))
-        }
-    }
-    let imported = legacy.is_some();
-    transaction
-        .execute(
-            "INSERT INTO daemon_store_state (id, generation, compaction, legacy_import_pending)
-             VALUES (1, 0, NULL, ?1)",
-            [imported as i64],
-        )
-        .map_err(|error| store_error(path, "initialize daemon job store", error))?;
-    if let Some(mut durable) = legacy {
-        let baseline = SqlSyncState::default();
-        write_changes(&transaction, path, &mut durable, &baseline)?;
-    }
-    transaction
-        .commit()
-        .map_err(|error| store_error(path, "commit daemon job store migration", error))?;
-    if imported {
-        rename_imported_legacy_file(path)?;
+    if !initialized {
         connection
             .execute(
-                "UPDATE daemon_store_state SET legacy_import_pending = 0 WHERE id = 1",
+                "INSERT OR IGNORE INTO daemon_store_state (id, generation, compaction)
+                 VALUES (1, 0, NULL)",
                 [],
             )
-            .map_err(|error| store_error(path, "clear legacy import state", error))?;
+            .map_err(|error| store_error(path, "initialize daemon job store", error))?;
     }
-    Ok(())
+    Ok(connection)
 }
 
 /// Read the whole store plus the sync state that describes exactly what was
@@ -364,9 +165,7 @@ pub(super) fn load_sql_store(
     durable.compaction = compaction
         .map(|raw| serde_json::from_str::<JobStoreCompactionEvidence>(&raw))
         .transpose()
-        .map_err(|error| {
-            Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-        })?;
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
 
     state.compaction_digest = compaction_digest(&durable.compaction)?;
 
@@ -383,9 +182,8 @@ pub(super) fn load_sql_store(
         for row in rows {
             let (job_id, body) =
                 row.map_err(|error| store_error(path, "read daemon job event", error))?;
-            let event: JobEvent = serde_json::from_str(&body).map_err(|error| {
-                Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-            })?;
+            let event: JobEvent = serde_json::from_str(&body)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
             events_by_job.entry(job_id).or_default().push(event);
         }
     }
@@ -402,9 +200,8 @@ pub(super) fn load_sql_store(
         for row in rows {
             let (job_id, body) =
                 row.map_err(|error| store_error(path, "read daemon job", error))?;
-            let mut stored: StoredJob = serde_json::from_str(&body).map_err(|error| {
-                Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-            })?;
+            let mut stored: StoredJob = serde_json::from_str(&body)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
             // Digest the re-serialized value, not the stored text, so the
             // digest matches what a later commit computes for the same value.
             let body_digest = digest(&job_row_body(&mut stored)?);
@@ -436,9 +233,7 @@ pub(super) fn load_sql_store(
         for row in rows {
             let (kind, key, body) =
                 row.map_err(|error| store_error(path, "read daemon job submission", error))?;
-            let invalid = |error| {
-                Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-            };
+            let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
             match kind.as_str() {
                 REMOTE_RUNNER_KIND => {
                     let submission: RemoteRunnerSubmission =
@@ -740,35 +535,19 @@ pub(super) fn commit_sql_store(
     Ok(())
 }
 
-/// Read the durable store without migrating or reconciling it: from SQLite
-/// when the store has moved there, otherwise from a not-yet-imported legacy
-/// `jobs.json`. `None` means no store exists.
+/// Read the durable store without initializing or reconciling it. `None`
+/// means no job has been stored yet.
 pub(super) fn read_durable_store_readonly(path: &Path) -> Result<Option<DurableJobStore>> {
-    if let Some(connection) = open_sql_store_readonly(path)? {
-        return Ok(Some(load_sql_store(&connection, path)?.0));
-    }
-    match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content)
-            .map(Some)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("read {}", path.display())),
-        )),
-    }
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(load_sql_store(&connection, path)?.0))
 }
 
-/// Non-terminal jobs, read without events and without migrating the store.
+/// Non-terminal jobs, read without events and without initializing the store.
 pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<StoredJob>>> {
     let Some(connection) = open_sql_store_readonly(path)? else {
-        return Ok(read_durable_store_readonly(path)?.map(|durable| {
-            durable
-                .jobs
-                .into_iter()
-                .filter(|stored| !stored.job.status.is_terminal())
-                .collect()
-        }));
+        return Ok(None);
     };
     let mut statement = connection
         .prepare("SELECT body FROM daemon_jobs WHERE active = 1")
@@ -779,9 +558,10 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
     let mut jobs = Vec::new();
     for row in rows {
         let body = row.map_err(|error| store_error(path, "read active daemon job", error))?;
-        jobs.push(serde_json::from_str(&body).map_err(|error| {
-            Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
-        })?);
+        jobs.push(
+            serde_json::from_str(&body)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?,
+        );
     }
     Ok(Some(jobs))
 }
@@ -795,8 +575,7 @@ pub(super) fn read_job_and_controller_submissions(
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
     };
-    let invalid =
-        |error| Error::config_invalid_json(tombstone_path(path).display().to_string(), error);
+    let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
     let stored = connection
         .query_row(
             "SELECT body FROM daemon_jobs WHERE job_id = ?1",
@@ -827,13 +606,6 @@ pub(super) fn pending_step_delivery_count_readonly(path: &Path) -> Result<usize>
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(0);
     };
-    let exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'step_terminal_deliveries')",
-        [], |row| row.get(0),
-    ).map_err(|error| store_error(path, "inspect terminal delivery table", error))?;
-    if !exists {
-        return Ok(0);
-    }
     connection
         .query_row(
             "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL",
@@ -843,9 +615,9 @@ pub(super) fn pending_step_delivery_count_readonly(path: &Path) -> Result<usize>
         .map_err(|error| store_error(path, "count pending terminal deliveries", error))
 }
 
-/// The durable store in its legacy document shape, for operator evidence
+/// The durable job ledger as one JSON document, for operator evidence
 /// snapshots and tests. Not a persistence format.
-pub(super) fn export_legacy_snapshot(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn ledger_snapshot(path: &Path) -> Result<Vec<u8>> {
     match read_durable_store_readonly(path)? {
         Some(mut durable) => {
             durable
@@ -854,91 +626,10 @@ pub(super) fn export_legacy_snapshot(path: &Path) -> Result<Vec<u8>> {
             // Submission maps are HashMaps; route through a Value so object
             // keys serialize sorted and equal stores yield identical bytes.
             let value = serde_json::to_value(&durable)
-                .map_err(|error| serialize_error(error, "daemon job store snapshot"))?;
+                .map_err(|error| serialize_error(error, "daemon job ledger snapshot"))?;
             serde_json::to_vec_pretty(&value)
-                .map_err(|error| serialize_error(error, "daemon job store snapshot"))
+                .map_err(|error| serialize_error(error, "daemon job ledger snapshot"))
         }
         None => Ok(b"{\"jobs\":[]}".to_vec()),
-    }
-}
-
-#[cfg(test)]
-mod crash_recovery_tests {
-    use super::*;
-    use std::process::{Command, Stdio};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    const CHILD_DATABASE: &str = "HOMEBOY_SQLITE_CRASH_TEST_DATABASE";
-    const CHILD_READY: &str = "HOMEBOY_SQLITE_CRASH_TEST_READY";
-
-    #[test]
-    fn child_leaves_hot_rollback_journal() {
-        let Ok(database) = std::env::var(CHILD_DATABASE) else {
-            return;
-        };
-        let ready = std::env::var(CHILD_READY).unwrap();
-        let connection = Connection::open(database).unwrap();
-        connection.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE; UPDATE recovery_probe SET value = printf('%01000d', id) WHERE id > 0;").unwrap();
-        std::fs::write(ready, b"ready").unwrap();
-        loop {
-            thread::sleep(Duration::from_secs(60));
-        }
-    }
-
-    #[test]
-    fn crashed_transaction_is_recovered_for_readonly_inspection() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
-        let database = tombstone_path(&path);
-        let writer = Connection::open(&database).unwrap();
-        writer.execute_batch("CREATE TABLE daemon_store_state (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL); INSERT INTO daemon_store_state VALUES (1, 0); CREATE TABLE recovery_probe (id INTEGER PRIMARY KEY, value TEXT); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000) INSERT INTO recovery_probe SELECT x, 'committed' FROM n; PRAGMA journal_mode=DELETE;").unwrap();
-        drop(writer);
-
-        let ready = directory.path().join("child-ready");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "api_jobs::sql_store::crash_recovery_tests::child_leaves_hot_rollback_journal",
-                "--nocapture",
-            ])
-            .env(CHILD_DATABASE, &database)
-            .env(CHILD_READY, &ready)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(ready.exists(), "child began its uncommitted write");
-        child.kill().unwrap();
-        child.wait().unwrap();
-
-        let readonly =
-            Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let error = readonly
-            .query_row("SELECT value FROM recovery_probe WHERE id = 1", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap_err();
-        assert!(
-            is_sqlite_readonly_error(&error),
-            "expected READONLY_* failure: {error}"
-        );
-        drop(readonly);
-
-        let connection = open_sql_store_readonly(&path).unwrap().unwrap();
-        let value: String = connection
-            .query_row("SELECT value FROM recovery_probe WHERE id = 1", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(value, "committed");
-        let query_only: i64 = connection
-            .query_row("PRAGMA query_only", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(query_only, 1);
     }
 }

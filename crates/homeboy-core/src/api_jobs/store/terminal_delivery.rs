@@ -44,7 +44,7 @@ impl JobStore {
         let Some(path) = self.persistence_path() else {
             return Ok(Vec::new());
         };
-        let connection = super::super::persistence::open_tombstone_store(&path)?;
+        let connection = super::super::persistence::open_ledger(&path)?;
         let mut statement = connection.prepare(
             "SELECT attempts, payload FROM step_terminal_deliveries AS delivery WHERE receipt IS NULL AND (?1 = 0 OR (next_attempt_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM daemon_jobs AS job WHERE job.job_id = delivery.job_id AND job.active = 1))) ORDER BY next_attempt_ms, rowid LIMIT 32"
         ).map_err(sql_error)?;
@@ -69,7 +69,7 @@ impl JobStore {
         let path = self.persistence_path().ok_or_else(|| {
             Error::internal_unexpected("terminal delivery requires a durable store")
         })?;
-        let connection = super::super::persistence::open_tombstone_store(&path)?;
+        let connection = super::super::persistence::open_ledger(&path)?;
         let receipt = serde_json::to_string(receipt)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         let changed = connection.execute("UPDATE step_terminal_deliveries SET receipt = ?2, payload = '', last_error = NULL WHERE job_id = ?1 AND receipt IS NULL", params![job_id, receipt]).map_err(sql_error)?;
@@ -108,7 +108,7 @@ impl JobStore {
                 }
                 Err(error) => {
                     let delay = (1000_u64 << attempts.min(6)).min(60_000);
-                    super::super::persistence::open_tombstone_store(&path)?.execute(
+                    super::super::persistence::open_ledger(&path)?.execute(
                         "UPDATE step_terminal_deliveries SET attempts = attempts + 1, next_attempt_ms = ?2, last_error = ?3 WHERE job_id = ?1 AND receipt IS NULL",
                         params![delivery.job_id, (timestamp_ms() + delay) as i64, crate::redaction::redact_string(&error.message)],
                     ).map_err(sql_error)?;

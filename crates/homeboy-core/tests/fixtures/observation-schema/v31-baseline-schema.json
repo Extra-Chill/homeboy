@@ -1,5 +1,73 @@
 {
   "indexes": {
+    "daemon_job_events_sequence": {
+      "columns": [
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "sequence",
+          "seqno": 0
+        },
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": "job_id",
+          "seqno": 1
+        }
+      ]
+    },
+    "daemon_job_submissions_job": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "kind",
+          "seqno": 0
+        },
+        {
+          "cid": 2,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "job_id",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
+    "daemon_jobs_active": {
+      "columns": [
+        {
+          "cid": 2,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "active",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
+    },
     "idx_agent_task_active_scope": {
       "columns": [
         {
@@ -1068,6 +1136,34 @@
         }
       ]
     },
+    "replay_tombstones_job_identity": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "kind",
+          "seqno": 0
+        },
+        {
+          "cid": 3,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "job_id",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
     "sqlite_autoindex_artifact_publication_intents_1": {
       "columns": [
         {
@@ -1296,6 +1392,26 @@
         }
       ]
     },
+    "sqlite_autoindex_controller_completions_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "job_id",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
+    },
     "sqlite_autoindex_coordination_fences_1": {
       "columns": [
         {
@@ -1388,6 +1504,54 @@
         }
       ]
     },
+    "sqlite_autoindex_daemon_job_submissions_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "kind",
+          "seqno": 0
+        },
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "key",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
+    "sqlite_autoindex_daemon_jobs_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "job_id",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
+    },
     "sqlite_autoindex_findings_1": {
       "columns": [
         {
@@ -1408,6 +1572,34 @@
         }
       ]
     },
+    "sqlite_autoindex_replay_tombstones_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "kind",
+          "seqno": 0
+        },
+        {
+          "cid": 1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "key",
+          "seqno": 1
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 2
+        }
+      ]
+    },
     "sqlite_autoindex_runs_1": {
       "columns": [
         {
@@ -1416,6 +1608,26 @@
           "desc": 0,
           "key": 1,
           "name": "id",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
+    },
+    "sqlite_autoindex_step_terminal_deliveries_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "job_id",
           "seqno": 0
         },
         {
@@ -1467,9 +1679,67 @@
           "seqno": 1
         }
       ]
+    },
+    "sqlite_autoindex_workflow_cadences_1": {
+      "columns": [
+        {
+          "cid": 0,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "workflow",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
+    },
+    "step_terminal_deliveries_pending": {
+      "columns": [
+        {
+          "cid": 3,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 1,
+          "name": "next_attempt_ms",
+          "seqno": 0
+        },
+        {
+          "cid": -1,
+          "coll": "BINARY",
+          "desc": 0,
+          "key": 0,
+          "name": null,
+          "seqno": 1
+        }
+      ]
     }
   },
   "objects": [
+    {
+      "name": "daemon_job_events_sequence",
+      "sql": "CREATE INDEX daemon_job_events_sequence\n    ON daemon_job_events (sequence)",
+      "tbl_name": "daemon_job_events",
+      "type": "index"
+    },
+    {
+      "name": "daemon_job_submissions_job",
+      "sql": "CREATE INDEX daemon_job_submissions_job\n    ON daemon_job_submissions (kind, job_id)",
+      "tbl_name": "daemon_job_submissions",
+      "type": "index"
+    },
+    {
+      "name": "daemon_jobs_active",
+      "sql": "CREATE INDEX daemon_jobs_active ON daemon_jobs (active)",
+      "tbl_name": "daemon_jobs",
+      "type": "index"
+    },
     {
       "name": "idx_agent_task_active_scope",
       "sql": "CREATE INDEX idx_agent_task_active_scope\n    ON runs (\n        json_extract(metadata_json, '$.agent_task_run.metadata.client_context.caller_context'),\n        json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),\n        json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),\n        id\n    )\n    WHERE kind = 'agent-task'\n      AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')\n      AND (json_type(metadata_json, '$.agent_task_run.metadata.caller_workspace') IS NOT NULL\n           OR json_type(metadata_json, '$.agent_task_run.metadata.detached_cook_handoff') = 'object'\n           OR json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'\n           OR json_type(metadata_json, '$.agent_task_run.metadata.cook_id') = 'text')",
@@ -1681,6 +1951,12 @@
       "type": "index"
     },
     {
+      "name": "replay_tombstones_job_identity",
+      "sql": "CREATE INDEX replay_tombstones_job_identity\n    ON replay_tombstones (kind, job_id)",
+      "tbl_name": "replay_tombstones",
+      "type": "index"
+    },
+    {
       "name": "sqlite_autoindex_artifact_publication_intents_1",
       "sql": null,
       "tbl_name": "artifact_publication_intents",
@@ -1735,6 +2011,12 @@
       "type": "index"
     },
     {
+      "name": "sqlite_autoindex_controller_completions_1",
+      "sql": null,
+      "tbl_name": "controller_completions",
+      "type": "index"
+    },
+    {
       "name": "sqlite_autoindex_coordination_fences_1",
       "sql": null,
       "tbl_name": "coordination_fences",
@@ -1753,15 +2035,39 @@
       "type": "index"
     },
     {
+      "name": "sqlite_autoindex_daemon_job_submissions_1",
+      "sql": null,
+      "tbl_name": "daemon_job_submissions",
+      "type": "index"
+    },
+    {
+      "name": "sqlite_autoindex_daemon_jobs_1",
+      "sql": null,
+      "tbl_name": "daemon_jobs",
+      "type": "index"
+    },
+    {
       "name": "sqlite_autoindex_findings_1",
       "sql": null,
       "tbl_name": "findings",
       "type": "index"
     },
     {
+      "name": "sqlite_autoindex_replay_tombstones_1",
+      "sql": null,
+      "tbl_name": "replay_tombstones",
+      "type": "index"
+    },
+    {
       "name": "sqlite_autoindex_runs_1",
       "sql": null,
       "tbl_name": "runs",
+      "type": "index"
+    },
+    {
+      "name": "sqlite_autoindex_step_terminal_deliveries_1",
+      "sql": null,
+      "tbl_name": "step_terminal_deliveries",
       "type": "index"
     },
     {
@@ -1774,6 +2080,18 @@
       "name": "sqlite_autoindex_trace_spans_1",
       "sql": null,
       "tbl_name": "trace_spans",
+      "type": "index"
+    },
+    {
+      "name": "sqlite_autoindex_workflow_cadences_1",
+      "sql": null,
+      "tbl_name": "workflow_cadences",
+      "type": "index"
+    },
+    {
+      "name": "step_terminal_deliveries_pending",
+      "sql": "CREATE INDEX step_terminal_deliveries_pending\n    ON step_terminal_deliveries(next_attempt_ms) WHERE receipt IS NULL",
+      "tbl_name": "step_terminal_deliveries",
       "type": "index"
     },
     {
@@ -1819,6 +2137,12 @@
       "type": "table"
     },
     {
+      "name": "controller_completions",
+      "sql": "CREATE TABLE controller_completions (\n    job_id TEXT PRIMARY KEY NOT NULL,\n    payload TEXT NOT NULL\n)",
+      "tbl_name": "controller_completions",
+      "type": "table"
+    },
+    {
       "name": "coordination_audit",
       "sql": "CREATE TABLE coordination_audit (\n    sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n    namespace TEXT NOT NULL,\n    subject_key TEXT NOT NULL,\n    at_ms INTEGER NOT NULL,\n    event TEXT NOT NULL,\n    payload_json TEXT NOT NULL DEFAULT '{}'\n)",
       "tbl_name": "coordination_audit",
@@ -1843,9 +2167,39 @@
       "type": "table"
     },
     {
+      "name": "daemon_job_events",
+      "sql": "CREATE TABLE daemon_job_events (\n    job_id TEXT NOT NULL,\n    sequence INTEGER NOT NULL,\n    body TEXT NOT NULL,\n    PRIMARY KEY (job_id, sequence)\n) WITHOUT ROWID",
+      "tbl_name": "daemon_job_events",
+      "type": "table"
+    },
+    {
+      "name": "daemon_job_submissions",
+      "sql": "CREATE TABLE daemon_job_submissions (\n    kind TEXT NOT NULL,\n    key TEXT NOT NULL,\n    job_id TEXT NOT NULL,\n    body TEXT NOT NULL,\n    PRIMARY KEY (kind, key)\n)",
+      "tbl_name": "daemon_job_submissions",
+      "type": "table"
+    },
+    {
+      "name": "daemon_jobs",
+      "sql": "CREATE TABLE daemon_jobs (\n    job_id TEXT PRIMARY KEY NOT NULL,\n    status TEXT NOT NULL,\n    active INTEGER NOT NULL,\n    created_at_ms INTEGER NOT NULL,\n    updated_at_ms INTEGER NOT NULL,\n    body TEXT NOT NULL\n)",
+      "tbl_name": "daemon_jobs",
+      "type": "table"
+    },
+    {
+      "name": "daemon_store_state",
+      "sql": "CREATE TABLE daemon_store_state (\n    id INTEGER PRIMARY KEY CHECK (id = 1),\n    generation INTEGER NOT NULL,\n    compaction TEXT\n)",
+      "tbl_name": "daemon_store_state",
+      "type": "table"
+    },
+    {
       "name": "findings",
       "sql": "CREATE TABLE findings (\n    id TEXT PRIMARY KEY,\n    run_id TEXT NOT NULL,\n    tool TEXT NOT NULL,\n    rule TEXT,\n    file TEXT,\n    line INTEGER,\n    severity TEXT,\n    fingerprint TEXT,\n    message TEXT NOT NULL,\n    fixable INTEGER,\n    metadata_json TEXT NOT NULL DEFAULT '{}',\n    created_at TEXT NOT NULL,\n    FOREIGN KEY(run_id) REFERENCES runs(id)\n)",
       "tbl_name": "findings",
+      "type": "table"
+    },
+    {
+      "name": "replay_tombstones",
+      "sql": "CREATE TABLE replay_tombstones (\n    kind TEXT NOT NULL,\n    key TEXT NOT NULL,\n    fingerprint TEXT NOT NULL,\n    job_id TEXT NOT NULL,\n    terminal_job TEXT,\n    PRIMARY KEY (kind, key)\n)",
+      "tbl_name": "replay_tombstones",
       "type": "table"
     },
     {
@@ -1861,6 +2215,12 @@
       "type": "table"
     },
     {
+      "name": "step_terminal_deliveries",
+      "sql": "CREATE TABLE step_terminal_deliveries (\n    job_id TEXT PRIMARY KEY NOT NULL,\n    payload TEXT NOT NULL,\n    attempts INTEGER NOT NULL DEFAULT 0,\n    next_attempt_ms INTEGER NOT NULL DEFAULT 0,\n    last_error TEXT,\n    receipt TEXT\n)",
+      "tbl_name": "step_terminal_deliveries",
+      "type": "table"
+    },
+    {
       "name": "trace_runs",
       "sql": "CREATE TABLE trace_runs (\n    run_id TEXT PRIMARY KEY,\n    component_id TEXT NOT NULL,\n    rig_id TEXT,\n    scenario_id TEXT NOT NULL,\n    status TEXT NOT NULL,\n    baseline_status TEXT,\n    metadata_json TEXT NOT NULL DEFAULT '{}',\n    FOREIGN KEY(run_id) REFERENCES runs(id)\n)",
       "tbl_name": "trace_runs",
@@ -1873,6 +2233,12 @@
       "type": "table"
     },
     {
+      "name": "workflow_cadences",
+      "sql": "CREATE TABLE workflow_cadences (\n    workflow TEXT PRIMARY KEY NOT NULL,\n    next_due_ms INTEGER NOT NULL,\n    body TEXT NOT NULL\n)",
+      "tbl_name": "workflow_cadences",
+      "type": "table"
+    },
+    {
       "name": "runs_mission_is_immutable",
       "sql": "CREATE TRIGGER runs_mission_is_immutable\n    BEFORE UPDATE OF mission_id ON runs\n    WHEN OLD.mission_id IS NOT NULL AND NEW.mission_id IS NOT OLD.mission_id\nBEGIN\n    SELECT RAISE(ABORT, 'run cannot move to a different mission');\nEND",
       "tbl_name": "runs",
@@ -1880,9 +2246,9 @@
     }
   ],
   "recorded_versions": [
-    30
+    31
   ],
-  "schema_version": 30,
+  "schema_version": 31,
   "tables": {
     "artifact_publication_intents": {
       "columns": [
@@ -2760,6 +3126,37 @@
         }
       ]
     },
+    "controller_completions": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "payload",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_controller_completions_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
     "coordination_audit": {
       "columns": [
         {
@@ -3079,6 +3476,213 @@
         }
       ]
     },
+    "daemon_job_events": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "sequence",
+          "notnull": 1,
+          "pk": 2,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "body",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "daemon_job_events_sequence",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        },
+        {
+          "name": "sqlite_autoindex_daemon_job_events_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "daemon_job_submissions": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "kind",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "key",
+          "notnull": 1,
+          "pk": 2,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "body",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "daemon_job_submissions_job",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        },
+        {
+          "name": "sqlite_autoindex_daemon_job_submissions_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "daemon_jobs": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "status",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "active",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "created_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "updated_at_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 5,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "body",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "daemon_jobs_active",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        },
+        {
+          "name": "sqlite_autoindex_daemon_jobs_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "daemon_store_state": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "id",
+          "notnull": 0,
+          "pk": 1,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "generation",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "compaction",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": []
+    },
     "findings": {
       "columns": [
         {
@@ -3223,6 +3827,70 @@
         },
         {
           "name": "sqlite_autoindex_findings_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "replay_tombstones": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "kind",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "key",
+          "notnull": 1,
+          "pk": 2,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "fingerprint",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 3,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 4,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "terminal_job",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "replay_tombstones_job_identity",
+          "origin": "c",
+          "partial": 0,
+          "unique": 0
+        },
+        {
+          "name": "sqlite_autoindex_replay_tombstones_1",
           "origin": "pk",
           "partial": 0,
           "unique": 1
@@ -3431,6 +4099,79 @@
       "foreign_keys": [],
       "indexes": []
     },
+    "step_terminal_deliveries": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "job_id",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "payload",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 2,
+          "dflt_value": "0",
+          "hidden": 0,
+          "name": "attempts",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 3,
+          "dflt_value": "0",
+          "hidden": 0,
+          "name": "next_attempt_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 4,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "last_error",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 5,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "receipt",
+          "notnull": 0,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_step_terminal_deliveries_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        },
+        {
+          "name": "step_terminal_deliveries_pending",
+          "origin": "c",
+          "partial": 1,
+          "unique": 0
+        }
+      ]
+    },
     "trace_runs": {
       "columns": [
         {
@@ -3626,6 +4367,46 @@
         },
         {
           "name": "sqlite_autoindex_trace_spans_1",
+          "origin": "pk",
+          "partial": 0,
+          "unique": 1
+        }
+      ]
+    },
+    "workflow_cadences": {
+      "columns": [
+        {
+          "cid": 0,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "workflow",
+          "notnull": 1,
+          "pk": 1,
+          "type": "TEXT"
+        },
+        {
+          "cid": 1,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "next_due_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 2,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "body",
+          "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "indexes": [
+        {
+          "name": "sqlite_autoindex_workflow_cadences_1",
           "origin": "pk",
           "partial": 0,
           "unique": 1

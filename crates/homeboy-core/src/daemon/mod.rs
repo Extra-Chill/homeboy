@@ -988,7 +988,7 @@ pub struct DaemonProcessCandidate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub durable_store_path: Option<String>,
+    pub state_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_identity: Option<String>,
     /// Exact startup identity carried by the supervised daemon argv, when its
@@ -1443,7 +1443,8 @@ pub fn read_status() -> Result<DaemonStatus> {
 /// status continues to follow the current registry owner during that handoff.
 pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
-    let jobs_path = path.with_file_name("jobs.json");
+    let jobs_path = paths::observation_db()?;
+    let state_dir = path.parent().unwrap_or(&path).to_path_buf();
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
@@ -1468,11 +1469,11 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
                 != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
         })
         .count();
-    let mut process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    let mut process_candidates = control::daemon_process_candidates(&state_dir)?;
     if validation.running {
         if let Some(state) = validation.state.as_ref() {
             for candidate in &mut process_candidates {
-                if candidate_matches_live_lease(candidate, state, &jobs_path) {
+                if candidate_matches_live_lease(candidate, state, &state_dir) {
                     candidate.ownership = DaemonProcessOwnership::Owning;
                 }
             }
@@ -1575,11 +1576,11 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
 fn candidate_matches_live_lease(
     candidate: &DaemonProcessCandidate,
     state: &DaemonState,
-    jobs_path: &Path,
+    state_dir: &Path,
 ) -> bool {
     candidate.ownership == DaemonProcessOwnership::Ambiguous
         && candidate.pid == state.pid
-        && candidate.durable_store_path.as_deref() == jobs_path.to_str()
+        && candidate.state_dir.as_deref() == state_dir.to_str()
         && candidate.bind_endpoint.as_deref() == Some(state.address.as_str())
         && !state.startup_token.is_empty()
         && candidate.startup_token.as_deref() == Some(state.startup_token.as_str())
@@ -1766,7 +1767,7 @@ where
     // never authorizes replay of an adopted job.
     let prior = validate_lease_file(&paths::daemon_state_file()?)?;
     let proven_dead = if prior.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) {
-        let candidates = control::daemon_process_candidates(&paths::daemon_jobs_file()?)?
+        let candidates = control::daemon_process_candidates(&paths::observation_db()?)?
             .into_iter()
             .filter(|candidate| candidate.pid != std::process::id())
             .collect::<Vec<_>>();
@@ -1777,7 +1778,7 @@ where
         None
     };
     let state = write_state(local_addr)?;
-    let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
+    let job_store = JobStore::open_without_reconciliation(paths::observation_db()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
@@ -1928,7 +1929,7 @@ where
         // checkpoint on the next start, which re-arms its resume (#15936).
         // With jobs still active keep the lease, so dead-lease recovery also
         // re-admits staged direct work.
-        let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
+        let active_jobs = JobStore::active_count_at_path(paths::observation_db()?)?;
         let clean = active_jobs == 0;
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
@@ -5162,7 +5163,7 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             register_enqueue_test_driver(); // This driver intentionally has no staged-source support.
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("jobs.json");
+            let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
             let old_state = write_state("127.0.0.1:31001".parse().unwrap()).unwrap();
             let old = JobStore::open_without_reconciliation(&path)
                 .unwrap()
@@ -5619,7 +5620,7 @@ mod tests {
             .expect("register available generic linked-run driver");
         });
         let store =
-            JobStore::open_without_reconciliation(paths::daemon_jobs_file().expect("jobs path"))
+            JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
                 .expect("durable store");
         let outcome = store
             .admit_controller_job(
@@ -5668,12 +5669,11 @@ mod tests {
                 blocking.is_empty(),
                 "terminal evidence proves no workload remains: {blocking:?}"
             );
-            let reconciled = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store")
-            .get(job_id)
-            .expect("staging dispatch");
+            let reconciled =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store")
+                    .get(job_id)
+                    .expect("staging dispatch");
             assert_eq!(reconciled.status, JobStatus::Cancelled);
         });
     }
@@ -5689,12 +5689,11 @@ mod tests {
             let blocking = active_daemon_job_ids().expect("replacement gate");
 
             assert_eq!(blocking, vec![job_id]);
-            let untouched = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store")
-            .get(job_id)
-            .expect("staging dispatch");
+            let untouched =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store")
+                    .get(job_id)
+                    .expect("staging dispatch");
             assert_eq!(untouched.status, JobStatus::Running);
         });
     }
@@ -6201,10 +6200,9 @@ mod tests {
         with_isolated_home(|_| {
             let lease_id = "lease-renew-durable-failure";
             write_test_lease(lease_id);
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             let reserved = reserve_admission(
                 Some(json!({
                     "runner_id": "lab", "expected_daemon_lease_id": lease_id,
@@ -6249,10 +6247,9 @@ mod tests {
         with_isolated_home(|_| {
             let lease_id = "lease-renew-cleanup-failure";
             write_test_lease(lease_id);
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             let reserved = reserve_admission(
                 Some(json!({
                     "runner_id": "lab", "expected_daemon_lease_id": lease_id,
@@ -6301,10 +6298,9 @@ mod tests {
         with_isolated_home(|_| {
             let lease_id = "lease-renew-terminal-persistence-failure";
             write_test_lease(lease_id);
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             let reserved = reserve_admission(
                 Some(json!({
                     "runner_id": "lab", "expected_daemon_lease_id": lease_id,
@@ -6445,10 +6441,9 @@ mod tests {
     #[test]
     fn cleanup_failure_preserves_terminal_outcome_and_records_typed_evidence() {
         with_isolated_home(|_| {
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             let lease = register_direct_owner("terminal-cleanup-failure");
             daemon_workspace_claim_store()
                 .expect("owner store")
@@ -6476,10 +6471,9 @@ mod tests {
         with_isolated_home(|_| {
             let lease_id = "lease-admission-commit-failure";
             write_test_lease(lease_id);
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             store.fail_next_durable_writes(1);
             let workspace = direct_owner_workspace();
             let error = reserve_admission(
@@ -6504,10 +6498,9 @@ mod tests {
     fn exec_queue_commit_failure_releases_new_owner_before_persisting() {
         with_isolated_home(|_| {
             register_enqueue_test_driver();
-            let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("jobs path"),
-            )
-            .expect("durable store");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
             store.fail_next_durable_writes(1);
             let workspace = direct_owner_workspace();
             let mut body = crate::test_support::direct_exec_body(
@@ -6998,7 +6991,7 @@ mod tests {
     fn routine_stop_gate_reads_queued_and_running_durable_jobs() {
         with_isolated_home(|_| {
             let store = JobStore::open_without_reconciliation(
-                paths::daemon_jobs_file().expect("daemon jobs path"),
+                paths::observation_db().expect("daemon jobs path"),
             )
             .expect("open daemon jobs");
             let queued = store.create("runner.exec");
@@ -7224,7 +7217,7 @@ fn config_paths_body() -> Result<serde_json::Value> {
         "extensions": paths::extensions()?.display().to_string(),
         "rigs": paths::rigs_in_root(&config_root).display().to_string(),
         "daemon_state": paths::daemon_state_file()?.display().to_string(),
-        "daemon_jobs": paths::daemon_jobs_file()?.display().to_string(),
+        "daemon_jobs": paths::observation_db()?.display().to_string(),
     }))
 }
 

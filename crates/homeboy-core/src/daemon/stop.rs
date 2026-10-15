@@ -606,7 +606,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     if pid_is_running(pid) && !force {
         return stop_supervised_daemon(&path, &identity, state, state_path_display);
     }
-    let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
+    let active_jobs = JobStore::active_count_at_path(paths::observation_db()?)?;
     if pid_is_running(pid) {
         write_termination_evidence(&DaemonTerminationEvidence {
             classification: DaemonTerminationClassification::CleanStop,
@@ -649,7 +649,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
 }
 
 pub(super) fn active_daemon_job_ids() -> Result<Vec<Uuid>> {
-    let store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)?;
+    let store = JobStore::open_without_reconciliation(paths::observation_db()?)?;
     // Replacement is authorized without an operator attestation when durable
     // terminal evidence proves no workload remains, so first reconcile every
     // active job whose evidence already proves it. Live children, live linked

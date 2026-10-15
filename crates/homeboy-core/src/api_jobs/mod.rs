@@ -1,5 +1,5 @@
 pub mod agent_task_terminal_recovery;
-mod persistence;
+pub(crate) mod persistence;
 mod remote_runner;
 mod runner_job_preparation;
 mod sql_store;

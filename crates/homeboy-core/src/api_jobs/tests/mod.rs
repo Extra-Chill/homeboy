@@ -12,23 +12,39 @@ use serde_json::json;
 use super::*;
 use uuid::Uuid;
 
-/// The durable store in its legacy document shape, read from the SQL store.
+/// The durable job ledger as one JSON document, read from the SQL store.
 pub(super) fn durable_snapshot(path: &std::path::Path) -> serde_json::Value {
-    serde_json::from_slice(
-        &JobStore::export_legacy_snapshot_at_path(path).expect("export durable store"),
-    )
-    .expect("exported snapshot is JSON")
+    serde_json::from_slice(&JobStore::ledger_snapshot_at_path(path).expect("snapshot ledger"))
+        .expect("ledger snapshot is JSON")
 }
 
-/// Replace the durable store with a pre-SQLite `jobs.json` document, as an
-/// older daemon would have left it. The next open imports it.
-pub(super) fn install_legacy_store(path: &std::path::Path, snapshot: &serde_json::Value) {
-    let _ = std::fs::remove_file(super::persistence::tombstone_path(path));
-    std::fs::write(
+/// Replace the durable ledger with `snapshot`, to tamper with persisted state.
+pub(super) fn replace_durable_store(path: &std::path::Path, snapshot: &serde_json::Value) {
+    JobStore::replace_ledger_at_path(
         path,
-        serde_json::to_vec_pretty(snapshot).expect("encode legacy store"),
+        &serde_json::to_vec(snapshot).expect("encode ledger snapshot"),
     )
-    .expect("write legacy store");
+    .expect("replace ledger");
+}
+
+/// Bytes the daemon job ledger's rows hold in the observation store.
+pub(super) fn ledger_bytes(path: &std::path::Path) -> u64 {
+    let connection = rusqlite::Connection::open(path).expect("open ledger");
+    [
+        "SELECT COALESCE(SUM(length(body)), 0) FROM daemon_jobs",
+        "SELECT COALESCE(SUM(length(body)), 0) FROM daemon_job_events",
+        "SELECT COALESCE(SUM(length(body)), 0) FROM daemon_job_submissions",
+        "SELECT COALESCE(SUM(length(key) + length(fingerprint) + length(job_id)
+             + COALESCE(length(terminal_job), 0)), 0) FROM replay_tombstones",
+        "SELECT COALESCE(SUM(length(payload)), 0) FROM controller_completions",
+    ]
+    .iter()
+    .map(|query| {
+        connection
+            .query_row(query, [], |row| row.get::<_, i64>(0))
+            .expect("sum ledger bytes") as u64
+    })
+    .sum()
 }
 
 pub(super) fn record_test_local_child(store: &JobStore, job_id: Uuid, pid: u32) {

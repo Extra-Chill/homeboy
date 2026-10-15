@@ -52,7 +52,7 @@ pub(crate) fn set_homeboy_command_selection(
 /// Default a direct daemon child's Homeboy to the daemon's own binary.
 ///
 /// The child authenticates against the daemon's durable job store, and that
-/// store's format is build-specific (jobs.json became SQLite in 0.418.0). The
+/// store's format is build-specific (its schema is versioned per release). The
 /// configured `homeboy_path` can name another build after a refresh or
 /// upgrade, and a child launched from it cannot find the job that launched it.
 /// The daemon is the one build guaranteed to match, so it takes the place of

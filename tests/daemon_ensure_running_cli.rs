@@ -67,8 +67,12 @@ fn idle_shutdown_preserves_active_durable_jobs_then_reaps_after_completion() {
         serde_json::from_slice(&fs::read(context.daemon_dir().join("state.json")).unwrap())
             .unwrap();
     let pid = state["pid"].as_u64().unwrap() as u32;
-    let jobs =
-        JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json")).unwrap();
+    let jobs = JobStore::open_without_reconciliation(
+        context
+            .data_dir()
+            .join(homeboy_core::paths::OBSERVATION_DB_FILENAME),
+    )
+    .unwrap();
     let job = jobs.create("idle-lifetime-active-regression");
     jobs.start(job.id).unwrap();
     thread::sleep(Duration::from_secs(5));
@@ -150,6 +154,10 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     let mut first_ensure = context.command(TestBinary::HomeboyFixture);
     first_ensure
         .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &first_dir)
+        .env(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            first_dir.join("data"),
+        )
         .args(["daemon", "ensure-running"]);
     let first_output = bounded_output(first_ensure);
     assert!(
@@ -161,19 +169,29 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     let first_state_bytes = fs::read(&first_state_path).expect("controller A lease exists");
     let first_state: serde_json::Value =
         serde_json::from_slice(&first_state_bytes).expect("controller A lease is JSON");
-    let first_jobs_path = first_dir.join("jobs.json");
+    let first_jobs_path = first_dir
+        .join("data")
+        .join(homeboy_core::paths::OBSERVATION_DB_FILENAME);
     let first_jobs = JobStore::open_without_reconciliation(&first_jobs_path)
         .expect("open controller A durable jobs store");
     let active_job = first_jobs.create("controller-a-active-job");
     let active_job = first_jobs.start(active_job.id).expect("start durable job");
     assert_eq!(active_job.status, JobStatus::Running);
-    // The durable job store lives in SQLite next to the legacy document path.
-    let first_jobs_db = first_dir.join("jobs.json.replay-tombstones.sqlite");
-    let first_jobs_before = fs::read(&first_jobs_db).expect("controller A jobs store exists");
+    let first_jobs_before = serde_json::to_value((
+        first_jobs.list(),
+        first_jobs
+            .events(active_job.id)
+            .expect("controller A job events"),
+    ))
+    .expect("controller A jobs JSON");
 
     let mut second_ensure = context.command(TestBinary::HomeboyFixture);
     second_ensure
         .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &second_dir)
+        .env(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            second_dir.join("data"),
+        )
         .args(["daemon", "ensure-running"]);
     let second_output = bounded_output(second_ensure);
     assert!(
@@ -186,6 +204,10 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     let mut first_status = context.command(TestBinary::HomeboyFixture);
     first_status
         .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &first_dir)
+        .env(
+            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+            first_dir.join("data"),
+        )
         .args(["daemon", "status"]);
     let first_status_output = bounded_output(first_status);
     assert!(
@@ -204,7 +226,17 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
         first_state_bytes,
     );
     assert_eq!(
-        fs::read(&first_jobs_db).expect("controller A jobs store remains"),
+        {
+            let reopened = JobStore::open_without_reconciliation(&first_jobs_path)
+                .expect("reopen controller A jobs store");
+            serde_json::to_value((
+                reopened.list(),
+                reopened
+                    .events(active_job.id)
+                    .expect("controller A job events"),
+            ))
+            .expect("controller A jobs JSON")
+        },
         first_jobs_before,
         "controller B startup must not reconcile or rewrite controller A's jobs"
     );
@@ -220,6 +252,10 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     for state_dir in [&second_dir, &first_dir] {
         let mut stop = context.command(TestBinary::HomeboyFixture);
         stop.env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, state_dir)
+            .env(
+                homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
+                state_dir.join("data"),
+            )
             .args(["daemon", "stop"]);
         let output = bounded_output(stop);
         assert!(

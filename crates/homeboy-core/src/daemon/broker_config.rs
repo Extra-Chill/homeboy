@@ -90,7 +90,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         identity: options.identity.clone(),
         binary_path: options.binary_path.clone(),
         daemon_state_path: "/var/lib/homeboy/.config/homeboy/daemon/state.json".to_string(),
-        daemon_jobs_path: "/var/lib/homeboy/.config/homeboy/daemon/jobs.json".to_string(),
+        daemon_jobs_path: broker_observation_db(),
         safe_exposure: BrokerExposure {
             loopback_only: true,
             private_tunnel_safe: true,
@@ -120,7 +120,7 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
             "homeboy runner status <runner-id>".to_string(),
         ],
         restart_caveats: vec![
-            "The durable job store is reopened from /var/lib/homeboy/.config/homeboy/daemon/jobs.json after restart.".to_string(),
+            format!("The durable job store is reopened from {} after restart.", broker_observation_db()),
             "Queued remote-runner jobs survive daemon restart; running broker-owned jobs are marked failed as stale.".to_string(),
             "Run POST /runner/jobs/reconcile before broker maintenance to let the broker fail expired reverse-runner claims explicitly.".to_string(),
             "Active reverse-runner claims remain claim-scoped until their lease expires; runners should reclaim after the broker reconciliation window.".to_string(),
@@ -129,9 +129,17 @@ pub fn render_broker_config(options: BrokerConfigOptions) -> Result<BrokerConfig
         retention_expectations: vec![
             "Job events are retained in the daemon durable job store with Homeboy's bounded per-job event retention.".to_string(),
             "The store is operational state, not an audit archive; mirror important run evidence into Homeboy observations/artifacts.".to_string(),
-            "Back up /var/lib/homeboy/.config/homeboy/daemon/jobs.json before broker maintenance if in-flight jobs matter.".to_string(),
+            format!("Back up {} before broker maintenance if in-flight jobs matter.", broker_observation_db()),
         ],
     })
+}
+
+/// The broker's observation store, which holds its durable job ledger.
+fn broker_observation_db() -> String {
+    format!(
+        "/var/lib/homeboy/.local/share/homeboy/{}",
+        crate::paths::OBSERVATION_DB_FILENAME
+    )
 }
 
 fn parse_loopback_addr(addr: &str) -> Result<String> {

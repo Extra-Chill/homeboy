@@ -105,9 +105,11 @@ fn gates_launch_the_next_step_and_until_passes_on_iteration_two() {
                  "exec": sh(&format!("echo fix-{{{{iteration}}}} >> {}", runs.display()))}
             ]
         });
-        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease("workflow-test".to_string());
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
         let request = request(definition, home.path());
         let job_id = admit(&store, &request);
         crate::daemon::start_controller_job(job_id, &store).unwrap();
@@ -145,7 +147,7 @@ fn gates_launch_the_next_step_and_until_passes_on_iteration_two() {
 fn recovery_after_a_commit_starts_each_admitted_step_exactly_once() {
     with_isolated_home(|home| {
         let runs = home.path().join("runs.log");
-        let path = home.path().join("jobs.json");
+        let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let definition = json!({
             "schema": "homeboy/workflow/v1",
             "id": "resume",
@@ -223,9 +225,11 @@ fn a_dead_daemons_workflow_is_adopted_once_and_resumes_in_place() {
 
         // Daemon DEAD admitted the instance and committed its first decision;
         // then it died.
-        let store = JobStore::open_without_reconciliation(dead_dir.join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease("DEAD".to_string());
+        let store = JobStore::open_without_reconciliation(
+            dead_dir.join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("DEAD".to_string());
         let job_id = admit(&store, &request);
         store.claim_controller_execution(job_id, false).unwrap();
         let (state, commands) = advance(
@@ -257,9 +261,11 @@ fn a_dead_daemons_workflow_is_adopted_once_and_resumes_in_place() {
         let (winner, _owner_lock) = winners.pop().unwrap();
 
         // The winner's startup resumes the checkpointed instance.
-        let restarted = JobStore::open_without_reconciliation(dead_dir.join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease(winner.to_string());
+        let restarted = JobStore::open_without_reconciliation(
+            dead_dir.join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease(winner.to_string());
         crate::daemon::recover_controller_jobs(&restarted);
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -360,9 +366,11 @@ fn approval_waits_for_a_recorded_approval() {
                 {"id": "after", "needs": ["ship"], "exec": sh(&format!("echo after >> {}", runs.display()))}
             ]
         });
-        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease("workflow-test".to_string());
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
         let request = request(definition, home.path());
         let job_id = admit(&store, &request);
         assert!(
@@ -403,9 +411,11 @@ fn cancelling_the_instance_cancels_its_running_step() {
             "id": "long",
             "steps": [{"id": "sleep", "exec": sh("sleep 60")}]
         });
-        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease("workflow-test".to_string());
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
         let request = request(definition, home.path());
         let job_id = admit(&store, &request);
         crate::daemon::start_controller_job(job_id, &store).unwrap();
@@ -469,9 +479,11 @@ fn fan_out_runs_items_two_at_a_time_and_joins() {
                  [ \"$1\" != 2 ]",
                 log = log.display()
             );
-            let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
-                .unwrap()
-                .with_daemon_lease("workflow-test".to_string());
+            let store = JobStore::open_without_reconciliation(
+                home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap()
+            .with_daemon_lease("workflow-test".to_string());
             let request = request(fan_out(join.clone(), &script), home.path());
             let job_id = admit(&store, &request);
             crate::daemon::start_controller_job(job_id, &store).unwrap();
@@ -505,9 +517,11 @@ fn fan_out_runs_items_two_at_a_time_and_joins() {
 #[test]
 fn cancelling_mid_wave_stops_every_running_item() {
     with_isolated_home(|home| {
-        let store = JobStore::open_without_reconciliation(home.path().join("jobs.json"))
-            .unwrap()
-            .with_daemon_lease("workflow-test".to_string());
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
         let request = request(fan_out(json!("all"), "sleep 60"), home.path());
         let job_id = admit(&store, &request);
         crate::daemon::start_controller_job(job_id, &store).unwrap();

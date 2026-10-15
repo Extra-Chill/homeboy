@@ -1046,7 +1046,7 @@ mod tests {
             executable_digest: None,
             cmdline: "homeboy daemon serve".to_string(),
             bind_endpoint: None,
-            durable_store_path: None,
+            state_dir: None,
             build_identity: None,
             startup_token: None,
             ownership: DaemonProcessOwnership::Unrelated,

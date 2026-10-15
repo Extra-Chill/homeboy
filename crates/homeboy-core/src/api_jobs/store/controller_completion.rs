@@ -71,7 +71,7 @@ mod tests {
             JobStatus::Cancelled,
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("jobs.json");
+            let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
             let store = JobStore::open_without_reconciliation(&path).unwrap();
             let id = running(&store);
             if status == JobStatus::Cancelled {
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn controller_completion_committed_custody_rejects_late_cancellation_without_losing_result() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         let id = running(&store);
         store.fail_next_durable_writes(1);
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn controller_completion_transient_failure_retains_original_result_and_clears_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         let id = running(&store);
         store.terminal_write_failures.store(1, Ordering::SeqCst);
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn controller_completion_blocked_batch_does_not_starve_later_healthy_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         for _ in 0..32 {
             let id = running(&store);
@@ -174,7 +174,7 @@ mod tests {
         }
         // Lose the job rows, as in store-loss recovery. The committed
         // completions must remain protected, not inferred absent.
-        let connection = super::super::super::persistence::open_tombstone_store(&path).unwrap();
+        let connection = super::super::super::persistence::open_ledger(&path).unwrap();
         connection
             .execute_batch(
                 "DELETE FROM daemon_jobs; DELETE FROM daemon_job_events; DELETE FROM daemon_job_submissions;",
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn terminal_identity_custody_survives_configured_pruning_and_restart() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation_with_retention(&path, 2, 1).unwrap();
         let mut winners = Vec::new();
         for status in [
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn terminal_identity_lookup_rejects_corrupt_identity_and_nonterminal_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("jobs.json");
+        let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         let id = running(&store);
         store
@@ -266,7 +266,7 @@ mod tests {
         store
             .prune_terminal_controller_jobs("test.completion-custody", 1, &[id])
             .unwrap();
-        let connection = super::super::super::persistence::open_tombstone_store(&path).unwrap();
+        let connection = super::super::super::persistence::open_ledger(&path).unwrap();
         let winner = store.terminal_controller_job(id).unwrap().unwrap();
         let mut mismatched = winner.clone();
         mismatched.id = Uuid::new_v4();
@@ -292,10 +292,9 @@ fn index_error(error: rusqlite::Error) -> Error {
 }
 
 pub(super) fn pending_completion_report(path: &std::path::Path) -> Result<Value> {
-    if !super::super::persistence::tombstone_path(path).exists() {
+    let Some(connection) = super::super::persistence::open_ledger_readonly(path)? else {
         return Ok(serde_json::json!({"count": 0, "bytes": 0, "resident": false}));
-    }
-    let connection = super::super::persistence::open_tombstone_store(path)?;
+    };
     let (count, bytes): (u64, u64) = connection
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0) FROM controller_completions",
@@ -311,10 +310,10 @@ impl JobStore {
         let Some(persistence) = &self.persistence else {
             return Ok(None);
         };
-        if !super::super::persistence::tombstone_path(&persistence.path).exists() {
+        let Some(connection) = super::super::persistence::open_ledger_readonly(&persistence.path)?
+        else {
             return Ok(None);
-        }
-        let connection = super::super::persistence::open_tombstone_store(&persistence.path)?;
+        };
         let raw: Option<String> = connection
             .query_row(
                 "SELECT payload FROM controller_completions WHERE job_id = ?1",
@@ -361,7 +360,7 @@ impl JobStore {
                 Some("serialize controller completion custody".to_string()),
             )
         })?;
-        let mut connection = super::super::persistence::open_tombstone_store(&persistence.path)?;
+        let mut connection = super::super::persistence::open_ledger(&persistence.path)?;
         let transaction = connection.transaction().map_err(index_error)?;
         transaction
             .execute(
@@ -392,10 +391,10 @@ impl JobStore {
         let Some(persistence) = &self.persistence else {
             return Ok(());
         };
-        if !super::super::persistence::tombstone_path(&persistence.path).exists() {
+        if !persistence.path.exists() {
             return Ok(());
         }
-        super::super::persistence::open_tombstone_store(&persistence.path)?
+        super::super::persistence::open_ledger(&persistence.path)?
             .execute(
                 "DELETE FROM controller_completions WHERE job_id = ?1",
                 [job_id.to_string()],
@@ -538,10 +537,10 @@ impl JobStore {
         let Some(persistence) = &self.persistence else {
             return Ok(());
         };
-        if !super::super::persistence::tombstone_path(&persistence.path).exists() {
+        let Some(connection) = super::super::persistence::open_ledger_readonly(&persistence.path)?
+        else {
             return Ok(());
-        }
-        let connection = super::super::persistence::open_tombstone_store(&persistence.path)?;
+        };
         let mut statement = connection
             .prepare("SELECT job_id, payload FROM controller_completions ORDER BY rowid LIMIT 32")
             .map_err(index_error)?;
@@ -588,7 +587,7 @@ impl JobStore {
                 // Move blocked entries to the next batch without changing their
                 // immutable identity or evidence. Thirty-two blocked receipts
                 // must not starve later healthy completions forever.
-                let _ = super::super::persistence::open_tombstone_store(&persistence.path)
+                let _ = super::super::persistence::open_ledger(&persistence.path)
                     .and_then(|connection| connection.execute(
                         "UPDATE controller_completions SET rowid = (SELECT COALESCE(MAX(rowid), 0) + 1 FROM controller_completions) WHERE job_id = ?1",
                         [&key],

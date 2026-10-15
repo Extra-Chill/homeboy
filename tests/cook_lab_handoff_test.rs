@@ -502,8 +502,12 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         handoff_parent.metadata["detached_cook_handoff"]["attempt_run_id"],
         attempt_id
     );
-    let job_store = JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json"))
-        .expect("open controller job store");
+    let job_store = JobStore::open_without_reconciliation(
+        context
+            .data_dir()
+            .join(homeboy_core::paths::OBSERVATION_DB_FILENAME),
+    )
+    .expect("open controller job store");
     assert!(
         job_store
             .events(supervisor_job_id)

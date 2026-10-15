@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn a_running_checkpoint_is_re_adopted_without_a_second_spawn() {
         with_isolated_home(|home| {
-            let path = home.path().join("step-jobs.json");
+            let path = home.path().join("step-jobs.sqlite");
             let counter = home.path().join("spawns");
             let script = format!("echo spawn >> {}; sleep 1", counter.display());
             let request = request(&script, EnvMaterializationPlan::default());
@@ -1450,7 +1450,7 @@ mod tests {
     fn exited_checkpoint_retains_delivery_across_fresh_store_open_and_pruning() {
         with_isolated_home(|home| {
             register_step_job_driver();
-            let path = home.path().join("crash-jobs.json");
+            let path = home.path().join("crash-jobs.sqlite");
             let mut request = request("true", Default::default());
             request.terminal_consumer = "test.crash".to_string();
             let harness = ControllerJobHarness::durable(
@@ -1653,7 +1653,7 @@ mod tests {
     fn child_gate_admits_descendants_of_the_authorized_child() {
         with_isolated_home(|home| {
             register_step_job_driver();
-            let path = home.path().join("reexec-jobs.json");
+            let path = home.path().join("reexec-jobs.sqlite");
             let request = request("true", Default::default());
             let harness = ControllerJobHarness::durable(
                 Arc::new(StepJobDriver),
@@ -1747,7 +1747,7 @@ mod tests {
     fn interrupted_spawning_delivers_typed_outcome_and_child_exits_inertly() {
         with_isolated_home(|home| {
             register_step_job_driver();
-            let path = home.path().join("interrupted-jobs.json");
+            let path = home.path().join("interrupted-jobs.sqlite");
             let request = request("true", Default::default());
             let harness = ControllerJobHarness::durable(
                 Arc::new(StepJobDriver),

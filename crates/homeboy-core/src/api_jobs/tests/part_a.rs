@@ -1,7 +1,5 @@
 #![cfg(test)]
 
-use std::fs;
-
 use serde_json::json;
 
 use super::store::LinkedDurableRunResolution;
@@ -64,7 +62,7 @@ fn inspection_projects_linked_durable_run_from_retained_event_metadata() {
 #[test]
 fn active_count_reads_durable_jobs_without_reconciling_them() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("open store");
     let job = store.create("runner.exec");
     store.start(job.id).expect("start job");
@@ -83,7 +81,7 @@ fn active_count_reads_durable_jobs_without_reconciling_them() {
 #[test]
 fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path).expect("open store");
     store
         .create_admission_at(json!({ "admission": { "state": "reserved" } }), 0, None)
@@ -505,7 +503,7 @@ fn background_runner_captures_errors_as_failed_jobs() {
 #[test]
 fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let first = JobStore::open(&path).expect("first store opens");
     let second = JobStore::open(&path).expect("second store opens");
     let job = first.create("bench");
@@ -559,7 +557,7 @@ fn durable_transaction_reuses_snapshot_until_another_writer_commits() {
 #[test]
 fn test_open() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store.create("bench");
 
@@ -586,41 +584,9 @@ fn test_open() {
 }
 
 #[test]
-fn open_quarantines_corrupt_durable_store() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
-    fs::write(&path, b"{").expect("corrupt store");
-
-    let store = JobStore::open(&path).expect("corrupt store is quarantined");
-    assert!(store.list().is_empty());
-    assert!(
-        !path.exists(),
-        "the corrupt document is moved aside, not left in place or re-imported"
-    );
-    assert!(!path.with_file_name("jobs.json.migrated").exists());
-    let job = store.create("after-quarantine");
-    assert_eq!(
-        JobStore::open(&path)
-            .expect("store reopens from SQLite")
-            .get(job.id)
-            .expect("job persists")
-            .id,
-        job.id
-    );
-
-    let quarantined = fs::read_dir(temp.path())
-        .expect("read temp dir")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .filter(|name| name.starts_with("jobs.json.corrupt-"))
-        .collect::<Vec<_>>();
-    assert_eq!(quarantined.len(), 1);
-}
-
-#[test]
 fn durable_store_reconciles_running_jobs_as_stale_after_restart() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open(&path).expect("durable store opens");
     let job = store.create("lint");
     store.start(job.id).expect("job starts");
@@ -649,7 +615,7 @@ fn durable_store_reconciles_running_jobs_as_stale_after_restart() {
 #[test]
 fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matching_jobs() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let matching = JobStore::open_without_reconciliation(&path)
         .expect("open matching")
         .with_daemon_lease("lease-dead".to_string());
@@ -773,7 +739,7 @@ fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matchi
 #[test]
 fn legacy_unowned_active_job_blocks_dead_lease_reconciliation() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let legacy = JobStore::open_without_reconciliation(&path).expect("open legacy store");
     let legacy_job = legacy.create("runner.exec");
     legacy.start(legacy_job.id).expect("start legacy job");
@@ -885,7 +851,7 @@ fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting()
         LinkedDurableRunResolution::Unresolved("run-unresolved".to_string()),
     ] {
         let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join("jobs.json");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
         let store = JobStore::open_without_reconciliation(&path)
             .expect("store")
             .with_daemon_lease("lease-dead".to_string());
@@ -929,7 +895,7 @@ fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting()
 #[test]
 fn confirmed_pidless_job_with_unselected_live_child_returns_diagnostics_without_persisting() {
     let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join("jobs.json");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease("lease-dead".to_string());

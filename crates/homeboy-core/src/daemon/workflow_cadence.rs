@@ -12,16 +12,16 @@
 //!   same registration is non-terminal is skipped and counted.
 //! - **Exactly once per slot.** A slot's instance name is derived from the
 //!   slot, so its instance id is deterministic. Before admitting it the tick
-//!   records the slot as pending, with the job store it is admitted into;
-//!   after a crash the restarted daemon finds it in that same store and
-//!   completes the slot instead of admitting it again.
+//!   records the slot as pending; after a crash the restarted daemon finds
+//!   the instance in the job ledger and completes the slot instead of
+//!   admitting it again.
 //!   Every registration write is a compare-and-set on the due time.
 //!
-//! Registrations outlive any one daemon process, so they live in one SQLite
-//! file beside the daemon's single job store. Every instance is admitted into
-//! and looked up in that one store, so overlap holds across daemon restarts.
+//! Registrations outlive any one daemon process, so they live in the
+//! observation store beside the daemon's job ledger. Every instance is
+//! admitted into and looked up in that one store, so overlap holds across
+//! daemon restarts.
 
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -34,7 +34,6 @@ use crate::error::{Error, Result};
 use crate::workflow::WorkflowDefinition;
 
 pub const CADENCE_SCHEMA: &str = "homeboy/workflow-cadence/v1";
-const STORE_FILE: &str = "workflow-cadences.sqlite";
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// One registered cadence.
@@ -55,9 +54,6 @@ pub struct Cadence {
     pub cancelled_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_instance: Option<String>,
-    /// The job store `last_instance` was admitted into.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_instance_store: Option<PathBuf>,
     /// A slot whose instance is being admitted. Set before admission and
     /// cleared with the registration's advance, so a crash in between is
     /// completed, not re-admitted.
@@ -79,8 +75,6 @@ pub struct PendingSlot {
     pub slot_ms: u64,
     pub instance_name: String,
     pub instance: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub store: Option<PathBuf>,
     pub next_due_ms: u64,
 }
 
@@ -174,32 +168,10 @@ pub fn slot_request(template: &WorkflowJobRequest, instance_name: &str) -> Workf
 // Store
 // ---------------------------------------------------------------------------
 
-fn store_path() -> Result<PathBuf> {
-    Ok(crate::paths::daemon_state_file()?.with_file_name(STORE_FILE))
-}
-
+/// Registrations are durable daemon state, so they are written like the job
+/// ledger: through the observation store, fsynced.
 fn open() -> Result<Connection> {
-    let path = store_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
-        })?;
-    }
-    let connection = Connection::open(&path).map_err(|error| sql(error, "open"))?;
-    connection
-        .busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| sql(error, "configure"))?;
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
-             CREATE TABLE IF NOT EXISTS workflow_cadences (
-                 workflow TEXT PRIMARY KEY NOT NULL,
-                 next_due_ms INTEGER NOT NULL,
-                 body TEXT NOT NULL
-             );",
-        )
-        .map_err(|error| sql(error, "initialize"))?;
-    Ok(connection)
+    crate::api_jobs::persistence::open_ledger(&crate::paths::observation_db()?)
 }
 
 fn read(connection: &Connection, workflow: &str) -> Result<Option<Cadence>> {
@@ -310,7 +282,6 @@ pub fn register(
                 },
                 cancelled_at_ms: None,
                 last_instance: None,
-                last_instance_store: None,
                 pending: None,
                 last_fired_at_ms: None,
                 fired: 0,
@@ -391,7 +362,7 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
     // A crash left this slot pending: complete it where it was admitted.
     if let Some(pending) = cadence.pending.clone() {
         let admitted = if instance_activity(store, &pending.instance).is_some() {
-            Ok((pending.store.clone(), "existing"))
+            Ok("existing")
         } else {
             admit_slot(
                 store,
@@ -428,7 +399,6 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
                 slot_ms,
                 instance_name,
                 instance: request.instance.clone(),
-                store: store.persistence_path(),
                 next_due_ms,
             };
             if !advance(&workflow, due, |cadence| {
@@ -443,7 +413,7 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
     }
 }
 
-type Admission = Result<(Option<PathBuf>, &'static str)>;
+type Admission = Result<&'static str>;
 
 /// Record a pending slot's admission (or its error) and move to the next slot.
 fn finish(workflow: &str, due: u64, pending: &PendingSlot, admitted: &Admission) -> Result<bool> {
@@ -451,11 +421,10 @@ fn finish(workflow: &str, due: u64, pending: &PendingSlot, admitted: &Admission)
         cadence.pending = None;
         cadence.next_due_ms = pending.next_due_ms;
         match admitted {
-            Ok((store, _)) => {
+            Ok(_) => {
                 cadence.fired += 1;
                 cadence.last_fired_at_ms = Some(pending.slot_ms);
                 cadence.last_instance = Some(pending.instance.clone());
-                cadence.last_instance_store = store.clone();
                 cadence.last_error = None;
             }
             Err(error) => cadence.last_error = Some(error.message.clone()),
@@ -465,7 +434,7 @@ fn finish(workflow: &str, due: u64, pending: &PendingSlot, admitted: &Admission)
 
 fn fired(workflow: &str, instance: &str, admitted: &Admission) -> Value {
     match admitted {
-        Ok((_, how)) => json!({ "workflow": workflow, "instance": instance, "admitted": how }),
+        Ok(how) => json!({ "workflow": workflow, "instance": instance, "admitted": how }),
         Err(error) => json!({ "workflow": workflow, "instance": instance, "error": error.message }),
     }
 }
@@ -479,7 +448,7 @@ fn admit_slot(store: &JobStore, request: &WorkflowJobRequest) -> Admission {
     let admission =
         super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
     super::start_controller_job(admission.job.id, store)?;
-    Ok((store.persistence_path(), admission.disposition.as_str()))
+    Ok(admission.disposition.as_str())
 }
 
 /// Whether `instance` is running (`Some(true)`), terminal (`Some(false)`), or
