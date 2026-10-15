@@ -543,6 +543,10 @@ fn with_base_store_publication_lock_until<T>(
     deadline: Instant,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    // Retention may reclaim the base store while a long run holds only its
+    // private target. Re-create it so publication lands in a fresh store.
+    fs::create_dir_all(base_dir)
+        .map_err(|error| io_error(error, "create Cargo cache base store"))?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -2229,6 +2233,31 @@ mod tests {
         let projection = cache_projection(&base);
         assert!(projection.join("runner-a-artifact").exists());
         assert!(projection.join("runner-b-artifact").exists());
+    }
+
+    #[test]
+    fn publish_recreates_base_store_reclaimed_during_run() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("Cargo.lock"), "lock-a").unwrap();
+        let compatibility = cargo_target_compatibility(workspace.path(), &[]);
+        let mut target = acquire_managed_cargo_target_for_compatibility_in(
+            root.path(),
+            "cook",
+            workspace.path(),
+            &compatibility,
+        )
+        .unwrap();
+        fs::write(target.target_dir().join("artifact"), b"warm").unwrap();
+        let base = shared_store_dir(root.path(), &format!("cook:{}", compatibility.identity()));
+        assert!(base.is_dir());
+
+        // Retention reclaims the base store while the run is still compiling.
+        fs::remove_dir_all(&base).unwrap();
+
+        target.publish().unwrap();
+        assert!(base.is_dir());
+        assert!(cache_projection(&base).join("artifact").exists());
     }
 
     #[test]
