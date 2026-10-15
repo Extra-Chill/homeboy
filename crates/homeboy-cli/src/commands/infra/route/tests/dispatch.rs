@@ -3748,6 +3748,58 @@ fn admission_inputs_preserves_explicit_lab_placement_without_a_runner_pin() {
 }
 
 #[test]
+fn admission_inputs_preserve_redaction_triggering_prompt_files_but_reject_verify_secrets() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, content) in [
+            ("auth.md", "Discuss basic authentication with the team."),
+            (
+                "url.md",
+                "Example: https://example.test/?action=rp&key=value&login=user",
+            ),
+        ] {
+            let path = temp.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            let args = [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--run-id",
+                name,
+                "--prompt",
+                &format!("@{}", path.display()),
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+            let intent = build_cook_admission_inputs(&args, name, None).expect("prompt admitted");
+            let reference = intent
+                .input_refs
+                .iter()
+                .find(|item| item.kind == "prompt")
+                .unwrap();
+            assert_eq!(std::fs::read(&reference.path).unwrap(), content.as_bytes());
+        }
+
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--run-id",
+            "verify-secret",
+            "--verify",
+            "api_token=secret-value",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let error = build_cook_admission_inputs(&args, "verify-secret", None)
+            .expect_err("inline verify credential rejected");
+        assert!(error.message.contains("unsafe inline value"), "{error:?}");
+    });
+}
+
+#[test]
 fn admission_inputs_snapshots_all_arbitrary_text_and_rejects_credential_urls() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let content = [
