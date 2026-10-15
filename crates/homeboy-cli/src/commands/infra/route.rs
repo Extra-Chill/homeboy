@@ -1519,7 +1519,7 @@ fn snapshot_admission_input(
         "--private-verify" => ("--private-verify-file", "private-verify", value.to_string()),
         _ => unreachable!("snapshot input flag is closed"),
     };
-    if homeboy::core::redaction::redact_string(&content) != content {
+    if flag != "--prompt" && homeboy::core::redaction::redact_string(&content) != content {
         return Err(unsafe_inline_admission_error(flag));
     }
     let argv_token = (flag == "--prompt").then(|| {
