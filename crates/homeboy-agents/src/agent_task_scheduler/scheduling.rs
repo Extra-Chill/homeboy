@@ -928,7 +928,7 @@ impl AgentTaskScheduleSupport {
     /// provider-classified failure whose only missing required output is a
     /// `review_form` the request declares. Returns the missing output names so
     /// the deferral carries the same evidence.
-    pub(super) fn review_form_only_deferral_gap(
+    pub(crate) fn review_form_only_deferral_gap(
         outcome: &AgentTaskOutcome,
         request: &AgentTaskRequest,
     ) -> Option<Vec<String>> {
