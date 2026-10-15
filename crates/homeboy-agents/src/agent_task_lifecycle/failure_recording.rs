@@ -73,7 +73,9 @@ pub fn record_interrupted_local_owner_in_store(
     let run_id = sanitize_run_id(run_id);
     let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
         let mut record = lifecycle_store.read_record(&run_id)?;
-        if record.state.is_terminal() {
+        // A remote owner settles its own attempt; losing a local observer
+        // (a detached launcher or execution step) never interrupts it.
+        if record.state.is_terminal() || record.has_remote_execution_owner() {
             return Ok((record, None));
         }
         let decision = annotate_local_provider_ownership(&mut record);

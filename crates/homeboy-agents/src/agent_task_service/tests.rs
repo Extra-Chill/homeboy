@@ -865,6 +865,45 @@ fn execution_step_interrupted_materialization_retains_the_reserved_child_and_pro
 }
 
 #[test]
+fn execution_step_delivery_leaves_controller_staged_lab_attempt_to_its_controller_job() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let parent = "controller-staged";
+        let child = "controller-staged-attempt-1";
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            parent,
+            serde_json::json!({}),
+            "queued",
+            "test",
+        )
+        .unwrap();
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            &store, parent, child,
+        )
+        .unwrap();
+        agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
+        // A detached Lab Cook's step exits once the controller staging job owns
+        // the attempt, before any runner job or accepted handoff exists.
+        store
+            .mutate_record(child, |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["lab_staging_controller_job_id"] =
+                    serde_json::json!("controller-job");
+                true
+            })
+            .unwrap();
+        let before = store.read_record(child).unwrap();
+        let delivery = execution_terminal(&execution_intent_for(&store, parent));
+        let receipt =
+            super::execution_step::consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        assert_eq!(receipt["disposition"], "execution_owned");
+        let after = store.read_record(child).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert!(!after.state.is_terminal(), "{:?}", after.state);
+    });
+}
+
+#[test]
 fn execution_step_published_admission_delivery_preserves_child_deferral_custody() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
