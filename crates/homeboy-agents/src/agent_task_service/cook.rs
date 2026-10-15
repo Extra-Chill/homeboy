@@ -3277,6 +3277,9 @@ pub(crate) fn dispatch_cook_follow_up(
             )
             .with_retryable(true)
         })?;
+    // A cancelled mission admits nothing further, so refuse before any recipe
+    // attempt is recorded for a follow-up that will never run.
+    ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
     if let Some(reason) = remediation_tool_policy_error(&follow_up_request) {
         return Ok(CookFollowUpDispatch::PolicyFailure { reason });
     }

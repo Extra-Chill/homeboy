@@ -182,6 +182,34 @@ fn annotate_stored_record(
         .ok_or_else(|| Error::internal_unexpected("cancellation annotation was not applied"))
 }
 
+/// Close a Cook mission to every later attempt, retry and follow-up.
+///
+/// The fence lives on the Cook index, which only a Cook alias owns; any other
+/// id is a no-op. Returns whether this call wrote the fence.
+pub fn fence_cook_mission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    reason: Option<&str>,
+) -> Result<bool> {
+    let cook_id = sanitize_run_id(cook_id);
+    lifecycle_store.with_config_lock(|| {
+        let mut fenced = false;
+        lifecycle_store.update_cook_index(&cook_id, |index| {
+            if index.cancellation_fence.is_some() {
+                return false;
+            }
+            index.cancellation_fence = Some(json!({
+                "state": "cancelled",
+                "cancelled_at": now_timestamp(),
+                "reason": reason.unwrap_or("cancel requested"),
+            }));
+            fenced = true;
+            true
+        })?;
+        Ok(fenced)
+    })
+}
+
 /// The store-rooted counterpart of [`cancel_run`].
 ///
 /// Alias resolution and cancellation are one loop: this re-resolves the Cook
@@ -199,20 +227,7 @@ pub fn cancel_run_in_store(
     // The Cook index is the authority every later attempt registration shares.
     // Fence it before resolving the current alias so a retry cannot become the
     // new mission outcome between cancellation passes.
-    lifecycle_store.with_config_lock(|| {
-        lifecycle_store.update_cook_index(&requested_run_id, |index| {
-            if index.cancellation_fence.is_some() {
-                return false;
-            }
-            index.cancellation_fence = Some(json!({
-                "state": "cancelled",
-                "cancelled_at": now_timestamp(),
-                "reason": reason.unwrap_or("cancel requested"),
-            }));
-            true
-        })?;
-        Ok(())
-    })?;
+    fence_cook_mission_in_store(lifecycle_store, &requested_run_id, reason)?;
     let mut resolved_run_id = resolve_run_id_in_store(lifecycle_store, &requested_run_id)?;
     // Index publication is independent from parent cancellation. Re-resolve
     // after each mutation until the Cook alias is stable, so every attempt that
