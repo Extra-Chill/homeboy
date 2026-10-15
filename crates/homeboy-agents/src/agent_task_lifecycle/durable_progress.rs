@@ -514,7 +514,7 @@ fn gate_output_reference(gate: &Value) -> Value {
     let bounded = |value: &Value| -> Option<String> {
         value.as_str().map(|text| {
             if text.len() > MAX_EXCERPT {
-                format!("{}…", &text[..MAX_EXCERPT])
+                format!("{}…", &text[..text.floor_char_boundary(MAX_EXCERPT)])
             } else {
                 text.to_string()
             }
@@ -848,5 +848,23 @@ fn map_append_error(error: ControlPlaneError) -> Error {
             Error::validation_invalid_argument("control_plane_event", error.message, None, None)
         }
         _ => Error::internal_unexpected(error.message),
+    }
+}
+
+#[cfg(test)]
+mod gate_output_reference_tests {
+    use super::gate_output_reference;
+    use serde_json::json;
+
+    /// Gate transcripts carry multi-byte glyphs (test runners print `✓`). An
+    /// excerpt bound that lands inside one must shorten to the previous
+    /// character rather than panic the controller.
+    #[test]
+    fn excerpt_bound_inside_a_multibyte_character_shortens_to_a_char_boundary() {
+        let stdout = format!("{}✓ passed", "a".repeat(4095));
+        let reference = gate_output_reference(&json!({ "stdout": stdout }));
+
+        let excerpt = reference["stdout_tail"].as_str().unwrap();
+        assert_eq!(excerpt, format!("{}…", "a".repeat(4095)));
     }
 }
