@@ -582,8 +582,9 @@ fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_u
             summary: Some("executor finished without changes".to_string()),
             ..Default::default()
         };
-        super::super::outcome_normalization::materialize_verified_no_op_change_set(
+        super::super::outcome_normalization::materialize_verified_no_change_set(
             &mut outcome,
+            &request("local-shell-no-op", String::new()).0,
             root.path(),
             &provenance,
             Some(workspace.path()),
@@ -641,6 +642,121 @@ fn no_op_without_change_artifact_is_verified_only_when_the_attempt_checkout_is_u
         &["commit", "--quiet", "-am", "provider commit"],
     );
     assert_unaudited(&normalize(Some(&base)));
+}
+
+/// A provider that ends a clean turn as `succeeded` without editing anything
+/// (e.g. a CLI runtime whose patch Homeboy captures from the workspace) on an
+/// attempt that must produce a patch is a no-change attempt, not a provider
+/// failure: on a checkout Homeboy verifies unchanged it gets the same
+/// Homeboy-owned empty patch and verified no-change record as a `no_op`
+/// (#15855). A checkout that changed, or a request that never asked for a
+/// patch, is left untouched.
+#[test]
+fn succeeded_without_change_artifact_is_a_verified_no_change_attempt_when_a_patch_is_required() {
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        homeboy_core::test_support::git_command_output(cwd, args)
+    }
+    let workspace = tempfile::tempdir().expect("attempt checkout");
+    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
+    git(workspace.path(), &["add", "lib.rs"]);
+    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
+    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "cli-runtime-investigation".to_string(),
+        attempt: 1,
+    };
+    let patch_request = {
+        let (mut request, _) = request("cli-runtime-investigation", String::new());
+        request.expected_artifacts = vec!["patch".to_string()];
+        request
+    };
+    let normalize = |request: &AgentTaskRequest| {
+        let root = tempfile::tempdir().expect("artifact root");
+        // The runtime's own process evidence: real work, no change artifact.
+        let stdout_path = root.path().join("runtime-stdout.jsonl");
+        fs::write(&stdout_path, "{\"type\":\"tool_call\"}\n").expect("stdout evidence");
+        let mut stdout = fixture_artifact(
+            "runtime-stdout",
+            "log",
+            &stdout_path,
+            Some("application/jsonl"),
+        );
+        stdout.size_bytes = None;
+        let mut outcome = AgentTaskOutcome {
+            task_id: "cli-runtime-investigation".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("investigated; nothing to change".to_string()),
+            artifacts: vec![stdout],
+            ..Default::default()
+        };
+        super::super::outcome_normalization::materialize_verified_no_change_set(
+            &mut outcome,
+            request,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+            Some(&base),
+        );
+        normalize_homeboy_local_artifact_sizes(
+            &mut outcome,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+        );
+        super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+            &mut outcome,
+            Some(workspace.path()),
+            Some(&base),
+        );
+        outcome
+    };
+    let assert_untouched = |outcome: &AgentTaskOutcome| {
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert!(
+            !outcome
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "patch"),
+            "{:?}",
+            outcome.artifacts
+        );
+        assert!(!outcome.is_verified_unchanged_attempt());
+    };
+
+    // Clean checkout at its base: a verified no-change attempt with an empty
+    // Homeboy-owned patch that satisfies the required `patch` artifact.
+    let clean = normalize(&patch_request);
+    assert_eq!(clean.status, AgentTaskOutcomeStatus::Succeeded);
+    assert!(clean.failure_classification.is_none());
+    assert!(clean.is_verified_unchanged_attempt());
+    let patches = clean
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.kind == "patch")
+        .collect::<Vec<_>>();
+    let [patch] = patches.as_slice() else {
+        panic!("one empty patch artifact: {:?}", clean.artifacts);
+    };
+    assert_eq!(patch.size_bytes, Some(0));
+
+    // A request that never asked for a patch keeps its provider result.
+    assert_untouched(&normalize(
+        &request("cli-runtime-investigation", String::new()).0,
+    ));
+
+    // Uncommitted work: Homeboy's workspace harvest owns that candidate.
+    fs::write(workspace.path().join("lib.rs"), "changed\n").expect("dirty");
+    assert_untouched(&normalize(&patch_request));
 }
 
 #[test]
