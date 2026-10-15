@@ -1819,7 +1819,8 @@ where
     let orchestration_reconciler =
         spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
-    let work_intent_deliverer = spawn_work_intent_deliverer(work_intent_shutdown_rx);
+    let work_intent_deliverer =
+        spawn_work_intent_deliverer(job_store.clone(), work_intent_shutdown_rx);
 
     const CONNECTION_WORKERS: usize = 16;
     let (connection_tx, connection_rx) = std::sync::mpsc::sync_channel::<TcpStream>(64);
@@ -2129,7 +2130,6 @@ fn orchestration_tick_loop(
         });
         isolated_tick(|| {
             let _ = job_store.reconcile_controller_completions();
-            let _ = job_store.deliver_pending_step_terminals();
         });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
@@ -2141,11 +2141,26 @@ fn orchestration_tick_loop(
 /// thing that starts its job, so delivery polls at a short cadence and drains
 /// every pending intent per pass. A failed delivery keeps custody and is
 /// reported; the next pass retries it.
+///
+/// Step terminal delivery is the inbound half of the same progress path: its
+/// consumer is what commits a crashed step's recovery successor. It therefore
+/// shares this cadence instead of the slower orchestration recovery tick,
+/// which operators may disable.
 const WORK_INTENT_DELIVERY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-fn spawn_work_intent_deliverer(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+fn spawn_work_intent_deliverer(
+    job_store: JobStore,
+    shutdown: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
         isolated_tick(|| loop {
+            #[cfg(feature = "test-support")]
+            if let Err(error) =
+                crate::test_support::wait_at_file_gate("HOMEBOY_TEST_WORK_INTENT_DELIVERY_GATE")
+            {
+                eprintln!("homeboy daemon: {error}");
+                break;
+            }
             match orchestration::drain_work_intents() {
                 Ok(receipt) if receipt["scheduled"] == true => continue,
                 Ok(_) => break,
@@ -2154,6 +2169,10 @@ fn spawn_work_intent_deliverer(shutdown: mpsc::Receiver<()>) -> std::thread::Joi
                     break;
                 }
             }
+        });
+        // Consumer failures keep custody with their own durable backoff.
+        isolated_tick(|| {
+            let _ = job_store.deliver_pending_step_terminals();
         });
         if shutdown.recv_timeout(WORK_INTENT_DELIVERY_INTERVAL)
             != Err(mpsc::RecvTimeoutError::Timeout)

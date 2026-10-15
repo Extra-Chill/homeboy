@@ -5,6 +5,15 @@ pub(super) fn run_fixture_provider(
     request: &AgentTaskRequest,
     artifact_root: &Path,
 ) -> AgentTaskOutcome {
+    if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE") {
+        use std::io::Write;
+        let mut ledger = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open fixture execution ledger");
+        writeln!(ledger, "{}", artifact_root.display()).expect("count fixture execution");
+    }
     if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE") {
         let _ = std::fs::write(path, "started\n");
     }

@@ -518,6 +518,32 @@ pub enum TestBinary {
     HomeboyFixture,
 }
 
+/// Deterministic subprocess fault boundary. Only test-support builds call this;
+/// the marker contains the exact process to fault, and `<path>.release` opens
+/// the gate across restarts. A forgotten release cannot strand a fixture.
+pub fn wait_at_file_gate(variable: &str) -> crate::Result<()> {
+    let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
+        return Ok(());
+    };
+    let release = path.with_extension("release");
+    if release.exists() {
+        return Ok(());
+    }
+    fs::write(&path, std::process::id().to_string())
+        .map_err(|error| crate::Error::internal_io(error.to_string(), None))?;
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while !release.exists() {
+        if Instant::now() >= deadline {
+            return Err(crate::Error::internal_unexpected(format!(
+                "fixture gate timed out: {}",
+                path.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
 /// Isolated filesystem and process environment for one test.
 ///
 /// Constructing this type does not mutate the parent process. Prefer

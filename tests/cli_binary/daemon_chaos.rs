@@ -16,6 +16,10 @@
 //! | 8 | Dead remote generation with a stale job reconciles (#15556) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --confirm-workload-processes-absent`) |
 //! | 9 | Host-service teardown (whole process group SIGKILL) recovers | `whole_daemon_process_group_killed_recovers_without_edits` |
 //! | 10 | Stop and restart in place mid-workflow, twice, resumes in one store (#15936) | `stop_and_restart_in_place_resumes_in_flight_work_every_time` |
+//! | 11 | Cook intent committed, daemon SIGKILL before delivery (#15804) | `execution_step_chaos::committed_execution_intent_survives_daemon_sigkill_before_delivery` (fixture binary target) |
+//! | 12 | Cook execution-step child SIGKILL before publication; one recovery | `execution_step_chaos::killed_execution_step_child_recovers_once` |
+//! | 13 | Daemon process-group SIGKILL with Cook step held; adopt once | `execution_step_chaos::execution_step_survives_daemon_process_group_sigkill` |
+//! | 14 | Daemon stop/start with Cook step held; resume once | `execution_step_chaos::execution_step_survives_daemon_stop_start` |
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
