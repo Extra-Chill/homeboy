@@ -981,6 +981,20 @@ impl RunnerStatusReport {
             })
         })
         .flatten()
+        // A rotation the live jobs also block is a dead end (#15995): the
+        // refresh refuses until they drain. Point at the jobs instead.
+        .map(|action| {
+            let rotation_blocked_by_live_jobs = action.id == "runner.refresh_homeboy"
+                && connected
+                && active_jobs_available
+                && governing_active_job_count > 0
+                && !safe_to_rotate;
+            if rotation_blocked_by_live_jobs {
+                job_list_action(&self.runner_id)
+            } else {
+                action
+            }
+        })
         .map(|action| action.render_command());
         daemon_lease_verdict.next_action = next_action.clone();
 
@@ -1124,6 +1138,23 @@ fn status_action(runner_id: &str) -> ExecutableAction {
             "status".to_string(),
             runner_id.to_string(),
             "--full".to_string(),
+        ],
+        ActionSafety::ReadOnly,
+    )
+}
+
+fn job_list_action(runner_id: &str) -> ExecutableAction {
+    ExecutableAction::new(
+        "runner.job_list",
+        format!(
+            "list live jobs on runner {runner_id}; wait for them or cancel them before rotating"
+        ),
+        "homeboy",
+        [
+            "runner".to_string(),
+            "job".to_string(),
+            "list".to_string(),
+            runner_id.to_string(),
         ],
         ActionSafety::ReadOnly,
     )
@@ -1686,6 +1717,67 @@ mod status_serialization_tests {
         assert!(!summary.daemon_fresh);
         assert!(!summary.accepting_jobs);
         assert!(summary.safe_to_rotate);
+    }
+
+    /// #15995: a stale daemon still running jobs cannot rotate, so its next
+    /// action must not be the refresh that refuses until those jobs drain.
+    #[test]
+    fn admission_summary_busy_stale_daemon_points_to_its_jobs_not_a_refused_refresh() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_count = 1;
+        report.stale_daemon = Some(RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.428.0".to_string(),
+            "0.428.2".to_string(),
+            Some("homeboy 0.428.0+19c5f4e54f8e95cd31dd1dcb036e885770c36344".to_string()),
+            Some("homeboy 0.428.2+5159b413bc0e0e46be3642fac202f4e0866d93b1".to_string()),
+        ));
+        report.daemon_freshness = Some(DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            restartable: false,
+            lease_id: Some("known-lease".to_string()),
+            pid: Some(1234),
+            recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
+            ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.428.0".to_string()),
+            daemon_build_identity: Some(
+                "homeboy 0.428.0+19c5f4e54f8e95cd31dd1dcb036e885770c36344".to_string(),
+            ),
+            runtime_paths: None,
+            active_jobs: 1,
+            termination_evidence: None,
+            repair_plan: vec![crate::daemon_repair::action_step(
+                crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
+                crate::daemon_repair::refresh_homeboy_action_for_ref(
+                    "homeboy-lab",
+                    Some("5159b413bc0e0e46be3642fac202f4e0866d93b1"),
+                ),
+            )],
+        });
+
+        let summary = report.admission_summary(0);
+        assert!(!summary.safe_to_rotate);
+        assert_eq!(summary.active_job_count, Some(1));
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner job list homeboy-lab")
+        );
+
+        report.active_job_count = 0;
+        report.daemon_freshness.as_mut().unwrap().active_jobs = 0;
+        let idle = report.admission_summary(0);
+        assert!(idle.safe_to_rotate);
+        assert_eq!(
+            idle.next_action.as_deref(),
+            Some(
+                "homeboy runner refresh-homeboy homeboy-lab --ref 5159b413bc0e0e46be3642fac202f4e0866d93b1 --reconnect"
+            ),
+            "once drained, the refresh is the next action again"
+        );
     }
 
     #[test]
