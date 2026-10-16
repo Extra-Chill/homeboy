@@ -386,7 +386,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
             .to_string(),
         vec!["Install Playwright and browser binaries on the runner.".to_string()],
         &test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         &overhead,
@@ -432,28 +432,28 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
         "Runner 'homeboy-lab' is missing required capability parity for `trace`: tools: playwright."
             .to_string(),
         Vec::new(),
-        &homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        &homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",
             "1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "test".to_string(),
                 workspace: "test".to_string(),
                 task: "test".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
-            Some(homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
+            homeboy_lab_contract::Placement::Auto,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+            Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
                 runner_id: "homeboy-lab".to_string(),
-                source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
+                source: homeboy_lab_contract::RunnerSelectionSource::Policy,
             }),
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: true,
                 reason: None,
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: false,
                 authority: None,
             },
@@ -493,30 +493,28 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
 #[test]
 fn capability_fallback_persists_the_verified_local_outcome() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",
             "1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "test".to_string(),
                 workspace: "test".to_string(),
                 task: "test".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
-            Some(
-                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
-                    runner_id: "homeboy-lab".to_string(),
-                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
-                },
-            ),
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::Placement::Auto,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+            Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: homeboy_lab_contract::RunnerSelectionSource::Policy,
+            }),
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: true,
                 reason: None,
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: false,
                 authority: None,
             },
@@ -563,25 +561,25 @@ fn capability_fallback_persists_the_verified_local_outcome() {
 fn local_outcome_without_an_agent_task_target_does_not_read_an_observation_id_as_a_lifecycle_record(
 ) {
     let mut request = LabOffloadRequest::for_test(&[]);
-    request.placement_decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+    request.placement_decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
         "test",
         "1",
-        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        homeboy_lab_contract::ExecutionPlacementIdentity {
             repository: "test".to_string(),
             workspace: "test".to_string(),
             task: "trace".to_string(),
             candidate: None,
             base: None,
         },
-        homeboy_lab_runner_contract::Placement::Auto,
-        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+        homeboy_lab_contract::Placement::Auto,
+        homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local,
         None,
-        homeboy_lab_runner_contract::ExecutionPlacementFallback {
+        homeboy_lab_contract::ExecutionPlacementFallback {
             local_allowed: false,
             reason: None,
         },
-        homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+        homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
             authorized: false,
             authority: None,
         },
@@ -594,25 +592,25 @@ fn local_outcome_without_an_agent_task_target_does_not_read_an_observation_id_as
 fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
     homeboy_core::test_support::with_isolated_home(|_| {
         crate::register_runner_lab_offload_provider();
-        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",
             "1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "test".to_string(),
                 workspace: "test".to_string(),
                 task: "timed-fallback".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            homeboy_lab_contract::Placement::Auto,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             None,
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: false,
                 reason: None,
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: false,
                 authority: None,
             },
@@ -630,7 +628,7 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
                 command: None,
                 normalized_args: &args,
                 explicit_runner: None,
-                placement: homeboy_lab_runner_contract::Placement::Auto,
+                placement: homeboy_lab_contract::Placement::Auto,
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
@@ -682,12 +680,12 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
 fn plan_records_skipped_auto_offload() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             None,
         ),
         command: Some(portable_lab_command("test")),
         normalized_args: &["homeboy".to_string(), "test".to_string()],
-        placement: homeboy_lab_runner_contract::Placement::Local,
+        placement: homeboy_lab_contract::Placement::Local,
         ..LabOffloadRequest::for_test(&["homeboy".to_string(), "test".to_string()])
     })
     .expect("outcome");
@@ -705,11 +703,11 @@ fn plan_records_skipped_auto_offload() {
 fn lab_placement_refuses_local_execution_without_lab_contract() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         normalized_args: &["homeboy".to_string(), "status".to_string()],
-        placement: homeboy_lab_runner_contract::Placement::Lab,
+        placement: homeboy_lab_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&["homeboy".to_string(), "status".to_string()])
     });
 
@@ -727,7 +725,7 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
     let reason = homeboy_core::lab_contract::RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON;
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         command: Some(local_only_lab_command(reason)),
@@ -737,7 +735,7 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
             "install".to_string(),
             "./rig-package".to_string(),
         ],
-        placement: homeboy_lab_runner_contract::Placement::Lab,
+        placement: homeboy_lab_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&[
             "homeboy".to_string(),
             "rig".to_string(),
@@ -761,7 +759,7 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
 fn build_runner_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         normalized_args: &[
@@ -801,7 +799,7 @@ fn build_runner_error_gives_managed_runner_replacement() {
 fn build_lab_placement_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         normalized_args: &[
@@ -809,7 +807,7 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
             "build".to_string(),
             "homeboy".to_string(),
         ],
-        placement: homeboy_lab_runner_contract::Placement::Lab,
+        placement: homeboy_lab_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&[
             "homeboy".to_string(),
             "build".to_string(),
@@ -841,7 +839,7 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
 fn unsupported_runner_error_includes_guidance() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         placement_decision: test_placement_decision(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some("homeboy-lab"),
         ),
         normalized_args: &["homeboy".to_string(), "unsupported-command".to_string()],

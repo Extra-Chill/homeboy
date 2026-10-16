@@ -1,14 +1,11 @@
 pub mod artifacts;
-// The pure component model + config data types were extracted to the
-// homeboy-component-contract leaf crate. Re-exported as `component::config` and
-// `component::model` so existing `crate::component::{config,model}::*` paths
-// keep resolving. The extension-driven, fs-touching remote-path resolution that
-// used to live on `Component` stays in core as free functions in
-// `remote_path`.
-pub use homeboy_component_contract::config;
-pub use homeboy_component_contract::model;
+// `config` and `model` are the pure serializable component shape declared in
+// `homeboy.json`. The extension-driven, fs-touching remote-path resolution over
+// `Component` lives in `remote_path` as free functions.
+pub mod config;
 pub mod drift;
 pub mod inventory;
+pub mod model;
 pub mod mutations;
 pub mod portable;
 pub mod relationships;

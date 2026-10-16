@@ -692,7 +692,7 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
                 run_id,
                 decision
                     .outcome(
-                        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                        homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
                         Some("homeboy-lab".to_string()),
                     )
                     .expect("authorized Lab outcome"),
@@ -754,7 +754,7 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
             "workspace-replacement",
             replacement
                 .outcome(
-                    homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                    homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
                     Some("homeboy-lab".to_string()),
                 )
                 .expect("replacement Lab outcome"),
@@ -777,35 +777,35 @@ fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
             vec!["homeboy", "--placement", "local", "review", "lint"],
             None,
             homeboy::cli_surface::Placement::Local,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
             true,
         ),
         (
             vec!["homeboy", "review", "lint"],
             Some("policy-lab"),
             homeboy::cli_surface::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
             true,
         ),
         (
             vec!["homeboy", "--placement", "lab-or-local", "review", "lint"],
             Some("policy-lab"),
             homeboy::cli_surface::Placement::LabOrLocal,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
             true,
         ),
         (
             vec!["homeboy", "--runner", "pinned-lab", "review", "lint"],
             Some("pinned-lab"),
             homeboy::cli_surface::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Lab,
             false,
         ),
         (
             vec!["homeboy", "--placement", "lab", "review", "lint"],
             Some("policy-lab"),
             homeboy::cli_surface::Placement::Lab,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Lab,
             false,
         ),
     ];
@@ -818,8 +818,7 @@ fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
         assert_eq!(cli.placement, placement);
         assert_eq!(decision.required, required);
         assert_eq!(
-            decision
-                .verifies_outcome(homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local),
+            decision.verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local),
             local_fallback,
             "{args:?} local fallback authorization"
         );
@@ -827,9 +826,9 @@ fn command_placement_matrix_separates_preferred_lab_from_required_lab() {
             decision.runner.as_ref().map(|runner| runner.source),
             runner.map(|_| {
                 if cli.runner.is_some() {
-                    homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+                    homeboy_lab_contract::RunnerSelectionSource::Explicit
                 } else {
-                    homeboy_lab_runner_contract::RunnerSelectionSource::Policy
+                    homeboy_lab_contract::RunnerSelectionSource::Policy
                 }
             })
         );

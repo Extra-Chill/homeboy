@@ -93,7 +93,7 @@ impl LabOffloadProvider for NoopProvider {
         request: crate::lab_routing::LabRoutingRequest<'_>,
     ) -> Result<LabOffloadOutcome> {
         if request.placement_decision.selected
-            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+            == homeboy_lab_contract::EffectiveExecutionPlacement::Local
         {
             // The controller has already made the authoritative placement
             // decision. A local outcome never needs runner behavior, whether or
@@ -148,14 +148,14 @@ mod tests {
         let outcome = NoopProvider
             .execute_lab_offload(crate::lab_routing::LabRoutingRequest {
                 placement_decision: crate::lab_routing::compatibility_placement_decision(
-                    homeboy_lab_runner_contract::Placement::Auto,
+                    homeboy_lab_contract::Placement::Auto,
                     None,
                     false,
                 ),
                 command: None,
                 normalized_args: &args,
                 explicit_runner: None,
-                placement: homeboy_lab_runner_contract::Placement::Auto,
+                placement: homeboy_lab_contract::Placement::Auto,
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,

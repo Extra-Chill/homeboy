@@ -9,8 +9,8 @@
 //!
 //! This module is the single source of truth for that algorithm identity: the
 //! permission-policy names, the default policy, and the policy → algorithm
-//! marker mapping. It is pure data + a pure `match`, so it lives in the leaf
-//! contract crate rather than in the runner's filesystem-walking code — the
+//! marker mapping. It is pure data + a pure `match`, so it lives in the runner
+//! contract rather than in the runner's filesystem-walking code — the
 //! controller-declare path and the runner-verify path both derive the marker
 //! from here, so they cannot disagree on what a given policy *means*.
 //!

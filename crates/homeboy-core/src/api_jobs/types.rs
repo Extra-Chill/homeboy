@@ -1,14 +1,21 @@
+//! Pure serializable job-model types.
+//!
+//! `Job`, `JobStatus`, `JobEvent`, and their runner/daemon companions describe
+//! the shape of a homeboy API job as it crosses process boundaries between the
+//! controller, daemon, and runner. They are behavior-free serde data types; the
+//! job store, persistence, and remote-runner dispatch live beside them in
+//! `api_jobs`.
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::metadata::JobArtifactMetadata;
+use homeboy_runner_contract::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
-    PathMaterializationPlan, RunnerJobLifecycleMetadata, RunnerLifecycleOwner,
+    JobArtifactMetadata, PathMaterializationPlan, RunnerJobLifecycleMetadata, RunnerLifecycleOwner,
 };
-use homeboy_source_snapshot_contract::SourceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

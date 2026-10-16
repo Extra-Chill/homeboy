@@ -703,12 +703,10 @@ fn unknown_ids_and_future_versions_are_preserved() {
         .daemon_recovery_capabilities
         .expect("forward-compatible list parses");
     assert_eq!(advertised.len(), 2);
-    assert!(
-        homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
-            Some(advertised.as_slice()),
-            homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-        )
-    );
+    assert!(homeboy_lab_contract::daemon_recovery_capability_advertised(
+        Some(advertised.as_slice()),
+        homeboy_lab_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+    ));
 }
 
 /// The drift this issue is about: the envelope and the parser are written in
@@ -716,7 +714,7 @@ fn unknown_ids_and_future_versions_are_preserved() {
 /// rather than silently disabling remote daemon recovery.
 #[test]
 fn the_advertised_capability_set_round_trips_through_the_parser() {
-    let advertised = homeboy_lab_runner_contract::daemon_recovery_capabilities();
+    let advertised = homeboy_lab_contract::daemon_recovery_capabilities();
     let body = serde_json::json!({
         "success": true,
         "data": {

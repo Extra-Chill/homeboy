@@ -5105,7 +5105,7 @@ mod tests {
         use crate::core::parsed_command_preflight::{
             FallbackDirective, ParsedCommandPolicySnapshot,
         };
-        use homeboy_lab_runner_contract::EffectiveExecutionPlacement;
+        use homeboy_lab_contract::EffectiveExecutionPlacement;
 
         let auto = Cli::parse_from([
             "homeboy",

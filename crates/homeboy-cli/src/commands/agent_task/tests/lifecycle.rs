@@ -2187,7 +2187,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
         .expect("persist terminal legacy candidate");
         test_lifecycle_store()
             .mutate_record(run_id, |record| {
-                let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
                     repository: "fixture".to_string(),
                     workspace: "fixture".to_string(),
                     task: "provider".to_string(),
@@ -2195,11 +2195,11 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
                     base: None,
                 };
                 record.metadata["execution_placement_decision"] = serde_json::to_value(
-                    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                    homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                         "fixture",
                         "v1",
                         identity,
-                        homeboy_lab_runner_contract::Placement::Local,
+                        homeboy_lab_contract::Placement::Local,
                     ),
                 )
                 .unwrap();

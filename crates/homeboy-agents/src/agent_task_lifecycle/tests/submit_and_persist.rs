@@ -2313,26 +2313,26 @@ impl AgentTaskAcceptanceVerifier for RootedAcceptanceVerifier {
 /// only supersedes a stamp, and the outcome recorder compares `decision_id`,
 /// which is a deterministic content identity and therefore identical in both
 /// roots.
-fn rooted_placement_decision() -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+fn rooted_placement_decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+    homeboy_lab_contract::ExecutionPlacementDecision::new(
         "rooted-run-outcome-policy",
         "1",
-        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        homeboy_lab_contract::ExecutionPlacementIdentity {
             repository: "repo".to_string(),
             workspace: "workspace".to_string(),
             task: "task-a".to_string(),
             candidate: None,
             base: None,
         },
-        homeboy_lab_runner_contract::Placement::Auto,
-        homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+        homeboy_lab_contract::Placement::Auto,
+        homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local,
         None,
-        homeboy_lab_runner_contract::ExecutionPlacementFallback {
+        homeboy_lab_contract::ExecutionPlacementFallback {
             local_allowed: false,
             reason: None,
         },
-        homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+        homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
             authorized: false,
             authority: None,
         },
@@ -2403,7 +2403,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
     let decision = rooted_placement_decision();
     let outcome = decision
         .outcome(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             None,
         )
         .expect("a controller-local outcome verifies a local decision");
@@ -2581,7 +2581,7 @@ fn run_outcome_siblings_record_only_into_the_injected_store() {
         .expect("the second root still has its own record");
     assert_eq!(
         untouched.metadata["execution_placement_decision"]["policy_id"],
-        homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+        homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
         "the second root's decision must still be the stamp it was submitted with"
     );
     for key in [

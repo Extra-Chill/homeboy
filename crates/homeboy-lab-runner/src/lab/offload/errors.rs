@@ -309,11 +309,11 @@ pub(crate) fn automatic_capability_fallback_or_error(
     runner_status: &RunnerStatusReport,
     reason: String,
     remediation: Vec<String>,
-    placement_decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    placement_decision: &homeboy_lab_contract::ExecutionPlacementDecision,
     overhead: &LabOffloadOverhead,
 ) -> Result<LabOffloadOutcome> {
     if !placement_decision
-        .verifies_outcome(homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local)
+        .verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local)
     {
         return Err(selected_runner_fallback_error(
             selection,

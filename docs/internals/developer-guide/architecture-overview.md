@@ -78,7 +78,7 @@ materialized rig resources. They do not own a parallel run lifecycle.
 
 | Concern | Owner |
 |---|---|
-| Portable rig composition and planning | Rig specification and `homeboy-rig-contract` resources |
+| Portable rig composition and planning | Rig specification and `homeboy-rig` materialized rig resources |
 | Local rig materialization, services, and local state | `homeboy-rig` |
 | Durable orchestration and run lifecycle | Control plane |
 | Runner transport and remote execution | Runner API |

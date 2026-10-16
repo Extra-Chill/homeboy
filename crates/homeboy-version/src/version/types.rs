@@ -4,10 +4,10 @@ use homeboy_core::is_zero;
 use serde::{Deserialize, Serialize};
 
 // VersionTargetInfo and ComponentVersionSnapshot moved DOWN to
-// homeboy-release-contract so core's context status mechanics can hold them in
+// homeboy-core's `release_state` so core's context status mechanics can hold them in
 // public struct fields without a cycle. Re-exported here so release code paths
 // are unchanged.
-pub use homeboy_release_contract::{ComponentVersionSnapshot, VersionTargetInfo};
+pub use homeboy_core::release_state::{ComponentVersionSnapshot, VersionTargetInfo};
 
 /// Result of reading a component's version
 #[derive(Debug, Clone, Serialize)]

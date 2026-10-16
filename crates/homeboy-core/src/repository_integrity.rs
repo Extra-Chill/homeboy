@@ -24,7 +24,7 @@ pub struct SymlinkException {
     pub reason: String,
 }
 
-pub use homeboy_source_snapshot_contract::source_snapshot::{
+pub use homeboy_runner_contract::source_snapshot::{
     RepositoryIntegrityEvidence, RepositoryIntegritySymlinkException,
 };
 

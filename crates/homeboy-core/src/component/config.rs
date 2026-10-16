@@ -157,7 +157,7 @@ impl ComponentOverrideConfig {
     ///
     /// `None` and empty collection fields mean "no override" so existing
     /// on-disk config keeps the same sparse-layer behavior.
-    pub fn apply_to_component(&self, component: &mut crate::model::Component) {
+    pub fn apply_to_component(&self, component: &mut super::model::Component) {
         if let Some(remote_path) = &self.remote_path {
             component.remote_path = remote_path.clone();
         }

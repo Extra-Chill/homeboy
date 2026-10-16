@@ -1,9 +1,11 @@
-//! Shared release/deploy state data types.
+//! Shared release/deploy state data types — release state data, not release
+//! policy.
 //!
-//! These sit below `homeboy-core` so that core's status-reporting mechanics
-//! (fleet / project / context) and the `homeboy-release` feature crate can both
-//! reference them without a dependency cycle. They are pure data (plus trivial
-//! derived accessors) — all release/deploy *behavior* lives in `homeboy-release`.
+//! These live in core so that core's status-reporting mechanics (fleet /
+//! project / context) and the release, deploy, and version feature crates can
+//! all reference them without a dependency cycle. They are pure data (plus
+//! trivial derived accessors) — all release/deploy *behavior* lives in
+//! `homeboy-release`, `homeboy-deploy`, and `homeboy-version`.
 
 use serde::{Deserialize, Serialize};
 

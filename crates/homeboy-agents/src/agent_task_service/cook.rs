@@ -180,16 +180,16 @@ pub fn cook_recovery_command_prefix_for_record(
 
 fn cook_recovery_placement_decision(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Option<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+) -> Option<homeboy_lab_contract::ExecutionPlacementDecision> {
     serde_json::from_value(record.metadata["execution_placement_decision"].clone()).ok()
 }
 
 fn cook_recovery_command_prefix_for_decision(
-    decision: Option<&homeboy_lab_runner_contract::ExecutionPlacementDecision>,
+    decision: Option<&homeboy_lab_contract::ExecutionPlacementDecision>,
 ) -> String {
     match decision {
         Some(decision)
-            if decision.requested == homeboy_lab_runner_contract::Placement::Local
+            if decision.requested == homeboy_lab_contract::Placement::Local
                 && decision.override_authorization.authorized =>
         {
             "homeboy --placement local".to_string()
@@ -2371,24 +2371,24 @@ mod run_lifecycle_projection_tests {
 
     #[test]
     fn recovery_prefix_preserves_only_explicit_local_authority() {
-        let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
             repository: "fixture".to_string(),
             workspace: "fixture".to_string(),
             task: "task".to_string(),
             candidate: None,
             base: None,
         };
-        let local = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+        let local = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
             "fixture",
             "v1",
             identity.clone(),
-            homeboy_lab_runner_contract::Placement::Local,
+            homeboy_lab_contract::Placement::Local,
         );
-        let automatic = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+        let automatic = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
             "fixture",
             "v1",
             identity,
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
         );
 
         assert_eq!(
@@ -2399,30 +2399,28 @@ mod run_lifecycle_projection_tests {
             cook_recovery_command_prefix_for_decision(Some(&automatic)),
             "homeboy"
         );
-        let lab = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let lab = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "fixture",
             "v1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "fixture".to_string(),
                 workspace: "fixture".to_string(),
                 task: "task".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Lab,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Lab,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
-            Some(
-                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
-                    runner_id: "lab-fixture".to_string(),
-                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Explicit,
-                },
-            ),
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::Placement::Lab,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+            Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+                runner_id: "lab-fixture".to_string(),
+                source: homeboy_lab_contract::RunnerSelectionSource::Explicit,
+            }),
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: false,
                 reason: None,
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: false,
                 authority: None,
             },

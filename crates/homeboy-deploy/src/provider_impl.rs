@@ -11,7 +11,7 @@
 //! `homeboy-release` re-exports this module, so the CLI registration path and
 //! all of core's status mechanics are unchanged.
 
-use homeboy_release_contract::{
+use homeboy_core::release_state::{
     ChangelogSnapshotData, ComponentDeployStatus, ComponentVersionSnapshot,
     FinalizedReleaseSnapshot, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };

@@ -1115,9 +1115,9 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                     None,
                 )
             })?;
-            if !homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
+            if !homeboy_lab_contract::daemon_recovery_capability_advertised(
                 daemon_recovery_capabilities,
-                homeboy_lab_runner_contract::DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+                homeboy_lab_contract::DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
             ) {
                 return Ok(failed_connect(
                     runner_id,
@@ -1637,11 +1637,11 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
 }
 
 fn negotiate_unleased_candidate_reconciliation(
-    daemon_recovery_capabilities: Option<&[homeboy_lab_runner_contract::LabCapabilityVersion]>,
+    daemon_recovery_capabilities: Option<&[homeboy_lab_contract::LabCapabilityVersion]>,
 ) -> std::result::Result<(), String> {
-    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
+    let advertised = homeboy_lab_contract::daemon_recovery_capability_advertised(
         daemon_recovery_capabilities,
-        homeboy_lab_runner_contract::DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY,
+        homeboy_lab_contract::DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY,
     );
     if !advertised {
         return Err("remote Homeboy must be upgraded: daemon reconcile-unleased-candidates does not advertise the idempotent candidate-reconciliation capability".to_string());
@@ -1800,7 +1800,7 @@ fn remote_leaseless_recovery_command(
 }
 
 fn execute_remote_leaseless_recovery<Recover>(
-    daemon_recovery_capabilities: Option<&[homeboy_lab_runner_contract::LabCapabilityVersion]>,
+    daemon_recovery_capabilities: Option<&[homeboy_lab_contract::LabCapabilityVersion]>,
     recover: Recover,
 ) -> std::result::Result<
     (
@@ -1812,9 +1812,9 @@ fn execute_remote_leaseless_recovery<Recover>(
 where
     Recover: FnOnce(RunnerLeaselessRecoveryContract) -> homeboy_core::server::CommandOutput,
 {
-    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
+    let advertised = homeboy_lab_contract::daemon_recovery_capability_advertised(
         daemon_recovery_capabilities,
-        homeboy_lab_runner_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        homeboy_lab_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
     );
     if !advertised {
         return Err("remote Homeboy must be upgraded: daemon reconcile-leaseless-orphans does not advertise the lease-less recovery contract".to_string());
@@ -2754,8 +2754,8 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
     homeboy: &str,
 ) -> Result<
     Option<(
-        homeboy_lab_runner_contract::LabRuntimeIdentity,
-        Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+        homeboy_lab_contract::LabRuntimeIdentity,
+        Vec<homeboy_lab_contract::LabCapabilityVersion>,
     )>,
 > {
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
@@ -2788,7 +2788,7 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
     let capabilities =
         serde_json::from_value(data["lab_handoff_capabilities"].clone()).unwrap_or_default();
     Ok(Some((
-        homeboy_lab_runner_contract::LabRuntimeIdentity {
+        homeboy_lab_contract::LabRuntimeIdentity {
             build_identity: display.to_string(),
             source_revision: commit.to_string(),
             clean: data.get("git_dirty").and_then(Value::as_bool) == Some(false),
@@ -2799,7 +2799,7 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
 
 pub(crate) fn daemon_lab_handoff_capabilities(
     local_url: &str,
-) -> std::result::Result<Vec<homeboy_lab_runner_contract::LabCapabilityVersion>, String> {
+) -> std::result::Result<Vec<homeboy_lab_contract::LabCapabilityVersion>, String> {
     connection_daemon::daemon_http_lab_handoff_capabilities(local_url)
 }
 

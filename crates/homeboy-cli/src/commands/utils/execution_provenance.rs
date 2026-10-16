@@ -79,14 +79,14 @@ fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPrefligh
     let argv = redact_execution_argv(&result.normalized_args);
     let rerun_command = homeboy::core::redaction::redact_argv_shell_display(&argv);
     let placement = match result.placement.requested {
-        homeboy_lab_runner_contract::Placement::Auto => "auto",
-        homeboy_lab_runner_contract::Placement::Local => "local",
-        homeboy_lab_runner_contract::Placement::Lab => "lab",
-        homeboy_lab_runner_contract::Placement::LabOrLocal => "lab-or-local",
+        homeboy_lab_contract::Placement::Auto => "auto",
+        homeboy_lab_contract::Placement::Local => "local",
+        homeboy_lab_contract::Placement::Lab => "lab",
+        homeboy_lab_contract::Placement::LabOrLocal => "lab-or-local",
     };
     let directive_location = match result.placement.selected {
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "controller",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Lab => "lab",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local => "controller",
     };
     // Split-placement coordinators dispatch children later; this invocation is
     // still controller-owned even when its child placement directive is Lab.
@@ -101,9 +101,7 @@ fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPrefligh
         .placement
         .runner
         .as_ref()
-        .filter(|runner| {
-            runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Policy
-        })
+        .filter(|runner| runner.source == homeboy_lab_contract::RunnerSelectionSource::Policy)
         .map(|runner| runner.runner_id.clone());
     let explicit_runner_id = match &result.input.runner {
         homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(runner_id)
@@ -119,18 +117,17 @@ fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPrefligh
                 .or_else(|| policy_runner_id.clone())
         })
         .flatten();
-    let decision_origin =
-        if result.placement.requested == homeboy_lab_runner_contract::Placement::Lab {
-            "explicit"
-        } else {
-            match result.placement.runner.as_ref().map(|runner| runner.source) {
-                Some(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit) => "explicit",
-                Some(homeboy_lab_runner_contract::RunnerSelectionSource::Policy) => "automatic",
-                None if result.placement.override_authorization.authorized => "explicit",
-                None if result.placement.fallback.local_allowed => "fallback",
-                _ => "automatic",
-            }
-        };
+    let decision_origin = if result.placement.requested == homeboy_lab_contract::Placement::Lab {
+        "explicit"
+    } else {
+        match result.placement.runner.as_ref().map(|runner| runner.source) {
+            Some(homeboy_lab_contract::RunnerSelectionSource::Explicit) => "explicit",
+            Some(homeboy_lab_contract::RunnerSelectionSource::Policy) => "automatic",
+            None if result.placement.override_authorization.authorized => "explicit",
+            None if result.placement.fallback.local_allowed => "fallback",
+            _ => "automatic",
+        }
+    };
     let runner_env = flag_values(&argv, "--runner-env");
     let lab_env_json = flag_values(&argv, "--lab-env-json").into_iter().last();
 

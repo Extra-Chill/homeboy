@@ -537,7 +537,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
     assert_eq!(decision.requested, crate::cli_surface::Placement::Lab);
     assert_eq!(
         decision.selected,
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        homeboy_lab_contract::EffectiveExecutionPlacement::Lab
     );
     assert_eq!(
         decision.runner.expect("selected runner").runner_id,

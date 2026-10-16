@@ -106,11 +106,11 @@ pub(crate) fn register_after_snapshot_directory_discovery_hook(
 
 // The workspace-content *identity spec* (permission-policy names, the default
 // policy, the policy -> algorithm-marker mapping, and the content manifest
-// types) lives in the leaf `homeboy-source-snapshot-contract` crate so the
+// types) lives in `homeboy-runner-contract`'s `workspace_content_identity` so the
 // controller-declare and runner-verify paths derive it from one place. The
 // filesystem traversal that *applies* the spec stays here. Re-exported so
 // existing `crate::workspace::snapshot::*` / `crate::*` paths keep resolving.
-pub use homeboy_source_snapshot_contract::workspace_content_identity::{
+pub use homeboy_runner_contract::workspace_content_identity::{
     workspace_content_hash_algorithm, WorkspaceContentManifest, WorkspaceContentManifestEntry,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,

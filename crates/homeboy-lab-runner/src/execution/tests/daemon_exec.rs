@@ -80,7 +80,7 @@ fn staged_envelope(
     envelope.handoff.recipe.runner_id = "lab-local".to_string();
     envelope.handoff.recipe.placement_decision =
         homeboy_core::lab_routing::compatibility_placement_decision(
-            homeboy_lab_runner_contract::Placement::Lab,
+            homeboy_lab_contract::Placement::Lab,
             Some("lab-local"),
             false,
         );

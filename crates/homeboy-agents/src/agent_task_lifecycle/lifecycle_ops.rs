@@ -1885,7 +1885,7 @@ fn detached_cook_deadline(
 /// names the same checkout the run operates on.
 fn controller_local_placement_decision(
     plan: &AgentTaskPlan,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+) -> homeboy_lab_contract::ExecutionPlacementDecision {
     let workspace_root = plan
         .tasks
         .first()
@@ -1896,14 +1896,14 @@ fn controller_local_placement_decision(
     let requested = if homeboy_core::resource_policy_context::captured_context()
         .is_some_and(|context| context.local_override)
     {
-        homeboy_lab_runner_contract::Placement::Local
+        homeboy_lab_contract::Placement::Local
     } else {
-        homeboy_lab_runner_contract::Placement::Auto
+        homeboy_lab_contract::Placement::Auto
     };
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
-        homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+    homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
+        homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
         "v1",
-        homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+        homeboy_lab_contract::ExecutionPlacementIdentity {
             repository: workspace_root
                 .and_then(|root| std::path::Path::new(root).file_name())
                 .map(|name| name.to_string_lossy().into_owned())
@@ -1938,7 +1938,7 @@ fn controller_local_placement_decision(
 /// would have something to supersede.
 pub fn normalize_missing_execution_placement_decision(
     run_id: &str,
-    decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    decision: &homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> Result<bool> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     normalize_missing_execution_placement_decision_in_store(&lifecycle_store, run_id, decision)
@@ -1953,14 +1953,13 @@ pub fn normalize_missing_execution_placement_decision(
 pub fn normalize_missing_execution_placement_decision_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    decision: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    decision: &homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> Result<bool> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let persisted =
-        serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(
-            record.metadata["execution_placement_decision"].clone(),
-        )
-        .ok();
+    let persisted = serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        record.metadata["execution_placement_decision"].clone(),
+    )
+    .ok();
     let reason = match persisted {
         Some(persisted) if persisted.decision_id == decision.decision_id => return Ok(false),
         Some(persisted) if persisted.is_submission_stamp() => {
@@ -1990,7 +1989,7 @@ pub fn normalize_missing_execution_placement_decision_in_store(
 /// and fails closed.
 pub fn record_execution_placement_outcome(
     run_id: &str,
-    outcome: homeboy_lab_runner_contract::ExecutionPlacementOutcome,
+    outcome: homeboy_lab_contract::ExecutionPlacementOutcome,
 ) -> Result<()> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     record_execution_placement_outcome_in_store(&lifecycle_store, run_id, outcome)
@@ -2007,10 +2006,10 @@ pub fn record_execution_placement_outcome(
 pub fn record_execution_placement_outcome_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    outcome: homeboy_lab_runner_contract::ExecutionPlacementOutcome,
+    outcome: homeboy_lab_contract::ExecutionPlacementOutcome,
 ) -> Result<()> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+    let decision: homeboy_lab_contract::ExecutionPlacementDecision = serde_json::from_value(
         record.metadata["execution_placement_decision"].clone(),
     )
     .map_err(|error| {
@@ -2023,7 +2022,7 @@ pub fn record_execution_placement_outcome_in_store(
     })?;
     if decision.decision_id != outcome.decision_id
         || !decision.verifies_outcome(outcome.effective)
-        || (outcome.effective == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        || (outcome.effective == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
             && decision
                 .runner
                 .as_ref()
@@ -2052,12 +2051,12 @@ pub fn record_execution_placement_outcome_in_store(
 pub fn transition_execution_placement_for_continuation_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    replacement: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    replacement: homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> Result<()> {
-    use homeboy_lab_runner_contract::ExecutionPlacementRequirement;
+    use homeboy_lab_contract::ExecutionPlacementRequirement;
 
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    let prior: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+    let prior: homeboy_lab_contract::ExecutionPlacementDecision = serde_json::from_value(
         record.metadata["execution_placement_decision"].clone(),
     )
     .map_err(|error| {
@@ -2169,14 +2168,14 @@ mod execution_placement_tests {
             .expect("lifecycle store")
     }
     use super::*;
-    use homeboy_lab_runner_contract::{
+    use homeboy_lab_contract::{
         EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
         ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
     };
 
-    fn decision() -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+    fn decision() -> homeboy_lab_contract::ExecutionPlacementDecision {
+        homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test-policy",
             "1",
             ExecutionPlacementIdentity {
@@ -2205,9 +2204,9 @@ mod execution_placement_tests {
     }
 
     fn local_continuation(
-        prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
-    ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        prior: &homeboy_lab_contract::ExecutionPlacementDecision,
+    ) -> homeboy_lab_contract::ExecutionPlacementDecision {
+        homeboy_lab_contract::ExecutionPlacementDecision::new(
             prior.policy_id.clone(),
             prior.policy_revision.clone(),
             prior.identity.clone(),
@@ -2231,7 +2230,7 @@ mod execution_placement_tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut plan = super::super::tests::test_plan();
             let lab = decision();
-            let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            let prior = homeboy_lab_contract::ExecutionPlacementDecision::new(
                 lab.policy_id,
                 lab.policy_revision,
                 lab.identity,
@@ -2261,7 +2260,7 @@ mod execution_placement_tests {
             let replacement = local_continuation(&prior);
             let mut stale_identity = prior.identity.clone();
             stale_identity.candidate = Some("candidate-b".to_string());
-            let stale = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            let stale = homeboy_lab_contract::ExecutionPlacementDecision::new(
                 prior.policy_id.clone(),
                 prior.policy_revision.clone(),
                 stale_identity,
@@ -2395,7 +2394,7 @@ mod execution_placement_tests {
             })
             .expect("submit plan");
 
-            let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+            let decision: homeboy_lab_contract::ExecutionPlacementDecision =
                 serde_json::from_value(record.metadata["execution_placement_decision"].clone())
                     .expect("a controller-local run records a decodable canonical decision");
             assert_eq!(decision.selected, EffectiveExecutionPlacement::Local);
@@ -2427,7 +2426,7 @@ mod execution_placement_tests {
             record.metadata["execution_placement_decision"] = Value::Null;
             store::write_record(&record).expect("write legacy record");
 
-            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            let routed = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                 "lab-route-contract",
                 "v1",
                 ExecutionPlacementIdentity {
@@ -2483,10 +2482,10 @@ mod execution_placement_tests {
             let stamped = store::read_record("stamped-run").expect("read record");
             assert_eq!(
                 stamped.metadata["execution_placement_decision"]["policy_id"],
-                json!(homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID)
+                json!(homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID)
             );
 
-            let routed = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            let routed = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                 "lab-route-contract",
                 "v1",
                 ExecutionPlacementIdentity {
@@ -2521,7 +2520,7 @@ mod execution_placement_tests {
                 .expect("submit plan");
             let error = record_execution_placement_outcome(
                 "placement-run",
-                homeboy_lab_runner_contract::ExecutionPlacementOutcome {
+                homeboy_lab_contract::ExecutionPlacementOutcome {
                     decision_id: "stale".to_string(),
                     effective: EffectiveExecutionPlacement::Local,
                     runner_id: None,
@@ -2546,7 +2545,7 @@ mod execution_placement_tests {
 
             let normalized = normalize_local_execution_placement_in_store(&store, &record.run_id)
                 .expect("submission stamp remains authoritative");
-            let submission_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+            let submission_decision: homeboy_lab_contract::ExecutionPlacementDecision =
                 serde_json::from_value(normalized.metadata["execution_placement_decision"].clone())
                     .expect("controller-local submission records a canonical decision");
             assert!(submission_decision.is_submission_stamp());

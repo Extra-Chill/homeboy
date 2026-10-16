@@ -41,27 +41,26 @@ pub const LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV: &str =
 /// canonical decision existed. New controller routing must provide its actual
 /// repository/workspace/task identity instead.
 pub fn compatibility_placement_decision(
-    placement: homeboy_lab_runner_contract::Placement,
+    placement: homeboy_lab_contract::Placement,
     runner_id: Option<&str>,
     allow_local_fallback: bool,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    use homeboy_lab_runner_contract::{
+) -> homeboy_lab_contract::ExecutionPlacementDecision {
+    use homeboy_lab_contract::{
         EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
         ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, RunnerSelectionSource,
     };
-    let required =
-        if placement == homeboy_lab_runner_contract::Placement::Lab || runner_id.is_some() {
-            ExecutionPlacementRequirement::Lab
-        } else {
-            ExecutionPlacementRequirement::Either
-        };
+    let required = if placement == homeboy_lab_contract::Placement::Lab || runner_id.is_some() {
+        ExecutionPlacementRequirement::Lab
+    } else {
+        ExecutionPlacementRequirement::Either
+    };
     let selected = if required == ExecutionPlacementRequirement::Lab {
         EffectiveExecutionPlacement::Lab
     } else {
         EffectiveExecutionPlacement::Local
     };
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+    homeboy_lab_contract::ExecutionPlacementDecision::new(
         "legacy-lab-routing",
         "v1",
         ExecutionPlacementIdentity {
@@ -95,7 +94,7 @@ pub fn compatibility_placement_decision(
 /// This is the single definition of "may an automatic offload happen here",
 /// and it exists because the answer has to be identical in two places: the
 /// controller, which decides whether a policy-selected runner enters the
-/// canonical [`homeboy_lab_runner_contract::ExecutionPlacementDecision`], and
+/// canonical [`homeboy_lab_contract::ExecutionPlacementDecision`], and
 /// the offload executor, which decides whether to dispatch. When those two
 /// disagreed, a controller-owned read-only command (`agent-task providers`,
 /// `status`, `logs`, `diagnose`) acquired a default runner it was never
@@ -106,7 +105,7 @@ pub fn compatibility_placement_decision(
 /// through here: pinning names the runner directly.
 pub fn authorizes_policy_lab_runner(
     contract: &LabCommandContract,
-    placement: homeboy_lab_runner_contract::Placement,
+    placement: homeboy_lab_contract::Placement,
     pressure_severity: Option<&str>,
 ) -> bool {
     // An explicit `--placement lab`/`lab-or-local` is the operator's request,
@@ -118,7 +117,7 @@ pub fn authorizes_policy_lab_runner(
     }
     // `--placement local` is an explicit ownership statement. A run created
     // locally must stay locally owned for its whole lifecycle (#11600).
-    if placement == homeboy_lab_runner_contract::Placement::Local {
+    if placement == homeboy_lab_contract::Placement::Local {
         return false;
     }
     if !contract.is_portable() {
@@ -130,7 +129,7 @@ pub fn authorizes_policy_lab_runner(
     // Pressure-driven promotion mirrors the executor exactly: runner-resident
     // reads are exempt, because relocating a read changes what its answer means
     // (#9763).
-    placement == homeboy_lab_runner_contract::Placement::Auto
+    placement == homeboy_lab_contract::Placement::Auto
         && contract.source_path_mode != LabSourcePathMode::RunnerResident
         && pressure_severity
             .is_some_and(|severity| contract.routing_policy.should_pressure_offload(severity))
@@ -151,11 +150,11 @@ pub struct LabRoutingRequest<'a> {
     /// Immutable output of the controller's placement-policy resolution. The
     /// runner provider consumes this record; legacy scalar fields below remain
     /// only while persisted callers migrate to the canonical contract.
-    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    pub placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
     pub command: Option<crate::lab_offload::LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub placement: homeboy_lab_runner_contract::Placement,
+    pub placement: homeboy_lab_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
@@ -1368,7 +1367,7 @@ mod tests {
     fn route_lab_offload_runs_contracted_local_decision_without_provider() {
         let outcome = route_lab_offload(LabRoutingRequest {
             placement_decision: compatibility_placement_decision(
-                homeboy_lab_runner_contract::Placement::Auto,
+                homeboy_lab_contract::Placement::Auto,
                 None,
                 false,
             ),
@@ -1378,7 +1377,7 @@ mod tests {
             )),
             normalized_args: &["homeboy".to_string(), "status".to_string()],
             explicit_runner: None,
-            placement: homeboy_lab_runner_contract::Placement::Auto,
+            placement: homeboy_lab_contract::Placement::Auto,
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
@@ -1427,7 +1426,7 @@ mod tests {
             assert!(
                 !authorizes_policy_lab_runner(
                     &contract,
-                    homeboy_lab_runner_contract::Placement::Auto,
+                    homeboy_lab_contract::Placement::Auto,
                     severity,
                 ),
                 "severity {severity:?} must not relocate a runner-resident read",
@@ -1450,7 +1449,7 @@ mod tests {
         ] {
             assert!(!authorizes_policy_lab_runner(
                 &contract,
-                homeboy_lab_runner_contract::Placement::Local,
+                homeboy_lab_contract::Placement::Local,
                 Some("hot"),
             ));
         }
@@ -1462,8 +1461,8 @@ mod tests {
         // answers — dispatching, or explaining its local-only reason — rather
         // than a generic "no ready runner".
         for placement in [
-            homeboy_lab_runner_contract::Placement::Lab,
-            homeboy_lab_runner_contract::Placement::LabOrLocal,
+            homeboy_lab_contract::Placement::Lab,
+            homeboy_lab_contract::Placement::LabOrLocal,
         ] {
             assert!(authorizes_policy_lab_runner(
                 &runner_resident_read_contract(),
@@ -1487,7 +1486,7 @@ mod tests {
                 false,
                 crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
             ),
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             None,
         ));
     }
@@ -1500,12 +1499,12 @@ mod tests {
         let contract = LabCommandContract::explicit_runner_simple("runtime refresh");
         assert!(!authorizes_policy_lab_runner(
             &contract,
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             Some("ok"),
         ));
         assert!(authorizes_policy_lab_runner(
             &contract,
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             Some("warm"),
         ));
     }
@@ -1514,7 +1513,7 @@ mod tests {
     fn a_local_only_contract_is_never_relocated_by_policy() {
         assert!(!authorizes_policy_lab_runner(
             &LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             Some("hot"),
         ));
     }
@@ -2094,14 +2093,14 @@ mod tests {
         let outcome = dispatch_lab_offload(
             LabRoutingRequest {
                 placement_decision: compatibility_placement_decision(
-                    homeboy_lab_runner_contract::Placement::Auto,
+                    homeboy_lab_contract::Placement::Auto,
                     None,
                     false,
                 ),
                 command: None,
                 normalized_args: &["homeboy".to_string(), "status".to_string()],
                 explicit_runner: None,
-                placement: homeboy_lab_runner_contract::Placement::Auto,
+                placement: homeboy_lab_contract::Placement::Auto,
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,

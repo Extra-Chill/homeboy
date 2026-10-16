@@ -872,7 +872,7 @@ fn record_verified_lab_placement_outcome(record: &mut AgentTaskRunRecord) -> Res
     let Some(decision) = record.metadata.get("execution_placement_decision").cloned() else {
         return Ok(());
     };
-    let decision: homeboy_lab_runner_contract::ExecutionPlacementDecision =
+    let decision: homeboy_lab_contract::ExecutionPlacementDecision =
         serde_json::from_value(decision).map_err(|error| {
             Error::validation_invalid_argument(
                 "execution_placement_decision",
@@ -899,7 +899,7 @@ fn record_verified_lab_placement_outcome(record: &mut AgentTaskRunRecord) -> Res
     })?;
     let outcome = decision
         .outcome(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
             Some(runner_id),
         )
         .ok_or_else(|| {

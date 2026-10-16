@@ -1,3 +1,11 @@
+//! Quality-gate result types: `HomeboyGateResult` and friends.
+//!
+//! `gate`, `plan`, and `proof` form one mutually-dependent data cluster: `plan`
+//! references `HomeboyGateResult` and `HomeboyProof`, `gate` references
+//! `HomeboyPlan`, and `proof` references `HomeboyGateResult`. They are
+//! behavior-free serde data plus clap `ValueEnum` derives and pure
+//! classification helpers.
+
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

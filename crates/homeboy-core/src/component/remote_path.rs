@@ -1,16 +1,14 @@
 //! Extension-driven `remote_path` auto-resolution for components.
 //!
-//! These functions used to be `Component` methods, but they reach into core's
-//! extension catalog (to load extension deploy rules) and the filesystem (to
-//! test rule file-content conditions), so they cannot live in the leaf
-//! `homeboy-component-contract` crate. They stay in core as free functions over
-//! `&Component` / `&mut Component`.
+//! These functions reach into core's extension catalog (to load extension
+//! deploy rules) and the filesystem (to test rule file-content conditions), so
+//! they stay out of the pure `component::model` data type as free functions
+//! over `&Component` / `&mut Component`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use homeboy_component_contract::model::render_remote_path_template;
-use homeboy_component_contract::Component;
+use super::model::{render_remote_path_template, Component};
 
 use crate::error::Result;
 use crate::extension::catalog::load_extension_in_optional_root;
