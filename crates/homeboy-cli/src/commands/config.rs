@@ -129,16 +129,16 @@ fn show(builtin: bool, pointer: Option<&str>) -> CmdResult<ConfigOutput> {
 /// Threshold, in characters, above which an `upgrade_command` install script
 /// is considered too large to usefully appear inline in an unscoped `config
 /// show`. Short one-liners (e.g. `brew update && brew upgrade homeboy`) stay
-/// inline; the multi-line source/binary bootstrap scripts do not.
+/// inline; the multi-line source build script does not.
 const INSTALL_SCRIPT_ELISION_THRESHOLD: usize = 200;
 
 /// Replace long, embedded install/upgrade shell scripts with a short summary
 /// in an unscoped `config show` dump.
 ///
 /// `config show` (no pointer) is the natural first command an operator runs
-/// to inspect state, but `defaults.install_methods` carries multi-line
-/// binary-upgrade and source-build scripts that otherwise dominate the
-/// output and bury the settings people actually came to read (#13635). A
+/// to inspect state, but `defaults.install_methods` carries a multi-line
+/// source-build script that otherwise dominates the
+/// output and buries the settings people actually came to read (#13635). A
 /// pointer read of a specific `upgrade_command` still returns the full
 /// script verbatim — nothing here changes what data exists, only what an
 /// unscoped dump shows by default.
@@ -675,31 +675,26 @@ mod tests {
                 "release_gate settings must still be present: {config}"
             );
 
-            // The large embedded install/upgrade shell scripts (source build,
-            // binary upgrade) no longer dominate the output.
+            // The large embedded source-build script no longer dominates the
+            // output.
             let source_script = config
                 .pointer("/defaults/install_methods/source/upgrade_command")
                 .and_then(Value::as_str)
                 .expect("source upgrade_command present");
-            let binary_script = config
+            // Release upgrades run the embedded canonical installer, so the
+            // binary method carries no configurable script.
+            assert!(config
                 .pointer("/defaults/install_methods/binary/upgrade_command")
-                .and_then(Value::as_str)
-                .expect("binary upgrade_command present");
+                .is_none());
             assert!(
                 source_script.len() < INSTALL_SCRIPT_ELISION_THRESHOLD + 200,
                 "source upgrade_command should be elided in an unscoped dump: {source_script}"
             );
-            assert!(
-                binary_script.len() < INSTALL_SCRIPT_ELISION_THRESHOLD + 200,
-                "binary upgrade_command should be elided in an unscoped dump: {binary_script}"
-            );
             assert!(!source_script.contains('\n'));
-            assert!(!binary_script.contains('\n'));
 
             // The elision must not silently discard data: it names the exact
             // pointer that returns the real script.
             assert!(source_script.contains("/defaults/install_methods/source/upgrade_command"));
-            assert!(binary_script.contains("/defaults/install_methods/binary/upgrade_command"));
 
             // A short, unmodified one-liner install command stays inline.
             let homebrew_script = config

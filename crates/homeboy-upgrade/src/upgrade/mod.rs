@@ -51,17 +51,13 @@ pub use validation::{check_for_updates, check_for_updates_with_runners};
 
 impl InstallMethod {
     pub fn as_str(&self) -> String {
-        if *self == InstallMethod::Homebrew {
-            "homebrew".to_string()
-        } else if *self == InstallMethod::Source {
-            "source".to_string()
-        } else if *self == InstallMethod::Binary {
-            "binary".to_string()
-        } else if *self == InstallMethod::Unknown {
-            "unknown".to_string()
-        } else {
-            homeboy_core::defaults::secondary_install_method_key()
+        match self {
+            InstallMethod::Homebrew => "homebrew",
+            InstallMethod::Source => "source",
+            InstallMethod::Binary => "binary",
+            InstallMethod::Unknown => "unknown",
         }
+        .to_string()
     }
 }
 
@@ -96,26 +92,19 @@ mod tests {
     #[test]
     fn test_install_method_strings() {
         assert_eq!(InstallMethod::Homebrew.as_str(), "homebrew");
-        assert_eq!(
-            InstallMethod::Secondary.as_str(),
-            homeboy_core::defaults::secondary_install_method_key()
-        );
         assert_eq!(InstallMethod::Source.as_str(), "source");
         assert_eq!(InstallMethod::Binary.as_str(), "binary");
         assert_eq!(InstallMethod::Unknown.as_str(), "unknown");
     }
 
     #[test]
-    fn test_detect_install_method_prefers_active_secondary_path_over_brew_list() {
-        let secondary_path = format!(
-            "/Users/user/.{}/bin/homeboy",
-            homeboy_core::defaults::secondary_install_method_key()
+    fn test_detect_install_method_reports_cargo_bin_path_as_binary_over_brew_list() {
+        let method = helpers::detect_install_method_from_exe_path(
+            "/Users/user/.cargo/bin/homeboy",
+            |cmd, args| cmd == "brew" && args == ["list", "homeboy"],
         );
-        let method = helpers::detect_install_method_from_exe_path(&secondary_path, |cmd, args| {
-            cmd == "brew" && args == ["list", "homeboy"]
-        });
 
-        assert_eq!(method, InstallMethod::Secondary);
+        assert_eq!(method, InstallMethod::Binary);
     }
 
     #[test]

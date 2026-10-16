@@ -11,7 +11,7 @@ use super::types::{InstallMethod, VersionCheck};
 /// reported release is the one the upgrade will install.
 ///
 pub(crate) fn selects_an_installable_release(method: InstallMethod) -> bool {
-    matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
+    method == InstallMethod::Binary
 }
 
 pub fn check_for_updates() -> Result<VersionCheck> {
@@ -266,11 +266,10 @@ mod tests {
         assert!(check.uninstallable_versions.is_empty());
     }
 
-    /// Both release-asset methods pin the selected installable release.
+    /// The release-asset method pins the selected installable release.
     #[test]
     fn only_the_release_pinning_method_consults_the_release_catalog() {
         assert!(selects_an_installable_release(InstallMethod::Binary));
-        assert!(selects_an_installable_release(InstallMethod::Secondary));
         assert!(!selects_an_installable_release(InstallMethod::Homebrew));
         assert!(!selects_an_installable_release(InstallMethod::Source));
         assert!(!selects_an_installable_release(InstallMethod::Unknown));

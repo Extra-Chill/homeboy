@@ -5,9 +5,9 @@ use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
     Homebrew,
-    Secondary,
     Source,
-    /// Downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy)
+    /// Downloaded release binary (e.g. ~/bin/homeboy, /usr/local/bin/homeboy,
+    /// or a release binary that replaced a cargo-installed ~/.cargo/bin/homeboy)
     Binary,
     Unknown,
 }
@@ -27,17 +27,23 @@ impl<'de> Deserialize<'de> for InstallMethod {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let secondary = homeboy_core::defaults::secondary_install_method_key();
-        match value.as_str() {
-            "homebrew" => Ok(Self::Homebrew),
-            "source" => Ok(Self::Source),
-            "binary" => Ok(Self::Binary),
-            "unknown" => Ok(Self::Unknown),
-            other if other == secondary => Ok(Self::Secondary),
-            other => Err(serde::de::Error::unknown_variant(
-                other,
-                &["homebrew", "source", "binary", "unknown"],
-            )),
+        if value == "unknown" {
+            return Ok(Self::Unknown);
+        }
+        Self::from_method_name(&value).ok_or_else(|| {
+            serde::de::Error::unknown_variant(&value, &["homebrew", "source", "binary", "unknown"])
+        })
+    }
+}
+
+impl InstallMethod {
+    /// Parse an install method name.
+    pub fn from_method_name(name: &str) -> Option<Self> {
+        match name {
+            "homebrew" => Some(Self::Homebrew),
+            "source" => Some(Self::Source),
+            "binary" => Some(Self::Binary),
+            _ => None,
         }
     }
 }

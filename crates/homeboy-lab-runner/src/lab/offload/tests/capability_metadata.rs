@@ -1009,7 +1009,7 @@ fn controller_recovery_command_uses_install_method_for_known_binary_locations() 
         controller_homeboy_recovery_command_for_binary(std::path::Path::new(
             "/Users/user/.cargo/bin/homeboy"
         )),
-        "homeboy upgrade --method cargo --force"
+        "homeboy upgrade"
     );
 }
 

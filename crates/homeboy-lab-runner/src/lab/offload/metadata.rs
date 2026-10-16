@@ -763,15 +763,6 @@ pub(super) fn controller_homeboy_recovery_command_for_binary(exe: &Path) -> Stri
     {
         return "homeboy upgrade --method homebrew --force".to_string();
     }
-    if exe_display.contains(&format!(
-        "/.{}/bin/",
-        homeboy_core::defaults::secondary_install_method_key()
-    )) {
-        return format!(
-            "homeboy upgrade --method {} --force",
-            homeboy_core::defaults::secondary_install_method_key()
-        );
-    }
     "homeboy upgrade".to_string()
 }
 

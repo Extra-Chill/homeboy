@@ -29,7 +29,7 @@ values include the `homeboy.json` path; values supplied by defaults report
 Keys that themselves contain dots (hostnames) still use a JSON pointer.
 
 An unscoped `config show` elides the large multi-line
-`defaults.install_methods.{source,binary}.upgrade_command` scripts so
+`defaults.install_methods.source.upgrade_command` script so
 settings like `agent_task`, `notifications`, and `release_gate` aren't buried
 in install/upgrade shell programs. The elided entry names the exact pointer
 to read for the full script — e.g. `homeboy config show
@@ -123,13 +123,12 @@ homeboy config path
         "upgrade_command": "brew update && brew upgrade homeboy",
         "list_command": "brew list homeboy"
       },
-      "cargo": {
-        "path_patterns": ["/.cargo/bin/"],
-        "upgrade_command": "cargo install homeboy"
-      },
       "source": {
         "path_patterns": ["/target/release/", "/target/debug/"],
         "upgrade_command": "git pull && cargo build --release"
+      },
+      "binary": {
+        "path_patterns": ["/bin/homeboy", "homeboy.exe"]
       }
     },
     "version_candidates": [
@@ -186,7 +185,7 @@ Controls environment variables Homeboy adds to `gh` and remote-capable Git subpr
 Controls how Homeboy detects installation method and upgrades itself:
 
 - `path_patterns`: Strings to match in the executable path
-- `upgrade_command`: Shell command to run for upgrades
+- `upgrade_command`: Shell command to run for upgrades (`homebrew` and `source` only; `binary` always runs the canonical `homeboy-installer.sh` in stage-only mode and ignores any configured command)
 - `list_command`: Optional command to verify installation (Homebrew only)
 
 ### Version Candidates

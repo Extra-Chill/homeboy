@@ -92,6 +92,24 @@ fn run_installer(
     force_sudo: bool,
     non_writable_parent: bool,
 ) -> (std::process::Output, String, String, String) {
+    run_installer_mode(
+        fixture,
+        candidate_exit,
+        legacy_installed,
+        force_sudo,
+        non_writable_parent,
+        false,
+    )
+}
+
+fn run_installer_mode(
+    fixture: ArchiveFixture,
+    candidate_exit: i32,
+    legacy_installed: bool,
+    force_sudo: bool,
+    non_writable_parent: bool,
+    stage_only: bool,
+) -> (std::process::Output, String, String, String) {
     let temp = tempfile::tempdir().expect("tempdir");
     let tools = temp.path().join("tools");
     let install_dir = temp.path().join("missing-parent/bin");
@@ -151,6 +169,9 @@ fn run_installer(
         .env("PATH", format!("{}:/usr/bin:/bin", tools.display()));
     if force_sudo {
         command.env("HOMEBOY_INSTALL_USE_SUDO", "true");
+    }
+    if stage_only {
+        command.env("HOMEBOY_INSTALL_STAGE_ONLY", "1");
     }
     let output = command.output().expect("run installer");
     let installed_bytes = fs::read_to_string(&installed).unwrap_or_default();
@@ -275,4 +296,39 @@ fn installer_rejects_unsafe_or_ambiguous_archive_members_before_admission() {
         assert!(evidence.is_empty());
         assert!(events.is_empty());
     }
+}
+
+/// `homeboy upgrade` runs this installer in stage-only mode: it places the
+/// verified candidate at HOMEBOY_INSTALL_PATH without running admission or
+/// escalating privilege, because the controller owns both.
+#[test]
+fn stage_only_mode_places_the_candidate_without_admission_or_privilege() {
+    let (output, staged, evidence, events) =
+        run_installer_mode(ArchiveFixture::Valid, 1, false, true, false, true);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(staged.contains("upgrade-admission"));
+    assert!(evidence.is_empty(), "stage-only mode must not admit");
+    assert!(
+        events.is_empty(),
+        "stage-only mode must not use sudo: {events}"
+    );
+}
+
+#[test]
+fn stage_only_mode_requires_an_explicit_install_path() {
+    let output = Command::new("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/homeboy-installer.sh"
+        ))
+        .env("HOMEBOY_INSTALL_STAGE_ONLY", "1")
+        .env_remove("HOMEBOY_INSTALL_PATH")
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("run installer");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("HOMEBOY_INSTALL_STAGE_ONLY=1 requires HOMEBOY_INSTALL_PATH"));
 }

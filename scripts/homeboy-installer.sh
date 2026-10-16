@@ -1,6 +1,15 @@
 #!/bin/sh
 set -eu
 
+# `homeboy upgrade` runs this installer with HOMEBOY_INSTALL_STAGE_ONLY=1 and
+# HOMEBOY_INSTALL_PATH inside an isolated stage. That mode only places the
+# checksum- and version-verified candidate at the stage path; the controller
+# then owns admission and promotion into the live destination.
+STAGE_ONLY="${HOMEBOY_INSTALL_STAGE_ONLY:-}"
+if [ "$STAGE_ONLY" = 1 ] && [ -z "${HOMEBOY_INSTALL_PATH:-}" ]; then
+  echo "HOMEBOY_INSTALL_STAGE_ONLY=1 requires HOMEBOY_INSTALL_PATH" >&2
+  exit 1
+fi
 BIN_PATH="${HOMEBOY_INSTALL_PATH:-$(command -v homeboy 2>/dev/null || printf '%s' "$HOME/.local/bin/homeboy")}"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
@@ -34,7 +43,9 @@ trap cleanup EXIT
 # relevant permission is therefore write+search on its parent, not write on
 # the binary itself. Select the privilege path before downloading any assets.
 EFFECTIVE_UID="$(id -u)"
-if [ -e "$BIN_PATH" ]; then
+if [ "$STAGE_ONLY" = 1 ]; then
+  BIN_OWNER_MODE="stage"
+elif [ -e "$BIN_PATH" ]; then
   if stat -c '%u:%a' "$BIN_PATH" >/dev/null 2>&1; then
     BIN_OWNER_MODE="$(stat -c '%u:%a' "$BIN_PATH")"
   else
@@ -43,7 +54,9 @@ if [ -e "$BIN_PATH" ]; then
 else
   BIN_OWNER_MODE="absent"
 fi
-if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" = true ] || [ ! -w "$BIN_DIR" ] || [ ! -x "$BIN_DIR" ]; then
+if [ "$STAGE_ONLY" = 1 ]; then
+  USE_SUDO=false
+elif [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" = true ] || [ ! -w "$BIN_DIR" ] || [ ! -x "$BIN_DIR" ]; then
   USE_SUDO=true
 else
   USE_SUDO=false
@@ -127,14 +140,18 @@ fi
 
 # The checksum- and version-verified staged candidate owns bounded recovery and
 # admission; any failure exits before the installed controller is written.
-LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
-# `set --` preserves the legacy identity as one argv element without an eval.
-set -- self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
-if [ -n "$TARGET_VERSION" ]; then
-  set -- "$@" --target-version "$TARGET_VERSION"
-  set -- "$@" --selected-tag-or-artifact "$TAG"
+# In stage-only mode the controller admits the staged candidate against the
+# live destination's legacy identity, so it is not admitted twice here.
+if [ "$STAGE_ONLY" != 1 ]; then
+  LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --version 2>/dev/null || printf 'unavailable')"
+  # `set --` preserves the legacy identity as one argv element without an eval.
+  set -- self upgrade-admission --legacy-identity "$LEGACY_IDENTITY"
+  if [ -n "$TARGET_VERSION" ]; then
+    set -- "$@" --target-version "$TARGET_VERSION"
+    set -- "$@" --selected-tag-or-artifact "$TAG"
+  fi
+  "$EXTRACTED_BIN" "$@"
 fi
-"$EXTRACTED_BIN" "$@"
 
 if [ "$USE_SUDO" != true ]; then
   install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"

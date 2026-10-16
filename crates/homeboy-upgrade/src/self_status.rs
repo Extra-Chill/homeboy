@@ -158,13 +158,6 @@ fn detect_install_method_from_path(path: Option<&Path>) -> InstallMethod {
     {
         return InstallMethod::Homebrew;
     }
-    let secondary_bin = format!(
-        "/.{}/bin/",
-        homeboy_core::defaults::secondary_install_method_key()
-    );
-    if raw.contains(&secondary_bin) {
-        return InstallMethod::Secondary;
-    }
     if raw.contains("/target/debug/")
         || raw.contains("/target/release/")
         || raw.contains("homeboy@")
@@ -570,15 +563,12 @@ mod tests {
     #[test]
     fn external_probe_failures_do_not_fail_status_collection() {
         let status = collect_status_with(
-            Some(PathBuf::from(format!(
-                "/Users/test/.{}/bin/homeboy",
-                homeboy_core::defaults::secondary_install_method_key()
-            ))),
+            Some(PathBuf::from("/Users/test/.cargo/bin/homeboy")),
             || Err("offline".to_string()),
             |_cmd, _args| Err("not installed".to_string()),
         );
 
-        assert_eq!(status.install_method, InstallMethod::Secondary);
+        assert_eq!(status.install_method, InstallMethod::Binary);
         assert!(!status.latest_github_release.available);
         assert_eq!(
             status.latest_github_release.error.as_deref(),
