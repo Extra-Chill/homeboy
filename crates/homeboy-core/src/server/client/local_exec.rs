@@ -1435,20 +1435,32 @@ mod tests {
         let value = run_dir.path().to_string_lossy().to_string();
         let marker = run_dir.path().join("graceful-termination");
         let marker_value = marker.to_string_lossy().to_string();
+        let ready = run_dir.path().join("trap-installed");
+        let ready_value = ready.to_string_lossy().to_string();
         let env = [
             (key.as_str(), value.as_str()),
             ("MARKER", marker_value.as_str()),
+            ("READY", ready_value.as_str()),
         ];
         let foreground_pid = unsafe { libc::getpid() };
+        // Signal only once the child has installed its trap: by then it is
+        // spawned and the parent's forwarding handler is in place, so the
+        // signal cannot arrive early and be lost under load (#15958).
         let interrupter = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(25));
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !ready.exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
             unsafe { libc::kill(foreground_pid, libc::SIGTERM) };
         });
 
-        let output = execute_local_command_in_dir(
-            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; while :; do sleep 1; done",
+        // Bounded so a lost signal fails the assertions below instead of
+        // hanging the test binary.
+        let output = execute_local_command_in_dir_with_timeout(
+            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; : > \"$READY\"; while :; do sleep 1; done",
             None,
             Some(&env),
+            Duration::from_secs(60),
         );
         interrupter.join().expect("interrupter");
 

@@ -3904,16 +3904,22 @@ mod tests {
             "a failure after worktree add must deregister the checkout"
         );
 
+        // Concurrent `git worktree add` races inside git's own
+        // `.git/worktrees` bookkeeping (#15986); production serializes recovery
+        // under the admission lock. Add serially, then finalize concurrently,
+        // which is the behavior under test.
+        let worktrees = ["first", "second"].map(|name| {
+            let checkout = temporary.path().join(name);
+            let worktree = RecoveryWorktree::add(&source, &checkout, &revision)
+                .expect("add recovery worktree");
+            (name, checkout, worktree)
+        });
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
-            for name in ["first", "second"] {
-                let checkout = temporary.path().join(name);
+            for (name, checkout, worktree) in worktrees {
                 let source = &source;
-                let revision = &revision;
                 let barrier = &barrier;
                 scope.spawn(move || {
-                    let worktree = RecoveryWorktree::add(source, &checkout, revision)
-                        .expect("add concurrent recovery worktree");
                     barrier.wait();
                     drop(worktree);
                     assert!(
