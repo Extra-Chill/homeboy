@@ -2553,6 +2553,9 @@ mod run_lifecycle_projection_tests {
         );
         assert!(context.next_actions[0]
             .command
+            .contains("homeboy runner set <runner> --json"));
+        assert!(context.next_actions[0]
+            .command
             .contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"));
         assert!(!context.next_actions[0]
             .command

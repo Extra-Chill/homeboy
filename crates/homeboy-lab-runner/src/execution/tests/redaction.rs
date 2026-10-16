@@ -198,6 +198,7 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
             process_count_limit: 128,
             process_count_limit_source: None,
             process_count_limit_ceiling: None,
+            top_processes: Vec::new(),
         }),
         cgroup_memory: Default::default(),
         source: "linux_procfs_process_tree".to_string(),
@@ -212,7 +213,8 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
     );
     assert!(err.hints.iter().any(|hint| hint
         .message
-        .contains("Runner resource guard stopped the job")));
+        .contains("Runner resource guard stopped the job")
+        && hint.message.contains("homeboy runner set <runner> --json")));
 }
 
 #[test]

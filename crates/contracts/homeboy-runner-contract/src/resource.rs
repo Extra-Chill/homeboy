@@ -83,6 +83,7 @@ pub struct RunnerResourceGuardLimits {
     pub process_count_limit: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_count_limit_source: Option<String>,
+    /// The daemon's [`PROCESS_COUNT_LIMIT_ENV`] value before the ceiling clamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_process_count_limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,23 +111,50 @@ pub struct RunnerResourceGuardViolation {
     pub rss_limit_bytes: u64,
     pub process_count: u64,
     pub process_count_limit: u64,
-    /// How the process-count limit was chosen (`default`, `runner_override`,
-    /// `job_override`, `job_override_capped`, ...). Absent on records written
+    /// How the process-count limit was chosen: `default` (scaled with the
+    /// runner's available parallelism), `runner_override` (the daemon's
+    /// [`PROCESS_COUNT_LIMIT_ENV`]), or `runner_ceiling` (clamped to the
+    /// daemon's [`PROCESS_COUNT_CEILING_ENV`]). Absent on records written
     /// before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_count_limit_source: Option<String>,
-    /// The runner-owned ceiling a job-requested process-count limit is clamped
-    /// to (`HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT` in the daemon env).
+    /// The runner-owned ceiling the process-count limit is clamped to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_count_limit_ceiling: Option<u64>,
+    /// The most common process names in the tree when the guard tripped,
+    /// most frequent first, bounded to [`TOP_PROCESS_NAME_LIMIT`] entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub top_processes: Vec<RunnerProcessNameCount>,
 }
 
-/// Runner-owned ceiling on a job-requested process-count limit. It is read
-/// from the runner daemon's own environment, so it is set in the runner's
-/// `env` and rendered into the runner service unit.
-pub const PROCESS_COUNT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
-/// Per-job (or runner-default) process-count limit request.
+/// How many processes with one name were in a guarded process tree.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerProcessNameCount {
+    pub name: String,
+    pub count: u64,
+}
+
+/// Bound on [`RunnerResourceGuardViolation::top_processes`].
+pub const TOP_PROCESS_NAME_LIMIT: usize = 10;
+
+/// Runner-owned process-count limit, read only from the runner daemon's own
+/// environment. Defaults to 16 per available core (at least 128).
 pub const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
+/// Runner-owned ceiling the process-count limit is clamped to, read only from
+/// the runner daemon's own environment. Defaults to 32 per available core (at
+/// least 256); `0` disables the ceiling.
+pub const PROCESS_COUNT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
+/// Runner-owned RSS limit, read only from the runner daemon's own environment.
+pub const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
+/// Every runner-owned resource-guard policy key. A runner's `env` renders
+/// these into its service unit; they are never forwarded with a job.
+pub const RESOURCE_GUARD_POLICY_ENV_KEYS: &[&str] = &[
+    PROCESS_COUNT_CEILING_ENV,
+    PROCESS_COUNT_LIMIT_ENV,
+    RSS_LIMIT_ENV,
+];
+
+const GIB: u64 = 1024 * 1024 * 1024;
 
 impl RunnerResourceGuardViolation {
     pub fn blocker_code(&self) -> String {
@@ -135,56 +163,80 @@ impl RunnerResourceGuardViolation {
 
     pub fn observed_summary(&self) -> String {
         if self.reason == "rss_limit_exceeded" {
-            format!(
+            return format!(
                 "rss_bytes={} exceeds limit {}",
                 self.rss_bytes, self.rss_limit_bytes
-            )
-        } else {
-            format!(
-                "process_count={} exceeds limit {}",
-                self.process_count, self.process_count_limit
-            )
+            );
         }
+        let summary = format!(
+            "process_count={} exceeds limit {}",
+            self.process_count, self.process_count_limit
+        );
+        if self.top_processes.is_empty() {
+            return summary;
+        }
+        let top = self
+            .top_processes
+            .iter()
+            .map(|process| format!("{}\u{d7}{}", process.name, process.count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{summary} (top: {top})")
     }
 
     pub fn operator_message(&self) -> String {
         format!("{}: {}", self.blocker_code(), self.observed_summary())
     }
 
+    /// The supported action for raising the limit that tripped. Guard policy
+    /// is runner-owned: it is set in the runner's `env` and reaches the
+    /// daemon only through its service unit, never through a job.
     pub fn remedy(&self) -> String {
         if self.reason == "rss_limit_exceeded" {
-            format!(
-                "raise HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES above {} (limit {}); do not resume into the same guard",
-                self.rss_bytes, self.rss_limit_bytes
-            )
-        } else if self.process_count_limit_is_ceiling() {
-            let ceiling = self
-                .process_count_limit_ceiling
-                .unwrap_or(self.process_count_limit);
-            format!(
-                "raise the runner-owned ceiling {PROCESS_COUNT_CEILING_ENV} above {} (ceiling {ceiling}) in the runner's env, then reinstall or upgrade the runner service so the daemon picks it up; {PROCESS_COUNT_LIMIT_ENV} is clamped to that ceiling. Do not resume into the same guard",
-                self.process_count
-            )
-        } else {
-            format!(
-                "raise {PROCESS_COUNT_LIMIT_ENV} above {} (limit {}{}); do not resume into the same guard",
-                self.process_count,
-                self.process_count_limit,
-                self.process_count_limit_ceiling
-                    .map(|ceiling| format!(", runner ceiling {ceiling}"))
-                    .unwrap_or_default()
-            )
+            let target = (self.rss_bytes / GIB + 2) * GIB;
+            return format!(
+                "RSS limit {} is runner-owned; {}",
+                self.rss_limit_bytes,
+                runner_policy_action(&[(RSS_LIMIT_ENV, target)])
+            );
         }
+        let target = (self.process_count / 64 + 2) * 64;
+        let mut policy = Vec::with_capacity(2);
+        if self
+            .process_count_limit_ceiling
+            .is_some_and(|ceiling| ceiling > 0 && target > ceiling)
+        {
+            policy.push((PROCESS_COUNT_CEILING_ENV, target));
+        }
+        policy.push((PROCESS_COUNT_LIMIT_ENV, target));
+        format!(
+            "process limit {} is {}; {}",
+            self.process_count_limit,
+            self.process_count_limit_origin(),
+            runner_policy_action(&policy)
+        )
     }
 
-    /// The limit that tripped is the runner-owned ceiling, so raising the
-    /// job-level request cannot help.
-    fn process_count_limit_is_ceiling(&self) -> bool {
-        self.process_count_limit_source.as_deref() == Some("job_override_capped")
-            || self
-                .process_count_limit_ceiling
-                .is_some_and(|ceiling| self.process_count_limit >= ceiling)
+    fn process_count_limit_origin(&self) -> String {
+        match self.process_count_limit_source.as_deref() {
+            Some("default") => "the runner default (16/core)".to_string(),
+            Some("runner_override") => "the runner's PROCESS_COUNT".to_string(),
+            Some("runner_ceiling") => "the runner ceiling".to_string(),
+            Some(source) => format!("from `{source}`"),
+            None => "from an unrecorded source".to_string(),
+        }
     }
+}
+
+fn runner_policy_action(policy: &[(&str, u64)]) -> String {
+    let env = policy
+        .iter()
+        .map(|(key, value)| format!("\"{key}\":\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "run `homeboy runner set <runner> --json '{{\"env\":{{{env}}}}}'` then `homeboy runner service install <runner>`"
+    )
 }
 
 /// A guard stop found in a runner result, job event, or operator log payload.
@@ -327,6 +379,7 @@ mod tests {
                 "rss_limit_bytes": 1024,
                 "process_count": 3,
                 "process_count_limit": 8,
+                "top_processes": [{"name": "rustc", "count": 2}],
             },
             "cgroup_memory": {
                 "status": "observed",
@@ -398,32 +451,107 @@ mod tests {
             process_count_limit: limit,
             process_count_limit_source: source.map(str::to_string),
             process_count_limit_ceiling: ceiling,
+            top_processes: Vec::new(),
+        }
+    }
+
+    const SERVICE_INSTALL: &str = "then `homeboy runner service install <runner>`";
+
+    #[test]
+    fn default_limit_remedy_names_the_runner_default_and_the_runner_config_action() {
+        let remedy = process_violation(512, Some("default"), Some(1024)).remedy();
+        assert_eq!(
+            remedy,
+            format!(
+                "process limit 512 is the runner default (16/core); run `homeboy runner set <runner> --json '{{\"env\":{{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}}}'` {SERVICE_INSTALL}"
+            )
+        );
+    }
+
+    #[test]
+    fn runner_override_remedy_names_the_runner_env_key() {
+        let remedy = process_violation(256, Some("runner_override"), Some(1024)).remedy();
+        assert!(remedy.starts_with("process limit 256 is the runner's PROCESS_COUNT; "));
+        assert!(
+            remedy.contains("{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}")
+        );
+        assert!(remedy.ends_with(SERVICE_INSTALL));
+    }
+
+    #[test]
+    fn ceiling_remedy_raises_the_ceiling_with_the_limit() {
+        let remedy = process_violation(256, Some("runner_ceiling"), Some(256)).remedy();
+        assert_eq!(
+            remedy,
+            format!(
+                "process limit 256 is the runner ceiling; run `homeboy runner set <runner> --json '{{\"env\":{{\"HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT\":\"384\",\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}}}'` {SERVICE_INSTALL}"
+            )
+        );
+        assert!(remedy.len() <= 256, "fits the blocker projection bound");
+    }
+
+    #[test]
+    fn unrecorded_or_retired_sources_get_the_same_runner_owned_action() {
+        for (source, origin) in [
+            (None, "from an unrecorded source"),
+            (Some("job_override"), "from `job_override`"),
+        ] {
+            let remedy = process_violation(128, source, None).remedy();
+            assert!(remedy.starts_with(&format!("process limit 128 is {origin}; ")));
+            assert!(remedy.contains("homeboy runner set <runner> --json"));
+            assert!(remedy.ends_with(SERVICE_INSTALL));
         }
     }
 
     #[test]
-    fn capped_job_request_remedy_names_the_runner_owned_ceiling() {
-        let remedy = process_violation(256, Some("job_override_capped"), Some(256)).remedy();
-        assert!(remedy.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT above 291"));
-        assert!(remedy.contains("ceiling 256"));
-        assert!(remedy.contains("runner service"));
+    fn remedies_never_suggest_flags_detached_cooks_refuse() {
+        let rss = RunnerResourceGuardViolation {
+            reason: "rss_limit_exceeded".to_string(),
+            rss_bytes: 3 * GIB + 1,
+            rss_limit_bytes: 3 * GIB,
+            ..process_violation(128, Some("default"), Some(256))
+        };
+        assert!(rss
+            .remedy()
+            .contains("{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES\":\"5368709120\"}}"));
+        for remedy in [
+            rss.remedy(),
+            process_violation(128, Some("default"), Some(256)).remedy(),
+            process_violation(256, Some("runner_ceiling"), Some(256)).remedy(),
+        ] {
+            for refused in ["--runner-env", "--lab-env-json", "--gate-env", "resume"] {
+                assert!(!remedy.contains(refused), "{remedy}");
+            }
+        }
     }
 
     #[test]
-    fn default_limit_at_the_ceiling_still_points_at_the_ceiling() {
-        let remedy = process_violation(256, Some("default"), Some(256)).remedy();
-        assert!(remedy.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT"));
+    fn observed_summary_carries_the_process_breakdown() {
+        let mut violation = process_violation(256, Some("default"), Some(512));
+        violation.top_processes = vec![
+            RunnerProcessNameCount {
+                name: "rustc".to_string(),
+                count: 34,
+            },
+            RunnerProcessNameCount {
+                name: "cc".to_string(),
+                count: 21,
+            },
+        ];
+        assert_eq!(
+            violation.observed_summary(),
+            "process_count=291 exceeds limit 256 (top: rustc\u{d7}34, cc\u{d7}21)"
+        );
+        let encoded = serde_json::to_value(&violation).expect("encode");
+        assert_eq!(encoded["top_processes"][0]["name"], "rustc");
+        assert_eq!(
+            serde_json::from_value::<RunnerResourceGuardViolation>(encoded).expect("decode"),
+            violation
+        );
     }
 
     #[test]
-    fn limit_below_the_ceiling_points_at_the_job_request_and_reports_the_ceiling() {
-        let remedy = process_violation(128, Some("default"), Some(256)).remedy();
-        assert!(remedy.starts_with("raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 291"));
-        assert!(remedy.contains("runner ceiling 256"));
-    }
-
-    #[test]
-    fn legacy_violation_without_ceiling_keeps_the_original_remedy_and_round_trips() {
+    fn legacy_violation_without_ceiling_or_breakdown_round_trips() {
         let legacy: RunnerResourceGuardViolation = serde_json::from_value(serde_json::json!({
             "reason": "process_count_limit_exceeded",
             "message": "",
@@ -434,11 +562,13 @@ mod tests {
         }))
         .expect("legacy record");
         assert_eq!(legacy.process_count_limit_ceiling, None);
+        assert!(legacy.top_processes.is_empty());
         assert_eq!(
-            legacy.remedy(),
-            "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 141 (limit 128); do not resume into the same guard"
+            legacy.observed_summary(),
+            "process_count=141 exceeds limit 128"
         );
         let encoded = serde_json::to_value(&legacy).expect("encode");
         assert!(encoded.get("process_count_limit_ceiling").is_none());
+        assert!(encoded.get("top_processes").is_none());
     }
 }

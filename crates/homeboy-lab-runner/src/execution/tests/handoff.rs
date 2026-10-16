@@ -1426,63 +1426,65 @@ fn lab_runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
 
 #[test]
 fn daemon_exec_failure_without_error_field_is_actionable() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-    let addr = listener.local_addr().expect("addr");
-    let (request_tx, request_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut buffer = [0; 4096];
-        let bytes = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
-        request_tx
-            .send(String::from_utf8_lossy(&buffer[..bytes]).to_string())
-            .expect("send request");
-        let body = serde_json::json!({
-            "success": false,
-            "data": {
-                "error": "validation.invalid_argument",
-                "message": "Invalid argument 'cwd': runner exec requires an absolute cwd"
-            }
-        })
-        .to_string();
-        let response = format!(
-            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let bytes = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            request_tx
+                .send(String::from_utf8_lossy(&buffer[..bytes]).to_string())
+                .expect("send request");
+            let body = serde_json::json!({
+                "success": false,
+                "data": {
+                    "error": "validation.invalid_argument",
+                    "message": "Invalid argument 'cwd': runner exec requires an absolute cwd"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let err = exec_via_daemon(
+            &ssh_runner(),
+            &format!("http://{addr}"),
+            None,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "--version".to_string()],
+            Default::default(),
+            Default::default(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect_err("daemon exec failure");
+
+        assert!(err.message.contains("daemon exec request failed"));
+        assert!(err.message.contains("validation.invalid_argument"));
+        assert!(err.message.contains("runner exec requires an absolute cwd"));
+        assert!(!err.message.contains(": null"));
+        let request = request_rx.recv().expect("request capture");
+        assert!(request.starts_with("POST /exec HTTP/1.1"));
+        assert!(request.to_ascii_lowercase().contains("connection: close"));
     });
-
-    let err = exec_via_daemon(
-        &ssh_runner(),
-        &format!("http://{addr}"),
-        None,
-        "/srv/homeboy/project".to_string(),
-        None,
-        vec!["homeboy".to_string(), "--version".to_string()],
-        Default::default(),
-        Default::default(),
-        false,
-        None,
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        false,
-        true,
-        true,
-        None,
-    )
-    .expect_err("daemon exec failure");
-
-    assert!(err.message.contains("daemon exec request failed"));
-    assert!(err.message.contains("validation.invalid_argument"));
-    assert!(err.message.contains("runner exec requires an absolute cwd"));
-    assert!(!err.message.contains(": null"));
-    let request = request_rx.recv().expect("request capture");
-    assert!(request.starts_with("POST /exec HTTP/1.1"));
-    assert!(request.to_ascii_lowercase().contains("connection: close"));
 }
 
 #[test]
@@ -1933,52 +1935,54 @@ fn daemon_exec_stale_response_error_is_actionable() {
 
 #[test]
 fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
-    // A stale daemon that answers `{"success": false}` with no error/data.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-    let addr = listener.local_addr().expect("addr");
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut buffer = [0; 4096];
-        let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
-        let body = serde_json::json!({ "success": false }).to_string();
-        let response = format!(
-            "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        // A stale daemon that answers `{"success": false}` with no error/data.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+            let body = serde_json::json!({ "success": false }).to_string();
+            let response = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write response");
+        });
+
+        let err = exec_via_daemon(
+            &ssh_runner(),
+            &format!("http://{addr}"),
+            None,
+            "/srv/homeboy/project".to_string(),
+            None,
+            vec!["homeboy".to_string(), "--version".to_string()],
+            Default::default(),
+            Default::default(),
+            false,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect_err("daemon exec failure");
+
+        assert!(!err.message.contains(": null"));
+        assert!(err.message.contains("no result") || err.message.contains("stale"));
+        assert!(err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy runner connect")));
     });
-
-    let err = exec_via_daemon(
-        &ssh_runner(),
-        &format!("http://{addr}"),
-        None,
-        "/srv/homeboy/project".to_string(),
-        None,
-        vec!["homeboy".to_string(), "--version".to_string()],
-        Default::default(),
-        Default::default(),
-        false,
-        None,
-        None,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        false,
-        false,
-        true,
-        true,
-        None,
-    )
-    .expect_err("daemon exec failure");
-
-    assert!(!err.message.contains(": null"));
-    assert!(err.message.contains("no result") || err.message.contains("stale"));
-    assert!(err
-        .hints
-        .iter()
-        .any(|hint| hint.message.contains("homeboy runner connect")));
 }
 
 fn running_job() -> Job {

@@ -2264,8 +2264,8 @@ mod tests {
             "artifacts": [],
             "blocker": {
                 "code": "resource_guard.process_count_limit_exceeded",
-                "message": "process_count=141 exceeds limit 128",
-                "reason": "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 141 (limit 128); do not resume into the same guard"
+                "message": "process_count=296 exceeds limit 256 (top: rustc×32, cc×21)",
+                "reason": "process limit 256 is the runner's PROCESS_COUNT; run `homeboy runner set <runner> --json '{\"env\":{\"HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT\":\"384\"}}'` then `homeboy runner service install <runner>`"
             },
             "action_eligibility": {
                 "actions": [{
@@ -2280,12 +2280,19 @@ mod tests {
             summary.contains("Blocker: resource_guard.process_count_limit_exceeded"),
             "{summary}"
         );
-        assert!(summary.contains("141"), "{summary}");
-        assert!(summary.contains("128"), "{summary}");
         assert!(
-            summary.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"),
+            summary.contains("(process_count=296 exceeds limit 256 (top: rustc×32, cc×21))"),
             "{summary}"
         );
+        assert!(
+            summary.contains("Next: process limit 256 is the runner's PROCESS_COUNT; run `homeboy runner set <runner> --json"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("then `homeboy runner service install <runner>`"),
+            "{summary}"
+        );
+        assert!(!summary.contains("--runner-env"), "{summary}");
         assert!(
             !summary.contains("Next: homeboy agent-task resume"),
             "{summary}"

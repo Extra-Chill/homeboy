@@ -50,8 +50,9 @@ pub use execution_context::{
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
     find_resource_guard_stop, ResourceGuardStop, RunnerCgroupMemoryEvidence,
-    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
-    PROCESS_COUNT_CEILING_ENV, PROCESS_COUNT_LIMIT_ENV,
+    RunnerProcessNameCount, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
+    RunnerResourceMetrics, PROCESS_COUNT_CEILING_ENV, PROCESS_COUNT_LIMIT_ENV,
+    RESOURCE_GUARD_POLICY_ENV_KEYS, RSS_LIMIT_ENV, TOP_PROCESS_NAME_LIMIT,
 };
 pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
