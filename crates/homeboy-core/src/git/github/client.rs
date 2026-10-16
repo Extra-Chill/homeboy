@@ -135,6 +135,18 @@ pub(super) fn parse_issue_number_from_url(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
+/// Extract `html_url` from a `gh api` REST response. The REST mutation paths
+/// (`pr_edit`, `issue_edit`) use this instead of trusting `gh pr edit`/`gh
+/// issue edit` stdout, which no longer exists once those mutations go through
+/// `gh api`.
+pub(super) fn parse_html_url(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw.trim())
+        .ok()?
+        .get("html_url")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +202,16 @@ mod tests {
             parse_issue_number_from_url("https://github.com/owner/repo/issues/42/"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn parse_html_url_extracts_rest_response_url() {
+        assert_eq!(
+            parse_html_url(r#"{"number":7,"html_url":"https://github.com/o/r/pull/7"}"#),
+            Some("https://github.com/o/r/pull/7".to_string())
+        );
+        assert_eq!(parse_html_url("not json"), None);
+        assert_eq!(parse_html_url("{}"), None);
     }
 
     #[test]

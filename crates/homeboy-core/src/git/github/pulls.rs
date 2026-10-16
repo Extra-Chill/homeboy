@@ -11,10 +11,12 @@ use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubPrOutput, GithubPrView, PrCreateOptions, PrEditOptions,
     PrFindOptions, PrMergeOptions,
 };
-use super::client::{default_gh_host, parse_issue_number_from_url, resolve_component_github};
+use super::client::{
+    default_gh_host, parse_html_url, parse_issue_number_from_url, resolve_component_github,
+};
 use super::pr_view_record::{parse_pr_view, pr_view_args};
-use super::push_markdown_body_file_arg;
 use super::readiness::classify_pr_ci;
+use super::{push_api_markdown_body_file_arg, push_markdown_body_file_arg};
 
 /// Open a new pull request.
 pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result<GithubPrOutput> {
@@ -78,6 +80,11 @@ pub fn pr_create(component_id: Option<&str>, options: PrCreateOptions) -> Result
 }
 
 /// Edit an existing pull request's title and/or body.
+///
+/// Goes through REST (`gh api -X PATCH repos/{owner}/{repo}/pulls/{n}`) rather
+/// than `gh pr edit`: gh 2.45's `pr edit` queries the deprecated GraphQL
+/// `projectCards` field, which GitHub now rejects, failing the whole edit even
+/// though nothing project-related was requested.
 pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<GithubPrOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
     gh.ensure_ready()?;
@@ -93,19 +100,18 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
     let mut args: Vec<String> = vec![
-        "pr".into(),
-        "edit".into(),
-        options.number.to_string(),
-        "-R".into(),
-        repo_flag,
+        "api".into(),
+        "-X".into(),
+        "PATCH".into(),
+        format!("repos/{}/pulls/{}", repo_flag, options.number),
     ];
     let mut body_files = Vec::new();
     if let Some(title) = &options.title {
-        args.push("--title".into());
-        args.push(title.clone());
+        args.push("-f".into());
+        args.push(format!("title={title}"));
     }
     if let Some(body) = &options.body {
-        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)?;
+        push_api_markdown_body_file_arg(&mut args, &mut body_files, "body", body)?;
     }
 
     let output = gh.run(&args)?;
@@ -116,7 +122,7 @@ pub fn pr_edit(component_id: Option<&str>, options: PrEditOptions) -> Result<Git
         action: "pr.edit".to_string(),
         success: true,
         number: Some(options.number),
-        url: Some(output.trim().to_string()),
+        url: parse_html_url(&output),
         title: options.title,
         ..Default::default()
     })
@@ -514,6 +520,63 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("Extra-Chill/homeboy")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pr_edit_patches_title_and_body_through_rest() {
+        crate::test_support::with_isolated_home(|home| {
+            let fixture = super::super::fake_gh::fake_gh_component(
+                home.path(),
+                "pr-edit-fixture",
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+[ "$1" = "api" ] && printf '%s\n' '{"number":7,"html_url":"https://github.com/example/pr-edit-fixture/pull/7"}'
+exit 0
+"#,
+            );
+
+            let output = pr_edit(
+                Some("pr-edit-fixture"),
+                PrEditOptions {
+                    number: 7,
+                    title: Some("feat:rest-edit".to_string()),
+                    body: Some("Updated body\nwith `markdown`".to_string()),
+                    path: None,
+                },
+            )
+            .expect("pr edit through fake gh");
+
+            // The URL comes from the REST response's html_url, not gh stdout.
+            assert_eq!(
+                output.url.as_deref(),
+                Some("https://github.com/example/pr-edit-fixture/pull/7")
+            );
+            assert_eq!(output.number, Some(7));
+            assert_eq!(output.title.as_deref(), Some("feat:rest-edit"));
+
+            let api_calls = fixture.api_calls();
+            assert_eq!(api_calls.len(), 1, "api calls: {api_calls:?}");
+            let args: Vec<&str> = api_calls[0].split(' ').collect();
+            assert_eq!(
+                &args[..4],
+                [
+                    "api",
+                    "-X",
+                    "PATCH",
+                    "repos/example/pr-edit-fixture/pulls/7"
+                ]
+            );
+            assert_eq!(&args[4..6], ["-f", "title=feat:rest-edit"]);
+            assert_eq!(args[6], "-F");
+            assert!(
+                args[7].starts_with("body=@"),
+                "body must come from a file, not argv: {}",
+                args[7]
+            );
+            // Never the deprecated `gh pr edit` path, which queries projectCards.
+            assert!(!api_calls[0].contains("pr edit"));
+        });
     }
 
     #[test]
