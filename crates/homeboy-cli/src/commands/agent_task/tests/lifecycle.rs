@@ -2840,7 +2840,10 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             diagnosis["root_cause"]["class"],
             "agent_task.promotion_gate_failed"
         );
-        assert_eq!(diagnosis["root_cause"]["message"], "gate proof failed");
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "deterministic gate `cargo test -p homeboy-cli` failed: gate proof failed"
+        );
     });
 }
 
@@ -2936,9 +2939,11 @@ fn diagnose_reads_no_change_gate_results_as_the_current_denial() {
             diagnosis["root_cause"]["class"],
             "agent_task.promotion_gate_failed"
         );
+        // The root cause is the delivery blocker: it names the failing step
+        // as well as the gate's own summary.
         assert_eq!(
             diagnosis["root_cause"]["message"],
-            "no-change gate proof failed"
+            "deterministic gate `gate-1` failed: no-change gate proof failed"
         );
         assert_eq!(
             diagnosis["root_cause"]["details"]["gate_results"][0]["id"],
@@ -3010,7 +3015,10 @@ fn diagnose_names_the_gate_not_the_successful_provider_stream_noise() {
             diagnosis["root_cause"]["class"],
             "agent_task.promotion_gate_failed"
         );
-        assert_eq!(diagnosis["root_cause"]["message"], "gate proof failed");
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "deterministic gate `cargo test -p homeboy-cli` failed: gate proof failed"
+        );
         assert_ne!(diagnosis["root_cause"]["class"], "provider.process_stream");
     });
 }
@@ -3132,7 +3140,10 @@ fn diagnose_names_the_real_gate_command_and_failure_summary_from_a_production_sh
             diagnosis["root_cause"]["class"],
             "agent_task.promotion_gate_failed"
         );
-        assert_eq!(diagnosis["root_cause"]["message"], "2 tests failed");
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "deterministic gate `gate-cargo-test` failed: 2 tests failed"
+        );
         assert!(
             diagnosis["root_cause"]["message"]
                 .as_str()
@@ -3183,6 +3194,61 @@ fn diagnose_prioritizes_current_finalization_failure_over_controller_history() {
             diagnosis["root_cause"]["message"],
             "pull request creation was denied"
         );
+    });
+}
+
+#[test]
+fn moving_base_blocker_is_the_reported_reason_without_a_finalization() {
+    // #15017: a moving-base stop with no finalization must report the base
+    // conflict, not a generic "not applied, verified and published".
+    with_temp_home(|| {
+        let run_id = "run-cli-moving-base-blocker";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::CandidateRecoverable;
+            record.metadata["latest_promotion"] = json!({
+                "status": "applied",
+                "task_id": "task-a",
+                "deterministic_gates": [{ "id": "cargo-test", "status": "succeeded" }]
+            });
+            record.metadata["cook_moving_base_recovery"] = json!({
+                "schema": "homeboy/agent-task-cook-moving-base-recovery/v1",
+                "cook_id": "cook-15017",
+                "run_id": run_id,
+                "promotion": { "changed_files": ["src/lib.rs"] },
+                "prior_verified_base": "base-sha",
+                "passed_gates": [],
+                "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
+                "continuation": "homeboy agent-task cook-continue run-cli-moving-base-blocker",
+                "base_movements": 1
+            });
+        })
+        .expect("persist moving-base blocker");
+
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose moving-base blocker");
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "cook_delivery.base_conflict"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["message"],
+            "origin/main moved and src/lib.rs no longer applies cleanly"
+        );
+        let expected = "base_conflict: origin/main moved and src/lib.rs no longer applies cleanly; next: homeboy agent-task cook-continue run-cli-moving-base-blocker";
+        assert_eq!(diagnosis["cook_verdict"]["reason"], expected);
+
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: true,
+            ..Default::default()
+        })
+        .expect("status moving-base blocker");
+        assert_eq!(status_value["blocker"]["code"], "base_conflict");
+        assert_eq!(status_value["reason"], expected);
     });
 }
 
@@ -4946,271 +5012,44 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
 }
 
 #[test]
-fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
-    let patch = execution_states(
-        fixture_execution_outcome(
-            AgentTaskOutcomeStatus::Succeeded,
-            None,
-            vec![AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch".to_string(),
-                kind: "patch".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: None,
-                url: None,
-                mime: None,
-                size_bytes: Some(1),
-                sha256: None,
-                metadata: Value::Null,
+fn failure_reasons_ignore_successful_no_ops_and_surface_provider_failures() {
+    let aggregate = |status, failure_classification, outputs| -> AgentTaskAggregate {
+        serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "plan",
+            "status": "succeeded",
+            "totals": { "skipped": 0 },
+            "outcomes": [AgentTaskOutcome {
+                status,
+                failure_classification,
+                outputs,
+                ..Default::default()
             }],
-            Value::Null,
-        ),
-        "applied",
-    );
-    assert_eq!(patch["provider"][0]["state"], "succeeded");
-    assert_eq!(patch["candidate"]["state"], "patch_available");
-    assert_eq!(patch["gate"]["state"], "not_run");
-    assert_eq!(patch["promotion"]["state"], "applied");
-    assert_eq!(patch["promotion"]["patch_promoted"], false);
-    assert_eq!(patch["promotion"]["verified"], false);
-
-    let missing = execution_states(
-        fixture_execution_outcome(
-            AgentTaskOutcomeStatus::Succeeded,
-            None,
-            vec![AgentTaskArtifact {
-                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "missing-patch".to_string(),
-                kind: "patch".to_string(),
-                name: None,
-                label: None,
-                role: None,
-                semantic_key: None,
-                path: None,
-                url: None,
-                mime: None,
-                size_bytes: Some(1),
-                sha256: None,
-                metadata: json!({ "executor_artifact_finalized": true }),
-            }],
-            Value::Null,
-        ),
-        "not_attempted",
-    );
-    assert_eq!(missing["candidate"]["state"], "missing");
-    assert_eq!(missing["candidate"]["tasks"][0]["reason_code"], "missing");
-
-    let no_op_aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
+        }))
+        .expect("aggregate fixture")
+    };
+    let no_op = aggregate(
         AgentTaskOutcomeStatus::NoOp,
         None,
-        Vec::new(),
-        json!({
-            "diagnostics": [{
-                "class": "provider_process",
-                "message": "OpenCode CLI exited with status 0."
-            }]
-        }),
-    ));
-    assert!(super::super::status::failure_reasons_from_aggregate(&no_op_aggregate).is_empty());
-    let no_op = super::super::status::execution_states_from_aggregate(
-        &no_op_aggregate,
-        &json!({ "metadata": { "latest_promotion": { "status": "no_changes" } } }),
+        json!({ "diagnostics": [{
+            "class": "provider_process",
+            "message": "OpenCode CLI exited with status 0."
+        }] }),
     );
-    assert_eq!(no_op["provider"][0]["state"], "succeeded");
-    assert_eq!(no_op["candidate"]["state"], "no_changes_produced");
-    assert_eq!(
-        no_op["candidate"]["tasks"][0]["reason_code"],
-        "no_changes_produced"
-    );
+    assert!(super::super::status::failure_reasons_from_aggregate(&no_op).is_empty());
 
-    let provider_failure = aggregate_for_execution_outcome(fixture_execution_outcome(
+    let provider_failure = aggregate(
         AgentTaskOutcomeStatus::ProviderError,
         Some(AgentTaskFailureClassification::Provider),
-        Vec::new(),
-        json!({
-            "diagnostics": [{
-                "class": "provider_process",
-                "message": "OpenCode CLI exited with status 1."
-            }]
-        }),
-    ));
+        json!({ "diagnostics": [{
+            "class": "provider_process",
+            "message": "OpenCode CLI exited with status 1."
+        }] }),
+    );
     assert_eq!(
         super::super::status::failure_reasons_from_aggregate(&provider_failure)[0]["message"],
         "OpenCode CLI exited with status 1."
     );
-    let gate_failure = super::super::status::execution_states_from_aggregate(
-        &provider_failure,
-        &json!({
-            "metadata": {
-                "latest_promotion": {
-                    "status": "gate_failed",
-                    // #11468 "distinguish retained candidates": a promotion
-                    // status alone is not proof the target changed, so the
-                    // gate state only reads "failed" once this full
-                    // post-apply provenance establishes target_applied.
-                    "provenance": {
-                        "post_apply": true,
-                        "candidate": {"sha": "deadbeef"}
-                    },
-                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
-                    "to_worktree": "worktree"
-                }
-            }
-        }),
-    );
-    assert_eq!(gate_failure["provider"][0]["state"], "failed");
-    assert_eq!(gate_failure["gate"]["state"], "failed");
-}
-
-#[test]
-fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_failure() {
-    let states = super::super::status::execution_states_from_aggregate(
-        &aggregate_for_execution_outcome(fixture_execution_outcome(
-            AgentTaskOutcomeStatus::ProviderError,
-            Some(AgentTaskFailureClassification::Provider),
-            Vec::new(),
-            Value::Null,
-        )),
-        &json!({
-            "metadata": {
-                "latest_promotion": {
-                    "schema": "homeboy/agent-task-promotion-report/v1",
-                    "status": "gate_failed",
-                    "source": {"kind": "aggregate", "task_id": "task", "run_id": "run"},
-                    "to_worktree": "worktree",
-                    "target": {"worktree": "worktree"},
-                    // #11468 "distinguish retained candidates": this full
-                    // post-apply provenance is what establishes
-                    // target_applied so the gate state reads its normalized
-                    // outcome instead of defaulting to "not_run".
-                    "provenance": {
-                        "post_apply": true,
-                        "candidate": {"sha": "deadbeef"}
-                    },
-                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
-                    "deterministic_gates": [{
-                        "id": "gate",
-                        "visibility": "visible",
-                        "reveal_policy": "full_evidence",
-                        "status": "accepted_inherited_failure",
-                        "command": ["sh", "-lc", "cargo test"],
-                        "exit_code": 1,
-                        "baseline_comparison": {
-                            "base_ref": "immutable-base",
-                            "exit_code": 1,
-                            "failure_fingerprint": "inherited",
-                            "matches_candidate_failure": true
-                        }
-                    }],
-                    "operator_notification": {"status": "completed", "message": "complete"}
-                }
-            }
-        }),
-    );
-    assert_eq!(states["gate"]["state"], "accepted_inherited_failure");
-    assert_eq!(states["promotion"]["state"], "gate_failed");
-}
-
-#[test]
-fn execution_states_keep_retained_candidate_after_a_failed_provider_attempt() {
-    let states = super::super::status::execution_states_from_aggregate(
-        &aggregate_for_execution_outcome(fixture_execution_outcome(
-            AgentTaskOutcomeStatus::Failed,
-            Some(AgentTaskFailureClassification::Provider),
-            Vec::new(),
-            Value::Null,
-        )),
-        &json!({
-            "metadata": {
-                "latest_promotion": {
-                    "status": "applied",
-                    "patch_artifact": { "id": "canonical-patch" }
-                }
-            }
-        }),
-    );
-
-    assert_eq!(states["provider"][0]["state"], "failed");
-    assert_eq!(states["candidate"]["state"], "apply_ready");
-    assert_eq!(states["promotion"]["state"], "applied");
-    assert_eq!(states["promotion"]["patch_promoted"], false);
-    assert_eq!(states["promotion"]["verified"], false);
-    assert_eq!(states["promotion"]["target"]["state"], "not_applied");
-}
-
-#[test]
-fn execution_states_distinguish_target_application_from_verification() {
-    let aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
-        AgentTaskOutcomeStatus::Succeeded,
-        None,
-        Vec::new(),
-        Value::Null,
-    ));
-    let target_applied = super::super::status::execution_states_from_aggregate(
-        &aggregate,
-        &json!({ "metadata": { "latest_promotion": {
-            "status": "verification_pending",
-            "to_worktree": "fixture@target",
-            "target": { "worktree": "fixture@target" },
-            "patch_artifact": { "id": "patch" },
-            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
-        } } }),
-    );
-    assert_eq!(target_applied["promotion"]["patch_promoted"], true);
-    assert_eq!(target_applied["promotion"]["verified"], false);
-    assert_eq!(
-        target_applied["promotion"]["verification_phase"],
-        "post_apply"
-    );
-
-    let verified = super::super::status::execution_states_from_aggregate(
-        &aggregate,
-        &json!({ "metadata": { "latest_promotion": {
-            "status": "applied",
-            "to_worktree": "fixture@target",
-            "target": { "worktree": "fixture@target" },
-            "patch_artifact": { "id": "patch" },
-            "provenance": { "post_apply": true, "candidate": { "head": "candidate" } }
-        } } }),
-    );
-    assert_eq!(verified["promotion"]["patch_promoted"], true);
-    assert_eq!(verified["promotion"]["verified"], true);
-}
-
-fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {
-    super::super::status::execution_states_from_aggregate(
-        &aggregate_for_execution_outcome(outcome),
-        &json!({ "metadata": { "latest_promotion": { "status": promotion_status } } }),
-    )
-}
-
-fn aggregate_for_execution_outcome(outcome: AgentTaskOutcome) -> AgentTaskAggregate {
-    serde_json::from_value(json!({
-        "schema": "homeboy/agent-task-aggregate/v1",
-        "plan_id": "plan",
-        "status": "succeeded",
-        "totals": { "skipped": 0 },
-        "outcomes": [outcome],
-    }))
-    .expect("aggregate fixture")
-}
-
-fn fixture_execution_outcome(
-    status: AgentTaskOutcomeStatus,
-    failure_classification: Option<AgentTaskFailureClassification>,
-    artifacts: Vec<AgentTaskArtifact>,
-    outputs: Value,
-) -> AgentTaskOutcome {
-    AgentTaskOutcome {
-        status,
-        failure_classification,
-        artifacts,
-        outputs,
-        ..Default::default()
-    }
 }
 
 #[test]

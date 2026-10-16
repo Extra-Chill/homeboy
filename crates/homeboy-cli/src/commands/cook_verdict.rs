@@ -16,9 +16,10 @@
 //! state, gate result, why it has not advanced, and the next legal action —
 //! so every surface reports the same answer from the same read.
 
+use homeboy::agents::agent_task_service::CookDeliveryBlockerCode;
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::observation::RunRecord;
-use homeboy_control_plane_contract::{ControlPlaneRun, ControlPlaneRunState};
+use homeboy_control_plane_contract::{ControlPlaneBlocker, ControlPlaneRun, ControlPlaneRunState};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -167,6 +168,9 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
         return None;
     }
     if let Some(blocker) = run.blocker.as_ref() {
+        if let Some(reason) = delivery_blocker_reason(blocker) {
+            return Some(reason);
+        }
         let message = blocker
             .reason
             .as_deref()
@@ -221,6 +225,23 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
             None => format!("the Cook ended `{}`", state_label(run.state)),
         }),
     }
+}
+
+/// A Cook delivery blocker reads as the step that stopped delivery, then the
+/// next legal action the blocker recorded.
+fn delivery_blocker_reason(blocker: &ControlPlaneBlocker) -> Option<String> {
+    let code =
+        serde_json::from_value::<CookDeliveryBlockerCode>(Value::String(blocker.code.clone()?))
+            .ok()?;
+    let mut reason = format!("{}: {}", code.as_str(), blocker.message);
+    if let Some(next) = blocker
+        .reason
+        .as_deref()
+        .filter(|next| !next.trim().is_empty())
+    {
+        reason.push_str(&format!("; next: {next}"));
+    }
+    Some(reason)
 }
 
 #[cfg(test)]
