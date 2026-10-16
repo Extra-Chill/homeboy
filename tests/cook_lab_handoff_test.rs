@@ -680,7 +680,7 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
         "crashed launcher {launcher_pid} remained {launcher_state:?}: {crashed_parent:?}"
     );
     assert!(
-        !lifecycle_store.cook_index_path(cook_id).exists(),
+        !lifecycle_store.cook_index_exists(cook_id),
         "an interrupted pre-projection launcher must not admit an executable Cook"
     );
 }
