@@ -1440,6 +1440,7 @@ pub struct CommandProgress {
 #[derive(Debug, Clone, Default)]
 pub struct SupervisedCommandHeartbeat {
     pub elapsed: Duration,
+    /// Time since the last liveness signal (see `no_progress_timeout`).
     pub last_progress_elapsed: Option<Duration>,
     pub progress: Option<CommandProgress>,
     pub output_tail: String,
@@ -1449,6 +1450,9 @@ pub struct SupervisedCommandHeartbeat {
 pub struct SupervisedCommandOutput {
     pub output: BoundedCommandOutput,
     pub termination: SupervisedCommandTermination,
+    /// The command emitted at least one valid `HOMEBOY_PROGRESS` marker, so
+    /// only markers (not ordinary output) counted as liveness afterwards.
+    pub progress_instrumented: bool,
 }
 
 impl BoundedCommandOutput {
@@ -1736,6 +1740,9 @@ pub fn wait_with_bounded_output_supervised_guarded(
             },
         },
         termination,
+        progress_instrumented: live_output
+            .lock()
+            .is_ok_and(|live| live.last_progress.is_some()),
     })
 }
 
@@ -1755,10 +1762,10 @@ fn join_capture_pair(
     }
 }
 
-/// Supervise a command with wall-clock and optional structured-progress
-/// deadlines. `no_progress_timeout` is measured from spawn until the first
-/// valid `HOMEBOY_PROGRESS` marker and between subsequent markers. Ordinary
-/// output is retained as evidence but cannot mask a stalled test case.
+/// Supervise a command with wall-clock and optional no-progress deadlines.
+/// `no_progress_timeout` measures time since the last liveness signal: any
+/// output until the first valid `HOMEBOY_PROGRESS` marker, then markers only,
+/// so ordinary output cannot mask a stalled instrumented test case.
 pub fn wait_with_bounded_output_supervised_with_progress(
     child: &mut Child,
     byte_limit: usize,
@@ -1837,13 +1844,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_until(
         if no_progress_timeout.is_some_and(|limit| {
             live_output
                 .lock()
-                .map(|live| {
-                    live.last_progress
-                        .as_ref()
-                        .map(|(_, progress_at)| progress_at.elapsed())
-                        .unwrap_or_else(|| started.elapsed())
-                        >= limit
-                })
+                .map(|live| live.quiet_for(started.elapsed()) >= limit)
                 .unwrap_or(false)
         }) {
             break (
@@ -1883,6 +1884,9 @@ pub fn wait_with_bounded_output_supervised_with_progress_until(
             },
         },
         termination,
+        progress_instrumented: live_output
+            .lock()
+            .is_ok_and(|live| live.last_progress.is_some()),
     })
 }
 
@@ -1944,13 +1948,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
         if no_progress_timeout.is_some_and(|limit| {
             live_output
                 .lock()
-                .map(|live| {
-                    live.last_progress
-                        .as_ref()
-                        .map(|(_, progress_at)| progress_at.elapsed())
-                        .unwrap_or_else(|| started.elapsed())
-                        >= limit
-                })
+                .map(|live| live.quiet_for(started.elapsed()) >= limit)
                 .unwrap_or(false)
         }) {
             break (
@@ -1988,6 +1986,9 @@ pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
             },
         },
         termination,
+        progress_instrumented: live_output
+            .lock()
+            .is_ok_and(|live| live.last_progress.is_some()),
     })
 }
 
@@ -2070,13 +2071,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
         if no_progress_timeout.is_some_and(|limit| {
             live_output
                 .lock()
-                .map(|live| {
-                    live.last_progress
-                        .as_ref()
-                        .map(|(_, progress_at)| progress_at.elapsed())
-                        .unwrap_or_else(|| started.elapsed())
-                        >= limit
-                })
+                .map(|live| live.quiet_for(started.elapsed()) >= limit)
                 .unwrap_or(false)
         }) {
             break (
@@ -2114,6 +2109,9 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
             },
         },
         termination,
+        progress_instrumented: live_output
+            .lock()
+            .is_ok_and(|live| live.last_progress.is_some()),
     })
 }
 
@@ -2151,6 +2149,7 @@ struct LiveOutputTail {
     stdout: TailCapture,
     stderr: TailCapture,
     last_progress: Option<(CommandProgress, std::time::Instant)>,
+    last_output_at: Option<std::time::Instant>,
 }
 
 impl LiveOutputTail {
@@ -2159,6 +2158,7 @@ impl LiveOutputTail {
             stdout: TailCapture::new(byte_limit),
             stderr: TailCapture::new(byte_limit),
             last_progress: None,
+            last_output_at: None,
         }
     }
 
@@ -2187,16 +2187,26 @@ impl LiveOutputTail {
         self.last_progress = Some((progress, std::time::Instant::now()));
     }
 
-    fn heartbeat(&self, elapsed: Duration) -> SupervisedCommandHeartbeat {
-        let (progress, marker_elapsed) = self
-            .last_progress
+    /// Time since the last liveness signal. Until the first valid
+    /// `HOMEBOY_PROGRESS` marker any output counts; once a command has emitted
+    /// a marker it is instrumented, and only markers count, so chatty output
+    /// cannot mask a stalled test case.
+    fn quiet_for(&self, elapsed: Duration) -> Duration {
+        self.last_progress
             .as_ref()
-            .map(|(progress, at)| (Some(progress.clone()), Some(at.elapsed())))
-            .unwrap_or((None, None));
+            .map(|(_, at)| *at)
+            .or(self.last_output_at)
+            .map_or(elapsed, |at| at.elapsed())
+    }
+
+    fn heartbeat(&self, elapsed: Duration) -> SupervisedCommandHeartbeat {
         SupervisedCommandHeartbeat {
             elapsed,
-            last_progress_elapsed: marker_elapsed,
-            progress,
+            last_progress_elapsed: Some(self.quiet_for(elapsed)),
+            progress: self
+                .last_progress
+                .as_ref()
+                .map(|(progress, _)| progress.clone()),
             output_tail: self.render(),
         }
     }
@@ -2223,6 +2233,7 @@ fn capture_tail_with_live_snapshot(
         }
         capture.push(&buffer[..count]);
         if let Ok(mut live) = live_output.lock() {
+            live.last_output_at = Some(std::time::Instant::now());
             let destination = if stdout {
                 &mut live.stdout
             } else {

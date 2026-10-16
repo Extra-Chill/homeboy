@@ -107,7 +107,9 @@ pub struct VerifyGateOptions {
     /// Cadence for durable liveness and bounded output-tail updates.
     #[serde(default = "default_gate_heartbeat_interval_seconds")]
     pub gate_heartbeat_interval_seconds: u64,
-    /// Maximum time a gate may go without a `HOMEBOY_PROGRESS` marker.
+    /// Maximum time a gate may go without a liveness signal. Any output counts
+    /// until the gate emits its first `HOMEBOY_PROGRESS` marker; after that,
+    /// only markers count.
     #[serde(default = "default_gate_no_progress_timeout_seconds")]
     pub gate_no_progress_timeout_seconds: u64,
     /// Completed adoption gates are reused by default; a recipe must opt in to
@@ -2160,7 +2162,7 @@ fn run_gate_argv_local(
     let timeout = declared_plan
         .map(|plan| plan.suite_timeout())
         .or(execution.timeout);
-    let (mut output, termination) = if let Some(timeout) = timeout {
+    let (mut output, termination, progress_instrumented) = if let Some(timeout) = timeout {
         let supervision = execution.supervision;
         if let Some(supervision) = supervision {
             if let Err(error) = (supervision.on_spawn)(process_group, command) {
@@ -2218,7 +2220,11 @@ fn run_gate_argv_local(
                     Some(format!("supervise deterministic gate {command}")),
                 )
             })?;
-        (supervised.output, supervised.termination)
+        (
+            supervised.output,
+            supervised.termination,
+            supervised.progress_instrumented,
+        )
     } else {
         let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled_owned(
             containment.owner_mut().expect("attached gate owner"),
@@ -2234,6 +2240,7 @@ fn run_gate_argv_local(
         (
             output,
             homeboy_core::engine::command::SupervisedCommandTermination::Completed,
+            false,
         )
     };
     // The wait loops above already reap survivors once they observe the
@@ -2299,6 +2306,7 @@ fn run_gate_argv_local(
             &stdout,
             &stderr,
             termination,
+            progress_instrumented,
             if termination == AgentTaskGateTermination::NoProgress {
                 execution
                     .supervision
@@ -4367,6 +4375,7 @@ fn gate_budget_failure_evidence(
     stdout: &str,
     stderr: &str,
     termination: AgentTaskGateTermination,
+    progress_instrumented: bool,
     budget: Option<Duration>,
 ) -> Option<AgentTaskGateFailureEvidence> {
     let cause = match termination {
@@ -4375,7 +4384,12 @@ fn gate_budget_failure_evidence(
             budget.unwrap_or_default().as_millis()
         ),
         AgentTaskGateTermination::NoProgress => format!(
-            "no output or progress for {} ms; killed (no_progress)",
+            "{} for {} ms; killed (no_progress)",
+            if progress_instrumented {
+                "no HOMEBOY_PROGRESS marker"
+            } else {
+                "no output"
+            },
             budget.unwrap_or_default().as_millis()
         ),
         _ => return None,
@@ -7211,7 +7225,7 @@ mod tests {
             serde_json::to_value(evidence.classification).unwrap(),
             "execution_budget"
         );
-        assert!(evidence.summary.contains("no output or progress for 30 ms"));
+        assert!(evidence.summary.contains("no output for 30 ms"));
         assert!(evidence.summary.contains("no_progress"));
     }
 
@@ -7249,6 +7263,69 @@ mod tests {
                 .is_some_and(|progress| progress.phase == "test")
                 && status.last_progress_ms_ago.is_some()
         }));
+    }
+
+    #[cfg(unix)]
+    fn chatty_gate_supervision() -> GateSupervision {
+        GateSupervision {
+            timeout: Duration::from_secs(5),
+            no_progress_timeout: Duration::from_millis(250),
+            heartbeat_interval: Duration::from_millis(10),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(|| false),
+        }
+    }
+
+    /// An uninstrumented gate (any third-party test runner) is alive while it
+    /// prints, even when it runs far longer than the no-progress window.
+    #[cfg(unix)]
+    #[test]
+    fn uninstrumented_gate_output_keeps_it_alive() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let report = run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            "for i in $(seq 1 40); do echo \"case $i passed\"; sleep 0.02; done",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&chatty_gate_supervision()),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate report");
+        assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+    }
+
+    /// Once a gate emits a marker it is instrumented: ordinary output can no
+    /// longer mask a stalled test case (#11415).
+    #[cfg(unix)]
+    #[test]
+    fn instrumented_gate_output_cannot_mask_a_missing_marker() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let report = run_gate_command_with_supervision(
+            worktree.path(),
+            1,
+            "printf 'HOMEBOY_PROGRESS {\"phase\":\"test\"}\\n'; for i in $(seq 1 100); do echo \"line $i\"; sleep 0.02; done",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            None,
+            Some(&chatty_gate_supervision()),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .expect("gate report");
+        assert_eq!(report.termination, AgentTaskGateTermination::NoProgress);
+        let evidence = report.failure_evidence.as_ref().expect("failure evidence");
+        assert!(
+            evidence
+                .summary
+                .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
+            "{}",
+            evidence.summary
+        );
     }
 
     #[test]
