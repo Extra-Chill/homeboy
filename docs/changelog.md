@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.17] - 2026-10-16
+
+### Changed
+- fold single-owner contract crates into their owners
+
+### Fixed
+- cook homeboy
+- enforce cancellation as a write invariant and drop the read projection
+
 ## [0.428.16] - 2026-10-16
 
 ### Changed
