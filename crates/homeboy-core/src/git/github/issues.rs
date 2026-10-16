@@ -6,8 +6,9 @@ use super::super::github_types::{
     GithubFindItem, GithubFindOutput, GithubIssueOutput, IssueCloseOptions, IssueCommentOptions,
     IssueCreateOptions, IssueEditOptions, IssueFindOptions,
 };
-use super::client::{parse_issue_number_from_url, resolve_component_github};
-use super::push_markdown_body_file_arg;
+use super::client::{parse_html_url, parse_issue_number_from_url, resolve_component_github};
+use super::{push_api_markdown_body_file_arg, push_markdown_body_file_arg};
+use crate::execution_contract::encode_uri_component;
 
 /// Create a new issue on the component's GitHub repository.
 pub fn issue_create(
@@ -167,10 +168,15 @@ pub fn issue_close(
 /// Edit an existing issue's title, body, or labels.
 ///
 /// At least one of `title`, `body`, `add_labels`, or `remove_labels` must be
-/// provided. Mirrors `gh issue edit <n> [--title ...] [--body ...]
-/// [--add-label ...] [--remove-label ...]`. Used by `homeboy runs findings reconcile`
-/// to refresh the body of existing issues (open OR closed) so the latest
-/// finding count and run link stay visible without duplicating the issue.
+/// provided. Used by `homeboy runs findings reconcile` to refresh the body of
+/// existing issues (open OR closed) so the latest finding count and run link
+/// stay visible without duplicating the issue.
+///
+/// Goes through REST (`gh api -X PATCH repos/{owner}/{repo}/issues/{n}` plus
+/// the REST label endpoints) rather than `gh issue edit`: gh 2.45's `issue
+/// edit` queries the deprecated GraphQL `projectCards` field, which GitHub now
+/// rejects, failing the whole edit even though nothing project-related was
+/// requested.
 pub fn issue_edit(
     component_id: Option<&str>,
     options: IssueEditOptions,
@@ -192,31 +198,62 @@ pub fn issue_edit(
     }
 
     let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let mut args: Vec<String> = vec![
-        "issue".into(),
-        "edit".into(),
-        options.number.to_string(),
-        "-R".into(),
-        repo_flag,
-    ];
-    let mut body_files = Vec::new();
-    if let Some(title) = &options.title {
-        args.push("--title".into());
-        args.push(title.clone());
-    }
-    if let Some(body) = &options.body {
-        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", body)?;
-    }
-    for label in &options.add_labels {
-        args.push("--add-label".into());
-        args.push(label.clone());
-    }
-    for label in &options.remove_labels {
-        args.push("--remove-label".into());
-        args.push(label.clone());
+    let mut url = None;
+    if options.title.is_some() || options.body.is_some() {
+        let mut args: Vec<String> = vec![
+            "api".into(),
+            "-X".into(),
+            "PATCH".into(),
+            format!("repos/{}/issues/{}", repo_flag, options.number),
+        ];
+        let mut body_files = Vec::new();
+        if let Some(title) = &options.title {
+            args.push("-f".into());
+            args.push(format!("title={title}"));
+        }
+        if let Some(body) = &options.body {
+            push_api_markdown_body_file_arg(&mut args, &mut body_files, "body", body)?;
+        }
+        let output = gh.run(&args)?;
+        url = parse_html_url(&output);
     }
 
-    let output = gh.run(&args)?;
+    if !options.add_labels.is_empty() {
+        let mut args: Vec<String> = vec![
+            "api".into(),
+            "-X".into(),
+            "POST".into(),
+            format!("repos/{}/issues/{}/labels", repo_flag, options.number),
+        ];
+        for label in &options.add_labels {
+            args.push("-f".into());
+            args.push(format!("labels[]={label}"));
+        }
+        let _ = gh.run(&args)?;
+    }
+
+    for label in &options.remove_labels {
+        let args: Vec<String> = vec![
+            "api".into(),
+            "-X".into(),
+            "DELETE".into(),
+            format!(
+                "repos/{}/issues/{}/labels/{}",
+                repo_flag,
+                options.number,
+                encode_uri_component(label)
+            ),
+        ];
+        match gh.run(&args) {
+            Ok(_) => {}
+            // `gh issue edit --remove-label` tolerated labels that were not on
+            // the issue; the REST endpoint 404s instead, so keep that lenient
+            // contract here.
+            Err(error) if error.to_string().contains("Label does not exist") => {}
+            Err(error) => return Err(error),
+        }
+    }
+
     Ok(GithubIssueOutput {
         component_id: id,
         owner: repo.owner,
@@ -224,7 +261,12 @@ pub fn issue_edit(
         action: "issue.edit".to_string(),
         success: true,
         number: Some(options.number),
-        url: Some(output.trim().to_string()),
+        url: url.or_else(|| {
+            Some(format!(
+                "https://{}/{}/issues/{}",
+                repo.host, repo_flag, options.number
+            ))
+        }),
         title: options.title,
         state: None,
     })
@@ -502,6 +544,115 @@ mod tests {
             items[2].labels,
             vec!["audit".to_string(), "wontfix".to_string()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_edit_mutates_through_rest_endpoints() {
+        crate::test_support::with_isolated_home(|home| {
+            let fixture = super::super::fake_gh::fake_gh_component(
+                home.path(),
+                "issue-edit-fixture",
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+[ "$1" = "api" ] && printf '%s\n' '{"number":9,"html_url":"https://github.com/example/issue-edit-fixture/issues/9"}'
+exit 0
+"#,
+            );
+
+            let output = issue_edit(
+                Some("issue-edit-fixture"),
+                IssueEditOptions {
+                    number: 9,
+                    title: Some("audit:refreshed".to_string()),
+                    body: Some("Refreshed body\nwith `markdown`".to_string()),
+                    add_labels: vec!["bug".to_string(), "needs-triage".to_string()],
+                    remove_labels: vec!["stale label".to_string()],
+                    path: None,
+                },
+            )
+            .expect("issue edit through fake gh");
+
+            // The URL comes from the REST response's html_url, not gh stdout.
+            assert_eq!(
+                output.url.as_deref(),
+                Some("https://github.com/example/issue-edit-fixture/issues/9")
+            );
+            assert_eq!(output.number, Some(9));
+
+            let api_calls = fixture.api_calls();
+            assert_eq!(api_calls.len(), 3, "api calls: {api_calls:?}");
+
+            let patch: Vec<&str> = api_calls[0].split(' ').collect();
+            assert_eq!(
+                &patch[..4],
+                [
+                    "api",
+                    "-X",
+                    "PATCH",
+                    "repos/example/issue-edit-fixture/issues/9"
+                ]
+            );
+            assert_eq!(&patch[4..6], ["-f", "title=audit:refreshed"]);
+            assert_eq!(patch[6], "-F");
+            assert!(
+                patch[7].starts_with("body=@"),
+                "body must come from a file, not argv: {}",
+                patch[7]
+            );
+
+            assert_eq!(
+                api_calls[1],
+                "api -X POST repos/example/issue-edit-fixture/issues/9/labels \
+                 -f labels[]=bug -f labels[]=needs-triage"
+            );
+            assert_eq!(
+                api_calls[2],
+                "api -X DELETE repos/example/issue-edit-fixture/issues/9/labels/stale%20label"
+            );
+            // Never the deprecated `gh issue edit` path, which queries projectCards.
+            assert!(!api_calls.iter().any(|call| call.contains("issue edit")));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn issue_edit_tolerates_removing_a_label_that_is_not_on_the_issue() {
+        crate::test_support::with_isolated_home(|home| {
+            let fixture = super::super::fake_gh::fake_gh_component(
+                home.path(),
+                "issue-label-fixture",
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+if [ "$1" = "api" ] && [ "$3" = "DELETE" ]; then
+  echo 'gh: Label does not exist (HTTP 404)' >&2
+  exit 1
+fi
+exit 0
+"#,
+            );
+
+            let output = issue_edit(
+                Some("issue-label-fixture"),
+                IssueEditOptions {
+                    number: 12,
+                    remove_labels: vec!["missing".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("removing an absent label stays non-fatal, as with gh issue edit");
+
+            // Labels-only edits never PATCH the issue, so the URL falls back to
+            // the canonical issue address.
+            assert_eq!(
+                output.url.as_deref(),
+                Some("https://github.com/example/issue-label-fixture/issues/12")
+            );
+            assert_eq!(
+                fixture.api_calls(),
+                vec!["api -X DELETE repos/example/issue-label-fixture/issues/12/labels/missing"]
+            );
+        });
     }
 
     #[test]

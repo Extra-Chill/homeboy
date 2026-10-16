@@ -35,6 +35,23 @@ pub fn push_markdown_body_file_arg(
     Ok(())
 }
 
+/// Push a `gh api` form field whose value is read from a bounded temp file
+/// (`-F <field>=@<path>`), keeping large Markdown bodies out of argv for REST
+/// mutations the same way [`push_markdown_body_file_arg`] does for `gh`
+/// subcommand `--body-file` flags.
+pub fn push_api_markdown_body_file_arg(
+    args: &mut Vec<String>,
+    body_files: &mut Vec<GhBodyFile>,
+    field: &str,
+    body: &str,
+) -> Result<()> {
+    let body_file = write_markdown_body_file(body)?;
+    args.push("-F".to_string());
+    args.push(format!("{field}=@{}", body_file.path()));
+    body_files.push(body_file);
+    Ok(())
+}
+
 fn write_markdown_body_file(body: &str) -> Result<GhBodyFile> {
     let rendered = bounded_markdown_body(body);
     let mut file = NamedTempFile::new().map_err(|error| {
@@ -83,6 +100,21 @@ mod tests {
         assert_eq!(args[2], "--body-file");
         assert_ne!(args[3], body);
         assert!(!args.iter().any(|arg| arg == body));
+        let persisted = std::fs::read_to_string(files[0].path()).expect("read body file");
+        assert_eq!(persisted, body);
+    }
+
+    #[test]
+    fn api_body_file_arg_reads_body_from_file_not_argv() {
+        let body = "`homeboy-lab run`\nline two";
+        let mut args = vec!["api".to_string()];
+        let mut files = Vec::new();
+
+        push_api_markdown_body_file_arg(&mut args, &mut files, "body", body).expect("body file");
+
+        assert_eq!(args[1], "-F");
+        assert_eq!(args[2], format!("body=@{}", files[0].path()));
+        assert!(!args.iter().any(|arg| arg.contains(body)));
         let persisted = std::fs::read_to_string(files[0].path()).expect("read body file");
         assert_eq!(persisted, body);
     }
