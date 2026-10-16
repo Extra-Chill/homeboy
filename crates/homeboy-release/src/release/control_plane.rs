@@ -1,4 +1,3 @@
-use std::fs::OpenOptions;
 use std::sync::Arc;
 
 use homeboy_control_plane_contract::{
@@ -113,20 +112,6 @@ pub(super) fn resume_deploy_action(
             ControlPlaneError::invalid_argument("deploy run has no recovery component")
         })?;
     let roots = homeboy_core::paths::PathRoots::from_environment()
-        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-    let lock_path = roots
-        .data()
-        .join("release-deploy-runs")
-        .join(format!("{}.lock", component_id.replace('/', "_")));
-    std::fs::create_dir_all(lock_path.parent().expect("deploy recovery lock parent"))
-        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
-    homeboy_core::config::lock_exclusive_bounded(&lock, &lock_path, "lock deploy recovery")
         .map_err(|error| ControlPlaneError::unavailable(error.message))?;
     let deployment = super::deployment::resume_deployment_for_run(&roots, component_id, &run.id)
         .map_err(|error| ControlPlaneError::unavailable(error.message))?;
