@@ -166,8 +166,9 @@ fn compile(
     set("head", json!("{{item.branch}}"));
     set("to-worktree", json!("{{item.worktree}}"));
     set("base", json!("{{steps.prepare.output/base}}"));
-    set("title", json!("{{item.title}}"));
-    set("commit-message", json!("{{item.commit_message}}"));
+    // No title or commit message: each child Cook takes both from its own
+    // validated agent review form, exactly like a single Cook (#15122,
+    // #16052). A per-item "Fix #N" would override that title (#16061).
     for (key, value) in [
         ("backend", &args.backend),
         ("selector", &args.selector),
@@ -570,8 +571,6 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                 "branch": branch,
                 "worktree": worktree,
                 "prompt": prompt,
-                "title": format!("Fix {}", issue.key),
-                "commit_message": format!("fix: address {}", issue.key),
             })
         })
         .collect::<Vec<_>>();
@@ -772,6 +771,9 @@ mod tests {
         assert_eq!(cook["max_parallel"], 2);
         assert_eq!(cook["join"], json!({"min_succeeded": 2}));
         assert_eq!(cook["cook"]["task-url"], "{{item.issue_url}}");
+        // #16061: children take title and commit subject from the agent form.
+        assert!(cook["cook"].get("title").is_none());
+        assert!(cook["cook"].get("commit-message").is_none());
         assert_eq!(cook["cook"]["verify"], json!(["test -f DONE"]));
         assert_eq!(cook["cook"]["placement"], "lab");
         assert_eq!(cook["cook"]["gate-timeout-seconds"], 60);
