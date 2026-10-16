@@ -1,12 +1,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupScope, ArtifactCleanupSort, CleanupPolicy,
     CleanupPolicyOverrides,
@@ -42,8 +40,6 @@ use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOu
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
-const AUTOMATIC_RETENTION_LOCK_FILE: &str = "automatic-retention-controller.lock";
-const AUTOMATIC_RETENTION_STATE_FILE: &str = "automatic-retention-controller.json";
 const CLEANUP_CATEGORY_CHILD_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_CHILD";
 const CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_TIMEOUT_MS";
 const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
@@ -58,10 +54,6 @@ const CLEANUP_CATEGORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const CLEANUP_CATEGORY_FIXTURE_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_FIXTURE";
 #[cfg(any(test, feature = "test-support"))]
 const CLEANUP_CATEGORY_TIMEOUT_ENV: &str = "HOMEBOY_TEST_CLEANUP_CATEGORY_TIMEOUT_MS";
-
-// Advisory file locks are process-scoped on POSIX. Keep the process-local gate
-// so a manual invocation cannot overlap a scheduled pass in this process.
-static AUTOMATIC_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct CleanupProgressContext {
     run_ref: String,
@@ -102,7 +94,8 @@ fn active_cleanup_run_ref() -> Option<String> {
 struct AutomaticRetentionControllerOutput {
     command: &'static str,
     status: &'static str,
-    state_path: String,
+    /// Coordination record holding the controller pass state.
+    state_key: String,
     resume_command: &'static str,
     reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
     repo_artifacts: Value,
@@ -1851,57 +1844,21 @@ const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
 
 fn automatic_retention() -> CmdResult<Value> {
     let data = homeboy::core::paths::homeboy_data()?;
-    fs::create_dir_all(&data).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("create automatic retention state directory".to_string()),
-        )
-    })?;
-    let state_path = data.join(AUTOMATIC_RETENTION_STATE_FILE);
-    let admission = AUTOMATIC_RETENTION_ADMISSION
-        .get_or_init(|| Mutex::new(()))
-        .try_lock();
-    let Ok(_admission) = admission else {
+    let kind = cleanup::AutomaticRetentionKind::Controller;
+    let state_key = kind.state_key();
+    let store = homeboy::core::observation::ObservationStore::open_initialized_for_lifecycle()?;
+    let Some(pass) = cleanup::begin_automatic_retention_pass(store, kind, SystemTime::now())?
+    else {
         return Ok((
             serde_json::json!({
                 "command": "cleanup.automatic_retention",
                 "status": "busy",
-                "state_path": state_path,
+                "state_key": state_key,
                 "resume_command": "homeboy cleanup automatic-retention",
             }),
             0,
         ));
     };
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(data.join(AUTOMATIC_RETENTION_LOCK_FILE))
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("open automatic retention lock".to_string()),
-            )
-        })?;
-    if lock.try_lock_exclusive().is_err() {
-        return Ok((
-            serde_json::json!({
-                "command": "cleanup.automatic_retention",
-                "status": "busy",
-                "state_path": state_path,
-                "resume_command": "homeboy cleanup automatic-retention",
-            }),
-            0,
-        ));
-    }
-
-    fs::write(&state_path, r#"{"status":"running"}"#).map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("write automatic retention state".to_string()),
-        )
-    })?;
     let retention = defaults::load_config().retention;
     let deadline = SystemTime::now().checked_add(Duration::from_secs(
         retention.automatic_retention_max_run_seconds,
@@ -1956,7 +1913,7 @@ fn automatic_retention() -> CmdResult<Value> {
             status: "partial",
             max_run_seconds: retention.automatic_retention_max_run_seconds,
             row_limit: retention.limit as usize,
-            state_path: state_path.display().to_string(),
+            state_key: cleanup::AutomaticRetentionKind::CargoTarget.state_key(),
             resume_command: "homeboy cleanup automatic-retention".to_string(),
             cargo_targets: None,
             runtime_tmp: None,
@@ -1999,7 +1956,7 @@ fn automatic_retention() -> CmdResult<Value> {
     let output = AutomaticRetentionControllerOutput {
         command: "cleanup.automatic_retention",
         status,
-        state_path: state_path.display().to_string(),
+        state_key,
         resume_command: "homeboy cleanup automatic-retention",
         reconciliation,
         repo_artifacts,
@@ -2015,21 +1972,7 @@ fn automatic_retention() -> CmdResult<Value> {
             Some("serialize automatic retention output".to_string()),
         )
     })?;
-    fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&value).map_err(|error| {
-            homeboy::core::Error::internal_json(
-                error.to_string(),
-                Some("serialize automatic retention state".to_string()),
-            )
-        })?,
-    )
-    .map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("write automatic retention state".to_string()),
-        )
-    })?;
+    pass.finish(status, None)?;
     Ok((value, (status == "partial_failure") as i32))
 }
 
@@ -6057,6 +6000,18 @@ mod tests {
             assert_eq!(exit_code, 1);
             assert_eq!(output["status"], "partial_failure");
             assert_eq!(output["cleanup"]["categories"]["status"], "partial_failure");
+            assert_eq!(output["state_key"], "automatic-retention/controller");
+            let store =
+                homeboy::core::observation::ObservationStore::open_initialized().expect("store");
+            let record = store
+                .coordination_record(cleanup::AUTOMATIC_RETENTION_NAMESPACE, "controller")
+                .expect("read record")
+                .expect("controller record");
+            assert_eq!(record.state, "partial_failure");
+            assert!(store
+                .coordination_lease_holders(cleanup::AUTOMATIC_RETENTION_NAMESPACE, "controller")
+                .expect("holders")
+                .is_empty());
         });
     }
 
