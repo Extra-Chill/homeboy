@@ -8,6 +8,7 @@ mod ci_ownership;
 pub mod containment;
 mod context;
 mod control_plane;
+mod deploy_recovery;
 mod deployment;
 mod execution_dispatch;
 mod execution_plan;

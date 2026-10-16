@@ -3,9 +3,9 @@ use homeboy_deploy::{
     self as deploy, DeployConfig, PreparedDeployArtifact, PreparedDeployProjection,
 };
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
+use super::deploy_recovery::{self, DeploymentRecovery, StoredRecovery};
 use super::executor::release_cleanup_paths;
 use super::types::{
     ReleaseArtifact, ReleaseControlPlaneContext, ReleaseDeploymentResult, ReleaseDeploymentSummary,
@@ -151,7 +151,7 @@ fn execute_deployment(
                     }
                 }
             } else {
-                if let Err(error) = remove_recovery(data_root, &component.id) {
+                if let Err(error) = deploy_recovery::clear(data_root, &component.id) {
                     return failed_deployment(
                         &projects,
                         format!("Deployment succeeded but its recovery checkpoint could not be cleared: {error}"),
@@ -416,36 +416,11 @@ fn release_deployment_config(
     })
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DeploymentRecovery {
-    component_id: String,
-    expected_version: Option<String>,
-    projects: Vec<String>,
-    artifact: PreparedDeployArtifact,
-    projection: PreparedDeployProjection,
-    deploy_run_id: String,
-    #[serde(default)]
-    component_path: String,
-    #[serde(default)]
-    package_owned_paths: Vec<String>,
-}
-
-/// The release deploy recovery checkpoint below an explicitly injected data
-/// root.
-///
-/// Infallible: every caller already resolves the root once at its own
-/// boundary, so the only fallible step left is resolution itself.
-fn recovery_path_in_roots(data_root: &Path, component_id: &str) -> std::path::PathBuf {
-    data_root
-        .join("release-deploy-runs")
-        .join(format!("{}.json", component_id.replace('/', "_")))
-}
-
 /// Write the release deploy recovery checkpoint below an explicitly injected
 /// data root.
 ///
 /// The checkpoint and the clear that eventually retires it must address the
-/// same home, so both take the root their caller already resolved (#7505).
+/// same store, so both take the root their caller already resolved (#7505).
 fn save_recovery(
     data_root: &Path,
     component: &homeboy_core::component::Component,
@@ -455,44 +430,25 @@ fn save_recovery(
     deploy_run_id: &str,
     package_owned_paths: &[String],
 ) -> Result<()> {
-    let record = DeploymentRecovery {
-        component_id: component.id.clone(),
-        expected_version: expected_version.map(str::to_string),
-        projects: projects.to_vec(),
-        artifact: config
-            .prepared_artifact
-            .clone()
-            .expect("release deploy has prepared artifact"),
-        projection: config
-            .prepared_projection
-            .clone()
-            .expect("release deploy has projection"),
-        deploy_run_id: deploy_run_id.to_string(),
-        component_path: component.local_path.clone(),
-        package_owned_paths: package_owned_paths.to_vec(),
-    };
-    let path = recovery_path_in_roots(data_root, &component.id);
-    fs::create_dir_all(path.parent().expect("recovery path parent"))
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let temporary = path.with_extension("json.tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(&record)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    deploy_recovery::save(
+        data_root,
+        &DeploymentRecovery {
+            component_id: component.id.clone(),
+            expected_version: expected_version.map(str::to_string),
+            projects: projects.to_vec(),
+            artifact: config
+                .prepared_artifact
+                .clone()
+                .expect("release deploy has prepared artifact"),
+            projection: config
+                .prepared_projection
+                .clone()
+                .expect("release deploy has projection"),
+            deploy_run_id: deploy_run_id.to_string(),
+            component_path: component.local_path.clone(),
+            package_owned_paths: package_owned_paths.to_vec(),
+        },
     )
-    .map_err(|error| {
-        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    fs::rename(&temporary, &path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
-}
-
-fn remove_recovery(data_root: &Path, component_id: &str) -> Result<()> {
-    let path = recovery_path_in_roots(data_root, component_id);
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
-    }
-    Ok(())
 }
 
 /// Resume a checkpointed release deployment.
@@ -522,14 +478,21 @@ fn resume_deployment_checkpoint(
     component_id: &str,
     deploy_run_id: Option<&str>,
 ) -> Result<Option<ReleaseDeploymentResult>> {
-    let path = recovery_path_in_roots(roots.data(), component_id);
-    if !path.exists() {
+    let Some(admission) = deploy_recovery::admit(roots.data(), component_id)? else {
+        return Err(Error::validation_invalid_argument(
+            "recover",
+            format!("Release deployment recovery for '{component_id}' is already in progress"),
+            None,
+            None,
+        ));
+    };
+    let Some(StoredRecovery {
+        recovery: record,
+        revision,
+    }) = deploy_recovery::load(roots.data(), component_id)?
+    else {
         return Ok(None);
-    }
-    let record: DeploymentRecovery = serde_json::from_slice(&fs::read(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })?)
-    .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))?;
+    };
     if record.component_id != component_id {
         return Err(Error::validation_invalid_argument(
             "recover",
@@ -574,8 +537,9 @@ fn resume_deployment_checkpoint(
         if !record.component_path.is_empty() {
             cleanup_release_artifacts(&record.component_path, &record.package_owned_paths);
         }
-        remove_recovery(roots.data(), component_id)?;
+        deploy_recovery::clear_at(roots.data(), component_id, revision)?;
     }
+    drop(admission);
     Ok(Some(deployment))
 }
 
@@ -677,9 +641,11 @@ mod tests {
         homeboy_core::paths::PathRoots::from_environment().expect("path roots")
     }
 
-    /// The checkpoint path for the ambient home these tests already isolate.
-    fn recovery_path(component_id: &str) -> std::path::PathBuf {
-        super::recovery_path_in_roots(test_roots().data(), component_id)
+    /// The stored checkpoint for the ambient home these tests already isolate.
+    fn stored_recovery(component_id: &str) -> Option<super::DeploymentRecovery> {
+        super::deploy_recovery::load(test_roots().data(), component_id)
+            .expect("load recovery checkpoint")
+            .map(|stored| stored.recovery)
     }
 
     use homeboy_core::test_support::git_command_output as run_git;
@@ -1239,13 +1205,10 @@ mod tests {
             assert!(successful_target
                 .join("plugins/successful/plugin.txt")
                 .exists());
-            assert!(recovery_path("fixture").exists());
+            assert!(stored_recovery("fixture").is_some());
             assert!(source.join("build/intermediate").is_file());
             assert!(source.join("fixture-1.2.4.tgz").is_file());
-            let recovery: super::DeploymentRecovery = serde_json::from_slice(
-                &std::fs::read(recovery_path("fixture")).expect("recovery checkpoint"),
-            )
-            .expect("decode recovery checkpoint");
+            let recovery = stored_recovery("fixture").expect("recovery checkpoint");
             let deploy_run = RunId::new(&recovery.deploy_run_id).expect("deploy run id");
             let mismatched_run =
                 super::resume_deployment_for_run(&test_roots(), "fixture", "deploy-run-unrelated")
@@ -1253,7 +1216,7 @@ mod tests {
             assert!(mismatched_run
                 .message
                 .contains("recovery run identity does not match"));
-            assert!(recovery_path("fixture").exists());
+            assert!(stored_recovery("fixture").is_some());
 
             // A process restart reloads the checkpoint, not an in-memory release plan.
             // The completed target is now invalid: success proves the resumed lifecycle skips it.
@@ -1309,7 +1272,7 @@ mod tests {
                 crate::release::control_plane::recover_deploy_action(&record, &request)
                     .expect("inspect interrupted deploy action");
             assert_eq!(interrupted.outcome, ControlPlaneActionOutcome::Failed);
-            assert!(recovery_path("fixture").exists());
+            assert!(stored_recovery("fixture").is_some());
             let execute = || {
                 let response =
                     homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
@@ -1392,7 +1355,7 @@ mod tests {
                 release_commit
             );
             assert!(
-                !recovery_path("fixture").exists(),
+                stored_recovery("fixture").is_none(),
                 "terminal success clears the durable checkpoint"
             );
 
