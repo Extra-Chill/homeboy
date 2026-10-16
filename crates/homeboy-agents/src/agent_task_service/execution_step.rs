@@ -788,7 +788,13 @@ pub(super) fn pin_execution_generation_or_defer(
             )? {
                 Ok(None)
             } else {
-                Err(error)
+                // Provider execution already happened, so the attempt cannot be
+                // requeued. Wait out the owner within the bounded Cook budget.
+                homeboy_core::runtime_promotion::pin_cook_runtime_generation(
+                    run_id,
+                    &record.metadata["controller_runtime"],
+                )
+                .map(Some)
             }
         }
         Err(error) => Err(error),
