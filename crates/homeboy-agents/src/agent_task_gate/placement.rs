@@ -461,8 +461,12 @@ fn execute_with_context_and_resources(
     {
         let mut values = BTreeMap::new();
         let mut report = AgentTaskGateEnvironment::default();
+        let declared_playwright_cache =
+            std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from);
+        let host_home = std::env::var_os("HOME").map(PathBuf::from);
         preserve_playwright_cache_mapping(
-            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            declared_playwright_cache.as_deref(),
+            host_home.as_deref(),
             &mut values,
             &mut report,
         );
