@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.22] - 2026-10-16
+
+### Fixed
+- wait out a short runtime owner when an executed attempt cannot be requeued
+- commit gate-green candidates on their verified parent when the base moves
+- cook homeboy
+
 ## [0.428.21] - 2026-10-16
 
 ### Fixed
