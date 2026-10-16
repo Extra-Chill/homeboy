@@ -222,7 +222,17 @@ impl ExecutionOwner {
             }
             activity
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            if !root_identity_is_live(self.identity) {
+                return DescendantActivity::default();
+            }
+            let Ok(snapshot) = unix_process_snapshot() else {
+                return DescendantActivity::default();
+            };
+            unix_descendant_activity(self.identity.root_pid, &snapshot)
+        }
+        #[cfg(not(unix))]
         DescendantActivity::default()
     }
 
@@ -2825,18 +2835,25 @@ fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
             Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
         })
         .collect();
+    Ok(walk_descendant_pids(root_pid, &parents))
+}
+
+/// Breadth-first walk of `(pid, ppid)` pairs from `root_pid`. The root is the
+/// first element of the result.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn walk_descendant_pids(root_pid: u32, parents: &[(u32, u32)]) -> Vec<u32> {
     let mut descendants = vec![root_pid];
     let mut cursor = 0;
     while cursor < descendants.len() {
         let parent = descendants[cursor];
-        descendants.extend(
-            parents
-                .iter()
-                .filter_map(|(pid, ppid)| (*ppid == parent).then_some(*pid)),
-        );
+        for (pid, ppid) in parents {
+            if *ppid == parent && !descendants.contains(pid) {
+                descendants.push(*pid);
+            }
+        }
         cursor += 1;
     }
-    Ok(descendants)
+    descendants
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -2845,13 +2862,68 @@ struct UnixProcessIdentity {
     pid: u32,
     parent_pid: u32,
     started_at: String,
+    /// Cumulative CPU time in centiseconds from `ps time=`, when readable.
+    cpu_centis: Option<u64>,
+}
+
+/// Sample CPU progress of `root_pid`'s descendants (excluding the root), keyed
+/// by `(pid, lstart-derived identity)` so a reused PID is never progress.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unix_descendant_activity(root_pid: u32, snapshot: &[UnixProcessIdentity]) -> DescendantActivity {
+    use std::hash::{Hash, Hasher};
+
+    let parents: Vec<(u32, u32)> = snapshot
+        .iter()
+        .map(|process| (process.pid, process.parent_pid))
+        .collect();
+    let mut activity = DescendantActivity::default();
+    for pid in walk_descendant_pids(root_pid, &parents).into_iter().skip(1) {
+        let Some(process) = snapshot.iter().find(|process| process.pid == pid) else {
+            continue;
+        };
+        let Some(cpu_centis) = process.cpu_centis else {
+            continue;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        process.started_at.hash(&mut hasher);
+        activity
+            .counters
+            .insert((pid, hasher.finish()), [cpu_centis, 0, 0]);
+    }
+    activity
+}
+
+/// Parse `ps time=` output (`[[dd-]hh:]mm:ss.cc`) into centiseconds.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parse_ps_cpu_time(text: &str) -> Option<u64> {
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
+        None => (0, text),
+    };
+    let parts: Vec<&str> = clock.split(':').collect();
+    let (hours, minutes, seconds) = match parts.as_slice() {
+        [minutes, seconds] => (0, *minutes, *seconds),
+        [hours, minutes, seconds] => (hours.parse::<u64>().ok()?, *minutes, *seconds),
+        _ => return None,
+    };
+    let minutes = minutes.parse::<u64>().ok()?;
+    let (whole, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
+    let whole = whole.parse::<u64>().ok()?;
+    if !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let centis = format!("{:0<2}", fraction.get(..2).unwrap_or(fraction))
+        .parse::<u64>()
+        .ok()?;
+    let total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + whole;
+    total_seconds.checked_mul(100)?.checked_add(centis)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
     let output = Command::new("ps")
         .env("PATH", "/usr/bin:/bin")
-        .args(["-axo", "pid=,ppid=,lstart="])
+        .args(["-axo", "pid=,ppid=,lstart=,time="])
         .output()?;
     parse_unix_process_snapshot(output)
 }
@@ -2878,6 +2950,7 @@ fn parse_unix_process_snapshot(
                 pid: fields[0].parse().ok()?,
                 parent_pid: fields[1].parse().ok()?,
                 started_at: fields[2..7].join(" "),
+                cpu_centis: fields.get(7).and_then(|time| parse_ps_cpu_time(time)),
             })
         })
         .collect())
@@ -4178,6 +4251,92 @@ mod tests {
             assert_eq!(identity.root_pgid, Some(identity.root_pid));
             let _ = owner.drain_and_reap();
         }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn descendant_cpu_time_parser_accepts_every_ps_time_shape() {
+        assert_eq!(parse_ps_cpu_time("0:00.01"), Some(1));
+        assert_eq!(
+            parse_ps_cpu_time("12:34.56"),
+            Some((12 * 60 + 34) * 100 + 56)
+        );
+        assert_eq!(
+            parse_ps_cpu_time("1:02:03.04"),
+            Some(((60 + 2) * 60 + 3) * 100 + 4)
+        );
+        assert_eq!(
+            parse_ps_cpu_time("2-01:02:03.04"),
+            Some((((2 * 24 + 1) * 60 + 2) * 60 + 3) * 100 + 4)
+        );
+        assert_eq!(parse_ps_cpu_time("0:05"), Some(500));
+        for invalid in ["", "12", "a:00.01", "0:00.x1", "1:2:3:4.00"] {
+            assert_eq!(parse_ps_cpu_time(invalid), None, "{invalid}");
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn descendant_activity_advances_for_cpu_busy_descendants_only() {
+        fn sample_after_descendant_appears(owner: &ExecutionOwner) -> DescendantActivity {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let activity = owner.descendant_activity();
+                if !activity.counters.is_empty() {
+                    return activity;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "descendant never appeared in the process snapshot"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        }
+        fn spawn(script: &str) -> ExecutionOwner {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            ExecutionOwner::spawn(&mut command).expect("spawn supervised root")
+        }
+
+        // The root sleeps; its quiet descendant burns CPU, bounded by the root.
+        let mut busy = spawn("while :; do :; done & busy=$!; sleep 10; kill $busy");
+        let before = sample_after_descendant_appears(&busy);
+        thread::sleep(Duration::from_millis(300));
+        let after = busy.descendant_activity();
+        let _ = busy.drain_and_reap();
+        assert!(
+            after.advanced_since(&before),
+            "CPU-busy descendant must advance: {:?} -> {:?}",
+            before.counters,
+            after.counters
+        );
+
+        let mut idle = spawn("sleep 10 & wait");
+        // Let the forked shell finish exec'ing `sleep` so startup CPU (which
+        // can be slow on a loaded machine) is not mistaken for progress.
+        let settle_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut before = sample_after_descendant_appears(&idle);
+        loop {
+            thread::sleep(Duration::from_millis(150));
+            let next = idle.descendant_activity();
+            let settled = !next.advanced_since(&before);
+            before = next;
+            if settled || std::time::Instant::now() >= settle_deadline {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(300));
+        let after = idle.descendant_activity();
+        let _ = idle.drain_and_reap();
+        assert!(
+            !after.advanced_since(&before),
+            "idle sleep descendant must not advance: {:?} -> {:?}",
+            before.counters,
+            after.counters
+        );
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
