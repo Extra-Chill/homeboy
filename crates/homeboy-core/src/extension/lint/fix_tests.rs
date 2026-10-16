@@ -318,11 +318,8 @@ fn refuses_a_foreign_live_worktree_holder_before_writing() {
         homeboy_core::worktree::record_active_for_test("fixture@foreign-held", &root);
         let record = homeboy_core::worktree::resolve("fixture@foreign-held")
             .expect("resolve managed worktree");
-        let claims = homeboy_core::workspace_claim::WorkspaceClaimStore::new(
-            homeboy_core::paths::homeboy_data()
-                .expect("data root")
-                .join(homeboy_core::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-        );
+        let claims = homeboy_core::workspace_claim::WorkspaceClaimStore::from_environment()
+            .expect("workspace authority");
         claims
             .register_owner(
                 record.effective_workspace_identity().expect("identity"),

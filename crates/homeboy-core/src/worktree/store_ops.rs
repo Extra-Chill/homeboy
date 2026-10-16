@@ -2482,8 +2482,8 @@ pub(super) fn workspace_claim_store_for_worktrees(
             store_dir.display()
         ))
     })?;
-    Ok(crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    Ok(crate::workspace_claim::WorkspaceClaimStore::in_data_root(
+        data_root,
     ))
 }
 

@@ -69,8 +69,9 @@ pub enum RecordOutcome {
     Conflict { current: Option<CoordinationRecord> },
 }
 
-/// The process that owns a lease holder row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The process that owns a lease holder row. It also serializes into record
+/// payloads that need the same process-identity liveness evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LeaseOwner {
     pub pid: Option<u32>,
     /// Hash of [`host_identity`]; process evidence is only valid on this host.
@@ -87,6 +88,13 @@ impl LeaseOwner {
             host: local_host(),
             start_identity: process_start_identity(pid).ok().flatten(),
         }
+    }
+
+    /// Whether this owner is conclusively gone, judged by the same evidence
+    /// lease reaping uses: only on this host, and a reused PID counts as dead.
+    /// Owners on other hosts or without a PID are never proven dead.
+    pub fn is_proven_dead(&self) -> bool {
+        owner_is_dead(self, &local_host())
     }
 }
 

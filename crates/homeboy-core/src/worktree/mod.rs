@@ -173,10 +173,8 @@ fn ownership_probe_in_root(
         return Ok(None);
     };
     let workspace = record.effective_workspace_identity()?;
-    let owners = crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    )
-    .owner_status(&workspace, now_ms)?;
+    let owners = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root)
+        .owner_status(&workspace, now_ms)?;
     let live_holders = owners
         .iter()
         .map(|owner| owner.owner_id.clone())
