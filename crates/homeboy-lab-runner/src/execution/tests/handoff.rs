@@ -1865,6 +1865,40 @@ fn daemon_polling_keeps_its_grace_window_when_a_reattach_cannot_reach_the_daemon
 }
 
 #[test]
+fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_generation_lock() {
+    let stale_endpoint = closed_endpoint();
+    let job = running_job();
+    let job_id = job.id.to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
+    let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let server = serve_one_job_poll(listener, job.clone());
+    let client = Client::builder().no_proxy().build().expect("client");
+    let reloads = std::sync::atomic::AtomicUsize::new(0);
+
+    let (fetched, endpoint) =
+        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
+            if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // Concurrent Cooks hold the runner generation registry lock;
+                // the reattach times out waiting for it (retryable).
+                let mut error = Error::internal_io(
+                    "timed out after 30000ms waiting for runner generation registry lock",
+                    Some("lock generation registry".to_string()),
+                );
+                error.details = serde_json::json!({ "kind": "runner_generation_lock_timeout" });
+                error.retryable = Some(true);
+                return Err(error);
+            }
+            Ok(Some(refreshed_endpoint.clone()))
+        })
+        .expect("a contended controller lock must not end the poll grace window");
+
+    assert_eq!(fetched.id, job.id);
+    assert_eq!(endpoint, refreshed_endpoint);
+    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    server.join().expect("server");
+}
+
+#[test]
 fn daemon_polling_returns_an_authoritative_reattach_refusal_immediately() {
     let stale_endpoint = closed_endpoint();
     let job_id = running_job().id.to_string();
