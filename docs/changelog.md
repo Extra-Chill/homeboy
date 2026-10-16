@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.16] - 2026-10-16
+
+### Changed
+- remove timing races from three load-sensitive core tests
+- keep workspace claim authority and composite claims in the coordination store
+
 ## [0.428.15] - 2026-10-16
 
 ### Changed
