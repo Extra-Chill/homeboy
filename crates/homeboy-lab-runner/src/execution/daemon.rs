@@ -1893,11 +1893,17 @@ where
                         DAEMON_POLL_TRANSIENT_GRACE.as_secs()
                     )));
                 }
-                if let Some(refreshed_endpoint) = reload_endpoint()? {
-                    if refreshed_endpoint != endpoint {
+                // A reattach that cannot reach the daemon yet is the same
+                // transport loss; keep retrying inside the grace window rather
+                // than letting the first failed reconnect end it.
+                match reload_endpoint() {
+                    Ok(Some(refreshed_endpoint)) if refreshed_endpoint != endpoint => {
                         endpoint = refreshed_endpoint;
                         continue;
                     }
+                    Ok(_) => {}
+                    Err(reload_err) if daemon_poll_transport_was_lost(&reload_err) => {}
+                    Err(reload_err) => return Err(reload_err),
                 }
                 std::thread::sleep(DAEMON_POLL_RETRY_BACKOFF);
             }

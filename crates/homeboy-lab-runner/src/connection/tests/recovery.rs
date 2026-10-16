@@ -2523,3 +2523,59 @@ esac
         drop(endpoint);
     });
 }
+
+#[test]
+fn job_owner_reattach_keeps_unreachable_daemon_failures_as_transport_loss() {
+    let reattach = |kind: RunnerFailureKind, stage: Option<&str>| {
+        let (mut report, _) = failed_connect(
+            "lab",
+            PathBuf::from("/session.json"),
+            kind,
+            "remote daemon health endpoint failed after 4 bounded requests".to_string(),
+        );
+        if let Some(evidence) = report.failure_evidence.as_mut() {
+            evidence.durability_stage = stage.map(str::to_string);
+        }
+        job_owner_reattach_error("lab", report)
+    };
+
+    for transient in [
+        reattach(
+            RunnerFailureKind::DaemonStartupFailure,
+            Some("health_settle"),
+        ),
+        reattach(
+            RunnerFailureKind::DaemonStartupFailure,
+            Some("tunnel_durability"),
+        ),
+        reattach(RunnerFailureKind::TunnelFailure, None),
+    ] {
+        assert_eq!(
+            transient.details["daemon_transport_error"]["kind"],
+            "connect"
+        );
+        assert_eq!(transient.details["runner_id"], "lab");
+        assert!(crate::daemon_health::runner_daemon_health_failure(&transient).is_some());
+    }
+
+    for authoritative in [
+        reattach(
+            RunnerFailureKind::DaemonStartupFailure,
+            Some("health_identity"),
+        ),
+        reattach(
+            RunnerFailureKind::DaemonStartupFailure,
+            Some("endpoint_identity"),
+        ),
+        reattach(RunnerFailureKind::DaemonStartupFailure, None),
+    ] {
+        assert_eq!(
+            authoritative.code,
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(authoritative
+            .details
+            .get("daemon_transport_error")
+            .is_none());
+    }
+}
