@@ -844,7 +844,8 @@ pub struct WorktreeReclaimOutput {
     pub removed: Vec<WorktreeReclaimRemoved>,
     pub skipped: Vec<WorktreeReclaimSkipped>,
     pub released_stale_leases: Vec<WorktreeStaleLeaseRelease>,
-    pub audit_path: String,
+    /// Coordination-audit namespace the reaping audit rows are appended to.
+    pub audit_namespace: String,
 }
 
 #[derive(Debug, Clone)]

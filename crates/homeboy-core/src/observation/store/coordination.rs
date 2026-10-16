@@ -316,6 +316,39 @@ impl ObservationStore {
             .map_err(sqlite_error("read coordination audit"))?;
         super::collect_rows(rows, "collect coordination audit")
     }
+
+    /// The newest `limit` audit entries across every subject in a namespace,
+    /// newest first. `limit` is capped at [`MAX_COORDINATION_AUDIT_READ`].
+    pub fn coordination_audit_in_namespace(
+        &self,
+        namespace: &'static str,
+        limit: usize,
+    ) -> Result<Vec<CoordinationAuditEntry>> {
+        super::validate_required("coordination.namespace", namespace)?;
+        let limit = limit.min(MAX_COORDINATION_AUDIT_READ) as i64;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT sequence, namespace, subject_key, at_ms, event, payload_json
+                 FROM coordination_audit
+                 WHERE namespace = ?1
+                 ORDER BY sequence DESC LIMIT ?2",
+            )
+            .map_err(sqlite_error("prepare coordination namespace audit read"))?;
+        let rows = statement
+            .query_map(params![namespace, limit], |row| {
+                Ok(CoordinationAuditEntry {
+                    sequence: row.get(0)?,
+                    namespace: row.get(1)?,
+                    subject_key: row.get(2)?,
+                    at_ms: row.get(3)?,
+                    event: row.get(4)?,
+                    payload: super::parse_metadata(row.get(5)?)?,
+                })
+            })
+            .map_err(sqlite_error("read coordination namespace audit"))?;
+        super::collect_rows(rows, "collect coordination namespace audit")
+    }
 }
 
 fn put_record_at(

@@ -4133,6 +4133,66 @@ fn reaping_audit_requires_removal_not_a_plan() {
     );
 }
 
+#[test]
+fn reaping_audit_rows_live_in_the_coordination_audit_and_survive_reopen() {
+    let (data_root, _source, _worktree, record) = reclaim_fixture();
+    let mut second = record.clone();
+    second.id = "second-record".to_string();
+    second.worktree_path = format!("{}-second", record.worktree_path);
+    for (index, entry) in [&record, &second].into_iter().enumerate() {
+        reaping::append_reaping_audit_in_root(
+            data_root.path(),
+            entry,
+            2_000 + index as u64,
+            Some("reopen"),
+            None,
+            true,
+            index == 1,
+        )
+        .unwrap();
+    }
+
+    // Every append and read opens its own store handle, so this read is the
+    // restart path: the rows are durable in the observation database.
+    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
+    let ids: Vec<_> = audit.iter().map(|entry| entry.record_id.as_str()).collect();
+    assert_eq!(ids, vec![record.id.as_str(), "second-record"]);
+    assert!(audit[1].branch_deleted && audit[0].force);
+    assert!(
+        !data_root
+            .path()
+            .join("task-worktree-reaping.jsonl")
+            .exists(),
+        "the reaping audit no longer writes a JSONL file"
+    );
+
+    let store = crate::observation::ObservationStore::open_initialized_for_lifecycle_at(
+        crate::paths::observation_db_in_root(data_root.path()),
+    )
+    .unwrap();
+    let rows = store
+        .coordination_audit(
+            TASK_WORKTREE_REAPING_AUDIT_NAMESPACE,
+            &second.worktree_path,
+            10,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].event, "removed");
+    assert_eq!(
+        rows[0].payload["schema"],
+        TASK_WORKTREE_REAPING_AUDIT_SCHEMA
+    );
+
+    // A separate data root is a separate store.
+    let other_root = tempfile::tempdir().unwrap();
+    assert!(
+        reaping::read_task_worktree_reaping_audit_in_root(other_root.path())
+            .unwrap()
+            .is_empty()
+    );
+}
+
 // -- #14745: squash/rebase-merged worktree reclamation ----------------------
 //
 // `git merge-base --is-ancestor` (and the plain `rev-list` ancestry it
