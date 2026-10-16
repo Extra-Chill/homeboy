@@ -16,7 +16,9 @@ use homeboy::agents::agent_task_lifecycle::{
 };
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
+use homeboy::agents::agent_tasks::promotion::AgentTaskPromotionStatus;
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
@@ -33,8 +35,6 @@ use super::args::{
     QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
     RuntimeValidateArgs, StatusArgs,
 };
-#[cfg(test)]
-use super::candidate::CandidateState;
 use super::candidate::{canonical_candidate_projection, classify_candidates};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
@@ -1237,54 +1237,6 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
             "message": "The immutable Cook recipe is durable but its lifecycle record is absent. Continue the exact attempt to materialize the controller lifecycle before provider work."
         }
     })))
-}
-
-/// Attach the canonical run resource assembled from the durable snapshot.
-#[cfg(test)]
-fn promotion_state(record: &Value) -> String {
-    let raw = record
-        .pointer("/metadata/latest_promotion/status")
-        .and_then(Value::as_str)
-        .unwrap_or("not_attempted");
-    raw.to_string()
-}
-
-#[cfg(test)]
-fn promotion_gate_state(record: &Value, promotion: &str, target_applied: bool) -> &'static str {
-    if !target_applied {
-        return "not_run";
-    }
-    if record
-        .pointer("/metadata/latest_promotion/deterministic_gates")
-        .and_then(Value::as_array)
-        .is_some_and(|gates| {
-            gates.iter().any(|gate| {
-                gate.get("status").and_then(Value::as_str) == Some("accepted_inherited_failure")
-            })
-        })
-    {
-        return "accepted_inherited_failure";
-    }
-    match promotion {
-        "applied" | "verified_no_changes" => "passed",
-        "gate_failed" | "no_changes_gate_failed" => "failed",
-        "verification_pending" => "pending",
-        _ => "not_run",
-    }
-}
-
-#[cfg(test)]
-fn finalization_state(record: &Value) -> String {
-    record
-        .pointer("/metadata/cook_finalization/status")
-        .and_then(Value::as_str)
-        .map(|status| match status {
-            "review_ready" | "draft_published" => "completed".to_string(),
-            "failed" | "finalization_failed" => "finalization_failed".to_string(),
-            "pending" | "finalization_pending" => "finalization_pending".to_string(),
-            other => other.to_string(),
-        })
-        .unwrap_or_else(|| "not_attempted".to_string())
 }
 
 fn attach_durable_read_availability(
@@ -4796,144 +4748,6 @@ pub(crate) fn completed_run_aggregate(
     }
 }
 
-/// Project terminal execution facts into stable machine-readable states. These
-/// fields deliberately derive from typed outcome and lifecycle values, never
-/// provider summary prose or diagnostic messages.
-#[cfg(test)]
-pub(crate) fn execution_states_from_aggregate(
-    aggregate: &AgentTaskAggregate,
-    record: &Value,
-) -> Value {
-    let review =
-        homeboy::agents::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
-    let canonical = classify_candidates(&candidate_result_payload(record, Some(aggregate)));
-    let candidate_state = canonical.state();
-    let provider = aggregate
-        .outcomes
-        .iter()
-        .map(|outcome| {
-            let state = if matches!(
-                outcome.status,
-                AgentTaskOutcomeStatus::Failed
-                    | AgentTaskOutcomeStatus::ProviderError
-                    | AgentTaskOutcomeStatus::Timeout
-                    | AgentTaskOutcomeStatus::UnableToRemediate
-                    | AgentTaskOutcomeStatus::Cancelled
-            ) {
-                "failed"
-            } else {
-                "succeeded"
-            };
-            json!({
-                "task_id": outcome.task_id,
-                "state": state,
-                "outcome_status": outcome.status,
-                "failure_classification": outcome.failure_classification,
-            })
-        })
-        .collect::<Vec<_>>();
-    let candidates = review
-        .tasks
-        .iter()
-        .map(|task| {
-            let reason_code = if task.status == AgentTaskOutcomeStatus::NoOp {
-                "no_changes_produced"
-            } else if task.decision
-                == homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate
-                && candidate_state != CandidateState::PatchAvailable
-            {
-                candidate_state.as_str()
-            } else {
-                match task.decision {
-                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
-                    "no_changes_produced"
-                }
-                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
-                    "patch_available"
-                }
-                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
-                    "provider_retry_required"
-                }
-                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
-                    "issue_report_required"
-                }
-                homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
-                    "review_required"
-                }
-                }
-            };
-            json!({
-                "task_id": task.task_id,
-                "state": task.decision,
-                "reason_code": reason_code,
-            })
-        })
-        .collect::<Vec<_>>();
-    let promotion_status = promotion_state(record);
-    let finalization_status = finalization_state(record);
-    let promotion = record.pointer("/metadata/latest_promotion");
-    // A retained artifact can carry a pending verification tracker before any
-    // target mutation. Only the post-apply checkpoint is evidence that this
-    // exact promotion reached its declared target.
-    let patch_promoted = canonical.target_applied;
-    let verified = canonical.verified;
-    let target = promotion_target_projection(promotion, patch_promoted);
-    let verification_phase = match promotion_status.as_str() {
-        "verification_pending" if patch_promoted => "post_apply",
-        "verification_pending" => "pre_apply",
-        "applied" | "gate_failed" if patch_promoted => "post_apply",
-        _ => "not_pending",
-    };
-
-    json!({
-        "schema": "homeboy/agent-task-execution-states/v1",
-        "provider": provider,
-        "candidate": {
-            "state": candidate_state.as_str(),
-            "tasks": candidates,
-            "scan": {
-                "attempts_omitted": canonical.attempts_omitted,
-                "outcomes_omitted": canonical.outcomes_omitted,
-                "artifacts_omitted": canonical.artifacts_omitted,
-                "degraded": canonical.is_degraded(),
-            },
-        },
-        "gate": {
-            "state": promotion_gate_state(record, &promotion_status, patch_promoted),
-        },
-        "promotion": {
-            "state": promotion_status,
-            "patch_promoted": patch_promoted,
-            "verified": verified,
-            "verification_phase": verification_phase,
-            "target": target,
-        },
-        "finalization": {
-            "state": finalization_status,
-            "finalized": canonical.finalized,
-        },
-    })
-}
-
-#[cfg(test)]
-fn promotion_target_projection(promotion: Option<&Value>, applied: bool) -> Value {
-    let Some(promotion) = promotion else {
-        return json!({ "state": "not_declared", "candidate_fingerprint_matches": Value::Null });
-    };
-    let target = promotion
-        .pointer("/target/worktree")
-        .or_else(|| promotion.get("to_worktree"));
-    let fingerprint_matches = applied
-        && promotion
-            .pointer("/provenance/candidate")
-            .is_some_and(|fingerprint| !fingerprint.is_null());
-    json!({
-        "state": if applied { "applied" } else { "not_applied" },
-        "worktree": target,
-        "candidate_fingerprint_matches": fingerprint_matches,
-    })
-}
-
 /// Cap the number of surfaced failure reasons so a pathological run with
 /// hundreds of nested diagnostics cannot flood the failure summary. Overflow is
 /// still available in the full nested payload (`--full` / aggregate file).
@@ -5825,123 +5639,49 @@ fn diagnostic_pre_execution_details(details: &Value) -> Value {
     details
 }
 
+/// The current delivery blocker, read through the Cook delivery model. Its
+/// evidence is the persisted record the blocker was read from.
 fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
-    let promotion = record.metadata.get("latest_promotion")?;
-    let promotion_status = promotion.get("status").and_then(Value::as_str);
-    if matches!(
-        promotion_status,
-        Some("gate_failed" | "no_changes_gate_failed")
-    ) {
-        let gate = promotion
-            .get("deterministic_gates")
-            .or_else(|| promotion.get("gate_results"))
-            .and_then(Value::as_array)
-            .and_then(|gates| {
-                gates.iter().find(|gate| {
-                    matches!(
-                        gate.get("status").and_then(Value::as_str),
-                        Some("failed" | "failure")
-                    )
-                })
-            });
-        let gate_name = gate_display_name(gate);
-        return Some(CollectedDiagnostic {
-            task_id: "promotion".to_string(),
-            class: "agent_task.promotion_gate_failed".to_string(),
-            message: gate_failure_message(gate)
-                .unwrap_or_else(|| format!("Deterministic promotion gate failed: {gate_name}")),
-            source: "current_lifecycle".to_string(),
-            data: promotion.clone(),
-        });
-    }
-    let finalization = record.metadata.get("cook_finalization")?;
-    if !matches!(
-        finalization.get("status").and_then(Value::as_str),
-        Some("failed" | "finalization_failed")
-    ) {
-        return None;
-    }
-    Some(CollectedDiagnostic {
-        task_id: "finalization".to_string(),
-        class: finalization
-            .get("code")
-            .and_then(Value::as_str)
-            .unwrap_or("agent_task.finalization_failed")
-            .to_string(),
-        message: finalization
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Cook finalization failed after promotion.")
-            .to_string(),
-        source: "current_lifecycle".to_string(),
-        data: finalization.clone(),
-    })
-}
-
-/// Name a failed deterministic gate from whatever shape its report carries.
-/// The real, production `AgentTaskGateReport` has no `name`/`message` field
-/// at all: its identity is `id` and its command is `command: Vec<String>`, so
-/// naming it only fell back to the generic `"deterministic gate"` placeholder
-/// for every real gate failure (#14735). Legacy/test fixtures that carry a
-/// bare `name`/string `command` are still honored.
-fn gate_display_name(gate: Option<&Value>) -> String {
-    gate.and_then(|gate| {
-        gate.get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| gate.get("name").and_then(Value::as_str).map(str::to_string))
-            .or_else(|| {
-                gate.pointer("/failure_evidence/command")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .or_else(|| {
-                gate.get("command").and_then(|command| match command {
-                    Value::String(command) => Some(command.clone()),
-                    Value::Array(parts) => {
-                        let joined = parts
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        (!joined.is_empty()).then_some(joined)
-                    }
-                    _ => None,
-                })
-            })
-    })
-    .unwrap_or_else(|| "deterministic gate".to_string())
-}
-
-/// The human-readable reason a gate failed, preferring the producer's own
-/// summary (`failure_evidence.summary`) over the legacy bare `message` field.
-fn gate_failure_message(gate: Option<&Value>) -> Option<String> {
-    gate.and_then(|gate| {
-        gate.pointer("/failure_evidence/summary")
-            .and_then(Value::as_str)
-            .or_else(|| gate.get("message").and_then(Value::as_str))
-            .map(str::to_string)
-    })
-}
-
-fn current_lifecycle_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
-    match record
-        .metadata
-        .pointer("/latest_promotion/status")
-        .and_then(Value::as_str)
-    {
-        Some("gate_failed") => Some("gate_failed"),
-        Some("no_changes_gate_failed" | "no_op_gate_failed") => Some("no_op_gate_failed"),
-        _ if matches!(
-            record
-                .metadata
-                .pointer("/cook_finalization/status")
-                .and_then(Value::as_str),
-            Some("failed" | "finalization_failed")
-        ) =>
-        {
-            Some("finalization_failed")
+    let delivery = CookDelivery::from_run_metadata(&record.metadata)?;
+    let blocker = delivery.blocker?;
+    let (task_id, class) = match blocker.code {
+        CookDeliveryBlockerCode::GateFailed => {
+            ("promotion", "agent_task.promotion_gate_failed".to_string())
         }
+        CookDeliveryBlockerCode::PublishRefused => (
+            "finalization",
+            blocker
+                .cause
+                .clone()
+                .unwrap_or_else(|| "agent_task.finalization_failed".to_string()),
+        ),
+        code => ("delivery", format!("cook_delivery.{}", code.as_str())),
+    };
+    Some(CollectedDiagnostic {
+        task_id: task_id.to_string(),
+        class,
+        message: blocker.message,
+        source: "current_lifecycle".to_string(),
+        data: record
+            .metadata
+            .pointer(&blocker.evidence)
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+/// The Cook failure status the recovery handoff admits for the current
+/// delivery blocker, if any.
+fn current_lifecycle_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
+    let delivery = CookDelivery::from_run_metadata(&record.metadata)?;
+    match delivery.blocker_code()? {
+        CookDeliveryBlockerCode::GateFailed
+            if delivery.promotion() == Some(AgentTaskPromotionStatus::NoChangesGateFailed) =>
+        {
+            Some("no_op_gate_failed")
+        }
+        CookDeliveryBlockerCode::GateFailed => Some("gate_failed"),
+        CookDeliveryBlockerCode::PublishRefused => Some("finalization_failed"),
         _ => None,
     }
 }

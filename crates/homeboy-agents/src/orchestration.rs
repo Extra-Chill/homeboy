@@ -54,12 +54,15 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::agent_task_gate::AgentTaskGateStatus;
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
     CanonicalControlPlaneIdentities,
 };
+use crate::agent_task_promotion::AgentTaskPromotionStatus;
 use crate::agent_task_schedule::AgentTaskPlan;
+use crate::agent_task_service::{CookDelivery, CookDeliveryBlocker};
 
 const ID_BOUND: usize = 128;
 const STATE_BOUND: usize = 64;
@@ -1609,8 +1612,9 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .as_ref()
             .map(review_failure_reasons)
             .filter(|reasons| !reasons.is_empty());
+        let delivery = CookDelivery::from_run_metadata(&record.metadata);
         let canonical_candidate =
-            review_canonical_candidate(record, aggregate_review.as_ref(), &resource);
+            review_canonical_candidate(delivery.as_ref(), aggregate_review.as_ref(), &resource);
         let (source_record, cleanup_evidence) = review_record_projection(&durable_read.record);
         let mut evidence = serde_json::json!({
             "record": source_record,
@@ -1621,7 +1625,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             "promotion_candidates": promotion_candidates,
             "diagnostic_summary": failure_reasons.as_ref().and_then(|reasons| reasons.first()).cloned(),
             "failure_reasons": failure_reasons,
-            "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, record, &resource),
+            "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, delivery.as_ref(), &resource),
             "canonical_candidate": canonical_candidate,
             "next_actions": review_next_actions(record, aggregate_review.as_ref(), request.to_worktree.is_some()),
             "cleanup_evidence": cleanup_evidence,
@@ -3156,7 +3160,7 @@ fn review_execution_states(
     aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
     review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
     canonical_candidate: &Value,
-    record: &AgentTaskRunRecord,
+    delivery: Option<&CookDelivery>,
     resource: &ControlPlaneRun,
 ) -> Value {
     let candidate_state = canonical_candidate["state"]
@@ -3196,28 +3200,33 @@ fn review_execution_states(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let promotion = record.metadata.get("latest_promotion");
-    let promotion_state = promotion
-        .and_then(|promotion| promotion.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("not_attempted");
-    let target_applied = promotion.is_some_and(review_promotion_target_applied);
-    let accepted_inherited_failure = promotion
-        .and_then(|promotion| promotion.get("deterministic_gates"))
-        .and_then(Value::as_array)
-        .is_some_and(|gates| {
-            gates.iter().any(|gate| {
-                gate.get("status").and_then(Value::as_str) == Some("accepted_inherited_failure")
-            })
-        });
-    let finalization = record.metadata.get("cook_finalization");
-    let finalized =
-        finalization.is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt);
-    let finalization_state = finalization
-        .and_then(|receipt| receipt.get("status"))
-        .and_then(Value::as_str)
-        .map(|status| match status {
-            _ if finalized => "completed",
+    let candidate = delivery.and_then(|delivery| delivery.candidate.as_ref());
+    let promotion = candidate.map(|candidate| candidate.promotion);
+    let promotion_state = promotion.map_or("not_attempted".to_string(), promotion_label);
+    let target_applied = candidate.is_some_and(|candidate| candidate.target_applied);
+    let pending = promotion == Some(AgentTaskPromotionStatus::VerificationPending);
+    let gate_state = if delivery.is_some_and(|delivery| {
+        delivery
+            .gates
+            .iter()
+            .any(|gate| gate.state == AgentTaskGateStatus::AcceptedInheritedFailure)
+    }) {
+        "accepted_inherited_failure"
+    } else if !target_applied {
+        "not_run"
+    } else {
+        match promotion {
+            Some(status) if status.gate_failed() => "failed",
+            Some(AgentTaskPromotionStatus::VerificationPending) => "pending",
+            Some(AgentTaskPromotionStatus::Applied) => "passed",
+            _ => "not_run",
+        }
+    };
+    let publication = delivery.and_then(|delivery| delivery.publication.as_ref());
+    let finalized = publication.is_some_and(|publication| publication.published);
+    let finalization_state = publication
+        .map(|publication| match publication.status.as_str() {
+            _ if publication.published => "completed",
             "review_ready" | "draft_published" | "completed" => "unknown",
             "failed" | "finalization_failed" => "finalization_failed",
             "pending" | "finalization_pending" => "finalization_pending",
@@ -3231,36 +3240,49 @@ fn review_execution_states(
             serde_json::json!({ "task_id": outcome.task_id, "state": if failed { "failed" } else { "succeeded" }, "outcome_status": outcome.status, "failure_classification": outcome.failure_classification })
         }).collect::<Vec<_>>()).unwrap_or_default(),
         "candidate": { "state": candidate_state, "tasks": candidate_tasks },
-        "gate": { "state": if accepted_inherited_failure { "accepted_inherited_failure" } else if !target_applied { "not_run" } else if matches!(promotion_state, "gate_failed" | "no_changes_gate_failed") { "failed" } else if promotion_state == "verification_pending" { "pending" } else if matches!(promotion_state, "applied" | "verified_no_changes") { "passed" } else { "not_run" } },
-        "promotion": { "state": promotion_state, "patch_promoted": target_applied, "verified": target_applied && promotion_state == "applied", "verification_phase": if promotion_state == "verification_pending" && target_applied { "post_apply" } else if promotion_state == "verification_pending" { "pre_apply" } else { "not_pending" }, "target": { "state": if target_applied { "applied" } else if promotion.is_some() { "not_applied" } else { "not_declared" }, "worktree": promotion.and_then(|promotion| promotion.pointer("/target/worktree").or_else(|| promotion.get("to_worktree"))), "candidate_fingerprint_matches": target_applied && promotion.is_some_and(|promotion| promotion.pointer("/provenance/candidate").is_some_and(|candidate| !candidate.is_null())) } },
+        "gate": { "state": gate_state },
+        "promotion": {
+            "state": promotion_state,
+            "patch_promoted": target_applied,
+            "verified": target_applied && promotion == Some(AgentTaskPromotionStatus::Applied),
+            "verification_phase": match (pending, target_applied) {
+                (true, true) => "post_apply",
+                (true, false) => "pre_apply",
+                (false, _) => "not_pending",
+            },
+            "target": {
+                "state": if target_applied { "applied" } else if candidate.is_some() { "not_applied" } else { "not_declared" },
+                "worktree": delivery
+                    .and_then(|delivery| delivery.destination.as_ref())
+                    .and_then(|destination| destination.worktree.as_deref()),
+                "candidate_fingerprint_matches": target_applied,
+            },
+        },
         "finalization": { "state": finalization_state, "finalized": finalized },
         "publication": resource.publication,
     })
 }
 
 fn review_canonical_candidate(
-    record: &AgentTaskRunRecord,
+    delivery: Option<&CookDelivery>,
     review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
     resource: &ControlPlaneRun,
 ) -> Value {
-    let promotion = record.metadata.get("latest_promotion");
-    let promotion_status = promotion
-        .and_then(|promotion| promotion.get("status"))
-        .and_then(Value::as_str);
-    let target_applied = promotion.is_some_and(review_promotion_target_applied);
-    let finalized = record
-        .metadata
-        .get("cook_finalization")
-        .is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt);
-    let retained = promotion.is_some_and(|promotion| {
-        promotion_status.is_some_and(|status| {
-            matches!(status, "applied" | "gate_failed" | "verification_pending")
-        }) && promotion
-            .get("patch_artifact")
-            .or_else(|| promotion.get("patch"))
-            .and_then(|artifact| artifact.get("id").or_else(|| artifact.get("artifact_id")))
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
+    let candidate = delivery.and_then(|delivery| delivery.candidate.as_ref());
+    let target_applied = candidate.is_some_and(|candidate| candidate.target_applied);
+    let verified = target_applied
+        && candidate.map(|candidate| candidate.promotion)
+            == Some(AgentTaskPromotionStatus::Applied);
+    let finalized = delivery
+        .and_then(|delivery| delivery.publication.as_ref())
+        .is_some_and(|publication| publication.published);
+    let retained = candidate.is_some_and(|candidate| {
+        matches!(
+            candidate.promotion,
+            AgentTaskPromotionStatus::Applied
+                | AgentTaskPromotionStatus::GateFailed
+                | AgentTaskPromotionStatus::VerificationPending
+        ) && candidate.patch_artifact.is_some()
     });
     let state = if finalized {
         "finalized"
@@ -3288,32 +3310,19 @@ fn review_canonical_candidate(
         "state": state,
         "id": resource.candidate.as_ref().and_then(|candidate| candidate.id.as_deref()),
         "target_applied": target_applied,
-        "verified": target_applied && promotion_status == Some("applied"),
+        "verified": verified,
         "finalized": finalized,
-        "fingerprint": promotion.and_then(|promotion| promotion.pointer("/provenance/candidate")),
+        "fingerprint": candidate.and_then(|candidate| candidate.fingerprint.as_deref()),
     })
 }
 
-fn review_promotion_target_applied(promotion: &Value) -> bool {
-    matches!(
-        promotion.get("status").and_then(Value::as_str),
-        Some("verification_pending" | "applied" | "gate_failed")
-    ) && promotion
-        .pointer("/provenance/post_apply")
-        .and_then(Value::as_bool)
-        == Some(true)
-        && promotion
-            .pointer("/patch_artifact/id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty())
-        && promotion
-            .pointer("/target/worktree")
-            .or_else(|| promotion.get("to_worktree"))
-            .and_then(Value::as_str)
-            .is_some_and(|target| !target.trim().is_empty())
-        && promotion
-            .pointer("/provenance/candidate")
-            .is_some_and(|candidate| !candidate.is_null())
+/// The persisted spelling of a promotion status, which is also its
+/// control-plane state label.
+fn promotion_label(status: AgentTaskPromotionStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 fn review_next_actions(
@@ -4065,11 +4074,12 @@ fn project_summary_fields(
     if let Some(mission) = fanout_mission(record)? {
         resource.mission = Some(mission);
     }
+    let delivery = CookDelivery::from_run_metadata(&record.metadata);
     resource.state = run_state(record);
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
-    resource.blocker = blocker(record);
+    resource.blocker = blocker(record, delivery.as_ref());
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
     resource.provider = assigned_provider(record);
@@ -4086,9 +4096,9 @@ fn project_summary_fields(
     {
         resource.updated_at = newest_timestamp(resource.updated_at.as_deref(), Some(observed_at));
     }
-    resource.candidate = candidate(record);
-    resource.gates = gates(record);
-    resource.publication = publication(record);
+    resource.candidate = candidate(record, delivery.as_ref());
+    resource.gates = gates(record, delivery.as_ref());
+    resource.publication = delivery.as_ref().and_then(publication);
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
@@ -4325,11 +4335,9 @@ pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     // states, where "pending verification" is the more accurate read (e.g. a
     // record already marked `Succeeded` whose promotion has not verified).
     if record.state != AgentTaskRunState::Running
-        && record
-            .metadata
-            .pointer("/latest_promotion/status")
-            .and_then(Value::as_str)
-            == Some("verification_pending")
+        && CookDelivery::from_run_metadata(&record.metadata)
+            .and_then(|delivery| delivery.promotion())
+            == Some(AgentTaskPromotionStatus::VerificationPending)
     {
         return ControlPlaneRunState::CandidateRecoverable;
     }
@@ -4604,7 +4612,10 @@ fn newest_timestamp(existing: Option<&str>, observed: Option<&str>) -> Option<St
     }
 }
 
-fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
+fn blocker(
+    record: &AgentTaskRunRecord,
+    delivery: Option<&CookDelivery>,
+) -> Option<ControlPlaneBlocker> {
     if let Some(quarantine) = record.metadata.get("queue_quarantine") {
         let message = quarantine
             .get("reason")
@@ -4651,6 +4662,11 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
                 retry,
             });
         }
+    }
+    // The current delivery blocker outranks controller failure history, as
+    // it does in `diagnose`.
+    if let Some(blocker) = delivery.and_then(|delivery| delivery.blocker.as_ref()) {
+        return Some(delivery_blocker(blocker));
     }
     if let Some(message) = record
         .metadata
@@ -4900,28 +4916,39 @@ fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
         })
 }
 
-fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
+/// The delivery blocker projected into the existing contract field: `reason`
+/// carries the next legal action, as it does for resource-guard stops.
+fn delivery_blocker(blocker: &CookDeliveryBlocker) -> ControlPlaneBlocker {
+    ControlPlaneBlocker {
+        code: Some(blocker.code.as_str().to_string()),
+        message: redacted_bounded(&blocker.message, MESSAGE_BOUND),
+        state: None,
+        reason: blocker
+            .next_action
+            .as_deref()
+            .map(|action| redacted_bounded(action, MESSAGE_BOUND)),
+        retry: None,
+    }
+}
+
+fn candidate(
+    record: &AgentTaskRunRecord,
+    delivery: Option<&CookDelivery>,
+) -> Option<ControlPlaneStateSummary> {
     if let Some(adoption) = record.candidate_adoption.as_ref() {
         return Some(ControlPlaneStateSummary {
             id: nonempty_bounded(&adoption.candidate_sha, ID_BOUND),
             state: bounded(&adoption.state, STATE_BOUND),
         });
     }
-    let promoted = record
-        .metadata
-        .pointer("/latest_promotion/status")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .map(|state| ControlPlaneStateSummary {
-            id: record
-                .metadata
-                .pointer("/latest_promotion/task_id")
-                .and_then(|value| value.as_str())
-                .and_then(|value| nonempty_bounded(value, ID_BOUND)),
-            state: bounded(state, STATE_BOUND),
+    if let Some(candidate) = delivery.and_then(|delivery| delivery.candidate.as_ref()) {
+        return Some(ControlPlaneStateSummary {
+            id: candidate
+                .task_id
+                .as_deref()
+                .and_then(|task| nonempty_bounded(task, ID_BOUND)),
+            state: promotion_label(candidate.promotion),
         });
-    if promoted.is_some() {
-        return promoted;
     }
     if matches!(
         record.state,
@@ -4942,34 +4969,20 @@ fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
     None
 }
 
-fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
-    let mut gates: Vec<ControlPlaneStateSummary> = record
-        .metadata
-        .get("latest_promotion")
-        .and_then(|promotion| {
-            promotion
-                .get("deterministic_gates")
-                .or_else(|| promotion.get("gate_results"))
-        })
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|gate| {
-            let state = gate
-                .get("status")
-                .or_else(|| gate.get("state"))
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.trim().is_empty())?;
-            let id = gate
-                .get("id")
-                .or_else(|| gate.get("kind"))
-                .or_else(|| gate.get("type"))
-                .and_then(|value| value.as_str())
-                .and_then(|value| nonempty_bounded(value, ID_BOUND));
-            Some(ControlPlaneStateSummary {
-                id,
-                state: bounded(state, STATE_BOUND),
-            })
+fn gates(
+    record: &AgentTaskRunRecord,
+    delivery: Option<&CookDelivery>,
+) -> Vec<ControlPlaneStateSummary> {
+    let mut gates: Vec<ControlPlaneStateSummary> = delivery
+        .map(|delivery| delivery.gates.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|gate| ControlPlaneStateSummary {
+            id: gate
+                .id
+                .as_deref()
+                .and_then(|id| nonempty_bounded(id, ID_BOUND)),
+            state: gate_label(gate.state),
         })
         .take(GATE_BOUND)
         .collect();
@@ -4998,17 +5011,23 @@ fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
     gates
 }
 
-fn publication(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
-    let finalization = record.metadata.get("cook_finalization")?;
-    let state = finalization
-        .get("status")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty())?;
-    let id = crate::agent_task_service::cook_finalization_pr_identity(finalization)
-        .and_then(|value| nonempty_redacted_bounded(&value, MESSAGE_BOUND));
+fn gate_label(status: AgentTaskGateStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn publication(delivery: &CookDelivery) -> Option<ControlPlaneStateSummary> {
+    let publication = delivery.publication.as_ref()?;
+    if publication.status.is_empty() {
+        return None;
+    }
     Some(ControlPlaneStateSummary {
-        id,
-        state: bounded(state, STATE_BOUND),
+        id: publication
+            .pr_identity()
+            .and_then(|identity| nonempty_redacted_bounded(&identity, MESSAGE_BOUND)),
+        state: bounded(&publication.status, STATE_BOUND),
     })
 }
 
@@ -9416,6 +9435,40 @@ mod tests {
         );
         assert_eq!(resource.gates[0].state, "failed");
         assert!(resource.publication.is_none());
+        let blocker = resource.blocker.expect("delivery blocker");
+        assert_eq!(blocker.code.as_deref(), Some("gate_failed"));
+        assert_eq!(blocker.message, "deterministic gate `test` failed");
+    }
+
+    #[test]
+    fn moving_base_recovery_without_finalization_projects_a_base_conflict() {
+        // #15017: the blocker is the base conflict and its recorded
+        // continuation, read without mutating the record.
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+        record.metadata["cook_finalization"] = serde_json::Value::Null;
+        record.metadata["cook_moving_base_recovery"] = json!({
+            "blocker": "origin/main moved and src/lib.rs no longer applies cleanly",
+            "continuation": "homeboy agent-task cook-continue cook-1",
+            "base_movements": 1
+        });
+        let before = record.clone();
+
+        let resource = project_record(&record, None).expect("project moving-base blocker");
+
+        assert_eq!(record, before);
+        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert!(resource.publication.is_none());
+        let blocker = resource.blocker.expect("delivery blocker");
+        assert_eq!(blocker.code.as_deref(), Some("base_conflict"));
+        assert_eq!(
+            blocker.message,
+            "origin/main moved and src/lib.rs no longer applies cleanly"
+        );
+        assert_eq!(
+            blocker.reason.as_deref(),
+            Some("homeboy agent-task cook-continue cook-1")
+        );
     }
 
     #[test]
