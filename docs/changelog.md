@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.19] - 2026-10-16
+
+### Fixed
+- commit the candidate under its PR title, not "fix: cook <repo>"
+- do not publish a candidate the agent reports as incomplete
+
 ## [0.428.18] - 2026-10-16
 
 ### Fixed
