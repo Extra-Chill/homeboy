@@ -199,7 +199,7 @@ fn execution_step_concurrent_drain_reuses_one_submission_and_executes_once() {
                 Ok(restarted.admit_keyed(submission)?.id.to_string())
             })
             .unwrap(),
-            receipts.0
+            receipts.0["scheduled"][0]
         );
         execute_and_assert_one_initial_attempt(subject);
     });

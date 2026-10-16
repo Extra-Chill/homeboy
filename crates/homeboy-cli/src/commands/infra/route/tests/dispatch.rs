@@ -3600,26 +3600,47 @@ fn auto_cook_stale_lab_does_not_persist_blocked_runner_stale_retries() {
 }
 
 #[test]
-fn unmaterialized_cook_admission_keeps_stale_unavailable_and_capacity_distinct() {
-    let readiness = |state: &str| homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
-        state: state.to_string(),
-        selected_runner_id: None,
-        available_runner_ids: Vec::new(),
-        reasons: Vec::new(),
-        remediation_commands: Vec::new(),
-        repair_admitted_runner_ids: Vec::new(),
+fn unmaterialized_cook_admission_maps_runner_readiness_to_honest_states() {
+    let readiness = |state: &str, reasons: &[&str]| {
+        homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+            state: state.to_string(),
+            selected_runner_id: Some("lab-a".to_string()),
+            available_runner_ids: Vec::new(),
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            remediation_commands: Vec::new(),
+            repair_admitted_runner_ids: Vec::new(),
+        }
     };
+    let unavailable = "no eligible Lab runner is currently available".to_string();
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness("stale"))),
-        "blocked_runner_stale"
+        unmaterialized_admission_state(Some(&readiness("connected_ready", &[]))),
+        (
+            "queued",
+            "admitted to lab-a; waiting for execution scheduling".to_string()
+        ),
+        "a ready runner is scheduling, never unavailable"
     );
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness("disconnected"))),
-        "blocked_runner_unavailable"
+        unmaterialized_admission_state(Some(&readiness("capacity_blocked", &[]))),
+        (
+            "queued",
+            "lab-a is at capacity; waiting for a free slot".to_string()
+        )
     );
     assert_eq!(
-        unmaterialized_admission_state(Some(&readiness("capacity_blocked"))),
-        "queued"
+        unmaterialized_admission_state(Some(&readiness("stale", &["lab-a admission is stale"]))),
+        (
+            "blocked_runner_stale",
+            "lab-a admission is stale".to_string()
+        )
+    );
+    assert_eq!(
+        unmaterialized_admission_state(Some(&readiness("disconnected", &[]))),
+        ("blocked_runner_unavailable", unavailable.clone())
+    );
+    assert_eq!(
+        unmaterialized_admission_state(None),
+        ("blocked_runner_unavailable", unavailable)
     );
 }
 

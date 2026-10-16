@@ -42,7 +42,7 @@ pub use control_plane_events::{
 pub use runs::{
     RunMetadataRevision, DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT,
 };
-pub use work_intents::WorkIntent;
+pub use work_intents::{WorkIntent, WorkIntentDeferral};
 
 pub(crate) use helpers::*;
 pub(crate) use schema::{open_initialized_connection, open_readonly_connection};

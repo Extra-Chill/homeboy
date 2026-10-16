@@ -18,6 +18,15 @@ pub struct WorkIntent {
     pub payload: Value,
 }
 
+/// A failed delivery's durable retry state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkIntentDeferral {
+    pub id: String,
+    pub attempts: u32,
+    pub next_attempt_ms: u64,
+    pub last_error: String,
+}
+
 impl WorkIntent {
     pub fn validate(&self, expected_run_id: &str) -> Result<()> {
         if self.id.trim().is_empty()
@@ -95,14 +104,16 @@ impl ObservationStore {
         })
         .transpose()
     }
-    /// Read the next indexed pending intent without claiming a foreign daemon
-    /// job. Submission is deduplicated by its stable id and the ACK is durable.
-    pub fn next_pending_work_intent(&self) -> Result<Option<WorkIntent>> {
+    /// Read the oldest pending intent that is due at `now_ms`, without
+    /// claiming a foreign daemon job. Submission is deduplicated by its stable
+    /// id and the ACK is durable. An intent deferred by a failed delivery is
+    /// skipped until its backoff elapses, so it never blocks newer intents.
+    pub fn next_pending_work_intent(&self, now_ms: u64) -> Result<Option<WorkIntent>> {
         let row: Option<(String, String, String, u32, String)> = self
             .connection
             .query_row(
-                "SELECT id, run_id, kind, version, payload_json FROM control_plane_work_intents WHERE state = 'pending' ORDER BY created_at, id LIMIT 1",
-                [],
+                "SELECT id, run_id, kind, version, payload_json FROM control_plane_work_intents WHERE state = 'pending' AND next_attempt_ms <= ?1 ORDER BY created_at, id LIMIT 1",
+                [now_ms as i64],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
@@ -118,6 +129,46 @@ impl ObservationStore {
             })
         })
         .transpose()
+    }
+
+    /// Keep custody of an intent whose delivery failed: record the error and
+    /// push its next attempt out with exponential backoff (1s to 60s). The
+    /// deadline is durable, so a daemon restart never resets it. An intent a
+    /// concurrent drain already acknowledged is left settled (`None`).
+    pub fn defer_work_intent(
+        &self,
+        id: &str,
+        now_ms: u64,
+        error: &str,
+    ) -> Result<Option<WorkIntentDeferral>> {
+        let last_error = crate::redaction::redact_string(error);
+        self.connection
+            .query_row(
+                "UPDATE control_plane_work_intents SET attempts = attempts + 1, next_attempt_ms = ?2 + MIN(1000 << MIN(attempts, 6), 60000), last_error = ?3 WHERE id = ?1 AND state = 'pending' RETURNING attempts, next_attempt_ms",
+                params![id, now_ms as i64, last_error],
+                |row| {
+                    Ok(WorkIntentDeferral {
+                        id: id.to_string(),
+                        attempts: row.get(0)?,
+                        next_attempt_ms: row.get::<_, i64>(1)? as u64,
+                        last_error: last_error.clone(),
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_error("defer work intent"))
+    }
+
+    /// Make every deferred intent due now, standing in for elapsed backoff.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expire_work_intent_backoff(&self) -> Result<()> {
+        self.connection
+            .execute(
+                "UPDATE control_plane_work_intents SET next_attempt_ms = 0 WHERE state = 'pending'",
+                [],
+            )
+            .map_err(sqlite_error("expire work intent backoff"))?;
+        Ok(())
     }
 
     /// Settle the outbox only after the daemon accepted the idempotent job.
@@ -174,7 +225,10 @@ mod tests {
             store
                 .acknowledge_work_intent(&intent.id, &serde_json::json!({"job_id": "job"}))
                 .unwrap();
-            assert!(store.next_pending_work_intent().unwrap().is_none());
+            assert!(store
+                .next_pending_work_intent(crate::api_jobs::timestamp_ms())
+                .unwrap()
+                .is_none());
             assert_eq!(store.work_intent_by_id(&intent.id).unwrap(), Some(intent));
             assert!(store.work_intent_by_id("absent").unwrap().is_none());
         });

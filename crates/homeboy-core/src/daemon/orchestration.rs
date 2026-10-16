@@ -96,9 +96,10 @@ pub fn reconcile_stale_active_runs() -> Result<Value> {
     active_driver().reconcile_stale_active_runs()
 }
 
-/// Drain one indexed intent. The source lifecycle write and intent share a
-/// SQLite transaction; the daemon job submission has its own idempotent key.
-/// A crash after submission but before ACK replays the same job on restart.
+/// Drain every work intent due at the start of this pass, oldest first. The
+/// source lifecycle write and intent share a SQLite transaction; the daemon
+/// job submission has its own idempotent key, so a crash after submission but
+/// before ACK replays the same job on restart.
 pub fn drain_work_intents() -> Result<Value> {
     drain_work_intents_with(|intent| {
         let schedule = work_intent_schedulers()
@@ -118,19 +119,127 @@ pub fn drain_work_intents() -> Result<Value> {
     })
 }
 
+/// A failed delivery keeps custody: the intent is deferred with its own
+/// durable backoff and the pass continues with the next due intent, so one
+/// failing intent never blocks newer ones. Deferred intents are not due again
+/// before the pass's start time, which bounds the pass.
+///
+/// Returns `{"scheduled": [receipt...], "deferred": [WorkIntentDeferral...]}`.
 pub fn drain_work_intents_with(
-    schedule: impl FnOnce(&WorkIntent) -> Result<Value>,
+    mut schedule: impl FnMut(&WorkIntent) -> Result<Value>,
 ) -> Result<Value> {
     let store = ObservationStore::open_initialized()?;
-    let Some(intent) = store.next_pending_work_intent()? else {
-        return Ok(serde_json::json!({"scheduled": false}));
-    };
-    let receipt = schedule(&intent)?;
+    let now_ms = crate::api_jobs::timestamp_ms();
+    let mut scheduled = Vec::new();
+    let mut deferred = Vec::new();
+    while let Some(intent) = store.next_pending_work_intent(now_ms)? {
+        match schedule(&intent).and_then(durable_job_receipt) {
+            Ok(receipt) => {
+                store.acknowledge_work_intent(&intent.id, &receipt)?;
+                scheduled.push(receipt);
+            }
+            Err(error) => {
+                deferred.extend(store.defer_work_intent(&intent.id, now_ms, &error.message)?)
+            }
+        }
+    }
+    Ok(serde_json::json!({ "scheduled": scheduled, "deferred": deferred }))
+}
+
+fn durable_job_receipt(receipt: Value) -> Result<Value> {
     if receipt["scheduled"] != true || receipt["job_id"].as_str().is_none_or(str::is_empty) {
         return Err(crate::Error::internal_unexpected(
             "work intent scheduling returned no durable job receipt",
         ));
     }
-    store.acknowledge_work_intent(&intent.id, &receipt)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observation::RunRecord;
+    use crate::test_support::with_isolated_home;
+
+    fn commit_intents(ids: &[&str]) {
+        let run = RunRecord {
+            id: "drain-run".to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({}),
+        };
+        let intents: Vec<_> = ids
+            .iter()
+            .map(|id| WorkIntent {
+                id: id.to_string(),
+                run_id: run.id.clone(),
+                kind: "test".to_string(),
+                version: 1,
+                payload: serde_json::json!({ "id": id }),
+            })
+            .collect();
+        ObservationStore::open_initialized()
+            .unwrap()
+            .upsert_imported_run_with_events_and_intents(&run, true, None, None, &[], &intents)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_failing_head_intent_defers_without_blocking_newer_intents() {
+        with_isolated_home(|_| {
+            commit_intents(&["intent-a-head", "intent-b-newer"]);
+            let schedule = |fail_head: bool| {
+                move |intent: &WorkIntent| {
+                    if fail_head && intent.id == "intent-a-head" {
+                        return Err(crate::Error::internal_unexpected(
+                            "controller idempotency key is already bound",
+                        ));
+                    }
+                    Ok(
+                        serde_json::json!({ "scheduled": true, "job_id": format!("job:{}", intent.id) }),
+                    )
+                }
+            };
+
+            let pass = drain_work_intents_with(schedule(true)).unwrap();
+            assert_eq!(
+                pass["scheduled"],
+                serde_json::json!([{ "scheduled": true, "job_id": "job:intent-b-newer" }])
+            );
+            assert_eq!(pass["deferred"][0]["id"], "intent-a-head");
+            assert_eq!(pass["deferred"][0]["attempts"], 1);
+            assert_eq!(
+                pass["deferred"][0]["last_error"],
+                "controller idempotency key is already bound"
+            );
+
+            let backing_off = drain_work_intents_with(|_| -> Result<Value> {
+                panic!("an intent in backoff is not retried early")
+            })
+            .unwrap();
+            assert_eq!(
+                backing_off,
+                serde_json::json!({ "scheduled": [], "deferred": [] })
+            );
+
+            let deadline = pass["deferred"][0]["next_attempt_ms"].as_u64().unwrap();
+            while crate::api_jobs::timestamp_ms() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let retried = drain_work_intents_with(schedule(false)).unwrap();
+            assert_eq!(
+                retried["scheduled"],
+                serde_json::json!([{ "scheduled": true, "job_id": "job:intent-a-head" }])
+            );
+            assert_eq!(retried["deferred"], serde_json::json!([]));
+        });
+    }
 }
