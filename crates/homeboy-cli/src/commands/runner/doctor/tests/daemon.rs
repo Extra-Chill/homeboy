@@ -1,4 +1,5 @@
 use super::super::*;
+use homeboy::runner::runners::RunnerTunnelMode;
 use types::RunnerDoctorStatus;
 
 #[test]

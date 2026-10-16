@@ -1,13 +1,12 @@
-//! Lab-runner handoff and pending-submission-intent reconciliation.
+//! Lab-runner handoff reconciliation.
 //!
 //! The volatile heart of the durable-run control plane: reconciling active lab
-//! handoffs, binding/expiring pending runner-submission intents, terminalizing
+//! handoffs, expiring unaccepted runner handoffs, terminalizing
 //! lost accepted lab jobs, and the handoff/candidate follow-up predicates.
 //! Extracted from the high-churn `lifecycle_ops` god file to isolate this
 //! reconciliation state machine into a named, testable seam.
 
 use super::*;
-use homeboy_runner_contract::RunnerApiSubmitRequest;
 
 // The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
 // above this resolved a root and delegated straight here. It had no callers, so
@@ -24,12 +23,10 @@ use homeboy_runner_contract::RunnerApiSubmitRequest;
 ///
 /// This is a queue scan that mutates every row it selects, so the scan and its
 /// consequences have to name one installation. The queue itself is read from
-/// this store's own observation database, and each of the three follow-ups is
+/// this store's own observation database, and each of the two follow-ups is
 /// dispatched to the rooted sibling that takes its lock and commits its record
 /// in the same home:
 ///
-/// * `reconcile_pending_runner_submission_intent_in_store` replays a submission
-///   key and binds the acceptance it gets back;
 /// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
 ///   store's `run_dir` and terminalizes;
 /// * `reconcile_status_in_store` takes two advisory locks of its own and has roughly
@@ -45,26 +42,18 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
 ) -> Result<usize> {
     let now = chrono::Utc::now();
     let mut accepted_run_ids = Vec::new();
-    let mut pending_intent_run_ids = Vec::new();
     let mut expired_run_ids = Vec::new();
     // Scan the stored snapshot so this operation owns and reports its expiry
     // mutations. Reads never expire a handoff (#15718).
     for record in lifecycle_store.read_records()? {
         if record.state == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
             accepted_run_ids.push(record.run_id);
-        } else if has_pending_runner_submission_intent(&record) {
-            pending_intent_run_ids.push(record.run_id);
         } else if has_expired_pending_runner_submission_intent(&record, now) {
             expired_run_ids.push(record.run_id);
         }
     }
 
     let mut reconciled = 0;
-    for run_id in pending_intent_run_ids {
-        if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, &run_id)? {
-            reconciled += 1;
-        }
-    }
     for run_id in expired_run_ids {
         if expire_unaccepted_lab_handoff_in_store(lifecycle_store, &run_id)? {
             reconciled += 1;
@@ -91,25 +80,6 @@ pub fn reconcile_active_lab_runner_handoffs_in_store(
     Ok(reconciled)
 }
 
-fn has_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
-    has_live_pending_runner_submission_intent(record, chrono::Utc::now())
-}
-
-/// A pending reverse-broker request is live only while its complete durable
-/// intent remains inside the controller's acceptance deadline.
-pub(crate) fn has_live_pending_runner_submission_intent(
-    record: &AgentTaskRunRecord,
-    now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    has_complete_pending_runner_submission_intent(record)
-        && record
-            .lab_handoff
-            .as_ref()
-            .and_then(|handoff| handoff.acceptance_deadline_at.as_deref())
-            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-            .is_some_and(|deadline| deadline.with_timezone(&chrono::Utc) > now)
-}
-
 pub(crate) fn has_expired_pending_runner_submission_intent(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
@@ -123,272 +93,6 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
         })
         && record.has_expired_pending_lab_handoff(now)
-}
-
-fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
-    // The reverse broker can start the runner-side workload before its accepted
-    // job projection reaches this controller record. That transient `Running`
-    // record is still submission-owned until the acceptance deadline, not an
-    // ownerless process that stale reconciliation may cancel.
-    if !matches!(
-        record.state,
-        AgentTaskRunState::Queued | AgentTaskRunState::Running
-    ) || record.runner_job_id().is_some()
-    {
-        return false;
-    }
-    let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
-        handoff.state == AgentTaskLabHandoffState::Pending
-            && handoff.authority == AgentTaskLabHandoffAuthority::Controller
-    }) else {
-        return false;
-    };
-    let Some(intent) = record
-        .metadata
-        .get("runner_submission_intent")
-        .and_then(Value::as_object)
-        .filter(|intent| intent.get("state").and_then(Value::as_str) == Some("pending"))
-    else {
-        return false;
-    };
-    let Some(submission_key) = intent
-        .get("submission_key")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return false;
-    };
-    let Some(runner_id) = intent
-        .get("runner_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return false;
-    };
-    let Ok(replay) = pending_runner_replay(intent) else {
-        return false;
-    };
-    replay.runner_id() == runner_id
-        && replay.submission_key() == Some(submission_key)
-        && handoff.runner_id == runner_id
-        && handoff.submission_key.as_deref() == Some(submission_key)
-}
-
-/// The durable replay input is the exact envelope request persisted by
-/// `record_lab_offload_submission_envelope` before it crossed the broker.
-struct PendingRunnerReplay(RunnerApiSubmitRequest);
-
-impl PendingRunnerReplay {
-    fn dispatch(&self) -> Option<&homeboy_runner_contract::RunnerExecutionDispatch> {
-        self.0.envelope.dispatch.as_ref()
-    }
-
-    fn runner_id(&self) -> &str {
-        self.dispatch()
-            .map(|dispatch| dispatch.runner_id.as_str())
-            .unwrap_or_default()
-    }
-
-    fn submission_key(&self) -> Option<&str> {
-        Some(self.0.submission_key.trim()).filter(|submission_key| !submission_key.is_empty())
-    }
-
-    fn cwd(&self) -> Option<&str> {
-        self.dispatch().and_then(|dispatch| dispatch.cwd.as_deref())
-    }
-
-    fn command(&self) -> &[String] {
-        self.dispatch()
-            .map(|dispatch| dispatch.command.as_slice())
-            .unwrap_or_default()
-    }
-}
-
-fn pending_runner_replay(intent: &serde_json::Map<String, Value>) -> Result<PendingRunnerReplay> {
-    let envelope = intent.get("replay_envelope_request").ok_or_else(|| {
-        Error::internal_unexpected(
-            "pending runner submission intent has no replay_envelope_request",
-        )
-    })?;
-    serde_json::from_value(envelope.clone())
-        .map(PendingRunnerReplay)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse envelope runner replay request".to_string()),
-            )
-        })
-}
-
-/// The replay decision and its consequence must name one installation. This
-/// body reads the intent that authorises the replay, and on acceptance commits
-/// the accepted handoff through `record_detached_lab_run_in_store` — which
-/// takes the handoff lock on the same store's `run_dir`. Deciding from one
-/// home's intent and binding the acceptance into another's would let two
-/// controllers replay the same submission key while neither handoff lock
-/// excluded the other (#7505).
-///
-/// The broker transport stays process-global on purpose:
-/// `with_runner_continuation` resolves the configured provider registry, which
-/// is trust material and a subprocess contract, not a lifecycle root.
-pub fn reconcile_pending_runner_submission_intent_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let run_id = sanitize_run_id(run_id);
-    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
-    let record = lifecycle_store.read_record(&run_id)?;
-    if !has_pending_runner_submission_intent(&record) {
-        return Ok(false);
-    }
-    if record.state.is_terminal()
-        || record
-            .metadata
-            .pointer("/runner_submission_cancellation/state")
-            .and_then(Value::as_str)
-            == Some("requested")
-    {
-        return Ok(false);
-    }
-    let intent = record
-        .metadata
-        .get("runner_submission_intent")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            Error::internal_unexpected("pending runner submission intent is malformed")
-        })?;
-    let string = |key: &str| {
-        intent
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string)
-    };
-    let runner_id = string("runner_id").ok_or_else(|| {
-        Error::internal_unexpected("pending runner submission intent has no runner id")
-    })?;
-    let submission_key = string("submission_key").ok_or_else(|| {
-        Error::internal_unexpected("pending runner submission intent has no submission key")
-    })?;
-    let replay = pending_runner_replay(intent)?;
-    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
-        return Err(Error::internal_unexpected(
-            "runner replay request does not match pending submission authority",
-        ));
-    }
-    let cwd = replay.cwd().unwrap_or_default().to_string();
-    let command = replay.command().to_vec();
-    match runner_continuation::with_runner_continuation(|provider| {
-        provider.submit_runner_api_request(&runner_id, replay.0)
-    }) {
-        Ok(job) => {
-            record_detached_lab_run_locked_in_store(
-                lifecycle_store,
-                DetachedLabRunRecord {
-                    run_id: &run_id,
-                    runner_id: &runner_id,
-                    runner_job_id: &job.id.to_string(),
-                    remote_workspace: &cwd,
-                    remote_command: &command,
-                },
-            )?;
-            Ok(true)
-        }
-        Err(error) => {
-            let _ = lifecycle_store.mutate_record(&run_id, |record| {
-                let metadata = record.ensure_metadata_object();
-                metadata["runner_submission_intent"]["last_reconciliation_error"] = json!({
-                    "code": error.code.as_str(),
-                    "message": error.message,
-                    "retryable": true,
-                });
-                true
-            })?;
-            Ok(false)
-        }
-    }
-}
-
-/// Admit the irreversible runner POST only while this exact rooted pending
-/// handoff remains open. The per-run lock spans `submit`, so cancellation either
-/// fences first and refuses the POST, or waits for this POST and resolves its
-/// acceptance receipt before deciding whether it can terminalize the run.
-#[derive(Debug)]
-pub enum PendingRunnerSubmissionAdmissionError {
-    Rejected(Error),
-    Submission(Error),
-}
-
-impl From<Error> for PendingRunnerSubmissionAdmissionError {
-    fn from(error: Error) -> Self {
-        Self::Rejected(error)
-    }
-}
-
-pub fn with_pending_runner_submission_admission_in_store<T>(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    submission: &RunnerApiSubmitRequest,
-    submit: impl FnOnce() -> Result<T>,
-) -> std::result::Result<T, PendingRunnerSubmissionAdmissionError> {
-    let run_id = sanitize_run_id(run_id);
-    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
-    let record = lifecycle_store.read_record(&run_id)?;
-    let blocked = || {
-        Error::validation_invalid_argument(
-            "runner_submission",
-            format!(
-                "runner submission for '{run_id}' was fenced before POST; inspect or retry cancellation with: homeboy agent-task cancel {run_id}"
-            ),
-            Some(run_id.clone()),
-            None,
-        )
-    };
-    if record.state.is_terminal()
-        || record
-            .metadata
-            .pointer("/runner_submission_cancellation/state")
-            .and_then(Value::as_str)
-            == Some("requested")
-        || !has_live_pending_runner_submission_intent(&record, chrono::Utc::now())
-    {
-        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
-    }
-    let intent = record
-        .metadata
-        .get("runner_submission_intent")
-        .and_then(Value::as_object)
-        .ok_or_else(blocked)?;
-    let runner_id = intent
-        .get("runner_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(blocked)?;
-    let submission_key = intent
-        .get("submission_key")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(blocked)?;
-    let dispatch = submission.envelope.dispatch.as_ref().ok_or_else(blocked)?;
-    let durable_run_id = submission
-        .envelope
-        .lifecycle
-        .as_ref()
-        .and_then(|lifecycle| lifecycle.durable_run_id.as_deref());
-    let fingerprint =
-        homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(submission)?;
-    if durable_run_id != Some(run_id.as_str())
-        || submission.submission_key != submission_key
-        || dispatch.runner_id != runner_id
-        || intent.get("payload_fingerprint").and_then(Value::as_str) != Some(fingerprint.as_str())
-        || record.lab_handoff.as_ref().is_none_or(|handoff| {
-            handoff.submission_key.as_deref() != Some(submission_key)
-                || handoff.payload_fingerprint.as_deref() != Some(fingerprint.as_str())
-        })
-    {
-        return Err(PendingRunnerSubmissionAdmissionError::Rejected(blocked()));
-    }
-    submit().map_err(PendingRunnerSubmissionAdmissionError::Submission)
 }
 
 /// Bind a direct-daemon job whose accepted response was lost after the daemon
@@ -450,125 +154,6 @@ pub(crate) fn recover_reserved_lab_runner_job_in_store(
         },
     )?;
     Ok(true)
-}
-
-/// Resolve a possibly accepted submission without replaying it. This is used
-/// only after the acceptance deadline or an operator cancellation request:
-/// those paths must never create new runner work.
-///
-/// There is deliberately no ambient wrapper. Both callers — expiry and
-/// cancellation — are destructive, and each already holds the store whose
-/// record it is about to terminalize. An ambient form would exist only to let a
-/// future caller decide acceptance from one installation's intent and bind the
-/// acceptance into another's (#7505).
-pub(crate) fn bind_pending_runner_submission_if_accepted_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let run_id = sanitize_run_id(run_id);
-    let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
-    bind_pending_runner_submission_if_accepted_locked_in_store(lifecycle_store, &run_id)
-}
-
-pub(crate) fn bind_pending_runner_submission_if_accepted_locked_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let run_id = sanitize_run_id(run_id);
-    let record = lifecycle_store.read_record(&run_id)?;
-    if record.runner_job_id().is_some()
-        || record
-            .metadata
-            .pointer("/runner_submission_intent/state")
-            .and_then(Value::as_str)
-            != Some("pending")
-    {
-        return Ok(false);
-    }
-    let intent = record
-        .metadata
-        .get("runner_submission_intent")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            Error::internal_unexpected("pending runner submission intent is malformed")
-        })?;
-    let string = |key: &str| {
-        intent
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string)
-    };
-    let runner_id = string("runner_id").ok_or_else(|| {
-        Error::internal_unexpected("pending runner submission intent has no runner id")
-    })?;
-    let submission_key = string("submission_key").ok_or_else(|| {
-        Error::internal_unexpected("pending runner submission intent has no submission key")
-    })?;
-    let replay = pending_runner_replay(intent)?;
-    if replay.runner_id() != runner_id || replay.submission_key() != Some(&submission_key) {
-        return Err(Error::internal_unexpected(
-            "runner replay request does not match pending submission authority",
-        ));
-    }
-    let lookup = runner_continuation::with_runner_continuation(|provider| {
-        provider.lookup_reverse_broker_submission(&runner_id, &submission_key)
-    });
-    if lookup.is_ok() {
-        lifecycle_store.mutate_record(&run_id, |record| {
-            if let Some(intent) = record
-                .ensure_metadata_object()
-                .get_mut("runner_submission_intent")
-                .and_then(Value::as_object_mut)
-            {
-                intent.remove("last_lookup_error");
-                true
-            } else {
-                false
-            }
-        })?;
-    }
-    match lookup {
-        Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Accepted { job }) => {
-            record_detached_lab_run_locked_in_store(
-                lifecycle_store,
-                DetachedLabRunRecord {
-                    run_id: &run_id,
-                    runner_id: &runner_id,
-                    runner_job_id: &job.id.to_string(),
-                    remote_workspace: replay.cwd().unwrap_or_default(),
-                    remote_command: replay.command(),
-                },
-            )?;
-            Ok(true)
-        }
-        Ok(
-            homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Absent
-            | homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Expired { .. },
-        ) => Ok(false),
-        Err(error) => {
-            let lookup_error = json!({
-                "code": error.code.as_str(),
-                "message": error.message.clone(),
-                "retryable": true,
-            });
-            lifecycle_store.mutate_record(&run_id, |record| {
-                if let Some(intent) = record
-                    .ensure_metadata_object()
-                    .get_mut("runner_submission_intent")
-                    .and_then(Value::as_object_mut)
-                {
-                    intent.insert("last_lookup_error".to_string(), lookup_error.clone());
-                    true
-                } else {
-                    false
-                }
-            })?;
-            let mut error = error;
-            error.retryable = Some(true);
-            Err(error)
-        }
-    }
 }
 
 /// Whether the controller has durably transferred this run to a specific
@@ -635,14 +220,6 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<bool> {
-    // An expired pending request may have been accepted immediately before its
-    // response was lost. Querying its key is read-only; never replay here.
-    if bind_pending_runner_submission_if_accepted_in_store(lifecycle_store, run_id)? {
-        return Ok(true);
-    }
-    // Cancellation repeats the acceptance lookup under the handoff lock before
-    // terminalizing, so acceptance between this read and cancellation remains
-    // authoritative.
     let record = lifecycle_store.read_record(run_id)?;
     if !has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         return Ok(false);

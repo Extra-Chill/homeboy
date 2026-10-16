@@ -1706,9 +1706,6 @@ pub(crate) fn connected_daemon_exec_checks_with_timeout(
     let Some(session) = status.session else {
         return Vec::new();
     };
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return Vec::new();
-    }
     let Some(local_url) = session.local_url else {
         return vec![checks::error(
             "daemon.exec",
@@ -1737,9 +1734,6 @@ pub(crate) fn connected_daemon_health_checks_with_timeout(
     session: &RunnerSession,
     timeout: std::time::Duration,
 ) -> Vec<RunnerCheck> {
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return Vec::new();
-    }
     let Some(local_url) = session.local_url.as_deref() else {
         return Vec::new();
     };

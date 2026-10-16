@@ -26,9 +26,7 @@ pub use mirror::{
 };
 pub(crate) use mirror::{
     mirror_daemon_evidence, mirror_daemon_job_progress_with_ownership,
-    mirror_reverse_broker_evidence, mirror_reverse_broker_job_progress_with_ownership,
     validate_controller_artifact_bytes, MirrorEvidenceRequest, MirrorRunOwnership,
-    ReverseBrokerEvidenceContext,
 };
 pub use mirror::{runner_job_log_snapshot_for_session, runner_job_log_snapshot_for_session_until};
 pub(crate) use util::{local_job_run_id, runner_exec_run_label};

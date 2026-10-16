@@ -1112,7 +1112,7 @@ fn runner_exec_promotes_offloaded_artifacts_from_runner_path() {
             .expect("run");
         let output = runner_exec_output(
             "local-ssh",
-            RunnerExecMode::ReverseBroker,
+            RunnerExecMode::Daemon,
             &workspace.path().display().to_string(),
         );
 
@@ -1178,7 +1178,7 @@ fn runner_exec_promotes_offloaded_directory_artifacts_from_runner_path() {
             .expect("run");
         let output = runner_exec_output(
             "local-ssh",
-            RunnerExecMode::ReverseBroker,
+            RunnerExecMode::Daemon,
             &workspace.path().display().to_string(),
         );
 

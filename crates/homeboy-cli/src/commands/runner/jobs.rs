@@ -9,14 +9,11 @@ use homeboy::runner::runners::{self as runner, runner_job_log_snapshot};
 
 use super::super::CmdResult;
 use super::cli::RunnerJobCommand;
-use super::types::{
-    RunnerBrokerJobOutput, RunnerJobListEntry, RunnerJobListOutput, RunnerJobOutput,
-};
+use super::types::{RunnerJobListEntry, RunnerJobListOutput, RunnerJobOutput};
 
 pub(super) enum RunnerJobCommandOutput {
     List(Box<RunnerJobListOutput>),
     Daemon(Box<RunnerJobOutput>),
-    Broker(RunnerBrokerJobOutput),
 }
 
 pub(super) fn compact_list_command_run(
@@ -140,12 +137,6 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
         RunnerJobCommand::Cancel { runner_id, job_id } => {
             map_daemon_job(job_cancel(&runner_id, &job_id))
         }
-        RunnerJobCommand::Reconcile { runner_id } => job_reconcile(&runner_id),
-        RunnerJobCommand::Artifacts {
-            runner_id,
-            job_id,
-            artifact_id,
-        } => job_artifacts(&runner_id, &job_id, &artifact_id),
     }
 }
 
@@ -281,39 +272,6 @@ fn job_matches_filter(job: &RunnerJobListEntry, filter: &JobListFilter) -> bool 
 
 fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobCommandOutput> {
     result.map(|(output, exit_code)| (RunnerJobCommandOutput::Daemon(Box::new(output)), exit_code))
-}
-
-fn job_reconcile(runner_id: &str) -> CmdResult<RunnerJobCommandOutput> {
-    Ok((
-        RunnerJobCommandOutput::Broker(RunnerBrokerJobOutput {
-            variant: "job_reconcile",
-            command: "runner.job.reconcile",
-            runner_id: runner_id.to_string(),
-            job_id: None,
-            artifact_id: None,
-            response: runner::reconcile_terminal_jobs(runner_id)?,
-        }),
-        0,
-    ))
-}
-
-fn job_artifacts(
-    runner_id: &str,
-    job_id: &str,
-    artifact_id: &str,
-) -> CmdResult<RunnerJobCommandOutput> {
-    reject_unknown_daemon_owner(job_id)?;
-    Ok((
-        RunnerJobCommandOutput::Broker(RunnerBrokerJobOutput {
-            variant: "job_artifacts",
-            command: "runner.job.artifacts",
-            runner_id: runner_id.to_string(),
-            job_id: Some(job_id.to_string()),
-            artifact_id: Some(artifact_id.to_string()),
-            response: runner::reverse_broker_artifact(runner_id, job_id, artifact_id)?,
-        }),
-        0,
-    ))
 }
 
 fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {

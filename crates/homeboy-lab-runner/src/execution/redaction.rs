@@ -205,7 +205,6 @@ pub(super) fn lab_runner_handoff(
         transport: transport.to_string(),
         lifecycle_owner: match transport {
             "local" => RunnerLifecycleOwner::Local,
-            "reverse_broker" => RunnerLifecycleOwner::Broker,
             _ => RunnerLifecycleOwner::Controller,
         },
         job,

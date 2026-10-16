@@ -589,21 +589,21 @@ fn runner_job_event_format_includes_sequence_kind_message_and_data() {
 }
 
 #[test]
-fn reverse_runner_status_commands_include_lifecycle_operations() {
+fn direct_runner_status_commands_include_lifecycle_operations() {
     let mut report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
         state: runner::RunnerSessionState::Connected,
         session: Some(RunnerSession {
             runner_id: "homeboy-lab".to_string(),
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
             role: runner::RunnerSessionRole::Controller,
             server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: Some("https://broker.example.test/".to_string()),
+            controller_id: None,
+            broker_url: None,
             remote_daemon_address: None,
             local_port: None,
-            local_url: None,
+            local_url: Some("http://127.0.0.1:49153".to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
             proxy_forward: None,
@@ -625,7 +625,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             runner_id: "homeboy-lab".to_string(),
             job_id: "job-123".to_string(),
             operation: "runner.exec".to_string(),
-            source: "broker".to_string(),
+            source: "daemon".to_string(),
             kind: "runner.exec".to_string(),
             status: JobStatus::Running,
             command: "true".to_string(),
@@ -654,7 +654,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
             status: JobStatus::Running,
             command: "true".to_string(),
             cwd: None,
-            source: "broker".to_string(),
+            source: "daemon".to_string(),
             lifecycle_owner: homeboy::runner::runners::RunnerLifecycleOwner::Broker,
             lifecycle: None,
             started_at_ms: Some(1000),
@@ -676,7 +676,7 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
         stale_runner_jobs: Vec::new(),
         stale_runner_job_count: 0,
         active_job_state: RunnerActiveJobState::Available,
-        active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),
@@ -689,8 +689,6 @@ fn reverse_runner_status_commands_include_lifecycle_operations() {
     assert!(serialized.contains("homeboy runner job logs homeboy-lab job-123 --follow"));
     assert!(serialized.contains("homeboy runner job cancel homeboy-lab job-123"));
     assert!(serialized.contains("homeboy runs artifact get run-123 <artifact-id> -o <path>"));
-    assert!(serialized.contains("homeboy runner job reconcile homeboy-lab"));
-    assert!(serialized.contains("homeboy runner job artifacts homeboy-lab job-123 <artifact-id>"));
     assert!(!serialized.contains("curl -fsS"));
 
     let serialized_connection =
@@ -960,8 +958,6 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
     report.state = runner::RunnerSessionState::Connected;
     let mut session = runner_session_fixture();
     session.runner_id = report.runner_id.clone();
-    session.mode = RunnerTunnelMode::Reverse;
-    session.broker_url = Some("https://broker.example.test/".to_string());
     session.homeboy_build_identity = Some("homeboy 0.320.0+runner".to_string());
     report.session = Some(session);
     report.active_job_count = 1;
@@ -1041,7 +1037,6 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
             "unknown_owner_reconcile"
                 | "agent_task_retry"
                 | "job_cancel"
-                | "broker_reconcile"
                 | "generation_reconcile"
                 | "daemon_refresh"
                 | "daemon_reconcile_split_view"
@@ -1052,79 +1047,14 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
     assert_eq!(output.upgrade_command, None);
     assert_eq!(output.stale_daemon_refresh_command, None);
     assert!(hints.iter().all(|hint| !hint.contains("refresh-homeboy")));
-    assert!(hints.iter().all(|hint| {
-        !hint.contains("runner job cancel") && !hint.contains("runner job reconcile")
-    }));
-    let mut missing_broker_report = report.clone();
-    missing_broker_report
-        .session
-        .as_mut()
-        .expect("reverse session")
-        .broker_url = None;
-    assert!(runner_status_operator_hints(&missing_broker_report)
+    assert!(hints
         .iter()
-        .all(|hint| !hint.contains("reconnecting with")));
+        .all(|hint| { !hint.contains("runner job cancel") }));
     assert!(output
         .artifact_features
         .hints
         .iter()
         .all(|hint| !hint.contains("runner disconnect")));
-}
-
-#[test]
-fn reverse_runner_and_workspace_sync_guidance_remain_available_without_terminal_ownership() {
-    let mut reverse_report = connected_report();
-    reverse_report.active_job_count = 1;
-    let mut reverse_session = runner_session_fixture();
-    reverse_session.runner_id = reverse_report.runner_id.clone();
-    reverse_session.mode = RunnerTunnelMode::Reverse;
-    reverse_session.broker_url = Some("https://broker.example.test/".to_string());
-    reverse_report.session = Some(reverse_session);
-
-    let reverse_hints = runner_status_operator_hints(&reverse_report);
-    assert!(reverse_hints
-        .iter()
-        .any(|hint| hint.contains("runner job cancel")));
-    assert!(reverse_hints
-        .iter()
-        .any(|hint| hint.contains("runner job reconcile")));
-
-    let mut missing_broker_report = reverse_report.clone();
-    missing_broker_report
-        .session
-        .as_mut()
-        .expect("reverse session")
-        .broker_url = None;
-    assert!(runner_status_operator_hints(&missing_broker_report)
-        .iter()
-        .any(|hint| hint.contains("reconnecting with")));
-
-    let mut workspace_report = connected_report();
-    workspace_report.daemon_freshness = Some(DaemonFreshnessReport {
-        fresh: true,
-        stale_reason_code: None,
-        restartable: false,
-        lease_id: Some("lease-workspace".to_string()),
-        pid: Some(42),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: None,
-        daemon_version: None,
-        daemon_build_identity: None,
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-    let admission = workspace_report.admission_summary(0);
-    assert!(runner_followups_with_admission(
-        Some("homeboy lab"),
-        Some(&workspace_report),
-        Some(&admission),
-    )
-    .iter()
-    .any(|followup| followup.label == "workspace_sync"));
 }
 
 #[test]
@@ -1487,14 +1417,14 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
         state: runner::RunnerSessionState::Connected,
         session: Some(RunnerSession {
             runner_id: "homeboy-lab".to_string(),
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
             role: runner::RunnerSessionRole::Controller,
             server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: Some("https://broker.example.test/".to_string()),
+            controller_id: None,
+            broker_url: None,
             remote_daemon_address: None,
             local_port: None,
-            local_url: None,
+            local_url: Some("http://127.0.0.1:49153".to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
             proxy_forward: None,
@@ -1518,7 +1448,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
         stale_runner_jobs: Vec::new(),
         stale_runner_job_count: 0,
         active_job_state: RunnerActiveJobState::Available,
-        active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
         session_path: "/tmp/session.json".to_string(),

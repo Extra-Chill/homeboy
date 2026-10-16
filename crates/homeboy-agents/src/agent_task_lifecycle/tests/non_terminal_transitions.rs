@@ -13,7 +13,7 @@ use crate::agent_task_lifecycle::{
     RunnerAuthority, RunnerContinuationProvider, RunnerContinuationTestGuard,
     AGENT_TASK_TRANSITION_CONFLICT,
 };
-use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use homeboy_core::{Error, Result};
 use std::sync::Mutex;
 
@@ -77,14 +77,6 @@ impl RunnerContinuationProvider for AcceptsDuringAuthorityProbe {
         _command: &[String],
         _run_id: &str,
     ) -> Result<i32> {
-        Err(Error::internal_unexpected("not used by this fixture"))
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> Result<Job> {
         Err(Error::internal_unexpected("not used by this fixture"))
     }
 }

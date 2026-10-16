@@ -12,7 +12,6 @@ use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
     self as runner, daemon_repair_codes, Runner, RunnerSession, RunnerToolRegistry, RunnerToolSpec,
-    RunnerTunnelMode,
 };
 use homeboy_runner_contract::RunnerKind;
 use serde::Serialize;

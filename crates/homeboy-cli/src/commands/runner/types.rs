@@ -551,7 +551,6 @@ pub enum RunnerCommandOutput {
     Lifecycle(Box<lifecycle::RunnerLifecycleOutput>),
     JobList(Box<RunnerJobListOutput>),
     Job(Box<RunnerJobOutput>),
-    BrokerJob(Box<RunnerBrokerJobOutput>),
     RefreshHomeboy(Box<RunnerRefreshHomeboyCommandOutput>),
     DevSync(Box<homeboy::runner::runners::RunnerDevSyncOutput>),
     CachePrune(Box<homeboy::runner::runners::RunnerBinaryCachePruneOutput>),
@@ -713,18 +712,6 @@ pub struct RunnerJobLogStream {
     pub returned_bytes: usize,
     pub truncated: bool,
     pub tail: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RunnerBrokerJobOutput {
-    pub variant: &'static str,
-    pub command: &'static str,
-    pub runner_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_id: Option<String>,
-    pub response: Value,
 }
 
 #[derive(Debug, Serialize)]

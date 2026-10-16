@@ -616,11 +616,9 @@ fn converged_idle_generations_rebind_the_normal_disconnect_owner() {
 }
 
 #[test]
-fn stale_generation_reconciliation_requires_every_ledger_entry_to_be_direct_and_leased() {
+fn stale_generation_reconciliation_requires_every_ledger_entry_to_be_leased() {
     let first = direct_ssh_session("lease-a");
     let second = direct_ssh_session("lease-b");
-    let mut mixed = direct_ssh_session("lease-b");
-    mixed.mode = RunnerTunnelMode::Reverse;
     let mut missing = direct_ssh_session("lease-b");
     missing.remote_daemon_lease_id = None;
     let mut empty = direct_ssh_session("lease-b");
@@ -629,13 +627,6 @@ fn stale_generation_reconciliation_requires_every_ledger_entry_to_be_direct_and_
     assert_eq!(
         super::super::stop_transport_recovery::eligible_stale_generation_leases(&[first, second]),
         Some(vec!["lease-a".to_string(), "lease-b".to_string()])
-    );
-    assert_eq!(
-        super::super::stop_transport_recovery::eligible_stale_generation_leases(&[
-            direct_ssh_session("lease-a"),
-            mixed,
-        ]),
-        None
     );
     assert_eq!(
         super::super::stop_transport_recovery::eligible_stale_generation_leases(&[

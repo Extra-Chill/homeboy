@@ -9,17 +9,8 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 
-const LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS: i64 = 120;
 pub(crate) const EXPIRED_LAB_HANDOFF_REASON: &str =
     "runner handoff acceptance deadline expired before a runner job was recorded";
-
-pub(super) fn lab_handoff_acceptance_timeout_seconds() -> i64 {
-    std::env::var("HOMEBOY_TEST_LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|seconds| *seconds >= 0)
-        .unwrap_or(LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS)
-}
 
 // The ambient `reconcile_deferred_candidate()` shim that used to sit above this
 // resolved a root and delegated straight here. It had no callers, so it was a
@@ -5768,9 +5759,6 @@ fn converge_resolved_run_in_store(
     // from a fresh read under the store lock, not from a caller copy.
     lifecycle_store.mutate_record(resolved_run_id, reconcile_candidate_adoption)?;
     let mut record = lifecycle_store.read_record(resolved_run_id)?;
-    if reconcile_pending_runner_submission_intent_in_store(lifecycle_store, resolved_run_id)? {
-        record = lifecycle_store.read_record(resolved_run_id)?;
-    }
     if recover_reserved_lab_runner_job_in_store(lifecycle_store, resolved_run_id)? {
         record = lifecycle_store.read_record(resolved_run_id)?;
     }

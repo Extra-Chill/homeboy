@@ -44,9 +44,6 @@ fn session_is_live_with_probe(
     timeout: Duration,
     probe: impl Fn(&RunnerSession, Duration) -> bool,
 ) -> bool {
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return false;
-    }
     if let Some(pid) = session.tunnel_pid {
         if !tunnel_process_is_owned(
             pid,
@@ -136,20 +133,6 @@ where
                 TunnelProcessOwnership::KernelIdentityMismatch
             }
         }
-    }
-}
-
-pub(super) fn reverse_controller_session_is_live(session: &RunnerSession) -> bool {
-    let Some(last_seen_at) = session.last_seen_at.as_deref() else {
-        return false;
-    };
-    let Ok(last_seen_at) = DateTime::parse_from_rfc3339(last_seen_at) else {
-        return false;
-    };
-    let age = Utc::now().signed_duration_since(last_seen_at.with_timezone(&Utc));
-    match age.to_std() {
-        Ok(age) => age <= REVERSE_RUNNER_HEARTBEAT_TTL,
-        Err(_) => true,
     }
 }
 
@@ -706,10 +689,7 @@ fn status_peer_session_in_with(
         let Some(candidate) = read_session_at(&path)? else {
             continue;
         };
-        if candidate.controller_id.as_deref() == Some(controller_id)
-            || candidate.mode != RunnerTunnelMode::DirectSsh
-            || !is_live(&candidate)
-        {
+        if candidate.controller_id.as_deref() == Some(controller_id) || !is_live(&candidate) {
             continue;
         }
         if peer
@@ -733,17 +713,6 @@ pub(super) fn status_session_state_until(
     deadline: Instant,
 ) -> RunnerSessionState {
     match session {
-        Some(session)
-            if session.mode == RunnerTunnelMode::Reverse
-                && session.role == RunnerSessionRole::Controller =>
-        {
-            if reverse_controller_session_is_live(session) {
-                RunnerSessionState::Connected
-            } else {
-                RunnerSessionState::Recorded
-            }
-        }
-        Some(session) if session.mode == RunnerTunnelMode::Reverse => RunnerSessionState::Recorded,
         Some(session)
             if {
                 let remaining = deadline.saturating_duration_since(Instant::now());

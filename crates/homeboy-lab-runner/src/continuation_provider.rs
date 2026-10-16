@@ -8,7 +8,7 @@
 use homeboy_agents::agent_task_lifecycle::{
     RunnerAuthority, RunnerContinuationProvider, RunnerJobReconciliation, RunnerLiveJobAuthority,
 };
-use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
@@ -115,9 +115,8 @@ impl RunnerContinuationProvider for RunnerContinuation {
         runner_id: &str,
         workspace: &WorkspaceIdentity,
     ) -> Result<bool> {
-        // This uses the same deterministic transport selection as acquisition:
-        // direct sessions inspect the daemon and reverse sessions inspect the
-        // broker, which are the respective stores that can own this workspace.
+        // This uses the same direct daemon transport as acquisition, which is
+        // the store that can own this workspace.
         let body = workspace_claim_post(
             runner_id,
             "/workspace-claims/authority",
@@ -138,15 +137,6 @@ impl RunnerContinuationProvider for RunnerContinuation {
         runner_id: &str,
         job_id: &str,
     ) -> Result<RunnerJobLogSnapshot> {
-        // Controller-job supervision outlives the detached reverse worker. Its
-        // broker result remains authoritative after the worker heartbeat
-        // expires, while the general status path intentionally performs
-        // liveness probes for interactive callers.
-        if let Some(broker_url) = super::connection::recorded_reverse_broker_url(runner_id)? {
-            let (job, events) =
-                super::connection::reverse_broker_job_snapshot_at(&broker_url, runner_id, job_id)?;
-            return Ok(RunnerJobLogSnapshot { job, events });
-        }
         super::evidence::runner_job_log_snapshot(runner_id, job_id)
     }
 
@@ -281,22 +271,6 @@ impl RunnerContinuationProvider for RunnerContinuation {
         )?;
         Ok(exit_code)
     }
-
-    fn submit_runner_api_request(
-        &self,
-        runner_id: &str,
-        submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        super::connection::submit_runner_api_request(runner_id, submission)
-    }
-
-    fn lookup_reverse_broker_submission(
-        &self,
-        runner_id: &str,
-        submission_key: &str,
-    ) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
-        super::connection::lookup_reverse_broker_submission(runner_id, submission_key)
-    }
 }
 
 fn runner_live_job_authority_from_admission(
@@ -344,18 +318,6 @@ fn workspace_claim_post(
         .session
         .filter(|_| report.connected)
         .ok_or_else(|| workspace_claim_error(runner_id, "direct daemon is not connected"))?;
-    if session.mode == super::RunnerTunnelMode::Reverse {
-        let broker_url = session.broker_url.ok_or_else(|| {
-            workspace_claim_error(runner_id, "reverse runner session has no broker endpoint")
-        })?;
-        return reverse_workspace_claim_post(runner_id, &broker_url, path, payload, deadline);
-    }
-    if session.mode != super::RunnerTunnelMode::DirectSsh {
-        return Err(workspace_claim_error(
-            runner_id,
-            "workspace claims require a direct daemon transport",
-        ));
-    }
     let local_url = session.local_url.ok_or_else(|| {
         workspace_claim_error(runner_id, "direct daemon session has no local endpoint")
     })?;
@@ -380,79 +342,13 @@ fn workspace_claim_post(
     daemon_post_json(&local_url, path, payload, runner_id, deadline)
 }
 
-fn reverse_workspace_claim_post(
-    runner_id: &str,
-    broker_url: &str,
-    daemon_path: &str,
-    payload: Value,
-    deadline: std::time::Instant,
-) -> Result<Value> {
-    let token = homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)?;
-    let client = workspace_claim_client(deadline, runner_id, false)?;
-    let capabilities = client
-        .get(format!(
-            "{}/runner/workspace-claims/capabilities",
-            broker_url.trim_end_matches('/')
-        ))
-        .bearer_auth(token.as_deref().unwrap_or_default())
-        .send()
-        .map_err(|error| {
-            workspace_claim_error(
-                runner_id,
-                format!("broker capability request failed: {error}"),
-            )
-        })?;
-    let capabilities = daemon_response(
-        capabilities.status().as_u16(),
-        capabilities.text(),
-        "/runner/workspace-claims/capabilities",
-        runner_id,
-    )?;
-    let protocols: Vec<WorkspaceClaimProtocol> = serde_json::from_value(
-        capabilities
-            .get("capabilities")
-            .cloned()
-            .unwrap_or(Value::Null),
-    )
-    .map_err(|error| {
-        workspace_claim_error(runner_id, format!("malformed broker capabilities: {error}"))
-    })?;
-    if !protocols.iter().any(|protocol| {
-        protocol.capability == WORKSPACE_CLAIM_CAPABILITY && protocol.verify().is_ok()
-    }) {
-        return Err(workspace_claim_error(
-            runner_id,
-            "reverse broker does not advertise workspace claim capability v1",
-        ));
-    }
-    let operation = daemon_path.trim_start_matches("/workspace-claims/");
-    let client = workspace_claim_client(deadline, runner_id, false)?;
-    let response = client
-        .post(format!(
-            "{}/runner/workspace-claims/{operation}",
-            broker_url.trim_end_matches('/')
-        ))
-        .bearer_auth(token.as_deref().unwrap_or_default())
-        .json(&payload)
-        .send()
-        .map_err(|error| {
-            workspace_claim_error(runner_id, format!("broker claim request failed: {error}"))
-        })?;
-    daemon_response(
-        response.status().as_u16(),
-        response.text(),
-        "/runner/workspace-claims",
-        runner_id,
-    )
-}
-
 fn daemon_get_json(
     url: &str,
     path: &str,
     runner_id: &str,
     deadline: std::time::Instant,
 ) -> Result<Value> {
-    let client = workspace_claim_client(deadline, runner_id, true)?;
+    let client = workspace_claim_client(deadline, runner_id)?;
     let response = client
         .get(format!("{}{}", url.trim_end_matches('/'), path))
         .send()
@@ -472,7 +368,7 @@ fn daemon_post_json(
     runner_id: &str,
     deadline: std::time::Instant,
 ) -> Result<Value> {
-    let client = workspace_claim_client(deadline, runner_id, true)?;
+    let client = workspace_claim_client(deadline, runner_id)?;
     let response = client
         .post(format!("{}{}", url.trim_end_matches('/'), path))
         .json(&payload)
@@ -483,20 +379,15 @@ fn daemon_post_json(
     daemon_response(response.status().as_u16(), response.text(), path, runner_id)
 }
 
-fn workspace_claim_client(
-    deadline: std::time::Instant,
-    runner_id: &str,
-    no_proxy: bool,
-) -> Result<Client> {
+fn workspace_claim_client(deadline: std::time::Instant, runner_id: &str) -> Result<Client> {
     let timeout = remaining_workspace_claim_budget(deadline, runner_id)?;
-    let builder = if no_proxy {
-        Client::builder().no_proxy().timeout(timeout)
-    } else {
-        Client::builder().timeout(timeout)
-    };
-    builder.build().map_err(|error| {
-        workspace_claim_error(runner_id, format!("build workspace claim client: {error}"))
-    })
+    Client::builder()
+        .no_proxy()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| {
+            workspace_claim_error(runner_id, format!("build workspace claim client: {error}"))
+        })
 }
 
 fn remaining_workspace_claim_budget(

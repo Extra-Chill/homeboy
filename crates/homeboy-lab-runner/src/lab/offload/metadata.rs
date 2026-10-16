@@ -688,9 +688,8 @@ pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     // always blocking regardless of the controller↔runner version policy.
     //
     // Drift is an *observed* inconsistency. A report that compared nothing
-    // observed no drift, and this branch is exactly where every reverse runner
-    // now lands (#11106) — blocking on it would take the whole class out of
-    // service on the strength of a gap rather than a mismatch.
+    // observed no drift (#11106), so blocking on it would block on a gap
+    // rather than a mismatch.
     if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
         return true;
     }

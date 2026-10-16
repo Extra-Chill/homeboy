@@ -1,8 +1,7 @@
-//! Transport-neutral lifecycle for an accepted runner job.
+//! Controller lifecycle for an accepted runner job.
 //!
-//! Direct-daemon and reverse-broker transports differ at their HTTP boundaries,
-//! but an accepted job has one controller lifecycle: bind, persist or detach,
-//! poll, mirror, and assemble the caller-visible result.
+//! An accepted job has one controller lifecycle: bind, persist or detach, poll,
+//! mirror, and assemble the caller-visible result.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -73,7 +72,6 @@ pub(super) struct SubmittedRunnerJobFlow<'a> {
     pub(super) detach_after_handoff: bool,
     pub(super) mirror_evidence: bool,
     pub(super) print_handoff_output: bool,
-    pub(super) handoff_endpoint: Option<&'a str>,
 }
 
 #[expect(
@@ -166,7 +164,6 @@ where
                 &job,
                 flow.run_id.as_deref(),
                 flow.run_id_owns_generic_exec,
-                flow.handoff_endpoint,
             )
         })
         .flatten();
@@ -197,11 +194,7 @@ where
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
-            observed_agent_task_terminal_job_status(
-                run_id,
-                flow.run_id_owns_generic_exec,
-                flow.handoff_endpoint,
-            )
+            observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
         }) {
             // The agent-task lifecycle owns provider terminality. A stale runner
             // job projection must not hold Cook in dispatch after its aggregate
@@ -520,7 +513,6 @@ pub(super) fn terminal_notification_run_id<'a>(
 fn observed_agent_task_terminal_job_status(
     run_id: &str,
     run_id_owns_generic_exec: bool,
-    control_plane_endpoint: Option<&str>,
 ) -> Option<JobStatus> {
     if run_id_owns_generic_exec {
         return None;
@@ -533,21 +525,6 @@ fn observed_agent_task_terminal_job_status(
         if let Ok(record) = store.read_record(run_id) {
             if record.state.is_terminal() {
                 return exact_attempt_terminal_job_status(record.state);
-            }
-        }
-    }
-    let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
-    if let Some(endpoint) = control_plane_endpoint {
-        if let Ok(client) = crate::control_plane_client::ControlPlaneClient::new_local(
-            endpoint,
-            Duration::from_secs(2),
-        ) {
-            if let Ok(run) = client.run(&run_id) {
-                if run.run == run_id {
-                    if let Some(status) = control_plane_terminal_job_status(run.state) {
-                        return Some(status);
-                    }
-                }
             }
         }
     }
@@ -565,27 +542,6 @@ fn exact_attempt_terminal_job_status(
         | AgentTaskRunState::PartialRecoverable => Some(JobStatus::Succeeded),
         AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure => Some(JobStatus::Failed),
         AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
-    }
-}
-
-fn control_plane_terminal_job_status(
-    state: homeboy_control_plane_contract::ControlPlaneRunState,
-) -> Option<JobStatus> {
-    use homeboy_control_plane_contract::ControlPlaneRunState;
-    match state {
-        ControlPlaneRunState::Succeeded
-        | ControlPlaneRunState::CandidateRecoverable
-        | ControlPlaneRunState::PartialRecoverable
-        | ControlPlaneRunState::Skipped => Some(JobStatus::Succeeded),
-        ControlPlaneRunState::PartialFailure
-        | ControlPlaneRunState::Failed
-        | ControlPlaneRunState::TimedOut => Some(JobStatus::Failed),
-        ControlPlaneRunState::Cancelled => Some(JobStatus::Cancelled),
-        ControlPlaneRunState::Queued
-        | ControlPlaneRunState::Blocked
-        | ControlPlaneRunState::Running
-        | ControlPlaneRunState::Stale
-        | ControlPlaneRunState::Unknown => None,
     }
 }
 
@@ -610,7 +566,6 @@ fn settle_generation_job_ownership_after_terminal_snapshot(
 mod tests {
     use super::*;
     use crate::{generation_store, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
-    use homeboy_control_plane_contract::ControlPlaneRunState;
 
     fn direct_session() -> RunnerSession {
         RunnerSession {
@@ -734,7 +689,7 @@ mod tests {
             let pin = runtime_promotion::pin_cook_generation(original_id).unwrap();
             // Active exact work stays non-terminal even with a retry alias.
             assert_eq!(
-                observed_agent_task_terminal_job_status(original_id, false, None),
+                observed_agent_task_terminal_job_status(original_id, false),
                 None
             );
             agent_task_lifecycle::cancel_run_in_store(
@@ -744,12 +699,12 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                observed_agent_task_terminal_job_status(original_id, false, None),
+                observed_agent_task_terminal_job_status(original_id, false),
                 Some(JobStatus::Cancelled)
             );
             // Generic exec children are still governed by their process owner.
             assert_eq!(
-                observed_agent_task_terminal_job_status(original_id, true, None),
+                observed_agent_task_terminal_job_status(original_id, true),
                 None
             );
             drop(pin); // same RAII boundary as the dispatch observer exiting
@@ -766,43 +721,5 @@ mod tests {
                 AgentTaskRunState::Queued
             );
         });
-    }
-
-    #[test]
-    fn agent_task_terminal_state_bounds_stale_runner_job_polling() {
-        for state in [
-            ControlPlaneRunState::Succeeded,
-            ControlPlaneRunState::CandidateRecoverable,
-            ControlPlaneRunState::PartialRecoverable,
-            ControlPlaneRunState::Skipped,
-        ] {
-            assert_eq!(
-                control_plane_terminal_job_status(state),
-                Some(JobStatus::Succeeded)
-            );
-        }
-        for state in [
-            ControlPlaneRunState::PartialFailure,
-            ControlPlaneRunState::Failed,
-            ControlPlaneRunState::TimedOut,
-        ] {
-            assert_eq!(
-                control_plane_terminal_job_status(state),
-                Some(JobStatus::Failed)
-            );
-        }
-        assert_eq!(
-            control_plane_terminal_job_status(ControlPlaneRunState::Cancelled),
-            Some(JobStatus::Cancelled)
-        );
-        for state in [
-            ControlPlaneRunState::Queued,
-            ControlPlaneRunState::Blocked,
-            ControlPlaneRunState::Running,
-            ControlPlaneRunState::Stale,
-            ControlPlaneRunState::Unknown,
-        ] {
-            assert_eq!(control_plane_terminal_job_status(state), None);
-        }
     }
 }

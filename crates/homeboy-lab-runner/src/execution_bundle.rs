@@ -21,9 +21,9 @@ pub(crate) struct ExecutionBundleInputs<'a> {
     /// Build identity verified for `homeboy_path`; never inferred or defaulted.
     pub(crate) verified_build_identity: Option<&'a str>,
     pub(crate) remote_cwd: &'a str,
-    /// Direct-daemon admission coordinates; both `None` means reverse broker.
-    pub(crate) daemon_lease_id: Option<&'a str>,
-    pub(crate) reservation_job_id: Option<&'a str>,
+    /// Direct-daemon admission coordinates.
+    pub(crate) daemon_lease_id: &'a str,
+    pub(crate) reservation_job_id: &'a str,
     pub(crate) rig_registry_root: Option<&'a str>,
     pub(crate) rigs: serde_json::Value,
     pub(crate) extensions: serde_json::Value,
@@ -37,8 +37,6 @@ pub(crate) struct ExecutionBundleInputs<'a> {
 
 /// Build the immutable execution bundle for an admitted Lab job.
 pub(crate) fn build(inputs: ExecutionBundleInputs<'_>) -> serde_json::Value {
-    let authority = (inputs.daemon_lease_id.is_none() && inputs.reservation_job_id.is_none())
-        .then_some("reverse_broker");
     serde_json::json!({
         "schema": LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": binary(inputs.homeboy_path, inputs.verified_build_identity),
@@ -51,7 +49,6 @@ pub(crate) fn build(inputs: ExecutionBundleInputs<'_>) -> serde_json::Value {
         "admission": {
             "daemon_lease_id": inputs.daemon_lease_id,
             "reservation_job_id": inputs.reservation_job_id,
-            "authority": authority,
         },
         "rig_registry_root": inputs.rig_registry_root,
         "rigs": inputs.rigs,
@@ -75,7 +72,6 @@ pub(crate) fn build(inputs: ExecutionBundleInputs<'_>) -> serde_json::Value {
                 "argv": inputs.executed_argv,
                 "daemon_lease_id": inputs.daemon_lease_id,
                 "reservation_job_id": inputs.reservation_job_id,
-                "authority": authority,
             },
         },
     })
@@ -111,13 +107,7 @@ pub(crate) fn validate_bundle_env(
     {
         return false;
     }
-    let direct_admission =
-        non_empty("/admission/daemon_lease_id") && non_empty("/admission/reservation_job_id");
-    let reverse_broker_admission = bundle
-        .pointer("/admission/authority")
-        .and_then(serde_json::Value::as_str)
-        == Some("reverse_broker");
-    if !direct_admission && !reverse_broker_admission {
+    if !non_empty("/admission/daemon_lease_id") || !non_empty("/admission/reservation_job_id") {
         return false;
     }
     let Some(overlays) = bundle
@@ -320,28 +310,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn reverse_broker_authority_preserves_the_job_private_bundle() {
-        let bundle = serde_json::json!({
-            "schema": LAB_EXECUTION_BUNDLE_SCHEMA,
-            "binary": { "path": "/runner/bin/homeboy" },
-            "admission": { "authority": "reverse_broker" },
-            "extension_runtime_home": "/runner/job/home",
-            "extensions": [{ "id": "fixture", "remote_path": "/runner/job/fixture", "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }]
-        });
-
-        assert!(validate_bundle_env(
-            &bundle_env(&bundle),
-            &["/runner/bin/homeboy".to_string(), "test".to_string()],
-            &["fixture".to_string()],
-        ));
-    }
-
     fn sample_inputs<'a>(
         command: &'a [String],
         required: &'a [String],
-        lease: Option<&'a str>,
-        job: Option<&'a str>,
+        lease: &'a str,
+        job: &'a str,
     ) -> ExecutionBundleInputs<'a> {
         ExecutionBundleInputs {
             homeboy_path: "/runner/bin/homeboy",
@@ -365,12 +338,7 @@ mod tests {
     fn build_publishes_direct_admission_bundle_with_run_owned_provenance_dir() {
         let command = vec!["/runner/bin/homeboy".to_string(), "test".to_string()];
         let required = vec!["fixture".to_string()];
-        let bundle = build(sample_inputs(
-            &command,
-            &required,
-            Some("lease-a"),
-            Some("job-a"),
-        ));
+        let bundle = build(sample_inputs(&command, &required, "lease-a", "job-a"));
 
         assert_eq!(bundle["schema"], LAB_EXECUTION_BUNDLE_SCHEMA);
         assert_eq!(bundle["binary"]["path"], "/runner/bin/homeboy");
@@ -386,7 +354,6 @@ mod tests {
         );
         assert_eq!(bundle["admission"]["daemon_lease_id"], "lease-a");
         assert_eq!(bundle["admission"]["reservation_job_id"], "job-a");
-        assert!(bundle["admission"]["authority"].is_null());
         assert_eq!(bundle["rig_registry_root"], "/srv/rigs");
         assert_eq!(bundle["extension_runtime_home"], "/runner/job/home");
         assert_eq!(bundle["identities"]["requested"]["runner_id"], "lab");
@@ -408,27 +375,9 @@ mod tests {
     }
 
     #[test]
-    fn build_marks_reverse_broker_authority_without_a_daemon_reservation() {
-        let command = vec!["/runner/bin/homeboy".to_string(), "test".to_string()];
-        let required = vec!["fixture".to_string()];
-        let bundle = build(sample_inputs(&command, &required, None, None));
-
-        assert_eq!(bundle["admission"]["authority"], "reverse_broker");
-        assert_eq!(
-            bundle["identities"]["executed"]["authority"],
-            "reverse_broker"
-        );
-        assert!(validate_bundle_env(
-            &bundle_env(&bundle),
-            &command,
-            &required
-        ));
-    }
-
-    #[test]
     fn authority_env_overrides_untrusted_values_and_roots_config_at_job_home() {
         let command = vec!["/runner/bin/homeboy".to_string()];
-        let bundle = build(sample_inputs(&command, &[], None, None));
+        let bundle = build(sample_inputs(&command, &[], "lease-a", "job-a"));
         let mut env = HashMap::from([
             ("HOMEBOY_COMMAND".to_string(), "/tmp/evil".to_string()),
             (LAB_EXECUTION_BUNDLE_ENV.to_string(), "{}".to_string()),

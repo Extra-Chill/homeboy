@@ -10,12 +10,11 @@ use crate::agent_task_scheduler::{
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use fs4::fs_std::FileExt;
-use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::fs::OpenOptions;
 use std::process::Command;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 /// The tests below drive the store-rooted entry points. Resolving the store
@@ -4030,99 +4029,6 @@ fn cancelling_queued_runner_proxy_projects_to_accepted_daemon_job() {
         cancelled.metadata["live_cancellation"]["cancellation"],
         "runner_job_cancel"
     );
-}
-
-/// Stays on `with_isolated_home` (#7505). This test *installs* a runner
-/// continuation provider. `RunnerContinuationTestGuard` holds no mutex of its
-/// own, so the hermetic home's global lock is currently the only thing
-/// serializing provider installation across tests; a rooted test running beside
-/// this one would observe whichever provider happened to be installed. Nothing
-/// about the store injection changes that, so the provider guard is what keeps
-/// this test ambient.
-#[test]
-fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
-    with_isolated_home(|_| {
-        let _runner = RunnerContinuationTestGuard::install(Box::new(IntentReplayProvider {
-            store: JobStore::default(),
-            submitted: Arc::new(Mutex::new(Vec::new())),
-            lookups: Arc::new(Mutex::new(Vec::new())),
-            fail_after_accept_once: Arc::new(Mutex::new(false)),
-        }));
-        let command = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-        ];
-        record_lab_offload_planned(LabOffloadProxyPlan {
-            run_id: "expired-handoff-late-acceptance",
-            runner_id: "homeboy-lab",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &command,
-            durable_plan: None,
-        })
-        .expect("controller proxy recorded before handoff");
-        record_lab_offload_submission_envelope(
-            "expired-handoff-late-acceptance",
-            &replay_request("expired-handoff-late-acceptance", &command),
-        )
-        .expect("persist complete pending submission request");
-        rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
-            record
-                .lab_handoff
-                .as_mut()
-                .expect("typed handoff")
-                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
-        })
-        .expect("expire acceptance deadline");
-
-        let expired = reconcile_status("expired-handoff-late-acceptance")
-            .expect("status reconciles the expired controller proxy");
-        assert_eq!(expired.state, AgentTaskRunState::Cancelled);
-        assert!(expired.metadata.get("handoff_acceptance").is_none());
-        assert_eq!(
-            expired.lab_handoff.as_ref().map(|handoff| handoff.state),
-            Some(AgentTaskLabHandoffState::Expired)
-        );
-        assert_eq!(expired.metadata["retryable"], true);
-        assert_eq!(
-            expired.metadata["managed_recovery"]["command"],
-            "homeboy agent-task retry expired-handoff-late-acceptance --run"
-        );
-
-        let accepted = record_detached_lab_run(DetachedLabRunRecord {
-            run_id: "expired-handoff-late-acceptance",
-            runner_id: "homeboy-lab",
-            runner_job_id: "job-accepted-after-deadline",
-            remote_workspace: "/runner/workspace/repo",
-            remote_command: &command,
-        })
-        .expect("late acceptance supersedes only the synthetic expiry cancellation");
-        assert_eq!(accepted.state, AgentTaskRunState::Running);
-        assert!(accepted.has_accepted_lab_handoff());
-        assert!(accepted.metadata.get("handoff_acceptance").is_none());
-        assert_eq!(
-            accepted.lab_handoff.as_ref().map(|handoff| handoff.state),
-            Some(AgentTaskLabHandoffState::Accepted)
-        );
-        assert_eq!(
-            accepted.metadata["runner_job_id"],
-            "job-accepted-after-deadline"
-        );
-        assert_eq!(
-            accepted.metadata["runner_execution_record"]["status"],
-            "running"
-        );
-        let accepted_with_stale_deadline =
-            rewrite_record_for_test("expired-handoff-late-acceptance", |record| {
-                record
-                    .lab_handoff
-                    .as_mut()
-                    .expect("typed accepted handoff")
-                    .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
-            })
-            .expect("make the historical acceptance deadline stale");
-        assert!(!accepted_with_stale_deadline.has_expired_pending_lab_handoff(chrono::Utc::now()));
-    });
 }
 
 #[test]

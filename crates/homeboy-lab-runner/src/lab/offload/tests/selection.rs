@@ -1,5 +1,4 @@
 use super::*;
-use crate::lab_selection::allows_detached_reverse_capacity_queue;
 
 #[test]
 fn busy_default_runner_fails_closed_for_release_gate() {
@@ -27,7 +26,7 @@ fn busy_default_runner_fails_closed_for_release_gate() {
 
 #[test]
 fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
-    let status = stale_reverse_status("homeboy-lab");
+    let status = stale_connected_status("homeboy-lab");
     let availability = RunnerAvailability::from_status_parts(
         status.runner_id.clone(),
         status.connected,
@@ -76,7 +75,7 @@ fn explicit_connected_stale_runner_preserves_drift_diagnosis_and_recovery() {
 
 #[test]
 fn persisted_session_drift_rejects_the_real_availability_and_preflight_path() {
-    let mut status = reverse_status("homeboy-lab");
+    let mut status = connected_status("homeboy-lab");
     status.stale_daemon = Some(
         RunnerStaleDaemonWarning::new(
             "homeboy-lab",
@@ -138,74 +137,4 @@ fn disconnected_runner_keeps_existing_availability_diagnosis() {
     );
     assert!(error.details["runner_status"].is_null());
     assert!(error.details["stale_daemon_recovery_command"].is_null());
-}
-
-#[test]
-fn capacity_queue_admission_requires_detached_durable_reverse_capacity_only() {
-    let reverse = LabRunnerSelection {
-        runner_id: "homeboy-lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::Reverse,
-    };
-    let direct = LabRunnerSelection {
-        mode: RunnerTunnelMode::DirectSsh,
-        ..reverse.clone()
-    };
-    let capacity = RunnerAvailability::from_status_parts(
-        "homeboy-lab",
-        true,
-        false,
-        1,
-        &RunnerActiveJobState::Available,
-        Some(1),
-    );
-    let disconnected = RunnerAvailability::from_status_parts(
-        "homeboy-lab",
-        false,
-        false,
-        1,
-        &RunnerActiveJobState::Available,
-        Some(1),
-    );
-    let stale = RunnerAvailability::from_status_parts(
-        "homeboy-lab",
-        true,
-        true,
-        1,
-        &RunnerActiveJobState::Available,
-        Some(1),
-    );
-    let unknown = RunnerAvailability::from_status_parts(
-        "homeboy-lab",
-        true,
-        false,
-        1,
-        &RunnerActiveJobState::Unavailable,
-        None,
-    );
-
-    assert!(allows_detached_reverse_capacity_queue(
-        true, true, &reverse, &capacity
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        false, true, &reverse, &capacity
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        true, false, &reverse, &capacity
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        true, true, &direct, &capacity
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        true,
-        true,
-        &reverse,
-        &disconnected
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        true, true, &reverse, &stale
-    ));
-    assert!(!allows_detached_reverse_capacity_queue(
-        true, true, &reverse, &unknown
-    ));
 }

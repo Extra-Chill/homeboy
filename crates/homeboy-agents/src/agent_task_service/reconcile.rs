@@ -140,11 +140,9 @@ fn verified_reconciled_status(
 
 #[cfg(test)]
 fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    let now = chrono::Utc::now();
     record.state.is_terminal()
         || record.has_fresh_controller_pre_provider_heartbeat()
         || (record.has_planned_runner_execution() && record.has_fresh_update())
-        || agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now)
         || record.has_live_execution_step_owner()
         || record.owner_process_is_running()
 }

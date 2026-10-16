@@ -1257,8 +1257,6 @@ pub fn record_lab_offload_submission_intent_in_store(
             "state": "preparing",
             "submission_key": submission_key,
             "runner_id": runner_id,
-            "ordering": "broker_fifo",
-            "eligibility": "reverse_runner_detached_durable_handoff",
             "canonical_workload": {
                 "run_id": run_id,
                 "remote_workspace": remote_workspace,
@@ -1270,57 +1268,12 @@ pub fn record_lab_offload_submission_intent_in_store(
     metadata.insert("phase".to_string(), json!("waiting_for_runner_capacity"));
     metadata.insert(
         "phase_activity".to_string(),
-        json!("durable broker submission intent recorded; waiting for runner capacity"),
+        json!("durable runner submission intent recorded; waiting for runner capacity"),
     );
     if record.lab_handoff == handoff_before {
         lifecycle_store.commit_record(&mut record)?;
     } else {
         lifecycle_store.advance_record(&mut record, AgentTaskAdvance::PendLabHandoff)?;
     }
-    Ok(record)
-}
-
-/// Persist the envelope-first replay input before it crosses the broker.
-pub fn record_lab_offload_submission_envelope(
-    run_id: &str,
-    request: &homeboy_runner_contract::RunnerApiSubmitRequest,
-) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
-        Error::internal_unexpected("Lab runner submission envelope has no dispatch")
-    })?;
-    if request.submission_key.trim().is_empty() {
-        return Err(Error::internal_unexpected(
-            "Lab runner submission envelope has no stable submission key",
-        ));
-    }
-    let payload_fingerprint =
-        homeboy_core::api_jobs::runner_api_submission_payload_fingerprint(request)?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
-    let _lock = LabHandoffLock::lock_in_store(&lifecycle_store, &run_id)?;
-    let mut record = lifecycle_store.read_record(&run_id)?;
-    if record.state.is_terminal() {
-        return Ok(record);
-    }
-    let now = chrono::Utc::now();
-    let mut handoff = AgentTaskLabHandoff::pending(
-        &dispatch.runner_id,
-        now.to_rfc3339(),
-        (now + chrono::Duration::seconds(lab_handoff_acceptance_timeout_seconds())).to_rfc3339(),
-    );
-    handoff.submission_key = Some(request.submission_key.clone());
-    handoff.payload_fingerprint = Some(payload_fingerprint.clone());
-    record.lab_handoff = Some(handoff);
-    record.ensure_metadata_object().insert(
-        "runner_submission_intent".to_string(),
-        json!({
-            "state": "pending",
-            "submission_key": request.submission_key,
-            "payload_fingerprint": payload_fingerprint,
-            "runner_id": dispatch.runner_id,
-            "replay_envelope_request": request,
-        }),
-    );
-    lifecycle_store.advance_record(&mut record, AgentTaskAdvance::PendLabHandoff)?;
     Ok(record)
 }

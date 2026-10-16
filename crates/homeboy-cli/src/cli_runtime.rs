@@ -741,7 +741,6 @@ pub(crate) fn select_unmaterialized_cook_runner(
         if crate::runner::runners::runner_admission_snapshot(runner_id)?
             .summary
             .accepting_jobs
-            || crate::runner::refresh_explicit_detached_queue_runner(runner_id)?
         {
             return eligible(runner_id.to_string());
         }
@@ -751,8 +750,9 @@ pub(crate) fn select_unmaterialized_cook_runner(
         })));
     }
     let readiness = crate::runner::refresh_lab_runner_readiness_for_admission()?;
+    // A capacity-blocked runner is not eligible: admission reports the
+    // readiness reason instead of queueing work behind the busy runner.
     let selection = match readiness.state {
-        Readiness::CapacityBlocked => crate::runner::refresh_detached_queue_runner()?,
         Readiness::ConnectedReady => readiness.selected_runner_id.clone(),
         _ => None,
     };
@@ -3341,23 +3341,6 @@ fn preflight_hot_command_with_input(
                             .unwrap_or(false)
                     })
                 });
-            // A detached Cook may be durably admitted to a connected reverse
-            // runner that is temporarily full. The route rechecks that runner
-            // and submits through the broker queue; this only bypasses the
-            // controller-local resource refusal, never selects local execution.
-            let runner_admits_offload = runner_admits_offload
-                || (hot_command.allows_warm_runner_coordination
-                    && cli.runner.is_none()
-                    && matches!(
-                        cli.command,
-                        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-                            command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
-                        })
-                    )
-                    && crate::runner::refresh_detached_queue_runner()
-                        .ok()
-                        .flatten()
-                        .is_some());
             let auto_local_capacity_fallback = resource_policy::admits_auto_local_capacity_fallback(
                 hot_command,
                 &resources,

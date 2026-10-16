@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use homeboy_core::api_jobs::{Job, JobEvent, RunnerJobProjectionCancelRequest};
 use homeboy_core::engine::shell;
@@ -9,12 +9,8 @@ use homeboy_core::error::{Error, Result};
 
 use crate::daemon_http_get::parse_daemon_response_json;
 
-use super::super::broker_http;
-use super::super::evidence::{
-    mirror_daemon_job_progress_with_ownership, mirror_reverse_broker_job_progress_with_ownership,
-    MirrorRunOwnership,
-};
-use super::super::{load, status, Runner, RunnerTunnelMode};
+use super::super::evidence::{mirror_daemon_job_progress_with_ownership, MirrorRunOwnership};
+use super::super::{load, status, Runner};
 
 #[allow(unused_imports)]
 use super::*;
@@ -164,8 +160,7 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
             "runner is not connected; run `homeboy runner connect <runner-id>` first",
             Some(runner.id),
             Some(vec![
-                "Runner job cancellation requires an active direct daemon or reverse broker transport."
-                    .to_string(),
+                "Runner job cancellation requires an active direct daemon transport.".to_string(),
             ]),
         ));
     };
@@ -182,26 +177,10 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
     let body = if let Some(local_url) = session.local_url.as_deref() {
         let data = daemon_post(&client, local_url, &path)?;
         canonical_daemon_body(&data, "daemon job cancel response")?.clone()
-    } else if session.mode == RunnerTunnelMode::Reverse {
-        let Some(broker_url) = session.broker_url.as_deref() else {
-            return Err(runner_job_cancel_unsupported(
-                &runner.id,
-                "reverse runner session has no broker URL",
-            ));
-        };
-        let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
-        broker_http::post_json(
-            &client,
-            broker_url,
-            &path,
-            json!({}),
-            "cancel reverse runner broker job",
-            broker_token.as_deref(),
-        )?
     } else {
         return Err(runner_job_cancel_unsupported(
             &runner.id,
-            "runner session does not expose a cancellable daemon or broker transport",
+            "runner session does not expose a cancellable daemon transport",
         ));
     };
     parse_runner_job_cancel_body(body)
@@ -298,26 +277,10 @@ pub fn runner_job_cancel_projection(
         envelope.data.ok_or_else(|| {
             Error::internal_unexpected("daemon projection cancel response missing data")
         })?
-    } else if session.mode == RunnerTunnelMode::Reverse {
-        let Some(broker_url) = session.broker_url.as_deref() else {
-            return Err(runner_job_cancel_unsupported(
-                &runner.id,
-                "reverse runner session has no broker URL",
-            ));
-        };
-        let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(&runner.id)?;
-        broker_http::post_json(
-            &client,
-            broker_url,
-            &path,
-            payload,
-            "cancel reverse runner broker job projection",
-            broker_token.as_deref(),
-        )?
     } else {
         return Err(runner_job_cancel_unsupported(
             &runner.id,
-            "runner session does not expose a cancellable daemon or broker transport",
+            "runner session does not expose a cancellable daemon transport",
         ));
     };
     parse_runner_job_cancel_body(body)
@@ -329,17 +292,16 @@ pub(super) fn runner_job_cancel_unsupported(runner_id: &str, reason: &str) -> Er
         format!("runner job cancellation is unsupported for runner `{runner_id}`: {reason}"),
         Some(runner_id.to_string()),
         Some(vec![
-            "Use a direct daemon connection or a reverse runner session registered with a broker before cancelling runner jobs."
+            "Reconnect the runner with `homeboy runner connect <runner-id>` before cancelling runner jobs."
                 .to_string(),
         ]),
     )
 }
 
 pub(super) fn parse_runner_job_cancel_body(body: Value) -> Result<(Job, Vec<JobEvent>)> {
-    // Direct daemon replies retain the HTTP API's canonical `body` envelope;
-    // the reverse broker already unwraps it. Normalize at the shared parser
-    // so neither transport can silently turn a real cancellation into a null
-    // `job` parse error after the runner has stopped the process.
+    // Direct daemon replies retain the HTTP API's canonical `body` envelope.
+    // Normalize at the shared parser so a real cancellation never becomes a
+    // null `job` parse error after the runner has stopped the process.
     let body = if body.get("body").is_some() {
         canonical_daemon_body(&body, "daemon projection cancel response")?.clone()
     } else {
@@ -373,7 +335,6 @@ pub(super) fn persist_lab_offload_handoff_run(
     job: &Job,
     run_id: Option<&str>,
     run_id_owns_generic_exec: bool,
-    reverse_broker_url: Option<&str>,
 ) -> Option<String> {
     let run_ownership = if run_id_owns_generic_exec {
         MirrorRunOwnership::GenericRunnerExec
@@ -382,27 +343,15 @@ pub(super) fn persist_lab_offload_handoff_run(
     } else {
         MirrorRunOwnership::Inferred
     };
-    let mirrored = match reverse_broker_url {
-        Some(broker_url) => mirror_reverse_broker_job_progress_with_ownership(
-            runner,
-            broker_url,
-            cwd,
-            command,
-            job,
-            run_id,
-            run_ownership,
-        ),
-        None => mirror_daemon_job_progress_with_ownership(
-            runner,
-            cwd,
-            command,
-            job,
-            &[],
-            run_id,
-            run_ownership,
-        ),
-    };
-    match mirrored {
+    match mirror_daemon_job_progress_with_ownership(
+        runner,
+        cwd,
+        command,
+        job,
+        &[],
+        run_id,
+        run_ownership,
+    ) {
         Ok(run) => Some(run.id),
         Err(err) => {
             eprintln!(

@@ -165,15 +165,15 @@ and the configured workspace root are usable on the target machine.
 ### `preflight`
 
 ```sh
-homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"agent_task_cook","provider":"openai","source_path":"/workspace","selector":"openai.default","model":"gpt-5"}}'
-homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","allow_queue":true,"durable_workload":true,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"browser"}}'
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","invocation":{"kind":"agent_task_cook","provider":"openai","source_path":"/workspace","selector":"openai.default","model":"gpt-5"}}'
+homeboy runner preflight --request '{"schema":"homeboy/placement-readiness/v2","runner_id":"homeboy-lab","invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"browser"}}'
 ```
 
 `preflight` creates no run, rig lease, runner job, workspace, or connection. Its
-`homeboy/placement-readiness/v2` response is `ready`, `queueable`, or `blocked`
-with exact predicates and typed executable recovery actions (including action
-ID, argv, safety, required confirmations, and evidence). Queueing is limited to a
-durable workload on a full reverse runner. Execution revalidates live admission
+`homeboy/placement-readiness/v2` response is `ready` or `blocked` with exact
+predicates and typed executable recovery actions (including action ID, argv,
+safety, required confirmations, and evidence). A full runner is blocked, not
+queued. Execution revalidates live admission
 facts through the same compiled admission plan before reserving a daemon admission, so this result is evidence, not a
 reservation. Wrapper order is preflight, durable run persistence, then setup and
 materialization.
@@ -414,7 +414,6 @@ homeboy runner connect <runner-id> --reconcile-leaseless-orphans
 homeboy daemon reconcile-leaseless-orphans
 homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
 homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
-homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
 
 `--recorded-pid` and `--recorded-endpoint` stay required because once a runner's
@@ -493,23 +492,6 @@ returns each original lease ID plus the affected job mapping before starting one
 replacement daemon. Historical lease IDs do not establish a current owner. Live
 or ambiguous probes abort without changing the store.
 
-Reverse runner connections record the runner-initiated session substrate and use
-the controller daemon as the broker. A reverse runner can register itself with
-`POST /runner/sessions`; the controller then reports that runner as connected
-and routes `runner exec` through brokered jobs instead of a direct daemon URL.
-The broker exposes `POST /runner/jobs`, `POST /runner/jobs/claim`,
-`POST /runner/jobs/<job-id>/events`, and `POST /runner/jobs/<job-id>/finish` so
-controllers can queue work and reverse runners can claim, stream progress, and
-return results without inbound access to the lab machine.
-
-Use Homeboy wrappers for broker maintenance and artifact lookup instead of raw
-HTTP calls:
-
-```sh
-homeboy runner job reconcile <runner-id>
-homeboy runner job artifacts <runner-id> <job-id> <artifact-id>
-```
-
 #### Broker authentication and pairing
 
 Every `/runner/*` broker route requires an authenticated, scoped bearer token
@@ -550,9 +532,8 @@ reports transport success and the endpoint payload always lives under
 
 ### `lifecycle`
 
-Runner lifecycle output is transport-neutral even when the underlying route is a
-direct daemon tunnel or a reverse broker. JSON consumers should prefer these
-generic contracts:
+Runner lifecycle output uses generic contracts over the direct daemon tunnel.
+JSON consumers should prefer these contracts:
 
 - `RunnerSession`: persisted connection/session ownership, including mode, role,
   controller/broker references, process IDs, version identity, and heartbeat.
@@ -579,8 +560,8 @@ generic contracts:
 Compatibility fields such as `active_jobs`, `job`, `job_id`, `job_events`, and
 `workspace_lease` remain present for existing callers. New integrations should
 read `active_runner_jobs`, `runner_job`, `workspace_leases`, `runner_result`,
-`mutation_artifacts`, `artifact_ref`, and `handoff` so direct SSH and reverse
-broker implementations stay hidden behind the same lifecycle vocabulary.
+`mutation_artifacts`, `artifact_ref`, and `handoff` so transport details stay
+hidden behind the same lifecycle vocabulary.
 
 Connected daemon status also reports stale runtime-path signals. When the daemon
 started with configured `HOMEBOY_*_COMPONENT_PATH`, `HOMEBOY_*_PLUGIN_PATH`,
@@ -592,7 +573,7 @@ paths. `homeboy runner status <runner-id>` surfaces those differences in
 development runner with `homeboy runner disconnect <runner-id>` followed by
 `homeboy runner connect <runner-id>` after rebuilding runner-side runtime code.
 
-### Daemon compatibility has three states, not two
+### Daemon compatibility is compared or unverified
 
 `stale_daemon.verification` names which question the report answered:
 
@@ -604,15 +585,7 @@ development runner with `homeboy runner disconnect <runner-id>` followed by
   `current_homeboy_version` is the sentinel `unverified` rather than a
   substituted value. A runner that *has* a probe and could not answer it is
   still fenced.
-- `unavailable` — this runner has no controller-side identity probe at all.
-  Reverse-connected sessions are reached through the broker, which exposes no
-  identity endpoint, so their compatibility is reported as
-  `compatibility_reason: reverse_unverified`. This is surfaced and ranked below
-  every verified runner in default Lab selection, but it does **not** fence
-  admission — fencing an entire runner class on the strength of a gap rather
-  than a mismatch would take every reverse lab out of service.
-
-Reports with either unverified verdict carry `severity: unknown` and a read-only
+Reports with the `probe_failed` verdict carry `severity: unknown` and a read-only
 `homeboy runner doctor <runner-id> --scope lab-offload` recovery: replacing a
 binary is not the answer to "I could not look at it".
 
@@ -652,12 +625,6 @@ Homeboy reports the two states separately:
 }
 ```
 
-For the generic controller-to-runner operator path, see
-[Controller to runner reverse-runner setup](../operations/controller-runner-reverse-runner.md).
-That guide is machine-agnostic and intentionally explicit about what is available
-now and what remains gated by #2990, #2991, #2992, and #2947 before production
-broker exposure.
-
 ### `broker`
 
 ```sh
@@ -667,7 +634,7 @@ homeboy runner broker revoke lab-1
 homeboy runner broker list
 ```
 
-Manage reverse runner broker authentication and pairing on the broker host.
+Manage broker authentication and pairing on the broker host.
 `pair` mints a one-time scoped bearer token (printed once; only its SHA-256 hash
 is stored under `~/.config/homeboy/broker_auth.json`). `revoke` disables a
 credential by id, and `list` reports non-secret credential metadata. See
@@ -754,13 +721,12 @@ homeboy runner exec <runner-id> -- homeboy extension refresh <source> --id <exte
 ```
 
 Status output is also the operator handoff for active runner jobs. When the
-connected daemon or reverse broker can report active work, each active job
+connected daemon can report active work, each active job
 includes lifecycle timing fields such as `updated_at_ms`, `heartbeat_age_ms`,
 `claim_id`, `claimed_by_runner_id`, `claimed_at_ms`, `claim_expires_at_ms`, and
 `claim_expires_in_ms`. The top-level `operator_commands` array gives copyable
 next actions for the current session, including job log following, cancellation,
-broker claim reconciliation for reverse runners, and artifact lookup/fetch
-commands when the status payload has enough context.
+and artifact lookup/fetch commands when the status payload has enough context.
 
 ### `peer-sessions`
 
@@ -855,7 +821,7 @@ Policy fields:
 - `--allow-raw-exec <true|false>` controls arbitrary `runner exec` shell access. SSH runner raw exec is denied by default until this is explicitly true.
 - `--workspace-root <path>` limits execution to one or more approved runner workspace roots.
 - `--artifact-policy <label>` records artifact behavior; `none` and `deny` block patch capture.
-- `--peer <id>` records accepted peer/controller server IDs for reverse-runner pairing.
+- `--peer <id>` records accepted peer/controller server IDs for runner pairing.
 - `--fingerprint <value>` records expected peer host keys or equivalent fingerprints.
 
 ### `pair`
@@ -950,11 +916,10 @@ Path rules:
 - `--run-id <id>` sets the persisted controller-side runner-exec run id for ad hoc evidence commands. When omitted, Homeboy derives a run id prefix from the command domain, such as `trace-matrix-summary`.
 - `--ssh` is the explicit diagnostic fallback when `connect` is unavailable; daemon execution is preferred because it records job metadata and supports artifact-oriented workflows.
 - Diagnostic SSH output serializes as `mode: "diagnostic_ssh"` and does not include job/event evidence.
-- Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon or reverse broker execution for job/event/artifact-compatible output.
+- Raw SSH execution remains intentionally explicit and should not be used as production Lab/offload evidence; use connected daemon execution for job/event/artifact-compatible output.
 - Mutation-capable executions expose returned source changes through
-  `mutation_artifacts.patch_ref` when a patch artifact is available. Direct
-  daemon and reverse broker results use the same field; callers should not branch
-  on transport mode to find returned mutations.
+  `mutation_artifacts.patch_ref` when a patch artifact is available; callers
+  should not branch on transport mode to find returned mutations.
 
 Dirty local worktree against runner-side resources:
 
@@ -1000,7 +965,7 @@ Runner jobs get a usable `XDG_RUNTIME_DIR` (see the runner job environment notes
 
 Runner metrics:
 
-- Local runner execution, connected daemon jobs, and reverse-runner worker results include a `metrics` object with `duration_ms`, `sample_count`, and lightweight resource fields when available.
+- Local runner execution and connected daemon jobs include a `metrics` object with `duration_ms`, `sample_count`, and lightweight resource fields when available.
 - On Linux runners, metrics are sampled from `/proc` for the command process tree and include `peak_rss_bytes`, `child_process_count_peak`, `cpu_user_ms`, and `cpu_system_ms`.
 - CPU accounting is sampled and can miss very short-lived child processes between samples; duration is always recorded, and non-Linux runners report `source: "duration_only"`.
 

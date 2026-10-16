@@ -75,8 +75,6 @@ pub struct PlacementReadinessRequest {
     /// released, so v2 is the first supported external schema.
     pub schema: String,
     pub runner_id: String,
-    pub allow_queue: bool,
-    pub durable_workload: bool,
     /// Only compiler-recognised invocations are accepted at the public
     /// boundary. Requirements are derived below, never supplied by callers.
     pub invocation: PlacementReadinessInvocation,
@@ -343,7 +341,6 @@ fn validate_placement_readiness_request(request: &PlacementReadinessRequest) -> 
 #[serde(rename_all = "snake_case")]
 pub enum PlacementReadinessState {
     Ready,
-    Queueable,
     Blocked,
 }
 
@@ -388,7 +385,6 @@ pub struct PlacementReadiness {
 struct PlacementReadinessObservation {
     status: RunnerStatusReport,
     capacity: Option<usize>,
-    mode: RunnerTunnelMode,
     capability_runner: Option<Runner>,
     capability_inventory: Option<super::RunnerCapabilityInventory>,
     provider_catalog: Option<Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>>,
@@ -406,7 +402,6 @@ pub fn placement_readiness(request: &PlacementReadinessRequest) -> Result<Placem
         );
         Ok(PlacementReadinessObservation {
             capacity: runner.settings.concurrency_limit,
-            mode: status_tunnel_mode(&status),
             require_exact_runner_version:
                 super::lab::offload::metadata::require_exact_runner_version(&runner.settings),
             capability_runner: Some(runner),
@@ -503,7 +498,6 @@ fn placement_readiness_with_transport(
         request,
         &observation.status,
         observation.capacity,
-        observation.mode,
         capability,
         observation.provider_catalog.as_deref(),
         observation.require_exact_runner_version,
@@ -514,7 +508,6 @@ fn placement_readiness_from_status_with_catalog(
     request: &PlacementReadinessRequest,
     status: &RunnerStatusReport,
     capacity: Option<usize>,
-    mode: RunnerTunnelMode,
     capability: super::LabRunnerGateDecision,
     provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
     require_exact_runner_version: bool,
@@ -534,10 +527,6 @@ fn placement_readiness_from_status_with_catalog(
         &status.active_job_state,
         capacity,
     );
-    let queueable = request.allow_queue
-        && request.durable_workload
-        && mode == RunnerTunnelMode::Reverse
-        && availability.is_capacity_exhausted();
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
     let inputs_declared = source_path_inputs
         .iter()
@@ -550,8 +539,6 @@ fn placement_readiness_from_status_with_catalog(
         .is_none_or(|plan| plan.is_ready());
     let state = if availability.accepts_jobs && compatible && inputs_declared && provider_ready {
         PlacementReadinessState::Ready
-    } else if queueable && compatible && inputs_declared && provider_ready {
-        PlacementReadinessState::Queueable
     } else {
         PlacementReadinessState::Blocked
     };
@@ -573,7 +560,7 @@ fn placement_readiness_from_status_with_catalog(
                 .collect(),
             super::LabRunnerGateDecision::Eligible => Vec::new(),
         }
-    } else if availability.accepts_jobs || queueable {
+    } else if availability.accepts_jobs {
         Vec::new()
     } else if let Some(action) = status.admission_action() {
         vec![action]
@@ -622,10 +609,6 @@ fn placement_readiness_from_status_with_catalog(
                     .reasons
                     .iter()
                     .any(|reason| reason == "capacity_reached"),
-            },
-            PlacementReadinessPredicate {
-                id: "durable_reverse_queue".to_string(),
-                satisfied: queueable,
             },
             PlacementReadinessPredicate {
                 id: "required_capabilities".to_string(),
@@ -736,10 +719,10 @@ pub(super) fn prepare_lab_runner_for_offload(
     if runner.kind != super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",
-            "Lab offload requires a remote direct SSH or reverse-connected runner; local runners would execute on this machine",
+            "Lab offload requires a remote direct SSH runner; local runners would execute on this machine",
             Some(runner.id),
             Some(vec![
-                "Register a direct SSH runner or configure a reverse-connected runner before using Lab offload.".to_string(),
+                "Register a direct SSH runner before using Lab offload.".to_string(),
             ]),
         ));
     }
@@ -769,21 +752,11 @@ pub fn prepare_explicit_lab_runner_for_offload(runner_id: &str) -> Result<()> {
 pub(super) fn preflight_lab_runner_availability(
     command: &LabOffloadCommand,
     selection: &LabRunnerSelection,
-    detach_after_handoff: bool,
-    has_durable_agent_task_plan: bool,
     connect_authority: Option<&RunnerConnectReport>,
 ) -> Result<RunnerStatusReport> {
     let (availability, status) =
         preflight_lab_runner_availability_with(selection, status, connect_authority)?;
     if availability.accepts_jobs {
-        return Ok(status);
-    }
-    if allows_detached_reverse_capacity_queue(
-        detach_after_handoff,
-        has_durable_agent_task_plan,
-        selection,
-        &availability,
-    ) {
         return Ok(status);
     }
 
@@ -798,20 +771,6 @@ pub(super) fn preflight_lab_runner_availability(
         Some(&status),
         eligible,
     ))
-}
-
-/// Capacity admission is only valid for a detached, durable reverse-broker
-/// handoff. Every other availability failure remains a preflight failure.
-pub(super) fn allows_detached_reverse_capacity_queue(
-    detach_after_handoff: bool,
-    has_durable_agent_task_plan: bool,
-    selection: &LabRunnerSelection,
-    availability: &RunnerAvailability,
-) -> bool {
-    detach_after_handoff
-        && has_durable_agent_task_plan
-        && selection.mode == RunnerTunnelMode::Reverse
-        && availability.is_capacity_exhausted()
 }
 
 fn preflight_lab_runner_availability_with(
@@ -836,11 +795,7 @@ fn loopback_direct_ssh_transport_for_preflight(
     selection: &LabRunnerSelection,
     resolve: impl FnOnce(&str) -> Result<bool>,
 ) -> Result<bool> {
-    if selection.mode == RunnerTunnelMode::DirectSsh {
-        resolve(&selection.runner_id)
-    } else {
-        Ok(false)
-    }
+    resolve(&selection.runner_id)
 }
 
 pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
@@ -1326,24 +1281,6 @@ pub(super) fn prepare_lab_runner_for_offload_with(
         });
     }
 
-    if status_tunnel_mode(&status) == RunnerTunnelMode::Reverse {
-        let reason = format!(
-            "reverse-connected runner `{}` is not currently connected",
-            selection.runner_id
-        );
-        return automatic_fallback_or_explicit_error(
-            selection,
-            reason,
-            format!(
-                "Lab offload requires reverse runner `{}` to have an active reverse session",
-                selection.runner_id
-            ),
-            "Start the reverse runner session on the Lab machine before using --runner."
-                .to_string(),
-            None,
-        );
-    }
-
     eprintln!(
         "Lab offload: direct SSH runner `{}` is not connected; attempting connection.",
         selection.runner_id
@@ -1461,11 +1398,6 @@ fn connected_runner_not_ready_reason(
         RunnerTunnelMode::DirectSsh if session.local_url.as_deref().unwrap_or("").is_empty() => {
             Some(format!(
                 "direct SSH runner `{runner_id}` has no local daemon URL; reconnect it with `homeboy runner connect {runner_id}`"
-            ))
-        }
-        RunnerTunnelMode::Reverse if session.broker_url.as_deref().unwrap_or("").is_empty() => {
-            Some(format!(
-                "reverse-connected runner `{runner_id}` has no broker URL; restart the reverse runner session before retrying"
             ))
         }
         _ => None,
@@ -1831,8 +1763,6 @@ mod placement_readiness_tests {
         PlacementReadinessRequest {
             schema: "homeboy/placement-readiness/v2".to_string(),
             runner_id: "lab".to_string(),
-            allow_queue: false,
-            durable_workload: false,
             invocation: PlacementReadinessInvocation::CapabilityAudit {
                 source_path: "/workspace/source".to_string(),
                 capability_id: "capability.alpha".to_string(),
@@ -1882,8 +1812,6 @@ mod placement_readiness_tests {
         PlacementReadinessRequest {
             schema: "homeboy/placement-readiness/v2".to_string(),
             runner_id: "lab".to_string(),
-            allow_queue: false,
-            durable_workload: true,
             invocation: PlacementReadinessInvocation::AgentTaskCook {
                 provider: "sol".to_string(),
                 source_path: "/workspace/source".to_string(),
@@ -1901,7 +1829,6 @@ mod placement_readiness_tests {
         PlacementReadinessObservation {
             status: status(),
             capacity: Some(1),
-            mode: RunnerTunnelMode::DirectSsh,
             capability_runner: None,
             capability_inventory: Some(super::super::RunnerCapabilityInventory {
                 runtime_ids: std::collections::BTreeSet::from(["runner-homeboy".to_string()]),
@@ -1923,11 +1850,10 @@ mod placement_readiness_tests {
         request: &PlacementReadinessRequest,
         status: &RunnerStatusReport,
         capacity: Option<usize>,
-        mode: RunnerTunnelMode,
         capability: super::super::LabRunnerGateDecision,
     ) -> PlacementReadiness {
         placement_readiness_from_status_with_catalog(
-            request, status, capacity, mode, capability, None, false,
+            request, status, capacity, capability, None, false,
         )
     }
 
@@ -1937,7 +1863,6 @@ mod placement_readiness_tests {
             &request(),
             &status(),
             Some(1),
-            RunnerTunnelMode::DirectSsh,
             super::super::LabRunnerGateDecision::Eligible,
         );
         assert_eq!(result.state, PlacementReadinessState::Ready);
@@ -2151,7 +2076,6 @@ mod placement_readiness_tests {
             &request(),
             &observed,
             Some(1),
-            RunnerTunnelMode::DirectSsh,
             super::super::LabRunnerGateDecision::Eligible,
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
@@ -2159,33 +2083,7 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn placement_readiness_accepts_reverse_runner_with_unavailable_verification() {
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::verification_unavailable(
-            "lab",
-            "homeboy 0.0.0".to_string(),
-            Some("homeboy 0.0.0+test".to_string()),
-            "reverse_runner_identity_unavailable",
-            "reverse runner identity cannot be verified".to_string(),
-        ));
-
-        let result = decide(
-            &request(),
-            &observed,
-            Some(1),
-            RunnerTunnelMode::Reverse,
-            super::super::LabRunnerGateDecision::Eligible,
-        );
-
-        assert_eq!(result.state, PlacementReadinessState::Ready);
-        assert!(result
-            .predicates
-            .iter()
-            .any(|predicate| predicate.id == "daemon_fresh" && predicate.satisfied));
-    }
-
-    #[test]
-    fn placement_readiness_rejects_reverse_runner_with_compared_mismatch() {
+    fn placement_readiness_rejects_runner_with_compared_mismatch() {
         let mut observed = status();
         observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
             "lab",
@@ -2199,55 +2097,10 @@ mod placement_readiness_tests {
             &request(),
             &observed,
             Some(1),
-            RunnerTunnelMode::Reverse,
             super::super::LabRunnerGateDecision::Eligible,
         );
 
         assert_eq!(result.state, PlacementReadinessState::Blocked);
-    }
-
-    #[test]
-    fn preflight_accepts_reverse_runner_with_unavailable_verification() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
-        };
-        let mut observed = status();
-        observed.stale_daemon = Some(RunnerStaleDaemonWarning::verification_unavailable(
-            "lab",
-            "homeboy 0.0.0".to_string(),
-            Some("homeboy 0.0.0+test".to_string()),
-            "reverse_runner_identity_unavailable",
-            "reverse runner identity cannot be verified".to_string(),
-        ));
-
-        let (availability, _) = preflight_lab_runner_availability_from_status_with_transport(
-            &selection,
-            |_| Ok(observed.clone()),
-            Some(1),
-            None,
-            false,
-        )
-        .expect("preflight");
-
-        assert!(availability.accepts_jobs);
-    }
-
-    #[test]
-    fn reverse_preflight_skips_direct_ssh_transport_resolution() {
-        let selection = LabRunnerSelection {
-            runner_id: "lab".to_string(),
-            source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
-        };
-
-        let loopback = loopback_direct_ssh_transport_for_preflight(&selection, |_| {
-            panic!("reverse broker transport must not resolve SSH configuration")
-        })
-        .expect("reverse transport does not need SSH resolution");
-
-        assert!(!loopback);
     }
 
     #[test]
@@ -2268,11 +2121,11 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn preflight_rejects_reverse_runner_with_compared_mismatch() {
+    fn preflight_rejects_runner_with_compared_mismatch() {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
         };
         let mut observed = status();
         observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
@@ -2297,42 +2150,6 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn busy_reverse_runner_is_queueable_only_for_durable_work() {
-        let mut observed = status();
-        observed.active_jobs.push(
-            serde_json::from_value(serde_json::json!({
-                "runner_id":"lab", "job_id":"00000000-0000-0000-0000-000000000001",
-                "operation":"test", "source":"daemon", "kind":"workload", "status":"running",
-                "command":"test", "started_at_ms":0, "elapsed_ms":0
-            }))
-            .expect("job"),
-        );
-        let mut request = request();
-        request.allow_queue = true;
-        request.durable_workload = true;
-        let result = decide(
-            &request,
-            &observed,
-            Some(1),
-            RunnerTunnelMode::Reverse,
-            super::super::LabRunnerGateDecision::Eligible,
-        );
-        assert_eq!(result.state, PlacementReadinessState::Queueable);
-        request.durable_workload = false;
-        assert_eq!(
-            decide(
-                &request,
-                &observed,
-                Some(1),
-                RunnerTunnelMode::Reverse,
-                super::super::LabRunnerGateDecision::Eligible
-            )
-            .state,
-            PlacementReadinessState::Blocked
-        );
-    }
-
-    #[test]
     fn incompatible_is_blocked_with_capability_remediation() {
         let decision = super::super::LabRunnerGateDecision::Missing {
             runner_id: "lab".to_string(),
@@ -2341,13 +2158,7 @@ mod placement_readiness_tests {
             reason: "missing capability.alpha".to_string(),
             remediation: vec!["configure capability.alpha".to_string()],
         };
-        let result = decide(
-            &request(),
-            &status(),
-            Some(1),
-            RunnerTunnelMode::DirectSsh,
-            decision,
-        );
+        let result = decide(&request(), &status(), Some(1), decision);
         assert_eq!(result.state, PlacementReadinessState::Blocked);
         assert_eq!(
             result.recovery_actions[0],
@@ -2367,36 +2178,6 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn incompatible_busy_reverse_runner_is_blocked_not_queueable() {
-        let mut observed = status();
-        observed.active_jobs.push(
-            serde_json::from_value(serde_json::json!({
-                "runner_id":"lab", "job_id":"00000000-0000-0000-0000-000000000001",
-                "operation":"test", "source":"daemon", "kind":"workload", "status":"running",
-                "command":"test", "started_at_ms":0, "elapsed_ms":0
-            }))
-            .expect("job"),
-        );
-        let mut request = request();
-        request.allow_queue = true;
-        request.durable_workload = true;
-        let result = decide(
-            &request,
-            &observed,
-            Some(1),
-            RunnerTunnelMode::Reverse,
-            super::super::LabRunnerGateDecision::Missing {
-                runner_id: "lab".to_string(),
-                command: "runner preflight",
-                missing_tools: Vec::new(),
-                reason: "missing capability.alpha".to_string(),
-                remediation: vec!["configure capability.alpha".to_string()],
-            },
-        );
-        assert_eq!(result.state, PlacementReadinessState::Blocked);
-    }
-
-    #[test]
     fn disconnected_is_blocked_without_creating_an_admission() {
         let mut observed = status();
         observed.connected = false;
@@ -2405,7 +2186,6 @@ mod placement_readiness_tests {
             &request(),
             &observed,
             Some(1),
-            RunnerTunnelMode::DirectSsh,
             super::super::LabRunnerGateDecision::Eligible,
         );
         assert_eq!(result.state, PlacementReadinessState::Blocked);
@@ -2432,7 +2212,6 @@ mod placement_readiness_tests {
             &request(),
             &observed,
             Some(1),
-            RunnerTunnelMode::DirectSsh,
             super::super::LabRunnerGateDecision::Eligible,
         );
         let value = serde_json::to_value(&result).expect("serialize v1 result");

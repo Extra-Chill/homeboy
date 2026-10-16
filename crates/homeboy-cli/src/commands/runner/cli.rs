@@ -258,20 +258,8 @@ pub(super) enum RunnerCommand {
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
-        /// Runner ID for direct SSH connect, or controller/broker ID when --reverse is set
+        /// Runner ID
         id: String,
-
-        /// Record a runner-initiated reverse tunnel session substrate
-        #[arg(long)]
-        reverse: bool,
-
-        /// Runner ID initiating the reverse connection
-        #[arg(long = "reverse-runner")]
-        reverse_runner: Option<String>,
-
-        /// Broker/controller URL observed by the reverse runner
-        #[arg(long)]
-        broker_url: Option<String>,
 
         /// Explicitly adopt this exact remote daemon lease after confirming its PID is dead
         #[arg(long)]
@@ -536,7 +524,7 @@ pub(super) enum RunnerCommand {
     /// Plan a runner-backed refresh loop before dispatching matrix-style work
     #[command(name = "refresh-plan")]
     RefreshPlan(refresh_plan::RefreshPlanArgs),
-    /// Manage reverse runner broker authentication and pairing
+    /// Manage runner broker authentication and pairing
     Broker {
         #[command(subcommand)]
         command: RunnerBrokerCommand,
@@ -670,22 +658,6 @@ pub(super) enum RunnerJobCommand {
         /// Runner daemon job ID from runner exec/Lab output or error details
         job_id: String,
     },
-    /// Reconcile expired reverse-runner broker claims
-    Reconcile {
-        /// Reverse-connected runner ID
-        runner_id: String,
-    },
-    /// Inspect broker-held reverse-runner artifact metadata
-    Artifacts {
-        /// Reverse-connected runner ID
-        runner_id: String,
-
-        /// Reverse broker job ID
-        job_id: String,
-
-        /// Artifact ID reported by the finished broker job
-        artifact_id: String,
-    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -760,7 +732,7 @@ mod tests {
             "runner",
             "preflight",
             "--request",
-            r#"{"schema":"homeboy/placement-readiness/v2","runner_id":"lab","allow_queue":false,"durable_workload":false,"invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
+            r#"{"schema":"homeboy/placement-readiness/v2","runner_id":"lab","invocation":{"kind":"capability_audit","source_path":"/workspace","capability_id":"capability.alpha"}}"#,
         ])
         .expect("parse typed preflight request");
         assert!(matches!(

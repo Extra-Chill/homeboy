@@ -16,7 +16,6 @@ use homeboy_runner_contract::{
     RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
     RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1, RUNNER_API_WATCH_REQUEST_SCHEMA,
 };
-use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
 /// Per-request broker authentication context extracted from the network layer.
 ///
@@ -111,24 +110,6 @@ struct OwnerValidationRequest {
     workspace_owner_lease: crate::workspace_claim::WorkspaceOwnerLease,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct SessionRequest {
-    runner_id: String,
-    controller_id: String,
-    #[serde(default)]
-    broker_url: Option<String>,
-    #[serde(default)]
-    homeboy_version: Option<String>,
-    #[serde(default)]
-    homeboy_build_identity: Option<String>,
-    #[serde(default)]
-    worker_identity: Option<String>,
-    #[serde(default)]
-    worker_pid: Option<u32>,
-    #[serde(default)]
-    last_seen_at: Option<String>,
-}
-
 pub(in crate::daemon) fn route(
     method: &str,
     path: &str,
@@ -193,10 +174,6 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.workspace_owners.release", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/sessions") => match register_session(body, auth) {
-            Ok(body) => daemon_endpoint_response("runner.sessions.register", body),
-            Err(err) => auth_or_bad_request(err),
-        },
         ("POST", "/runner/jobs") => {
             match super::with_daemon_job_admission(|| enqueue(body, job_store, auth)) {
                 Ok(body) => daemon_endpoint_response("runner.jobs.submit", body),
@@ -232,7 +209,6 @@ pub(in crate::daemon) fn route(
                 Some(vec![
                     "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/watch, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
                         .to_string(),
-                    "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
             ),
         ),
@@ -570,62 +546,6 @@ fn reconcile(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext
     }))
 }
 
-fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Value> {
-    let request: SessionRequest = parse_body(body, "remote runner session request")?;
-    if request.runner_id.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "runner_id",
-            "remote runner session requires a runner id",
-            None,
-            None,
-        ));
-    }
-    auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    if request.controller_id.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "controller_id",
-            "remote runner session requires a controller id",
-            None,
-            None,
-        ));
-    }
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let session = RunnerSession {
-        runner_id: request.runner_id.clone(),
-        mode: RunnerTunnelMode::Reverse,
-        role: RunnerSessionRole::Controller,
-        server_id: None,
-        controller_id: Some(request.controller_id.clone()),
-        broker_url: request.broker_url.clone(),
-        remote_daemon_address: None,
-        local_port: None,
-        local_url: None,
-        tunnel_pid: None,
-        tunnel_process_start_identity: None,
-        proxy_forward: None,
-        remote_daemon_pid: None,
-        remote_daemon_lease_id: None,
-        homeboy_version: request
-            .homeboy_version
-            .clone()
-            .unwrap_or_else(|| crate::build_identity::current().version),
-        homeboy_build_identity: request.homeboy_build_identity.clone(),
-        connected_at: now.clone(),
-        worker_identity: request.worker_identity.clone(),
-        worker_pid: request.worker_pid,
-        last_seen_at: request.last_seen_at.clone().or(Some(now)),
-        leaseless_recovery_evidence: None,
-    };
-    let path = write_session(&session)?;
-
-    Ok(json!({
-        "command": "api.runner.sessions.register",
-        "session": session,
-        "session_path": path.display().to_string(),
-    }))
-}
-
 fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     let submission: RunnerApiSubmitRequest = parse_body(body, "Runner API submit request")?;
     let runner_id = submission
@@ -722,7 +642,6 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         ));
     }
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
     let concurrency_limit = request
         .concurrency_limit
         .or_else(|| super::runner_workspace_root::runner_concurrency_limit(&request.runner_id));
@@ -918,7 +837,6 @@ fn append_event(
 ) -> Result<Value> {
     let request: EventRequest = parse_body(body, "remote runner event request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
     authorize_exact_workspace_claim_binding(
         job_store,
         job_id,
@@ -951,7 +869,6 @@ fn finish(
 ) -> Result<Value> {
     let request: FinishRequest = parse_body(body, "remote runner finish request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
     authorize_exact_workspace_claim_binding(
         job_store,
         job_id,
@@ -1045,7 +962,6 @@ fn renew_heartbeat(
     auth: &BrokerAuthContext,
 ) -> Result<(u64, Option<crate::workspace_claim::WorkspaceOwnerLease>)> {
     auth.authorize(BrokerScope::Work, Some(runner_id))?;
-    touch_reverse_session(runner_id)?;
     authorize_exact_workspace_claim_binding(job_store, job_id, workspace_claim_binding)?;
     authorize_exact_workspace_owner_lease(job_store, job_id, workspace_owner_lease)?;
     // One authority for the renewal and its failure-recovery write. The renewal
@@ -1093,7 +1009,6 @@ fn consume(
 ) -> Result<Value> {
     let request: ConsumeRequest = parse_body(body, "remote runner execution consume request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
     authorize_exact_workspace_claim_binding(
         job_store,
         job_id,
@@ -1160,7 +1075,6 @@ fn validate_owner(
     let request: OwnerValidationRequest =
         parse_body(body, "remote runner owner validation request")?;
     auth.authorize(BrokerScope::Work, Some(request.runner_id.as_str()))?;
-    touch_reverse_session(&request.runner_id)?;
     authorize_exact_workspace_owner_lease(job_store, job_id, Some(&request.workspace_owner_lease))?;
     job_store.ensure_remote_runner_claim(job_id, &request.runner_id, &request.claim_id)?;
     let valid = workspace_claim_store()?
@@ -1438,45 +1352,6 @@ fn authorize_exact_workspace_owner_lease(
         ));
     }
     authorize_workspace_owner_lease(presented)
-}
-
-fn touch_reverse_session(runner_id: &str) -> Result<()> {
-    let path = paths::runner_session_file(runner_id)?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    let mut session: RunnerSession = serde_json::from_str(&raw)
-        .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
-    if session.mode == RunnerTunnelMode::Reverse && session.role == RunnerSessionRole::Controller {
-        session.last_seen_at = Some(chrono::Utc::now().to_rfc3339());
-        write_session(&session)?;
-    }
-    Ok(())
-}
-
-fn write_session(session: &RunnerSession) -> Result<std::path::PathBuf> {
-    let path = paths::runner_session_file(&session.runner_id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-    let serialized = serde_json::to_string_pretty(session).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("serialize runner session".to_string()),
-        )
-    })?;
-    std::fs::write(&path, serialized).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
-    })?;
-    Ok(path)
 }
 
 #[cfg(test)]

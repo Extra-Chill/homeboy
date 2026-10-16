@@ -12,7 +12,7 @@ use super::super::daemon_http_get::{
     classify_reqwest_error, daemon_get, daemon_transport_error, parse_daemon_response_json,
     DaemonHttpErrorKind,
 };
-use super::super::{load, status, RunnerSession, RunnerTunnelMode};
+use super::super::{load, status, RunnerSession};
 
 #[allow(unused_imports)]
 use super::*;
@@ -34,10 +34,6 @@ pub(super) struct DaemonHttpTextResponse {
 pub fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a Value> {
     data.get("body")
         .ok_or_else(|| Error::internal_unexpected(format!("{context} missing canonical data.body")))
-}
-
-fn reverse_broker_daemon_data(body: Value) -> Value {
-    json!({ "body": body })
 }
 
 fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions) -> RequestBuilder {
@@ -108,13 +104,12 @@ pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -
     daemon_post(&client, local_url, path)
 }
 
-/// Post to a direct runner daemon with the paired broker token when the caller
-/// is crossing the same broker-auth trust boundary as a reverse transport.
 /// Total deadline for small control-plane daemon calls (status, capabilities,
 /// job queries). Payload-carrying requests such as sealed source staging must
 /// not use it; see [`daemon_api_post_json_for_session_with_timeout`].
 pub(super) const DAEMON_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Post to a direct runner daemon with the paired broker token.
 pub(crate) fn daemon_api_post_json_for_session_with_broker_token(
     session: &RunnerSession,
     path: &str,
@@ -181,36 +176,10 @@ pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "POST")
 }
 
-/// A reverse runner's broker is a controller-reachable durable rendezvous, not
-/// the runner machine. A detached Cook's worker exits as soon as it publishes
-/// its terminal result, so its controller-session heartbeat necessarily ages
-/// out past `REVERSE_RUNNER_HEARTBEAT_TTL` — but the result it already wrote to
-/// the broker stays readable and must stay projectable
-/// (Extra-Chill/homeboy#10659). Observation of durable broker state therefore
-/// requires only a recorded reverse session that names its broker endpoint.
-/// Mutations still assert an intent that a live worker has to honor, so they
-/// keep the liveness gate, as does every direct-daemon transport.
-fn reverse_broker_read_without_live_worker(session: Option<&RunnerSession>, method: &str) -> bool {
-    method == "GET"
-        && session.is_some_and(|session| {
-            session.mode == RunnerTunnelMode::Reverse
-                && session.local_url.is_none()
-                && session
-                    .broker_url
-                    .as_deref()
-                    .is_some_and(|url| !url.trim().is_empty())
-        })
-}
-
 pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let recorded_broker_read =
-        reverse_broker_read_without_live_worker(connected.session.as_ref(), method);
-    let Some(current_session) = connected
-        .session
-        .filter(|_| connected.connected || recorded_broker_read)
-    else {
+    let Some(current_session) = connected.session.filter(|_| connected.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
@@ -220,14 +189,8 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             ]),
         ));
     };
-    // Generation routing resolves which *live* direct-daemon endpoint owns a
-    // job. A recorded-only reverse session has no generation to reconcile, so
-    // read it through the broker endpoint it recorded.
-    let session = if connected.connected {
-        daemon_api_session_for_path(runner_id, path, current_session)?
-    } else {
-        current_session
-    };
+    // Generation routing resolves which live direct-daemon endpoint owns a job.
+    let session = daemon_api_session_for_path(runner_id, path, current_session)?;
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -240,48 +203,12 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             _ => Err(unsupported_daemon_api_method(method)),
         };
     }
-    if session.mode == RunnerTunnelMode::Reverse {
-        let Some(broker_url) = session.broker_url.as_deref() else {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "reverse runner session does not expose a broker URL",
-                Some(runner.id),
-                Some(vec![
-                    "Reconnect the reverse runner with `homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>`.".to_string(),
-                ]),
-            ));
-        };
-        let broker_token = homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)?;
-        let body = match method {
-            "GET" => broker_http::get_json(
-                &client,
-                broker_url,
-                path,
-                "query reverse runner broker",
-                broker_token.as_deref(),
-            ),
-            "POST" => broker_http::post_json(
-                &client,
-                broker_url,
-                path,
-                json!({}),
-                "query reverse runner broker",
-                broker_token.as_deref(),
-            ),
-            _ => Err(unsupported_daemon_api_method(method)),
-        }?;
-        // Broker helpers validate and extract their canonical `data.body`, while
-        // daemon API consumers intentionally parse the daemon `data` object.
-        // Restore that shared shape so direct and reverse transports are
-        // interchangeable for status, logs, artifacts, and cancellation.
-        return Ok(reverse_broker_daemon_data(body));
-    }
     Err(Error::validation_invalid_argument(
         "runner",
-        "runner session does not expose a local daemon URL or reverse broker URL",
+        "runner session does not expose a local daemon URL",
         Some(runner.id),
         Some(vec![
-            "Use a direct daemon connection or a reverse runner session registered with a broker before querying runner jobs.".to_string(),
+            "Reconnect the runner with `homeboy runner connect <runner-id>` before querying runner jobs.".to_string(),
         ]),
     ))
 }
@@ -371,13 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn reverse_broker_body_normalizes_to_daemon_data_contract() {
-        let data = reverse_broker_daemon_data(json!({ "job": { "id": "job-1" } }));
-        let body = canonical_daemon_body(&data, "reverse broker job").expect("canonical body");
-        assert_eq!(body["job"]["id"], "job-1");
-    }
-
-    #[test]
     fn daemon_post_preserves_structured_remote_storage_error() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind daemon fixture");
         let address = listener.local_addr().expect("daemon fixture address");
@@ -422,67 +342,6 @@ mod tests {
         );
         assert_eq!(error.details["phase"], "lab_staging_submission");
         assert_eq!(error.hints[0].message, "repair the staging record");
-    }
-
-    fn reverse_session() -> RunnerSession {
-        let mut session = session("lease-reverse", "unused");
-        session.mode = RunnerTunnelMode::Reverse;
-        session.broker_url = Some("http://127.0.0.1:9000".to_string());
-        session.local_url = None;
-        session.local_port = None;
-        session.remote_daemon_address = None;
-        session
-    }
-
-    #[test]
-    fn recorded_reverse_session_still_serves_broker_reads_after_its_worker_exits() {
-        // A detached Cook's worker exits the moment it publishes its terminal
-        // result, so its session heartbeat is always stale by the time the
-        // controller projects. The broker is durable and controller-reachable,
-        // so the read must not depend on worker liveness
-        // (Extra-Chill/homeboy#10659).
-        assert!(reverse_broker_read_without_live_worker(
-            Some(&reverse_session()),
-            "GET"
-        ));
-    }
-
-    #[test]
-    fn recorded_reverse_session_still_gates_mutations_and_direct_transports() {
-        // A mutation asserts an intent a live worker has to honor.
-        assert!(!reverse_broker_read_without_live_worker(
-            Some(&reverse_session()),
-            "POST"
-        ));
-        // Direct-SSH transport reads the runner machine itself, so liveness
-        // remains the correct gate.
-        assert!(!reverse_broker_read_without_live_worker(
-            Some(&session("lease-a", "daemon-a")),
-            "GET"
-        ));
-        // A reverse session that never recorded a broker endpoint has nothing
-        // durable to read.
-        let mut without_broker = reverse_session();
-        without_broker.broker_url = None;
-        assert!(!reverse_broker_read_without_live_worker(
-            Some(&without_broker),
-            "GET"
-        ));
-        let mut blank_broker = reverse_session();
-        blank_broker.broker_url = Some("   ".to_string());
-        assert!(!reverse_broker_read_without_live_worker(
-            Some(&blank_broker),
-            "GET"
-        ));
-        // A reverse session pinned to a local daemon endpoint would route
-        // direct, and that endpoint really is dead once the worker exits.
-        let mut with_local = reverse_session();
-        with_local.local_url = Some("http://127.0.0.1:4100".to_string());
-        assert!(!reverse_broker_read_without_live_worker(
-            Some(&with_local),
-            "GET"
-        ));
-        assert!(!reverse_broker_read_without_live_worker(None, "GET"));
     }
 }
 

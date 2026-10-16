@@ -44,7 +44,6 @@ mod session_enums {
     #[serde(rename_all = "snake_case")]
     pub enum RunnerActiveJobSource {
         DirectDaemon,
-        ReverseBroker,
     }
 }
 pub use session_enums::*;
@@ -739,24 +738,9 @@ impl RunnerStatusReport {
         self.state == RunnerSessionState::Connected
     }
 
-    /// The stale-daemon report that fences admission.
-    ///
-    /// `None` when the runner carries no report at all *or* when the only
-    /// report present records that this runner class cannot be verified. The
-    /// latter is deliberately not a fence: see
-    /// [`RunnerStaleDaemonWarning::blocks_admission`].
+    /// The stale-daemon report that fences admission, if any.
     pub fn admission_blocking_stale_daemon(&self) -> Option<&RunnerStaleDaemonWarning> {
-        self.stale_daemon
-            .as_ref()
-            .filter(|warning| warning.blocks_admission())
-    }
-
-    /// The report that records an unverifiable runner, as opposed to a proven
-    /// mismatch. Present exactly when freshness was never established.
-    pub fn unverified_daemon(&self) -> Option<&RunnerStaleDaemonWarning> {
-        self.stale_daemon
-            .as_ref()
-            .filter(|warning| !warning.blocks_admission())
+        self.stale_daemon.as_ref()
     }
 
     /// Whether an observed fresh daemon has a lease identity for admission.
@@ -848,12 +832,6 @@ impl RunnerStatusReport {
                 .reasons
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
-        }
-        // A runner whose freshness was never established is named, not fenced.
-        // The reason travels with the availability record so an operator can
-        // see *why* it was deprioritized without it dropping out of service.
-        if self.unverified_daemon().is_some() {
-            availability.reasons.push("daemon_unverified".to_string());
         }
         availability
     }
@@ -1394,11 +1372,11 @@ mod status_serialization_tests {
     fn session_reporting_version(version: &str) -> RunnerSession {
         RunnerSession {
             runner_id: "homeboy-lab".to_string(),
-            mode: RunnerTunnelMode::Reverse,
-            role: RunnerSessionRole::Runner,
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
             server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: Some("http://broker.invalid".to_string()),
+            controller_id: None,
+            broker_url: None,
             remote_daemon_address: None,
             local_port: None,
             local_url: None,
@@ -2449,9 +2427,6 @@ pub enum RunnerDaemonVerification {
     /// A verification path exists for this runner, but the probe that feeds it
     /// failed. Nothing was compared; `probe_error` carries the reason.
     ProbeFailed,
-    /// This runner has no controller-side identity probe at all, so no
-    /// comparison could be attempted for any reason.
-    Unavailable,
 }
 
 impl RunnerDaemonVerification {
@@ -2471,10 +2446,6 @@ pub const UNVERIFIED_HOMEBOY_VERSION: &str = "unverified";
 
 /// Severity of a report that established neither freshness nor staleness.
 pub const RUNNER_DAEMON_SEVERITY_UNKNOWN: &str = "unknown";
-
-/// `compatibility_reason` for a reverse-connected session, which the controller
-/// has no path to probe. See [`RunnerStaleDaemonWarning::verification_unavailable`].
-pub const REVERSE_UNVERIFIED_REASON: &str = "reverse_unverified";
 
 /// `compatibility_reason` for a runner whose identity probe failed outright.
 pub const IDENTITY_PROBE_FAILED_REASON: &str = "identity_probe_failed";
@@ -2700,34 +2671,7 @@ impl RunnerStaleDaemonWarning {
         )
     }
 
-    /// The honest verdict for a runner this controller has no way to probe.
-    ///
-    /// A reverse-connected session is reached through the broker, not over SSH,
-    /// so the direct identity probe has nothing to run against. That absence
-    /// used to be reported as no warning at all, which reads as healthy and let
-    /// an arbitrarily old reverse runner stay fully eligible (#11106). It is a
-    /// verification gap, so it is reported as one — visibly, and distinctly
-    /// from a proven mismatch, which is what keeps it from fencing every
-    /// reverse lab out of selection.
-    pub fn verification_unavailable(
-        runner_id: &str,
-        session_homeboy_version: String,
-        session_homeboy_build_identity: Option<String>,
-        compatibility_reason: &'static str,
-        message: String,
-    ) -> Self {
-        Self::unverified(
-            runner_id,
-            RunnerDaemonVerification::Unavailable,
-            compatibility_reason,
-            session_homeboy_version,
-            session_homeboy_build_identity,
-            None,
-            message,
-        )
-    }
-
-    /// Shared body of the two unverified verdicts.
+    /// Shared body of the unverified verdict.
     ///
     /// Nothing here is a comparison: the "current"/"job command binary" fields
     /// hold [`UNVERIFIED_HOMEBOY_VERSION`] so no downstream reader can mistake
@@ -2778,18 +2722,6 @@ impl RunnerStaleDaemonWarning {
     /// nor staleness.
     pub fn is_unverified(&self) -> bool {
         !self.verification.is_compared()
-    }
-
-    /// Whether this report may fence admission.
-    ///
-    /// An observed mismatch does, and so does a failed probe on a runner that
-    /// *has* a probe — "I tried and could not verify" is a real anomaly on a
-    /// path that normally answers. A runner with no verification path at all is
-    /// reported and deprioritized instead: fencing it would take every
-    /// reverse-connected lab out of service, which is the opposite failure
-    /// (#11101) rather than a fix.
-    pub fn blocks_admission(&self) -> bool {
-        self.verification != RunnerDaemonVerification::Unavailable
     }
 
     /// The one place a recovery is assigned.
@@ -3077,11 +3009,4 @@ pub struct RunnerDisconnectReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<RunnerSession>,
     pub session_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReverseRunnerConnectOptions {
-    pub controller_id: String,
-    pub runner_id: String,
-    pub broker_url: Option<String>,
 }

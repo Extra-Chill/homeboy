@@ -5,7 +5,7 @@ use serde_json::Value;
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
-use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
+use homeboy::runner::runners::{self as runner, Runner};
 use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::{
     RunnerApiListRequest, RunnerApiListResponse, RunnerKind, RUNNER_API_LIST_REQUEST_SCHEMA,
@@ -452,9 +452,6 @@ pub(super) fn remove(id: &str) -> CmdResult<RunnerOutput> {
 }
 
 pub(super) struct RunnerConnectInput {
-    pub(super) reverse: bool,
-    pub(super) runner_id: Option<String>,
-    pub(super) broker_url: Option<String>,
     pub(super) adopt_orphan_lease: Option<String>,
     pub(super) adopt_live_lease: Option<String>,
     pub(super) expected_live_pid: Option<u32>,
@@ -470,9 +467,6 @@ pub(super) struct RunnerConnectInput {
 /// exercised without attempting an SSH connection.
 pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::core::Result<()> {
     let RunnerConnectInput {
-        reverse,
-        runner_id: _,
-        broker_url: _,
         adopt_orphan_lease,
         adopt_live_lease,
         expected_live_pid,
@@ -491,42 +485,10 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
             None,
         ));
     }
-    if *reverse && adopt_live_lease.is_some() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "adopt_live_lease",
-            "live daemon adoption only applies to direct SSH runner connections",
-            None,
-            None,
-        ));
-    }
     if !confirm_untracked_child_dead.is_empty() && adopt_orphan_lease.is_none() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "confirm_untracked_child_dead",
             "--confirm-untracked-child-dead requires --adopt-orphan-lease",
-            None,
-            None,
-        ));
-    }
-    if *reverse && adopt_orphan_lease.is_some() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "adopt_orphan_lease",
-            "orphan daemon adoption only applies to direct SSH runner connections",
-            None,
-            None,
-        ));
-    }
-    if *reverse && *reconcile_leaseless_orphans {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "lease-less recovery only applies to direct SSH runner connections",
-            None,
-            None,
-        ));
-    }
-    if *reverse && *reconcile_unleased_candidates {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "reconcile_unleased_candidates",
-            "unleased candidate reconciliation only applies to direct SSH runner connections",
             None,
             None,
         ));
@@ -556,23 +518,12 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
             None,
         ));
     }
-    if *reverse && recover_missing_lease_state.is_some() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "recover_missing_lease_state",
-            "state-loss recovery only applies to direct SSH runner connections",
-            None,
-            None,
-        ));
-    }
     Ok(())
 }
 
 pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOutput> {
     validate_connect_input(&input)?;
     let RunnerConnectInput {
-        reverse,
-        runner_id,
-        broker_url,
         adopt_orphan_lease,
         adopt_live_lease,
         expected_live_pid,
@@ -583,38 +534,20 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         recorded_pid,
         recorded_endpoint,
     } = input;
-    let (report, exit_code) = if reverse {
-        let runner_id = runner_id.ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "runner",
-                "Provide --reverse-runner <runner-id> when using --reverse",
-                None,
-                None,
-            )
-        })?;
-        runner::connect_reverse(ReverseRunnerConnectOptions {
-            controller_id: id.to_string(),
-            runner_id,
-            broker_url,
-        })?
-    } else {
-        match (adopt_live_lease.as_deref(), expected_live_pid) {
-            (Some(lease_id), Some(pid)) => {
-                runner::connect_with_live_lease_adoption(id, lease_id, pid)?
-            }
-            _ if reconcile_unleased_candidates => {
-                runner::connect_with_unleased_candidate_reconciliation(id)?
-            }
-            _ => runner::connect_with_orphan_adoption(
-                id,
-                adopt_orphan_lease.as_deref(),
-                &confirm_untracked_child_dead,
-                reconcile_leaseless_orphans,
-                recover_missing_lease_state.as_deref(),
-                recorded_pid,
-                recorded_endpoint.as_deref(),
-            )?,
+    let (report, exit_code) = match (adopt_live_lease.as_deref(), expected_live_pid) {
+        (Some(lease_id), Some(pid)) => runner::connect_with_live_lease_adoption(id, lease_id, pid)?,
+        _ if reconcile_unleased_candidates => {
+            runner::connect_with_unleased_candidate_reconciliation(id)?
         }
+        _ => runner::connect_with_orphan_adoption(
+            id,
+            adopt_orphan_lease.as_deref(),
+            &confirm_untracked_child_dead,
+            reconcile_leaseless_orphans,
+            recover_missing_lease_state.as_deref(),
+            recorded_pid,
+            recorded_endpoint.as_deref(),
+        )?,
     };
     Ok((
         RunnerOutput {
@@ -1086,9 +1019,6 @@ mod tests {
 
     fn input() -> RunnerConnectInput {
         RunnerConnectInput {
-            reverse: false,
-            runner_id: None,
-            broker_url: None,
             adopt_orphan_lease: None,
             adopt_live_lease: None,
             expected_live_pid: None,
@@ -1134,43 +1064,12 @@ mod tests {
     }
 
     #[test]
-    fn reverse_connections_cannot_reconcile_leaseless_jobs() {
-        let error = validate_connect_input(&RunnerConnectInput {
-            reverse: true,
-            reconcile_leaseless_orphans: true,
-            ..input()
-        })
-        .expect_err("reverse recovery is unsupported");
-        assert!(error.message.contains("direct SSH"));
-    }
-
-    #[test]
     fn candidate_reconciliation_is_a_direct_ssh_recovery_mode() {
         validate_connect_input(&RunnerConnectInput {
             reconcile_unleased_candidates: true,
             ..input()
         })
         .expect("candidate reconciliation selects one direct SSH recovery mode");
-
-        let error = validate_connect_input(&RunnerConnectInput {
-            reverse: true,
-            reconcile_unleased_candidates: true,
-            ..input()
-        })
-        .expect_err("reverse candidate recovery has no direct remote lifecycle boundary");
-        assert!(error.message.contains("direct SSH"));
-    }
-
-    #[test]
-    fn reverse_connections_cannot_adopt_live_daemons() {
-        let error = validate_connect_input(&RunnerConnectInput {
-            reverse: true,
-            adopt_live_lease: Some("lease-live".to_string()),
-            expected_live_pid: Some(42),
-            ..input()
-        })
-        .expect_err("reverse connections have no direct SSH daemon ownership");
-        assert!(error.message.contains("direct SSH"));
     }
 
     #[test]

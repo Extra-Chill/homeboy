@@ -439,34 +439,6 @@ fn admission_reconnects_when_concurrent_rotation_removes_the_session() {
 }
 
 #[test]
-fn admission_does_not_reconnect_a_known_reverse_session() {
-    let mut session = direct_ssh_session("lease-reverse");
-    session.mode = RunnerTunnelMode::Reverse;
-    let status = admission_status(&session, false);
-    let mut reconnects = 0;
-
-    let admitted = status_for_admission_with(
-        "homeboy-lab",
-        |_| Ok(status.clone()),
-        |_| {
-            reconnects += 1;
-            Ok(())
-        },
-    )
-    .expect("known reverse admission remains caller-owned");
-
-    assert_eq!(reconnects, 0);
-    assert!(!admitted.connected);
-    assert_eq!(
-        admitted
-            .session
-            .as_ref()
-            .map(|session| session.mode.clone()),
-        Some(RunnerTunnelMode::Reverse)
-    );
-}
-
-#[test]
 fn admission_refuses_a_lease_mismatch_without_retrying_status() {
     let session = direct_ssh_session("lease-recorded");
     let calls = std::cell::Cell::new(0);
@@ -1526,83 +1498,11 @@ fn failed_identity_probe_reports_the_error_instead_of_the_session_version() {
         "the vague `with_identity_unverifiable` message is not the diagnosis"
     );
     assert!(warning.is_unverified());
-    // A probe that failed on a runner that *has* a probe is a real anomaly and
-    // still fences admission, exactly as the fabricated warning did.
-    assert!(warning.blocks_admission());
     assert_eq!(
         warning.recovery_commands,
         ["homeboy runner doctor homeboy-lab --scope lab-offload"],
         "the answer to an unread binary is to re-probe it, not to replace it"
     );
-}
-
-/// #11106 failure mode 2: `stale_daemon_warning` returned `None` for every
-/// non-direct-SSH session, so a reverse-connected lab on an arbitrarily old
-/// binary read as healthy with nothing ever checked.
-#[test]
-fn reverse_session_is_checked_and_reports_an_unverified_verdict() {
-    let runner = Runner {
-        id: "homeboy-lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: Some("/srv/homeboy".to_string()),
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-    let session = super::reverse_controller_session();
-
-    let warning = tunnel_verification_gap(&runner, &session).expect(
-        "a reverse session has no controller-side identity probe and must say so, not stay silent",
-    );
-
-    assert_eq!(warning.severity, "unknown");
-    assert_eq!(warning.verification, RunnerDaemonVerification::Unavailable);
-    assert_eq!(warning.compatibility_reason, Some("reverse_unverified"));
-    assert!(warning.is_unverified());
-    assert!(warning.message.contains("homeboy test+abc123"));
-    assert!(warning.message.contains("UNVERIFIED"));
-    // The counter-property (#11101): unverified is not stale. Fencing every
-    // reverse lab would trade this bug for the opposite one.
-    assert!(!warning.blocks_admission());
-    assert_eq!(
-        warning.recovery_commands,
-        ["homeboy runner doctor homeboy-lab --scope lab-offload"]
-    );
-
-    let mut direct = session.clone();
-    direct.mode = RunnerTunnelMode::DirectSsh;
-    assert!(
-        tunnel_verification_gap(&runner, &direct).is_none(),
-        "a direct-SSH session has a real probe and must be compared, not excused"
-    );
-}
-
-/// The three states must be distinguishable by every admission consumer, not
-/// collapsed back into "there is a warning".
-#[test]
-fn unverified_reports_fence_nothing_while_compared_mismatches_still_do() {
-    let unverified = RunnerStaleDaemonWarning::verification_unavailable(
-        "homeboy-lab",
-        "0.328.0".to_string(),
-        None,
-        "reverse_unverified",
-        "no probe".to_string(),
-    );
-    let mismatch = RunnerStaleDaemonWarning::new(
-        "homeboy-lab",
-        "0.328.0".to_string(),
-        "0.329.0".to_string(),
-        Some("homeboy 0.328.0+a".to_string()),
-        Some("homeboy 0.329.0+b".to_string()),
-    );
-
-    assert!(!mismatch.is_unverified());
-    assert!(mismatch.blocks_admission());
-    assert!(unverified.is_unverified());
-    assert!(!unverified.blocks_admission());
 }
 
 #[test]
@@ -1707,27 +1607,10 @@ fn routine_disconnect_refuses_an_unbound_session_without_executing_a_configured_
 #[test]
 fn terminal_reconciliation_routes_direct_sessions_to_the_daemon() {
     let session = direct_ssh_session("lease-live");
-    let result = reconcile_terminal_jobs_for_session(
-        &session,
-        |url| Ok(format!("direct:{url}")),
-        || Ok("reverse".to_string()),
-    )
-    .expect("direct reconciliation route");
+    let result = reconcile_terminal_jobs_for_session(&session, |url| Ok(format!("direct:{url}")))
+        .expect("direct reconciliation route");
 
     assert!(result.starts_with("direct:http://"));
-}
-
-#[test]
-fn terminal_reconciliation_routes_reverse_sessions_to_the_broker() {
-    let session = reverse_controller_session();
-    let result = reconcile_terminal_jobs_for_session(
-        &session,
-        |_| Ok("direct".to_string()),
-        || Ok("reverse".to_string()),
-    )
-    .expect("reverse reconciliation route");
-
-    assert_eq!(result, "reverse");
 }
 
 #[test]
@@ -1896,106 +1779,6 @@ fn connect_reports_local_runner_as_unsupported() {
 }
 
 #[test]
-fn disconnect_removes_existing_session_file() {
-    test_support::with_isolated_home(|_| {
-        crate::create(r#"{"id":"lab-local","kind":"local"}"#, false).expect("create runner");
-        // A reverse-tunnel session: disconnect removes local session state
-        // without the direct-SSH remote-daemon-stop path, which (since
-        // #8250) refuses to unbind a leaseless direct-SSH daemon. This test
-        // asserts local session-file cleanup, not remote stop.
-        let session = RunnerSession {
-            runner_id: "lab-local".to_string(),
-            mode: RunnerTunnelMode::Reverse,
-            role: RunnerSessionRole::Controller,
-            server_id: None,
-            controller_id: None,
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
-            local_port: Some(49153),
-            local_url: Some("http://127.0.0.1:49153".to_string()),
-            tunnel_pid: None,
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: None,
-            remote_daemon_lease_id: None,
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some("homeboy test+abc123".to_string()),
-            connected_at: Utc::now().to_rfc3339(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
-        };
-        write_session(&session).expect("write session");
-        let path = session_path("lab-local").expect("session path");
-        assert!(path.exists());
-
-        let report = disconnect("lab-local").expect("disconnect");
-
-        assert!(report.disconnected);
-        assert_eq!(report.session.expect("session").runner_id, "lab-local");
-        assert!(!path.exists());
-    });
-}
-
-#[test]
-fn records_reverse_runner_session_without_marking_transport_live() {
-    test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"homeboy-lab","kind":"local","workspace_root":"/home/user/Developer"}"#,
-            false,
-        )
-        .expect("create runner");
-
-        let (report, exit_code) = connect_reverse(ReverseRunnerConnectOptions {
-            controller_id: "extra-chill".to_string(),
-            runner_id: "homeboy-lab".to_string(),
-            broker_url: None,
-        })
-        .expect("record reverse session");
-
-        assert_eq!(exit_code, 0);
-        assert!(!report.connected);
-        assert_eq!(report.recorded, Some(true));
-        assert_eq!(report.mode, Some(RunnerTunnelMode::Reverse));
-        assert_eq!(report.role, Some(RunnerSessionRole::Runner));
-        assert_eq!(report.controller_id.as_deref(), Some("extra-chill"));
-
-        let status = status("homeboy-lab").expect("status");
-        assert!(!status.connected);
-        assert_eq!(status.state, RunnerSessionState::Recorded);
-        let session = status.session.expect("session");
-        assert_eq!(session.mode, RunnerTunnelMode::Reverse);
-        assert_eq!(session.role, RunnerSessionRole::Runner);
-        assert_eq!(session.controller_id.as_deref(), Some("extra-chill"));
-        assert_eq!(session.broker_url, None);
-        assert_eq!(session.local_url, None);
-        assert_eq!(session.local_port, None);
-    });
-}
-
-#[test]
-fn status_lists_reverse_session_records() {
-    test_support::with_isolated_home(|_| {
-        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
-        connect_reverse(ReverseRunnerConnectOptions {
-            controller_id: "extra-chill".to_string(),
-            runner_id: "homeboy-lab".to_string(),
-            broker_url: None,
-        })
-        .expect("record reverse session");
-
-        let reports = statuses().expect("statuses");
-        let report = reports
-            .iter()
-            .find(|report| report.runner_id == "homeboy-lab")
-            .expect("homeboy-lab status");
-
-        assert_eq!(report.state, RunnerSessionState::Recorded);
-    });
-}
-
-#[test]
 fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged() {
     test_support::with_isolated_home(|home| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
@@ -2083,28 +1866,6 @@ fn snapshot_directory(
 }
 
 #[test]
-fn status_marks_connected_reverse_active_jobs_unavailable_without_broker_url() {
-    test_support::with_isolated_home(|_| {
-        crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
-        let mut session = reverse_controller_session();
-        session.broker_url = None;
-        write_session(&session).expect("write session");
-
-        let report = status("homeboy-lab").expect("status");
-
-        assert!(report.connected);
-        assert_eq!(report.active_job_count, 0);
-        assert_eq!(report.active_jobs, Vec::new());
-        assert_eq!(report.active_runner_jobs, Vec::new());
-        assert_eq!(report.active_job_state, RunnerActiveJobState::Unavailable);
-        assert_eq!(report.active_job_source, None);
-        let error = report.active_job_error.expect("active job error");
-        assert_eq!(error.code, "internal.unexpected");
-        assert!(error.message.contains("no broker URL"));
-    });
-}
-
-#[test]
 fn local_typed_job_timeout_records_runner_attributed_partial_status() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
@@ -2136,80 +1897,6 @@ fn local_typed_job_timeout_records_runner_attributed_partial_status() {
         degradations[0].reason_code,
         crate::readonly_probe::REASON_PROBE_TIMEOUT
     );
-}
-
-#[test]
-fn broker_typed_job_timeout_records_runner_attributed_partial_status() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("request");
-        let mut request = [0; 1024];
-        let _ = stream.read(&mut request).expect("read request");
-        std::thread::sleep(Duration::from_millis(100));
-    });
-    let mut session = reverse_controller_session();
-    session.broker_url = Some(format!("http://{address}"));
-    let client = Client::builder()
-        .timeout(Duration::from_millis(10))
-        .build()
-        .expect("client");
-    crate::readonly_probe::clear_degradations();
-
-    assert!(
-        runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_millis(10))
-            .is_err()
-    );
-
-    server.join().expect("server");
-    let degradations = crate::readonly_probe::take_degradations();
-    assert_eq!(degradations.len(), 1);
-    assert_eq!(degradations[0].probe, "runner_typed_jobs");
-    assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
-    assert_eq!(
-        degradations[0].reason_code,
-        crate::readonly_probe::REASON_PROBE_TIMEOUT
-    );
-}
-
-#[test]
-fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("address");
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("request");
-        let mut request = [0; 1024];
-        let _ = stream.read(&mut request).expect("read request");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
-            .expect("headers");
-        stream.flush().expect("flush headers");
-        let _ = release_rx.recv();
-    });
-    let mut session = reverse_controller_session();
-    session.broker_url = Some(format!("http://{address}"));
-    let client = Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-        .expect("client");
-    crate::readonly_probe::clear_degradations();
-
-    assert!(
-        runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_secs(1)).is_err()
-    );
-
-    drop(release_tx);
-    server.join().expect("server");
-    let degradations = crate::readonly_probe::take_degradations();
-    assert_eq!(degradations.len(), 1);
-    assert_eq!(degradations[0].probe, "runner_typed_jobs");
-    assert_eq!(degradations[0].runner_id.as_deref(), Some("homeboy-lab"));
-    assert_eq!(
-        degradations[0].reason_code,
-        crate::readonly_probe::REASON_PROBE_TIMEOUT
-    );
-    assert_eq!(degradations[0].timeout_seconds, 1);
 }
 
 #[test]
@@ -2707,22 +2394,16 @@ fn pre_describe_upgrade_requires_stable_owned_idle_http_evidence() {
 }
 
 #[test]
-fn active_runner_job_source_maps_direct_and_reverse_endpoints() {
-    let mut direct = reverse_controller_session();
-    direct.mode = RunnerTunnelMode::DirectSsh;
-    direct.role = RunnerSessionRole::Controller;
+fn active_runner_job_source_maps_the_direct_daemon_endpoint() {
+    let mut direct = controller_session();
     direct.local_url = Some("http://127.0.0.1:49153".to_string());
-    direct.broker_url = None;
     assert_eq!(
         active_runner_job_source(&direct),
         Some(RunnerActiveJobSource::DirectDaemon)
     );
 
-    let reverse = reverse_controller_session();
-    assert_eq!(
-        active_runner_job_source(&reverse),
-        Some(RunnerActiveJobSource::ReverseBroker)
-    );
+    direct.local_url = None;
+    assert_eq!(active_runner_job_source(&direct), None);
 }
 
 #[test]

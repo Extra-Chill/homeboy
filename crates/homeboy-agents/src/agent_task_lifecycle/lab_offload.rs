@@ -867,17 +867,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     Ok(record)
 }
 
-pub(crate) fn record_detached_lab_run_locked_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    input: DetachedLabRunRecord<'_>,
-) -> Result<AgentTaskRunRecord> {
-    record_detached_lab_run_with_submission_locked_in_store(
-        lifecycle_store,
-        input,
-        &admitted_lab_offload_submission,
-    )
-}
-
 /// The runner daemon is the authority that accepts a detached dispatch. Bind a
 /// retry receipt in this same record write, rather than trusting the controller
 /// dispatcher to record an acknowledgement after the handoff has returned.

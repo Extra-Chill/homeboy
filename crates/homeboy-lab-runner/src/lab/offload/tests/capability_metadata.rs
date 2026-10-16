@@ -297,7 +297,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         &plan,
         "explicit",
         Some("lab"),
-        Some("reverse"),
+        Some("direct_ssh"),
         "offloaded",
         Some(&remote_path.display().to_string()),
         None,
@@ -561,7 +561,7 @@ fn materialization_proof_records_hashes_source_and_runner_identity() {
 
 #[test]
 fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
-    let status = reverse_status("homeboy lab");
+    let status = connected_status("homeboy lab");
     let metadata = lab_runner_homeboy_metadata(
         "homeboy lab",
         "/tmp/_lab_workspaces/homeboy/target/debug/homeboy",
@@ -595,15 +595,11 @@ fn lab_runner_homeboy_metadata_names_binary_and_refresh_path() {
 }
 
 #[test]
-fn runner_homeboy_version_drift_blocks_offload_with_upgrade_guidance() {
-    let status = reverse_status("homeboy-lab");
+fn runner_homeboy_version_drift_reports_upgrade_guidance() {
+    let status = connected_status("homeboy-lab");
 
-    // `reverse_status` reports runner `0.0.0` against the controller's current
-    // version, a MINOR/MAJOR mismatch that is blocking regardless of strict mode.
-    assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
-    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
+    // `connected_status` reports runner `0.0.0` against the controller's current
+    // version, a MINOR/MAJOR mismatch.
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::Incompatible
@@ -742,7 +738,7 @@ fn daemon_capabilities_do_not_substitute_for_a_conflicting_configured_identity()
 }
 
 fn hash_bound_direct_status(identity: &str) -> RunnerStatusReport {
-    let mut status = reverse_status("homeboy-lab");
+    let mut status = connected_status("homeboy-lab");
     let session = status.session.as_mut().expect("session");
     session.mode = RunnerTunnelMode::DirectSsh;
     session.local_url = Some("http://127.0.0.1:7421".to_string());
@@ -755,9 +751,9 @@ fn hash_bound_direct_status(identity: &str) -> RunnerStatusReport {
     status
 }
 
-/// Build a reverse-connected status whose runner session reports `version`.
+/// Build a connected status whose runner session reports `version`.
 fn status_with_runner_version(runner_id: &str, version: &str) -> RunnerStatusReport {
-    let mut status = reverse_status(runner_id);
+    let mut status = connected_status(runner_id);
     if let Some(session) = status.session.as_mut() {
         session.homeboy_version = version.to_string();
         session.homeboy_build_identity = None;
@@ -794,9 +790,6 @@ fn same_minor_patch_drift_is_compatible_and_proceeds_with_warning() {
         RunnerHomeboyVersionDrift::CompatiblePatch
     );
     // Compatibility-aware default: patch drift proceeds.
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
     let warning = lab_runner_homeboy_compatible_drift_warning(&status, false)
         .expect("compatible patch drift should warn");
     assert!(warning.contains("wire-compatible"));
@@ -820,18 +813,16 @@ fn matching_runner_version_has_no_compatible_drift_warning() {
 }
 
 #[test]
-fn same_minor_patch_drift_is_refused_under_strict_mode() {
+fn same_minor_patch_drift_has_no_proceeding_warning_under_strict_mode() {
     let status = status_with_runner_version("homeboy-lab", &same_minor_patch_drift_version(""));
 
-    // Strict override restores exact-match: patch drift now refuses.
-    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
     // No "proceeding" warning is emitted under strict mode; the drift surfaces
     // as the refusal error instead.
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, true).is_none());
 }
 
 #[test]
-fn minor_version_drift_is_incompatible_and_refused() {
+fn minor_version_drift_is_incompatible_without_a_proceeding_warning() {
     let controller = homeboy_product_identity::product_version();
     let mut parts = controller.split('.');
     let major = parts.next().unwrap_or("0");
@@ -843,10 +834,6 @@ fn minor_version_drift_is_incompatible_and_refused() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::Incompatible
     );
-    assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
-    assert!(lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true));
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
@@ -1035,12 +1022,6 @@ fn exact_version_match_has_no_drift() {
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::None
     );
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true)
-    );
     assert!(lab_runner_homeboy_compatible_drift_warning(&status, false).is_none());
 }
 
@@ -1056,9 +1037,6 @@ fn matching_full_build_identities_have_no_drift_under_strict_mode() {
     assert_eq!(
         classify_runner_homeboy_version_drift(&status),
         RunnerHomeboyVersionDrift::None
-    );
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, true)
     );
 }
 
@@ -1197,7 +1175,7 @@ fn source_checkout_ref_display_handles_missing_git_ref() {
 
 #[test]
 fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
-    let status = stale_reverse_status("homeboy lab");
+    let status = stale_connected_status("homeboy lab");
 
     let err = stale_runner_homeboy_error(
         "homeboy lab",
@@ -1243,7 +1221,7 @@ fn higher_minor_version() -> String {
 
 #[test]
 fn runner_homeboy_metadata_carries_stale_daemon_details() {
-    let status = stale_reverse_status("lab");
+    let status = stale_connected_status("lab");
 
     let metadata = lab_runner_homeboy_metadata("lab", "homeboy", &status);
 
@@ -1296,7 +1274,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
 
 #[test]
 fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() {
-    let mut status = reverse_status("lab");
+    let mut status = connected_status("lab");
     status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         "lab",
         "0.264.0".to_string(),

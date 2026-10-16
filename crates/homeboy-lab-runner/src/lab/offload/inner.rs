@@ -1651,10 +1651,10 @@ pub(crate) fn run_lab_offload_inner(
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
             "runner",
-            "Lab offload requires a remote direct SSH or reverse-connected runner; local runners would execute on this machine",
+            "Lab offload requires a remote direct SSH runner; local runners would execute on this machine",
             Some(runner.id),
             Some(vec![
-                "Register a direct SSH runner or configure a reverse-connected runner first."
+                "Register a direct SSH runner first."
                     .to_string(),
             ]),
         ));
@@ -2581,7 +2581,7 @@ pub(crate) fn run_lab_offload_inner(
     lab_metadata["runner_workload"] =
         serde_json::to_value(&lab_runner_workload).unwrap_or(serde_json::json!(null));
     // Preserve the evidence with the serialized workload envelope as well as
-    // Lab metadata, so direct and reverse runner evidence retain the exact
+    // Lab metadata, so runner evidence retains the exact
     // dispatch identity without widening the stable workload contract.
     lab_metadata["runner_workload"]["runtime_evidence"] =
         serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
@@ -2647,74 +2647,62 @@ pub(crate) fn run_lab_offload_inner(
     // `strict_admission_rejection` releases the reservation and returns a
     // remediation-bearing error rather than proceeding.
     let admission_started = std::time::Instant::now();
-    let admission = match direct_daemon_admission_coordinates(
-        runner_id,
-        &selection.mode,
-        runner_status.session.as_ref(),
-    )
-    .and_then(|coordinates| {
-        coordinates
-            .map(|(local_url, expected_daemon_lease_id)| {
+    let admission =
+        match direct_daemon_admission_coordinates(runner_id, runner_status.session.as_ref())
+            .and_then(|(local_url, expected_daemon_lease_id)| {
                 reserve_daemon_admission_with_recovery(
-                    runner_id,
-                    local_url,
-                    &redact_argv_shell_display(&command_prefix.argv),
-                    expected_daemon_lease_id,
-                    agent_task_run_id.as_deref(),
-                    agent_task_run_id
-                        .as_deref()
-                        .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)
-                        .transpose()?
-                        .flatten(),
-                )
-            })
-            .transpose()
-    }) {
-        Ok(admission) => admission,
-        Err(error) => {
-            if error.retryable == Some(true) {
-                materialized_workspace.preserve();
-                if let Some(run_id) = agent_task_run_id.as_deref() {
-                    eprintln!(
+            runner_id,
+            local_url,
+            &redact_argv_shell_display(&command_prefix.argv),
+            expected_daemon_lease_id,
+            agent_task_run_id.as_deref(),
+            agent_task_run_id
+                .as_deref()
+                .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)
+                .transpose()?
+                .flatten(),
+        )
+            }) {
+            Ok(admission) => admission,
+            Err(error) => {
+                if error.retryable == Some(true) {
+                    materialized_workspace.preserve();
+                    if let Some(run_id) = agent_task_run_id.as_deref() {
+                        eprintln!(
                         "Lab offload: retryable admission failure for run `{run_id}` on runner \
                          `{runner_id}`; preserving prepared workspace `{remote_cwd}` for resume \
                          (rig install/sync and snapshots are reusable). Retry to resume from \
                          admission."
                     );
+                    }
                 }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
     overhead.record(LabOffloadPhase::QueueAdmission, admission_started.elapsed());
     // Name the reservation on the durable record before anything else can fail.
     // Until this write lands the reservation exists only in this process, so an
     // operator who lost the caller cannot tell which admission belongs to which
     // run. The daemon lease reclaims it automatically; this makes it findable by
     // run id in the meantime (#9163).
-    if let (Some(run_id), Some(reservation)) = (agent_task_run_id.as_deref(), admission.as_ref()) {
-        let authority = reservation.authority();
+    let admission_authority = admission.authority();
+    if let Some(run_id) = agent_task_run_id.as_deref() {
         agent_task_lifecycle::record_lab_admission_reservation_in_store(
             &lab_lifecycle_store,
             run_id,
             runner_id,
-            authority.daemon_lease_id(),
-            authority.reservation_job_id(),
-            authority.lease_expires_at_ms(),
+            admission_authority.daemon_lease_id(),
+            admission_authority.reservation_job_id(),
+            admission_authority.lease_expires_at_ms(),
         )?;
     }
-    let admission_authority = admission
-        .as_ref()
-        .map(|reservation| reservation.authority());
     lab_metadata["execution_bundle"] =
         crate::execution_bundle::build(crate::execution_bundle::ExecutionBundleInputs {
             homeboy_path: &homeboy_path,
             verified_build_identity: configured_build_identity.as_deref(),
             remote_cwd: &remote_cwd,
-            daemon_lease_id: admission_authority
-                .as_ref()
-                .map(|authority| authority.daemon_lease_id()),
-            reservation_job_id: admission.as_ref().map(|reservation| reservation.job_id()),
+            daemon_lease_id: admission_authority.daemon_lease_id(),
+            reservation_job_id: admission.job_id(),
             rig_registry_root: rig_registry_root.as_deref(),
             rigs: serde_json::json!(&synced_rigs),
             extensions: extension_overlays.clone(),
@@ -2776,7 +2764,7 @@ pub(crate) fn run_lab_offload_inner(
         materialized_workspace: Some(materialized_workspace),
         remote_output_file,
         host_telemetry: Some(host_telemetry),
-        admission,
+        admission: Some(admission),
         plan,
         messages,
         overhead,
@@ -2895,8 +2883,8 @@ pub(crate) fn detached_staging_submission_output(
     output
 }
 
-/// Keep the generated direct command and the reverse-transport command in
-/// lockstep when resolving a controller policy into a runner generation.
+/// Keep the generated direct command and the remote command in lockstep when
+/// resolving a controller policy into a runner generation.
 fn rewrite_dispatched_runtime_args(
     prior_args: &[String],
     resolved_args: &[String],
@@ -2917,12 +2905,8 @@ fn rewrite_dispatched_runtime_args(
 
 fn direct_daemon_admission_coordinates<'a>(
     runner_id: &str,
-    mode: &super::super::super::RunnerTunnelMode,
     session: Option<&'a super::super::super::RunnerSession>,
-) -> Result<Option<(&'a str, &'a str)>> {
-    if *mode == super::super::super::RunnerTunnelMode::Reverse {
-        return Ok(None);
-    }
+) -> Result<(&'a str, &'a str)> {
     let session = session.ok_or_else(|| {
         Error::validation_invalid_argument(
             "runner",
@@ -2931,14 +2915,6 @@ fn direct_daemon_admission_coordinates<'a>(
             None,
         )
     })?;
-    if session.mode != super::super::super::RunnerTunnelMode::DirectSsh {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            format!("runner `{runner_id}` direct Lab admission found a non-direct session"),
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
     let local_url = session.local_url.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "runner",
@@ -2955,7 +2931,7 @@ fn direct_daemon_admission_coordinates<'a>(
             None,
         )
     })?;
-    Ok(Some((local_url, lease_id)))
+    Ok((local_url, lease_id))
 }
 
 /// Gate Lab dispatch on the same authoritative availability verdict the
@@ -3228,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_runtime_policy_rewrites_direct_and_reverse_transport_commands() {
+    fn resolved_runtime_policy_rewrites_local_and_remote_dispatch_commands() {
         let controller_policy =
             "--resolved-provider-policy={\"runtime_identity\":{\"runtime_path\":\"/controller/runtime\"}}"
                 .to_string();
@@ -3237,13 +3213,13 @@ mod tests {
                 .to_string();
         let prior = vec!["agent-task".to_string(), controller_policy.clone()];
         let resolved = vec!["agent-task".to_string(), runner_policy.clone()];
-        let mut direct = vec!["homeboy".to_string(), controller_policy.clone()];
-        let mut reverse = vec!["homeboy".to_string(), controller_policy];
+        let mut command = vec!["homeboy".to_string(), controller_policy.clone()];
+        let mut remote_command = vec!["homeboy".to_string(), controller_policy];
 
-        rewrite_dispatched_runtime_args(&prior, &resolved, &mut direct, &mut reverse);
+        rewrite_dispatched_runtime_args(&prior, &resolved, &mut command, &mut remote_command);
 
-        assert_eq!(direct[1], runner_policy);
-        assert_eq!(reverse[1], runner_policy);
+        assert_eq!(command[1], runner_policy);
+        assert_eq!(remote_command[1], runner_policy);
     }
 
     #[test]
@@ -3272,7 +3248,7 @@ mod tests {
         let selection = LabRunnerSelection {
             runner_id: "homeboy-lab".to_string(),
             source: LabRunnerSelectionSource::Explicit,
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
         };
         let contract = LabOffloadCommand {
             command: homeboy_core::lab_contract::LabCommandContract::portable(
@@ -4137,33 +4113,16 @@ mod tests {
             Some("lease-a"),
         );
         assert_eq!(
-            direct_daemon_admission_coordinates(
-                "homeboy-lab",
-                &RunnerTunnelMode::DirectSsh,
-                Some(&session),
-            )
-            .expect("direct admission coordinates"),
-            Some(("http://127.0.0.1:7421", "lease-a")),
+            direct_daemon_admission_coordinates("homeboy-lab", Some(&session))
+                .expect("direct admission coordinates"),
+            ("http://127.0.0.1:7421", "lease-a"),
         );
 
         let missing_endpoint =
             admission_session(RunnerTunnelMode::DirectSsh, None, Some("lease-a"));
-        let error = direct_daemon_admission_coordinates(
-            "homeboy-lab",
-            &RunnerTunnelMode::DirectSsh,
-            Some(&missing_endpoint),
-        )
-        .expect_err("direct admission requires an endpoint");
+        let error = direct_daemon_admission_coordinates("homeboy-lab", Some(&missing_endpoint))
+            .expect_err("direct admission requires an endpoint");
         assert!(error.message.contains("direct daemon endpoint"));
-    }
-
-    #[test]
-    fn reverse_lab_admission_keeps_broker_path_without_direct_reservation() {
-        assert_eq!(
-            direct_daemon_admission_coordinates("homeboy-lab", &RunnerTunnelMode::Reverse, None)
-                .expect("reverse sessions use broker admission"),
-            None,
-        );
     }
 
     fn admission_session(

@@ -12,9 +12,9 @@
 //! fail (so the caller annotates "runner disconnected"), and existence /
 //! connection checks report `false`.
 
-use homeboy_core::api_jobs::{Job, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot};
+use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use homeboy_core::error::{Error, Result};
-use homeboy_runner_contract::{RunnerApiSubmitRequest, WorkspaceClaim, WorkspaceIdentity};
+use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity};
 
 /// Result of reconciling a runner job across its known daemon generations.
 ///
@@ -192,23 +192,6 @@ pub trait RunnerContinuationProvider: Send + Sync {
         command: &[String],
         run_id: &str,
     ) -> Result<i32>;
-
-    /// Submit a replayable reverse-broker request during lifecycle reconciliation.
-    fn submit_runner_api_request(
-        &self,
-        runner_id: &str,
-        submission: RunnerApiSubmitRequest,
-    ) -> Result<Job>;
-
-    fn lookup_reverse_broker_submission(
-        &self,
-        _runner_id: &str,
-        _submission_key: &str,
-    ) -> Result<RemoteRunnerSubmissionLookup> {
-        Err(Error::internal_unexpected(
-            "runner subsystem is unavailable: cannot look up reverse broker submission",
-        ))
-    }
 }
 
 /// Default provider used when the runner subsystem is not present. Behaves like
@@ -239,16 +222,6 @@ impl RunnerContinuationProvider for NoopProvider {
     ) -> Result<i32> {
         Err(Error::internal_unexpected(
             "runner subsystem is unavailable: cannot execute runner continuation",
-        ))
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        _submission: RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        Err(Error::internal_unexpected(
-            "runner subsystem is unavailable: cannot submit reverse broker job",
         ))
     }
 }
@@ -392,14 +365,6 @@ mod tests {
             _command: &[String],
             _run_id: &str,
         ) -> Result<i32> {
-            Err(Error::internal_unexpected("unused in fixture"))
-        }
-
-        fn submit_runner_api_request(
-            &self,
-            _runner_id: &str,
-            _submission: RunnerApiSubmitRequest,
-        ) -> Result<Job> {
             Err(Error::internal_unexpected("unused in fixture"))
         }
     }
