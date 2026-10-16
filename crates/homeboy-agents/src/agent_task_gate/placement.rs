@@ -471,7 +471,7 @@ fn execute_with_context_and_resources(
             &mut report,
         );
         environment.variables.extend(values);
-        environment.preserve.extend(report.preserved);
+        // Resolved paths are policy variables, never preserve-source mappings.
     }
     if let Some(resources) = resources {
         if resources.len() != environment.extension_inputs.len()
