@@ -3426,10 +3426,8 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
         "endpoint-commit-rollback",
     )
     .expect("workspace identity");
-    let claims_root = crate::paths::homeboy_data()
-        .expect("homeboy data")
-        .join("daemon-workspace-claims");
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(&claims_root);
+    let claims_root = crate::paths::homeboy_data().expect("homeboy data");
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(&claims_root);
     claims
         .fail_next_owner_releases(&workspace, 1)
         .expect("inject owner release failure");
@@ -3482,7 +3480,7 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
         .validate_owner(&lease, crate::api_jobs::timestamp_ms())
         .expect("validate pending owner"));
     assert_eq!(
-        crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+        crate::workspace_claim::WorkspaceClaimStore::in_data_root(&claims_root)
             .pending_owner_release_recoveries()
             .expect("durable recovery evidence"),
         vec![serde_json::from_value(recovery.clone()).expect("typed recovery evidence")]
@@ -3504,12 +3502,12 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
         .expect("restart daemon");
 
     assert!(
-        !crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+        !crate::workspace_claim::WorkspaceClaimStore::in_data_root(&claims_root)
             .validate_owner(&lease, crate::api_jobs::timestamp_ms())
             .expect("validate released owner")
     );
     assert!(
-        crate::workspace_claim::WorkspaceClaimStore::new(&claims_root)
+        crate::workspace_claim::WorkspaceClaimStore::in_data_root(&claims_root)
             .pending_owner_release_recoveries()
             .expect("recovery records")
             .is_empty()

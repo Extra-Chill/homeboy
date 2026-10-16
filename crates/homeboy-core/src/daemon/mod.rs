@@ -3024,14 +3024,9 @@ fn validate_admission_lease(expected_lease_id: &str, actual_lease_id: &str) -> R
     ))
 }
 
-/// Directory name of the daemon-owned workspace claim authority.
-///
-/// It lives here as a constant because a second copy of this literal in
-/// `api_jobs` once let a terminal release address a store the register never
-/// wrote to. One name, one authority.
-const DAEMON_WORKSPACE_CLAIMS_DIR: &str = "daemon-workspace-claims";
-
-/// Construct the daemon claim authority below an already-resolved data root.
+/// Construct the workspace claim authority below an already-resolved data root.
+/// The daemon shares the one `workspace-authority` namespace with the
+/// controller, so a workspace has exactly one authority record.
 ///
 /// Callers that hold a lease across register/renew/release resolve this once
 /// and thread the value, so the whole trio addresses one installation even if
@@ -3039,7 +3034,7 @@ const DAEMON_WORKSPACE_CLAIMS_DIR: &str = "daemon-workspace-claims";
 pub(crate) fn daemon_workspace_claim_store_in_root(
     data_root: &std::path::Path,
 ) -> crate::workspace_claim::WorkspaceClaimStore {
-    crate::workspace_claim::WorkspaceClaimStore::new(data_root.join(DAEMON_WORKSPACE_CLAIMS_DIR))
+    crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root)
 }
 
 pub(crate) fn daemon_workspace_claim_store() -> Result<crate::workspace_claim::WorkspaceClaimStore>

@@ -2,7 +2,10 @@
 
 use super::runner_continuation::with_runner_continuation;
 use super::*;
-use homeboy_core::engine::local_files::{remove_file_durably, write_json_file_owner_only};
+use homeboy_core::observation::coordination::{
+    CoordinationRecord, ExpectedRevision, RecordOutcome, RecordWrite,
+};
+use homeboy_core::observation::ObservationStore;
 use homeboy_core::workspace_claim::{WorkspaceClaimStore, MAX_WORKSPACE_CLAIM_TTL_MS};
 use homeboy_core::worktree::{
     authority_set_fingerprint, MissingActiveWorktreeReason, TaskWorktreeRecord,
@@ -14,7 +17,6 @@ use homeboy_runner_contract::{
     WorkspaceClaim, WorkspaceClaimBinding, WorkspaceIdentity, WorkspaceOwnerLease,
 };
 use serde::{Deserialize, Serialize};
-use std::fs;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -278,6 +280,18 @@ pub struct CompositeWorkspaceClaimAcquisitionFailure {
 pub const PENDING_COMPOSITE_WORKSPACE_CLEANUP_SCHEMA: &str =
     "homeboy/pending-composite-workspace-cleanup/v1";
 pub const COMPOSITE_ACQUISITION_INTENT_SCHEMA: &str = "homeboy/composite-acquisition-intent/v1";
+
+/// Coordination namespace of write-ahead composite acquisition intents, one
+/// record per workspace digest. The record state is the intent state.
+const COMPOSITE_ACQUISITION_NAMESPACE: &str = "composite-workspace-acquisition";
+const INTENT_STATE_ACQUIRING: &str = "acquiring";
+const INTENT_STATE_ACTIVE: &str = "active";
+
+/// Coordination namespace of composite cleanup receipts, one record per
+/// recovery id. A receipt that fails verification moves to `quarantined`.
+const COMPOSITE_CLEANUP_NAMESPACE: &str = "composite-workspace-cleanup";
+const CLEANUP_STATE_PENDING: &str = "pending";
+const CLEANUP_STATE_QUARANTINED: &str = "quarantined";
 
 #[cfg(test)]
 static FAIL_NEXT_PENDING_COMPOSITE_CLEANUP_WRITE: AtomicBool = AtomicBool::new(false);
@@ -552,13 +566,16 @@ pub fn acquire_composite_workspace_claim_until(
         workspace: workspace.clone(),
         started_at_ms: now_ms(),
         requested_ttl_ms: LOCAL_WORKSPACE_CLAIM_TTL_MS,
-        state: "acquiring".into(),
+        state: INTENT_STATE_ACQUIRING.into(),
     };
-    if let Err(error) = homeboy_core::config::with_config_lock_until(deadline, || {
-        write_composite_acquisition_intent(&intent)
+    let intent_revision = match open_composite_store().and_then(|store| {
+        write_composite_acquisition_intent(&store, &intent, ExpectedRevision::Absent)
+            .map(|revision| (store, revision))
     }) {
-        return Err(CompositeWorkspaceClaimAcquisitionFailure::from(error));
-    }
+        Ok(written) => written,
+        Err(error) => return Err(CompositeWorkspaceClaimAcquisitionFailure::from(error)),
+    };
+    let (store, intent_revision) = intent_revision;
     match acquire_composite_workspace_claim_unrecovered(
         workspace,
         generation,
@@ -567,10 +584,12 @@ pub fn acquire_composite_workspace_claim_until(
     ) {
         Ok(claim) => {
             let mut active = intent;
-            active.state = "active".into();
-            if let Err(error) = homeboy_core::config::with_config_lock_until(deadline, || {
-                write_composite_acquisition_intent(&active)
-            }) {
+            active.state = INTENT_STATE_ACTIVE.into();
+            if let Err(error) = write_composite_acquisition_intent(
+                &store,
+                &active,
+                ExpectedRevision::Revision(intent_revision),
+            ) {
                 let status =
                     persist_and_retry_composite_workspace_cleanup_until(claim, &error, deadline);
                 let mut failure = CompositeWorkspaceClaimAcquisitionFailure::from(error);
@@ -598,9 +617,11 @@ pub fn acquire_composite_workspace_claim_until(
             } else {
                 // Every acquired component was released, so the intent is no
                 // longer a crash-recovery obligation.
-                let _ = homeboy_core::config::with_config_lock_until(deadline, || {
-                    remove_composite_acquisition_intent(&intent.workspace)
-                });
+                let _ = remove_composite_acquisition_intent(
+                    &store,
+                    &intent.workspace,
+                    Some(intent_revision),
+                );
             }
             Err(failure)
         }
@@ -783,9 +804,7 @@ pub fn release_composite_workspace_claim_until(
         }
     }
     if failures.is_empty() {
-        homeboy_core::config::with_config_lock_until(deadline, || {
-            remove_composite_acquisition_intent(&claim.workspace)
-        })?;
+        remove_composite_acquisition_intent(&open_composite_store()?, &claim.workspace, None)?;
         Ok(CompositeWorkspaceClaimRelease::Released)
     } else {
         Ok(CompositeWorkspaceClaimRelease::Partial { failures })
@@ -823,19 +842,21 @@ pub fn persist_and_retry_composite_workspace_cleanup(
         },
     };
     let recovery_id = pending.recovery_id.clone();
-    if let Err(error) =
-        homeboy_core::config::with_config_lock(|| write_pending_composite_cleanup(&pending))
-    {
-        return CompositeWorkspaceCleanupStatus::Quarantined {
-            recovery_id,
-            reason: format!("could not persist cleanup receipt: {}", error.message),
-        };
-    }
+    let store = match open_composite_store().and_then(|store| {
+        write_pending_composite_cleanup(&store, &pending, ExpectedRevision::Absent)?;
+        Ok(store)
+    }) {
+        Ok(store) => store,
+        Err(error) => {
+            return CompositeWorkspaceCleanupStatus::Quarantined {
+                recovery_id,
+                reason: format!("could not persist cleanup receipt: {}", error.message),
+            }
+        }
+    };
     // The exact receipt is durable now; removing the token-free intent cannot
     // reopen acquisition because the receipt itself remains identity-scoped.
-    if let Err(error) = homeboy_core::config::with_config_lock(|| {
-        remove_composite_acquisition_intent(&pending.workspace)
-    }) {
+    if let Err(error) = remove_composite_acquisition_intent(&store, &pending.workspace, None) {
         return CompositeWorkspaceCleanupStatus::Quarantined {
             recovery_id,
             reason: format!(
@@ -853,13 +874,13 @@ pub fn persist_and_retry_composite_workspace_cleanup(
     })
 }
 
-/// Persist a cleanup receipt while respecting a caller-owned operation budget.
-/// An expired apply page leaves the receipt for the normal recovery worker
-/// rather than starting a fresh remote release window.
+/// Persist a cleanup receipt within a caller-owned operation budget. It never
+/// starts a remote release: an expired apply page leaves the receipt for the
+/// normal recovery worker rather than opening a fresh release window.
 pub fn persist_and_retry_composite_workspace_cleanup_until(
     claim: CompositeWorkspaceClaim,
     error: &Error,
-    deadline: std::time::Instant,
+    _deadline: std::time::Instant,
 ) -> CompositeWorkspaceCleanupStatus {
     let pending = PendingCompositeWorkspaceCleanup {
         schema: PENDING_COMPOSITE_WORKSPACE_CLEANUP_SCHEMA.into(),
@@ -885,10 +906,10 @@ pub fn persist_and_retry_composite_workspace_cleanup_until(
         },
     };
     let recovery_id = pending.recovery_id.clone();
-    match homeboy_core::config::with_config_lock_until(deadline, || {
-        write_pending_composite_cleanup(&pending)
+    match open_composite_store().and_then(|store| {
+        write_pending_composite_cleanup(&store, &pending, ExpectedRevision::Absent)
     }) {
-        Ok(()) => CompositeWorkspaceCleanupStatus::Pending {
+        Ok(_) => CompositeWorkspaceCleanupStatus::Pending {
             recovery_id,
             attempt_count: 0,
             failures: vec!["reconciliation deadline exhausted before release".into()],
@@ -906,7 +927,7 @@ pub fn persist_and_retry_composite_workspace_cleanup_until(
 pub fn retry_pending_composite_workspace_cleanups(
     limit: usize,
 ) -> Result<Vec<CompositeWorkspaceCleanupStatus>> {
-    let entries = read_pending_composite_cleanups()?;
+    let entries = read_pending_composite_cleanups(&open_composite_store()?)?;
     entries
         .into_iter()
         .take(limit)
@@ -914,70 +935,97 @@ pub fn retry_pending_composite_workspace_cleanups(
         .collect()
 }
 
+/// Replay one receipt. Its record revision is the concurrency guard: a retry
+/// that loses the compare-and-set to another retry reports the stored state
+/// instead of overwriting it, and component releases are idempotent.
 fn retry_pending_composite_workspace_cleanup(
     recovery_id: &str,
 ) -> Result<CompositeWorkspaceCleanupStatus> {
-    homeboy_core::config::with_config_lock(|| {
-        let Some((path, mut pending)) = read_pending_composite_cleanups()?
-            .into_iter()
-            .find(|(_, pending)| pending.recovery_id == recovery_id)
-        else {
-            return Ok(CompositeWorkspaceCleanupStatus::Released);
-        };
-        let mut claim = CompositeWorkspaceClaim {
-            workspace: pending.workspace.clone(),
-            generation: pending.generation,
-            // A cleanup receipt is never committed, so its old commit deadline
-            // is irrelevant to an idempotent release.
-            commit_deadline: std::time::Instant::now(),
-            local: pending.local.clone(),
-            local_released: pending.local_released,
-            runners: pending
-                .runners
-                .iter()
-                .map(|component| CompositeWorkspaceClaimComponent {
-                    runner_id: component.runner_id.clone(),
-                    claim: component.claim.clone(),
-                    released: component.released,
-                })
-                .collect(),
-        };
-        match release_composite_workspace_claim(&mut claim)? {
-            CompositeWorkspaceClaimRelease::Released => {
-                remove_file_durably(&path, "pending composite cleanup")?;
-                Ok(CompositeWorkspaceCleanupStatus::Released)
-            }
-            CompositeWorkspaceClaimRelease::Partial { failures } => {
-                pending.local_released = claim.local_released;
-                pending.runners = claim
-                    .runners
-                    .into_iter()
-                    .map(|component| PendingCompositeWorkspaceCleanupComponent {
-                        runner_id: component.runner_id,
-                        claim: component.claim,
-                        released: component.released,
-                    })
-                    .collect();
-                pending.attempt_count = pending.attempt_count.saturating_add(1);
-                pending.last_error = PendingCompositeWorkspaceCleanupError {
-                    code: "workspace_claim_composite".into(),
-                    message: failures.join("; "),
-                };
-                write_pending_composite_cleanup(&pending)?;
-                Ok(CompositeWorkspaceCleanupStatus::Pending {
-                    recovery_id: pending.recovery_id,
-                    attempt_count: pending.attempt_count,
-                    failures,
-                })
+    let store = open_composite_store()?;
+    let Some((revision, mut pending)) = read_pending_composite_cleanups(&store)?
+        .into_iter()
+        .find(|(_, pending)| pending.recovery_id == recovery_id)
+    else {
+        return Ok(CompositeWorkspaceCleanupStatus::Released);
+    };
+    let mut claim = CompositeWorkspaceClaim {
+        workspace: pending.workspace.clone(),
+        generation: pending.generation,
+        // A cleanup receipt is never committed, so its old commit deadline is
+        // irrelevant to an idempotent release.
+        commit_deadline: std::time::Instant::now(),
+        local: pending.local.clone(),
+        local_released: pending.local_released,
+        runners: pending
+            .runners
+            .iter()
+            .map(|component| CompositeWorkspaceClaimComponent {
+                runner_id: component.runner_id.clone(),
+                claim: component.claim.clone(),
+                released: component.released,
+            })
+            .collect(),
+    };
+    match release_composite_workspace_claim(&mut claim)? {
+        CompositeWorkspaceClaimRelease::Released => {
+            match store.delete_coordination_record(
+                COMPOSITE_CLEANUP_NAMESPACE,
+                &pending.recovery_id,
+                revision,
+            )? {
+                RecordOutcome::Applied(_) | RecordOutcome::Conflict { current: None } => {
+                    Ok(CompositeWorkspaceCleanupStatus::Released)
+                }
+                RecordOutcome::Conflict { current: Some(_) } => Err(composite_error(
+                    "pending composite cleanup receipt changed while it was retried",
+                    Vec::new(),
+                )),
             }
         }
-    })
+        CompositeWorkspaceClaimRelease::Partial { failures } => {
+            pending.local_released = claim.local_released;
+            pending.runners = claim
+                .runners
+                .into_iter()
+                .map(|component| PendingCompositeWorkspaceCleanupComponent {
+                    runner_id: component.runner_id,
+                    claim: component.claim,
+                    released: component.released,
+                })
+                .collect();
+            pending.attempt_count = pending.attempt_count.saturating_add(1);
+            pending.last_error = PendingCompositeWorkspaceCleanupError {
+                code: "workspace_claim_composite".into(),
+                message: failures.join("; "),
+            };
+            write_pending_composite_cleanup(
+                &store,
+                &pending,
+                ExpectedRevision::Revision(revision),
+            )?;
+            Ok(CompositeWorkspaceCleanupStatus::Pending {
+                recovery_id: pending.recovery_id,
+                attempt_count: pending.attempt_count,
+                failures,
+            })
+        }
+    }
 }
 
 fn pending_composite_cleanup_for_workspace(
     workspace: &WorkspaceIdentity,
 ) -> Option<CompositeWorkspaceCleanupStatus> {
-    match read_pending_composite_cleanups() {
+    let unavailable = |error: Error| {
+        Some(CompositeWorkspaceCleanupStatus::Quarantined {
+            recovery_id: "unknown".into(),
+            reason: error.message,
+        })
+    };
+    let store = match open_composite_store() {
+        Ok(store) => store,
+        Err(error) => return unavailable(error),
+    };
+    match read_pending_composite_cleanups(&store) {
         Ok(entries) => entries
             .into_iter()
             .find_map(|(_, pending)| {
@@ -989,103 +1037,131 @@ fn pending_composite_cleanup_for_workspace(
                     },
                 )
             })
-            .or_else(|| quarantined_composite_cleanup_for_workspace(workspace)),
-        Err(error) => Some(CompositeWorkspaceCleanupStatus::Quarantined {
-            recovery_id: "unknown".into(),
-            reason: error.message,
-        }),
+            .or_else(|| quarantined_composite_cleanup_for_workspace(&store, workspace)),
+        Err(error) => unavailable(error),
     }
 }
 
-fn pending_composite_cleanup_dir() -> Result<std::path::PathBuf> {
-    Ok(paths::homeboy_data()?.join("agent-task-composite-workspace-cleanups"))
+/// Composite intents and cleanup receipts live in the ambient installation's
+/// observation store, as coordination records (#15947).
+fn open_composite_store() -> Result<ObservationStore> {
+    ObservationStore::open_initialized_for_lifecycle()
 }
 
-fn composite_acquisition_intent_dir() -> Result<std::path::PathBuf> {
-    Ok(paths::homeboy_data()?.join("agent-task-composite-acquisition-intents"))
-}
-
-fn composite_acquisition_intent_path(workspace: &WorkspaceIdentity) -> Result<std::path::PathBuf> {
-    // This digest is the on-disk filename, so its bytes are a compatibility
-    // surface -- see the pinned assertions in `content_hash`.
-    let digest = homeboy_engine_primitives::content_hash::nul_separated_digest([
+/// The workspace digest keying its composite acquisition intent record.
+fn composite_acquisition_intent_key(workspace: &WorkspaceIdentity) -> String {
+    homeboy_engine_primitives::content_hash::nul_separated_digest([
         workspace.schema.as_str(),
         workspace.kind.as_str(),
         workspace.locator.as_str(),
-    ]);
-    Ok(composite_acquisition_intent_dir()?.join(format!("{digest}.json")))
+    ])
 }
 
-fn write_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Result<()> {
+fn verify_composite_acquisition_intent(intent: &CompositeAcquisitionIntent) -> Result<()> {
     if intent.schema != COMPOSITE_ACQUISITION_INTENT_SCHEMA
         || intent.recovery_id.trim().is_empty()
         || intent.requested_ttl_ms == 0
         || intent.requested_ttl_ms > MAX_WORKSPACE_CLAIM_TTL_MS
-        || !matches!(intent.state.as_str(), "acquiring" | "active")
+        || !matches!(
+            intent.state.as_str(),
+            INTENT_STATE_ACQUIRING | INTENT_STATE_ACTIVE
+        )
     {
         return Err(composite_error(
             "composite acquisition intent is malformed",
             Vec::new(),
         ));
     }
-    intent.workspace.verify()?;
-    write_json_file_owner_only(
-        &composite_acquisition_intent_path(&intent.workspace)?,
-        intent,
+    intent.workspace.verify()
+}
+
+/// Write the intent when its record is still at `expected`, returning the new
+/// revision. Creating with [`ExpectedRevision::Absent`] is what makes two
+/// concurrent acquisitions of one workspace fail closed on the second.
+fn write_composite_acquisition_intent(
+    store: &ObservationStore,
+    intent: &CompositeAcquisitionIntent,
+    expected: ExpectedRevision,
+) -> Result<i64> {
+    verify_composite_acquisition_intent(intent)?;
+    put_composite_record(
+        store,
+        COMPOSITE_ACQUISITION_NAMESPACE,
+        &composite_acquisition_intent_key(&intent.workspace),
+        expected,
+        &intent.state,
+        &to_payload(intent)?,
+        "workspace has a concurrent composite acquisition intent",
     )
 }
 
-fn remove_composite_acquisition_intent(workspace: &WorkspaceIdentity) -> Result<()> {
-    let path = composite_acquisition_intent_path(workspace)?;
-    remove_file_durably(&path, &path.display().to_string())
+/// Remove the intent. With `revision` set only that exact intent is removed,
+/// so a fresh intent written meanwhile survives.
+fn remove_composite_acquisition_intent(
+    store: &ObservationStore,
+    workspace: &WorkspaceIdentity,
+    revision: Option<i64>,
+) -> Result<()> {
+    let key = composite_acquisition_intent_key(workspace);
+    loop {
+        let Some(current) = store.coordination_record(COMPOSITE_ACQUISITION_NAMESPACE, &key)?
+        else {
+            return Ok(());
+        };
+        if revision.is_some_and(|revision| revision != current.revision) {
+            return Err(composite_error(
+                "composite acquisition intent changed before it was cleared",
+                Vec::new(),
+            ));
+        }
+        if let RecordOutcome::Applied(_) = store.delete_coordination_record(
+            COMPOSITE_ACQUISITION_NAMESPACE,
+            &key,
+            current.revision,
+        )? {
+            return Ok(());
+        }
+    }
 }
 
 /// Read-only: whether any composite claim intent or cleanup receipt may still
 /// cover `workspace`. An unreadable receipt cannot prove absence.
 fn composite_claim_receipt_outstanding(workspace: &WorkspaceIdentity) -> bool {
+    let Ok(store) = open_composite_store() else {
+        return true;
+    };
     // An intent past the maximum claim lifetime no longer proves a live claim;
     // acquisition clears it only after a complete authority inventory, so
     // preflight leaves that decision to acquisition instead of blocking it.
-    let intent_present = composite_acquisition_intent_path(workspace)
-        .map(|path| {
-            path.exists()
-                && fs::read(&path)
+    let intent_present = store
+        .coordination_record(
+            COMPOSITE_ACQUISITION_NAMESPACE,
+            &composite_acquisition_intent_key(workspace),
+        )
+        .map(|record| {
+            record.is_some_and(|record| {
+                serde_json::from_value::<CompositeAcquisitionIntent>(record.payload)
                     .ok()
-                    .and_then(|bytes| {
-                        serde_json::from_slice::<CompositeAcquisitionIntent>(&bytes).ok()
-                    })
                     .is_none_or(|intent| {
                         now_ms()
                             < intent
                                 .started_at_ms
                                 .saturating_add(MAX_WORKSPACE_CLAIM_TTL_MS)
                     })
+            })
         })
         .unwrap_or(true);
     let receipt_present = || {
-        let Ok(directory) = pending_composite_cleanup_dir() else {
+        let Ok(records) = store.coordination_records(COMPOSITE_CLEANUP_NAMESPACE) else {
             return true;
         };
-        let Ok(entries) = fs::read_dir(&directory) else {
-            return directory.exists();
-        };
-        entries.into_iter().any(|entry| {
-            let Ok(path) = entry.map(|entry| entry.path()) else {
-                return true;
-            };
-            path.extension().and_then(|extension| extension.to_str()) == Some("json")
-                && fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| {
-                        serde_json::from_slice::<serde_json::Value>(&bytes)
-                            .ok()?
-                            .get("workspace")
-                            .cloned()
-                            .and_then(|value| {
-                                serde_json::from_value::<WorkspaceIdentity>(value).ok()
-                            })
-                    })
-                    .is_none_or(|recorded| recorded == *workspace)
+        records.into_iter().any(|record| {
+            record
+                .payload
+                .get("workspace")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<WorkspaceIdentity>(value).ok())
+                .is_none_or(|recorded| recorded == *workspace)
         })
     };
     intent_present || receipt_present()
@@ -1094,39 +1170,48 @@ fn composite_claim_receipt_outstanding(workspace: &WorkspaceIdentity) -> bool {
 fn composite_acquisition_intent_for_workspace(
     workspace: &WorkspaceIdentity,
 ) -> Option<CompositeWorkspaceCleanupStatus> {
-    let path = composite_acquisition_intent_path(workspace).ok()?;
-    if !path.exists() {
-        return None;
-    }
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
+    let quarantined = |recovery_id: String, reason: String| {
+        Some(CompositeWorkspaceCleanupStatus::Quarantined {
+            recovery_id,
+            reason,
+        })
+    };
+    let store = match open_composite_store() {
+        Ok(store) => store,
         Err(error) => {
-            return Some(CompositeWorkspaceCleanupStatus::Quarantined {
-                recovery_id: "unknown".into(),
-                reason: format!("could not read composite acquisition intent: {error}"),
-            })
+            return quarantined(
+                "unknown".into(),
+                format!("could not open composite acquisition intents: {error}"),
+            )
         }
     };
-    let intent: CompositeAcquisitionIntent = match serde_json::from_slice(&bytes) {
-        Ok(intent) => intent,
-        Err(_) => {
-            return Some(CompositeWorkspaceCleanupStatus::Quarantined {
-                recovery_id: "unknown".into(),
-                reason: "composite acquisition intent is malformed".into(),
-            })
+    let record = match store.coordination_record(
+        COMPOSITE_ACQUISITION_NAMESPACE,
+        &composite_acquisition_intent_key(workspace),
+    ) {
+        Ok(Some(record)) => record,
+        Ok(None) => return None,
+        Err(error) => {
+            return quarantined(
+                "unknown".into(),
+                format!("could not read composite acquisition intent: {error}"),
+            )
         }
     };
-    if intent.schema != COMPOSITE_ACQUISITION_INTENT_SCHEMA
+    let Ok(intent) = serde_json::from_value::<CompositeAcquisitionIntent>(record.payload) else {
+        return quarantined(
+            "unknown".into(),
+            "composite acquisition intent is malformed".into(),
+        );
+    };
+    if verify_composite_acquisition_intent(&intent).is_err()
         || intent.workspace != *workspace
-        || intent.recovery_id.trim().is_empty()
-        || intent.requested_ttl_ms == 0
-        || intent.requested_ttl_ms > MAX_WORKSPACE_CLAIM_TTL_MS
-        || !matches!(intent.state.as_str(), "acquiring" | "active")
+        || intent.state != record.state
     {
-        return Some(CompositeWorkspaceCleanupStatus::Quarantined {
-            recovery_id: intent.recovery_id,
-            reason: "composite acquisition intent is malformed".into(),
-        });
+        return quarantined(
+            intent.recovery_id,
+            "composite acquisition intent is malformed".into(),
+        );
     }
     let conservative_expiry = intent
         .started_at_ms
@@ -1142,7 +1227,7 @@ fn composite_acquisition_intent_for_workspace(
     }
     // A token-free marker may be cleared only with a complete local and remote
     // authority inventory. Any unavailable inventory remains a quarantine.
-    let clear = store()
+    let clear = claim_store()
         .and_then(|store| {
             store
                 .has_live_authority(workspace, now_ms())
@@ -1168,7 +1253,12 @@ fn composite_acquisition_intent_for_workspace(
             })
         });
     match clear {
-        Ok(true) if remove_composite_acquisition_intent(workspace).is_ok() => None,
+        Ok(true)
+            if remove_composite_acquisition_intent(&store, workspace, Some(record.revision))
+                .is_ok() =>
+        {
+            None
+        }
         Ok(_) => Some(CompositeWorkspaceCleanupStatus::Pending {
             recovery_id: intent.recovery_id,
             attempt_count: 0,
@@ -1176,21 +1266,22 @@ fn composite_acquisition_intent_for_workspace(
                 "complete authority inventory still reports a live claim or owner".into(),
             ],
         }),
-        Err(error) => Some(CompositeWorkspaceCleanupStatus::Quarantined {
-            recovery_id: intent.recovery_id,
-            reason: format!(
+        Err(error) => quarantined(
+            intent.recovery_id,
+            format!(
                 "complete authority inventory is unavailable: {}",
                 error.message
             ),
-        }),
+        ),
     }
 }
 
-fn pending_composite_cleanup_path(recovery_id: &str) -> Result<std::path::PathBuf> {
-    Ok(pending_composite_cleanup_dir()?.join(format!("{recovery_id}.json")))
-}
-
-fn write_pending_composite_cleanup(pending: &PendingCompositeWorkspaceCleanup) -> Result<()> {
+/// Write a pending cleanup receipt when its record is still at `expected`.
+fn write_pending_composite_cleanup(
+    store: &ObservationStore,
+    pending: &PendingCompositeWorkspaceCleanup,
+    expected: ExpectedRevision,
+) -> Result<i64> {
     #[cfg(test)]
     if FAIL_NEXT_PENDING_COMPOSITE_CLEANUP_WRITE.swap(false, Ordering::SeqCst) {
         return Err(Error::internal_io(
@@ -1199,93 +1290,124 @@ fn write_pending_composite_cleanup(pending: &PendingCompositeWorkspaceCleanup) -
         ));
     }
     verify_pending_composite_cleanup(pending)?;
-    let path = pending_composite_cleanup_path(&pending.recovery_id)?;
-    write_json_file_owner_only(&path, pending)
+    put_composite_record(
+        store,
+        COMPOSITE_CLEANUP_NAMESPACE,
+        &pending.recovery_id,
+        expected,
+        CLEANUP_STATE_PENDING,
+        &to_payload(pending)?,
+        "pending composite cleanup receipt changed concurrently",
+    )
 }
 
+/// Every verified pending receipt with its record revision. A receipt that
+/// fails verification is quarantined in place: its record moves to the
+/// `quarantined` state, keeping only the identity it blocks and the reason.
 fn read_pending_composite_cleanups(
-) -> Result<Vec<(std::path::PathBuf, PendingCompositeWorkspaceCleanup)>> {
-    let directory = pending_composite_cleanup_dir()?;
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
+    store: &ObservationStore,
+) -> Result<Vec<(i64, PendingCompositeWorkspaceCleanup)>> {
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&directory).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(directory.display().to_string()))
-    })? {
-        let path = entry
-            .map_err(|error| Error::internal_io(error.to_string(), None))?
-            .path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
-            || path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".quarantine.json"))
-        {
+    for record in store.coordination_records(COMPOSITE_CLEANUP_NAMESPACE)? {
+        if record.state != CLEANUP_STATE_PENDING {
             continue;
         }
-        let bytes = fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
-        })?;
-        match serde_json::from_slice::<PendingCompositeWorkspaceCleanup>(&bytes)
-            .map_err(|error| {
-                Error::internal_json(error.to_string(), Some(path.display().to_string()))
-            })
+        match serde_json::from_value::<PendingCompositeWorkspaceCleanup>(record.payload.clone())
+            .map_err(|error| Error::internal_json(error.to_string(), Some(record.key.clone())))
             .and_then(|pending| {
                 verify_pending_composite_cleanup(&pending)?;
-                Ok(pending)
+                (pending.recovery_id == record.key)
+                    .then_some(pending)
+                    .ok_or_else(|| {
+                        composite_error(
+                            "pending composite cleanup receipt is malformed",
+                            Vec::new(),
+                        )
+                    })
             }) {
-            Ok(pending) => entries.push((path, pending)),
-            Err(error) => quarantine_pending_composite_cleanup(&path, &bytes, error.message)?,
+            Ok(pending) => entries.push((record.revision, pending)),
+            Err(error) => quarantine_pending_composite_cleanup(store, &record, error.message)?,
         }
     }
     Ok(entries)
 }
 
 fn quarantine_pending_composite_cleanup(
-    path: &std::path::Path,
-    bytes: &[u8],
+    store: &ObservationStore,
+    record: &CoordinationRecord,
     reason: String,
 ) -> Result<()> {
-    let recovery_id = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let workspace = serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|value| value.get("workspace").cloned())
+    let workspace = record
+        .payload
+        .get("workspace")
+        .cloned()
         .and_then(|value| serde_json::from_value(value).ok());
     let quarantine = QuarantinedCompositeWorkspaceCleanup {
-        recovery_id: recovery_id.clone(),
+        recovery_id: record.key.clone(),
         workspace,
         reason,
     };
-    let quarantine_path = path.with_file_name(format!("{recovery_id}.quarantine.json"));
-    write_json_file_owner_only(&quarantine_path, &quarantine)?;
-    remove_file_durably(path, &path.display().to_string())
+    put_composite_record(
+        store,
+        COMPOSITE_CLEANUP_NAMESPACE,
+        &record.key,
+        ExpectedRevision::Revision(record.revision),
+        CLEANUP_STATE_QUARANTINED,
+        &to_payload(&quarantine)?,
+        "pending composite cleanup receipt changed while it was quarantined",
+    )
+    .map(|_| ())
 }
 
 fn quarantined_composite_cleanup_for_workspace(
+    store: &ObservationStore,
     workspace: &WorkspaceIdentity,
 ) -> Option<CompositeWorkspaceCleanupStatus> {
-    let directory = pending_composite_cleanup_dir().ok()?;
-    let entries = fs::read_dir(directory).ok()?;
-    entries.filter_map(|entry| entry.ok()).find_map(|entry| {
-        let path = entry.path();
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".quarantine.json"))
-            .then_some(())?;
-        let quarantine: QuarantinedCompositeWorkspaceCleanup =
-            serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-        (quarantine.workspace.as_ref() == Some(workspace)).then_some(
-            CompositeWorkspaceCleanupStatus::Quarantined {
-                recovery_id: quarantine.recovery_id,
-                reason: quarantine.reason,
-            },
-        )
-    })
+    store
+        .coordination_records(COMPOSITE_CLEANUP_NAMESPACE)
+        .ok()?
+        .into_iter()
+        .filter(|record| record.state == CLEANUP_STATE_QUARANTINED)
+        .find_map(|record| {
+            let quarantine: QuarantinedCompositeWorkspaceCleanup =
+                serde_json::from_value(record.payload).ok()?;
+            (quarantine.workspace.as_ref() == Some(workspace)).then_some(
+                CompositeWorkspaceCleanupStatus::Quarantined {
+                    recovery_id: quarantine.recovery_id,
+                    reason: quarantine.reason,
+                },
+            )
+        })
+}
+
+fn put_composite_record(
+    store: &ObservationStore,
+    namespace: &'static str,
+    key: &str,
+    expected: ExpectedRevision,
+    state: &str,
+    payload: &serde_json::Value,
+    conflict: &str,
+) -> Result<i64> {
+    match store.put_coordination_record(
+        namespace,
+        key,
+        expected,
+        RecordWrite {
+            state,
+            payload,
+            expires_at_ms: None,
+        },
+    )? {
+        RecordOutcome::Applied(Some(record)) => Ok(record.revision),
+        RecordOutcome::Applied(None) | RecordOutcome::Conflict { .. } => {
+            Err(composite_error(conflict, Vec::new()))
+        }
+    }
+}
+
+fn to_payload(value: &impl Serialize) -> Result<serde_json::Value> {
+    serde_json::to_value(value).map_err(|error| Error::internal_json(error.to_string(), None))
 }
 
 fn verify_pending_composite_cleanup(pending: &PendingCompositeWorkspaceCleanup) -> Result<()> {
@@ -1322,16 +1444,14 @@ fn composite_error(message: &str, failures: Vec<String>) -> Error {
     )
 }
 
-fn store() -> Result<WorkspaceClaimStore> {
+fn claim_store() -> Result<WorkspaceClaimStore> {
     Ok(workspace_claim_store_at(paths::homeboy_data()?))
 }
 
 /// Construct the controller-local claim authority below an explicit lifecycle
 /// data root. Lifecycle commits use this rather than resolving ambient paths.
 pub(crate) fn workspace_claim_store_at(data_root: std::path::PathBuf) -> WorkspaceClaimStore {
-    WorkspaceClaimStore::new(
-        data_root.join(homeboy_core::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    )
+    WorkspaceClaimStore::in_data_root(&data_root)
 }
 
 /// Return the durable controller binding for a workspace-owning run. Callers
@@ -1392,15 +1512,15 @@ pub fn acquire_local_workspace_claim(
     workspace: WorkspaceIdentity,
     _lifecycle_revision: u64,
 ) -> Result<WorkspaceClaim> {
-    store()?.acquire(workspace, LOCAL_WORKSPACE_CLAIM_TTL_MS, now_ms())
+    claim_store()?.acquire(workspace, LOCAL_WORKSPACE_CLAIM_TTL_MS, now_ms())
 }
 
 pub fn validate_local_workspace_claim(claim: &WorkspaceClaim) -> Result<bool> {
-    store()?.validate(claim, now_ms())
+    claim_store()?.validate(claim, now_ms())
 }
 
 pub fn release_local_workspace_claim(claim: &WorkspaceClaim) -> Result<()> {
-    store()?.release(claim, now_ms())
+    claim_store()?.release(claim, now_ms())
 }
 
 pub(crate) fn register_local_workspace_owner_in_store(
@@ -1447,7 +1567,7 @@ pub(crate) fn renew_record_workspace_owner_in_store(
 }
 
 pub(crate) fn require_record_workspace_owner(record: &AgentTaskRunRecord) -> Result<()> {
-    require_record_workspace_owner_in_store(&store()?, record)
+    require_record_workspace_owner_in_store(&claim_store()?, record)
 }
 
 pub(crate) fn require_record_workspace_owner_in_store(
@@ -1506,7 +1626,31 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use homeboy_runner_contract::{WorkspaceClaimProtocol, WORKSPACE_CLAIM_SCHEMA};
     use std::collections::BTreeSet;
+    use std::fs;
     use std::sync::{Arc, Mutex};
+
+    fn composite_store() -> ObservationStore {
+        open_composite_store().expect("observation store")
+    }
+
+    fn intent_record(workspace: &WorkspaceIdentity) -> Option<CoordinationRecord> {
+        composite_store()
+            .coordination_record(
+                COMPOSITE_ACQUISITION_NAMESPACE,
+                &composite_acquisition_intent_key(workspace),
+            )
+            .expect("read intent record")
+    }
+
+    /// Replace whatever intent is stored for the workspace.
+    fn overwrite_intent(intent: &CompositeAcquisitionIntent) {
+        let expected = intent_record(&intent.workspace)
+            .map_or(ExpectedRevision::Absent, |record| {
+                ExpectedRevision::Revision(record.revision)
+            });
+        write_composite_acquisition_intent(&composite_store(), intent, expected)
+            .expect("write intent");
+    }
 
     struct ClaimProvider {
         runner_ids: Result<Vec<String>>,
@@ -2024,11 +2168,16 @@ mod tests {
                 },
             };
             pending.local.token.clear();
-            let path = pending_composite_cleanup_path(&recovery_id).expect("receipt path");
-            fs::create_dir_all(path.parent().expect("receipt directory"))
-                .expect("receipt directory");
-            fs::write(&path, serde_json::to_vec(&pending).expect("receipt json"))
-                .expect("corrupt receipt");
+            put_composite_record(
+                &composite_store(),
+                COMPOSITE_CLEANUP_NAMESPACE,
+                &recovery_id,
+                ExpectedRevision::Absent,
+                CLEANUP_STATE_PENDING,
+                &to_payload(&pending).expect("receipt json"),
+                "fixture",
+            )
+            .expect("corrupt receipt");
 
             let blocked = acquire_composite_workspace_claim(workspace.clone(), 2)
                 .expect_err("malformed receipt must fail closed");
@@ -2038,9 +2187,22 @@ mod tests {
                     .expect("status")
                     .contains(&recovery_id)
             );
-            assert!(path
-                .with_file_name(format!("{recovery_id}.quarantine.json"))
-                .exists());
+            let quarantined = composite_store()
+                .coordination_record(COMPOSITE_CLEANUP_NAMESPACE, &recovery_id)
+                .expect("read receipt")
+                .expect("quarantined receipt is retained");
+            assert_eq!(quarantined.state, CLEANUP_STATE_QUARANTINED);
+            assert!(!quarantined.payload.to_string().contains(&local.token));
+            // The quarantine survives a reopen and still blocks its identity
+            // without blocking an unrelated one.
+            assert!(matches!(
+                pending_composite_cleanup_for_workspace(&workspace),
+                Some(CompositeWorkspaceCleanupStatus::Quarantined { .. })
+            ));
+            assert!(pending_composite_cleanup_for_workspace(
+                &WorkspaceIdentity::new("test", "unrelated-quarantine").expect("identity")
+            )
+            .is_none());
 
             release_local_workspace_claim(&local).expect("fixture release");
         });
@@ -2060,7 +2222,15 @@ mod tests {
                 requested_ttl_ms: LOCAL_WORKSPACE_CLAIM_TTL_MS,
                 state: "acquiring".into(),
             };
-            write_composite_acquisition_intent(&intent).expect("write token-free intent");
+            overwrite_intent(&intent);
+            // A second acquisition intent for the same identity loses the
+            // write-ahead compare-and-set.
+            assert!(write_composite_acquisition_intent(
+                &composite_store(),
+                &intent,
+                ExpectedRevision::Absent
+            )
+            .is_err());
             assert!(composite_claim_receipt_outstanding(&workspace));
             assert!(matches!(
                 composite_acquisition_intent_for_workspace(&workspace),
@@ -2077,7 +2247,7 @@ mod tests {
             ));
 
             intent.started_at_ms = now_ms().saturating_sub(MAX_WORKSPACE_CLAIM_TTL_MS + 1);
-            write_composite_acquisition_intent(&intent).expect("age intent beyond ttl");
+            overwrite_intent(&intent);
             // Preflight defers an expired intent to acquisition's full inventory.
             assert!(!composite_claim_receipt_outstanding(&workspace));
             let live = acquire_local_workspace_claim(workspace.clone(), 1).expect("live authority");
@@ -2090,16 +2260,15 @@ mod tests {
 
             let mut claim = acquire_composite_workspace_claim(workspace.clone(), 1)
                 .expect("clear intent permits acquisition");
-            assert!(composite_acquisition_intent_path(&workspace)
-                .expect("intent path")
-                .exists());
+            assert_eq!(
+                intent_record(&workspace).expect("active intent").state,
+                INTENT_STATE_ACTIVE
+            );
             assert!(matches!(
                 release_composite_workspace_claim(&mut claim).expect("release claim"),
                 CompositeWorkspaceClaimRelease::Released
             ));
-            assert!(!composite_acquisition_intent_path(&workspace)
-                .expect("intent path")
-                .exists());
+            assert!(intent_record(&workspace).is_none());
         });
     }
 
@@ -2107,9 +2276,16 @@ mod tests {
     fn malformed_write_ahead_intent_quarantines_its_identity() {
         with_isolated_home(|_| {
             let workspace = workspace();
-            let path = composite_acquisition_intent_path(&workspace).expect("intent path");
-            fs::create_dir_all(path.parent().expect("intent directory")).expect("intent directory");
-            fs::write(&path, b"not json").expect("malformed intent");
+            put_composite_record(
+                &composite_store(),
+                COMPOSITE_ACQUISITION_NAMESPACE,
+                &composite_acquisition_intent_key(&workspace),
+                ExpectedRevision::Absent,
+                INTENT_STATE_ACQUIRING,
+                &serde_json::json!("not an intent"),
+                "fixture",
+            )
+            .expect("malformed intent");
             assert!(matches!(
                 composite_acquisition_intent_for_workspace(&workspace),
                 Some(CompositeWorkspaceCleanupStatus::Quarantined { .. })
@@ -2139,9 +2315,7 @@ mod tests {
                     .expect("public status")
                     .contains("quarantined")
             );
-            assert!(composite_acquisition_intent_path(&workspace())
-                .expect("intent path")
-                .exists());
+            assert!(intent_record(&workspace()).is_some());
             assert!(acquire_composite_workspace_claim(workspace(), 2).is_err());
 
             let mut unrelated = acquire_composite_workspace_claim(

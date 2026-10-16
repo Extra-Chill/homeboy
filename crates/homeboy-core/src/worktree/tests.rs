@@ -483,7 +483,7 @@ fn task_worktree_identity_is_path_independent_and_rejects_conflicts() {
     assert_eq!(identity.locator, "fixture/fixture@task");
 
     let claim_store = tempfile::tempdir().expect("claim store");
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(claim_store.path());
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(claim_store.path());
     let owner = claims
         .register_owner(identity.clone(), "agent-task-run", 1_000, 1)
         .expect("register task-worktree owner");
@@ -515,11 +515,7 @@ fn ownership_probe_names_the_live_holder_for_a_nested_checkout_path() {
     let mut record = fixture_record(checkout.path(), checkout.path());
     record.run_id = Some("ses_live_holder".to_string());
     write_record(&metadata_dir_in_root(data_root.path()), &record).expect("record worktree");
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root
-            .path()
-            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    );
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root.path());
     claims
         .register_owner(
             record.effective_workspace_identity().expect("identity"),
@@ -2276,11 +2272,7 @@ fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
     record.terminal_disposition = Some("succeeded".to_string());
     record.lifecycle_revision = 1;
     write_record(&store, &record).unwrap();
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root
-            .path()
-            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    );
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root.path());
     let now = now_ms();
     let owner = claims
         .register_owner(
@@ -3993,11 +3985,7 @@ fn reclaim_apply_removes_completed_loops_and_audits_reaping() {
 #[test]
 fn reclaim_refuses_claimed_workspace_and_names_the_holder() {
     let (data_root, _source, worktree, record) = reclaim_fixture();
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root
-            .path()
-            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    );
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root.path());
     let workspace = WorkspaceIdentity::new(
         "task-worktree",
         format!("{}/{}", record.component_id, record.id),
@@ -4546,11 +4534,7 @@ fn cleanup_retains_squash_merged_worktree_claimed_by_a_live_owner() {
     let mut record = succeeded_record(source.path(), &worktree);
     record.base_ref = main.to_string();
     write_record(&store, &record).unwrap();
-    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
-        data_root
-            .path()
-            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
-    );
+    let claims = crate::workspace_claim::WorkspaceClaimStore::in_data_root(data_root.path());
     claims
         .register_owner(
             record.effective_workspace_identity().unwrap(),
