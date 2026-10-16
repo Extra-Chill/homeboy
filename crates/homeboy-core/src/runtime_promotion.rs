@@ -1113,6 +1113,23 @@ pub fn try_pin_cook_generation(
     pin_cook_runtime_waiting(cook_id, Some(runtime), Duration::ZERO, || false, |_| {})
 }
 
+/// Acquire the Cook generation pin for `runtime`, waiting a bounded interval
+/// behind a live promotion owner. Used when the attempt cannot be durably
+/// requeued (it already consumed provider execution), so a short-lived owner
+/// such as a runner reconnect is waited out instead of failing at 0ms.
+pub fn pin_cook_runtime_generation(
+    cook_id: &str,
+    runtime: &serde_json::Value,
+) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_runtime_waiting(
+        cook_id,
+        Some(runtime),
+        COOK_ADMISSION_WAIT_TIMEOUT,
+        || false,
+        |_| {},
+    )
+}
+
 /// Pin a cook generation without blocking indefinitely behind a promotion.
 ///
 /// The shared lock is deliberately acquired with `try_lock_shared`: callers

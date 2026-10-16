@@ -5266,6 +5266,47 @@ fn cook_runtime_admission_projects_waiting_owner_and_rejects_duplicate_resume() 
 }
 
 #[test]
+fn executed_attempt_waits_out_short_runtime_owner_instead_of_failing_at_zero_ms() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "executed-attempt-runtime-pin-wait",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = options.identity.initial_run_id.clone();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+            .expect("materialize Cook lifecycle record");
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("record the consumed provider execution");
+        let lifecycle_store = test_lifecycle_store();
+        let mut owner = runtime_admission_owner_process();
+        let release = homeboy_core::paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join("runtime-admission-test-release");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(release, b"release").expect("release runtime owner");
+        });
+
+        let pin = super::super::execution_step::pin_execution_generation_or_defer(
+            &lifecycle_store,
+            &run_id,
+        )
+        .expect("an executed attempt waits for a short-lived owner");
+        assert!(
+            pin.is_some(),
+            "the executed attempt is pinned, not deferred"
+        );
+        let record = lifecycle_store.read_record(&run_id).expect("read record");
+        assert!(record.metadata.get("cook_runtime_admission").is_none());
+
+        releaser.join().expect("release thread joins");
+        owner.wait().expect("runtime owner exits");
+    });
+}
+
+#[test]
 fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_release() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "materialized-runtime-admission-resume";
