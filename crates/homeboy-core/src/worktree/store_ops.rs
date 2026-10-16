@@ -1242,7 +1242,7 @@ fn linked_worktree_identity_error(worktree: &Path, reason: &str) -> Error {
     )
 }
 
-fn verify_create_record_identity(
+pub(super) fn verify_create_record_identity(
     record: &TaskWorktreeRecord,
     component_id: &str,
     source_checkout: &Path,
@@ -1260,12 +1260,13 @@ fn verify_create_record_identity(
         || record_source.as_deref() != Some(source_checkout)
         || record.effective_workspace_identity()? != *workspace_identity
     {
-        return Err(Error::validation_invalid_argument(
+        let error = Error::validation_invalid_argument(
             "branch",
             "Existing task-worktree record does not prove the declared worktree identity",
             Some(record.id.clone()),
             Some(vec!["Record component, source checkout, contained path, branch, and workspace identity must match exactly.".to_string()]),
-        ));
+        );
+        return Err(with_orphan_record_hint(error, record));
     }
     Ok(())
 }
@@ -2132,9 +2133,71 @@ pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeSt
             safety: None,
         });
     }
+    if is_orphan_record(&record) && !orphan_recovers_contained_checkout(&record) {
+        let safety = Some(orphan_safety_report(&record));
+        return Ok(WorktreeStatusOutput { record, safety });
+    }
     repair_record_source_checkout_if_needed(&mut record, store_dir)?;
     let safety = Some(safety_report(&record)?);
     Ok(WorktreeStatusOutput { record, safety })
+}
+
+/// An orphan is an active record whose worktree path AND recorded source
+/// checkout are both gone. Nothing exists on disk to inspect or delete, so the
+/// record can only be reported and retired as metadata (#16028). A record with
+/// either path still present is never an orphan and keeps every gate.
+pub(super) fn is_orphan_record(record: &TaskWorktreeRecord) -> bool {
+    record.state == TaskWorktreeState::Active
+        && !Path::new(&record.worktree_path).exists()
+        && !Path::new(&record.source_checkout).exists()
+}
+
+/// Whether the existing source-checkout repair would adopt a component checkout
+/// whose parent still contains the recorded worktree path. Only then does
+/// status keep repairing an orphan; otherwise it reports the orphan as-is
+/// rather than persisting a checkout the record was never created from.
+fn orphan_recovers_contained_checkout(record: &TaskWorktreeRecord) -> bool {
+    recovered_component_source_checkout(record).is_ok_and(|source| {
+        source.parent().is_some_and(|parent| {
+            normalize_missing_path(Path::new(&record.worktree_path)).starts_with(parent)
+        })
+    })
+}
+
+fn orphan_remove_command(record: &TaskWorktreeRecord) -> String {
+    format!("homeboy worktree remove {}", shell_arg(&record.id))
+}
+
+fn with_orphan_record_hint(error: Error, record: &TaskWorktreeRecord) -> Error {
+    if !is_orphan_record(record) {
+        return error;
+    }
+    error.with_hint(format!(
+        "Task-worktree record '{}' is an orphan: its worktree path and source checkout no longer exist. Retire the metadata with `{}`.",
+        record.id,
+        orphan_remove_command(record)
+    ))
+}
+
+fn orphan_safety_report(record: &TaskWorktreeRecord) -> WorktreeSafetyReport {
+    WorktreeSafetyReport {
+        dirty: false,
+        unpushed_commits: 0,
+        primary_checkout: false,
+        // Containment is vacuous: no path exists that a removal could touch.
+        path_contained: true,
+        worktree_missing: true,
+        source_checkout_missing: true,
+        safe: false,
+        reasons: vec![
+            format!("worktree_missing: {}", record.worktree_path),
+            format!("source_checkout_missing: {}", record.source_checkout),
+            format!(
+                "orphan record; retire metadata with `{}`",
+                orphan_remove_command(record)
+            ),
+        ],
+    }
 }
 
 pub(super) fn remove_with_store(
@@ -2167,6 +2230,9 @@ fn remove_with_store_unlocked_until(
     // The registry lease fences the complete decision and Git mutation. Always
     // re-read under it so finalization that won the lease first is preserved.
     let mut record = read_record(store_dir, &options.id)?;
+    if is_orphan_record(&record) {
+        return retire_orphan_record(options, store_dir, record);
+    }
     if !Path::new(&record.source_checkout).exists() {
         record.source_checkout = recovered_component_source_checkout(&record)?
             .to_string_lossy()
@@ -2201,19 +2267,7 @@ fn remove_with_store_unlocked_until(
             Some(safety.reasons.clone()),
         ));
     }
-    let live_owners = live_workspace_owners(&record, store_dir)?;
-    if !live_owners.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "workspace_claim",
-            format!(
-                "refuses to remove workspace claimed by {} durable live owner lease(s); holder session/run(s): {}",
-                live_owners.len(),
-                owners_display(&live_owners)
-            ),
-            Some(record.id.clone()),
-            Some(live_owners.clone()),
-        ));
-    }
+    refuse_live_workspace_owners(&record, store_dir)?;
 
     let claims = workspace_claim_store_for_worktrees(store_dir)?;
     let claim = claims.acquire(
@@ -2301,6 +2355,98 @@ fn remove_with_store_unlocked_until(
             )
             .unwrap_or_else(|error| branch_cleanup_unknown(&record, error.message));
         }
+        Ok(WorktreeRemoveOutput {
+            record,
+            safety,
+            branch_cleanup,
+            removed: true,
+        })
+    });
+    let release = claims.release(&claim, now_ms());
+    match result {
+        Err(error) => Err(error),
+        Ok(output) => {
+            release?;
+            Ok(output)
+        }
+    }
+}
+
+fn refuse_live_workspace_owners(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<()> {
+    let live_owners = live_workspace_owners(record, store_dir)?;
+    if live_owners.is_empty() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "workspace_claim",
+        format!(
+            "refuses to remove workspace claimed by {} durable live owner lease(s); holder session/run(s): {}",
+            live_owners.len(),
+            owners_display(&live_owners)
+        ),
+        Some(record.id.clone()),
+        Some(live_owners),
+    ))
+}
+
+/// Retire an orphan record (#16028) as a metadata-only lifecycle transition.
+///
+/// Both the worktree and its recorded source checkout are gone, so there is no
+/// filesystem path to contain, delete, or sync and no checkout whose branch may
+/// be touched: containment and primary-checkout gates have nothing to guard.
+/// Live owner leases still refuse, and the transition runs under the same
+/// workspace-claim fence and reaping audit as a physical removal.
+fn retire_orphan_record(
+    options: WorktreeRemoveOptions,
+    store_dir: &Path,
+    mut record: TaskWorktreeRecord,
+) -> Result<WorktreeRemoveOutput> {
+    refuse_live_workspace_owners(&record, store_dir)?;
+    let safety = orphan_safety_report(&record);
+    let claims = workspace_claim_store_for_worktrees(store_dir)?;
+    let claim = claims.acquire(
+        record.effective_workspace_identity()?,
+        crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+        now_ms(),
+    )?;
+    let result = claims.with_reconciliation_fence(&claim, || {
+        record.state = TaskWorktreeState::Removed;
+        record.lifecycle_revision = record.lifecycle_revision.checked_add(1).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lifecycle_revision",
+                "task worktree lifecycle revision overflowed during removal",
+                Some(record.id.clone()),
+                None,
+            )
+        })?;
+        write_record_unlocked(store_dir, &record)?;
+        if let Some(data_root) = store_dir.parent() {
+            reaping::append_reaping_audit_in_root(
+                data_root,
+                &record,
+                now_ms(),
+                options.reason.as_deref(),
+                options.reaper.as_deref(),
+                options.force,
+                false,
+            )?;
+        }
+        let branch_cleanup = WorktreeBranchCleanupReport {
+            branch: record.branch.clone(),
+            base_ref: record.base_ref.clone(),
+            intent: record.branch_cleanup_intent.clone(),
+            status: BranchCleanupStatus::Preserved,
+            safe_delete: false,
+            deleted: false,
+            reason: Some(
+                "orphan record: source checkout is missing, so no branch was inspected or deleted"
+                    .to_string(),
+            ),
+            cleanup_command: format!(
+                "homeboy worktree remove {} --cleanup-branch",
+                shell_arg(&record.id)
+            ),
+        };
         Ok(WorktreeRemoveOutput {
             record,
             safety,
@@ -2557,6 +2703,7 @@ fn safety_report_until(
         primary_checkout,
         path_contained,
         worktree_missing,
+        source_checkout_missing: false,
         safe,
         reasons,
     })
@@ -2813,7 +2960,7 @@ fn missing_source_checkout_error(
         ));
     }
 
-    Error::validation_invalid_argument(
+    let error = Error::validation_invalid_argument(
         "source_checkout",
         "Task worktree source checkout is missing and Homeboy could not safely recover a component checkout",
         Some(record.id.clone()),
@@ -2826,7 +2973,8 @@ fn missing_source_checkout_error(
     .with_hint(format!(
         "If the task worktree is intentionally gone, remove or repair the metadata record for '{}'.",
         record.id
-    ))
+    ));
+    with_orphan_record_hint(error, record)
 }
 
 pub(super) fn normalize_missing_path(path: &Path) -> PathBuf {
