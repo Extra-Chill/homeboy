@@ -540,20 +540,21 @@ fn daemon_worker_marks_nested_cook_as_runner_hosted() {
 }
 
 #[test]
-fn daemon_prep_keeps_resource_guard_request_separate_from_runner_env() {
+fn daemon_prep_never_forwards_runner_owned_guard_policy_to_the_job() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).expect("workspace");
         let mut runner = local_runner(workspace.display().to_string());
-        runner.env.insert(
-            "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT".to_string(),
-            "160".to_string(),
-        );
+        for key in homeboy_runner_contract::RESOURCE_GUARD_POLICY_ENV_KEYS {
+            runner.env.insert(key.to_string(), "160".to_string());
+        }
         runner
             .env
             .insert("RUNNER_ONLY".to_string(), "1".to_string());
 
+        // A controller forwards its runner config `env` with each job; the
+        // guard policy in it is rendered into the service unit instead.
         let plan = prepare_daemon_local_process(RunnerProcessRequest {
             runner_id: "homeboy-lab".to_string(),
             runner: Some(runner),
@@ -562,7 +563,7 @@ fn daemon_prep_keeps_resource_guard_request_separate_from_runner_env() {
             command: vec!["true".to_string()],
             env: HashMap::from([(
                 "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT".to_string(),
-                "200".to_string(),
+                "256".to_string(),
             )]),
             secret_env_names: Vec::new(),
             secret_env_plan: None,
@@ -574,20 +575,10 @@ fn daemon_prep_keeps_resource_guard_request_separate_from_runner_env() {
         })
         .expect("prepare daemon worker process");
 
-        assert_eq!(
-            plan.env
-                .get("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")
-                .map(String::as_str),
-            Some("200")
-        );
-        assert_eq!(
-            plan.resource_guard_env
-                .get("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")
-                .map(String::as_str),
-            Some("200")
-        );
-        assert_eq!(plan.resource_guard_env.len(), 1);
-        assert!(!plan.resource_guard_env.contains_key("RUNNER_ONLY"));
+        for key in homeboy_runner_contract::RESOURCE_GUARD_POLICY_ENV_KEYS {
+            assert!(!plan.env.contains_key(*key), "{key} reached the job env");
+        }
+        assert_eq!(plan.env.get("RUNNER_ONLY").map(String::as_str), Some("1"));
     });
 }
 

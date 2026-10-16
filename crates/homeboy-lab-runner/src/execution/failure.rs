@@ -16,7 +16,9 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     let runner_message = runner_error_str_field(runner_error.as_ref(), "message");
     let cause = runner_message
         .or(runner_code)
-        .or_else(|| runner_resource_guard_message(output))
+        .or_else(|| {
+            runner_resource_guard_violation(output).map(|violation| violation.message.as_str())
+        })
         .or_else(|| first_non_empty_line(&output.stderr))
         .or_else(|| first_non_empty_line(&output.stdout))
         .unwrap_or("runner command exited non-zero")
@@ -63,21 +65,24 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
             error = error.with_hint(hint);
         }
     }
-    if let Some(message) = runner_resource_guard_message(output) {
+    if let Some(violation) = runner_resource_guard_violation(output) {
         error = error.with_hint(format!(
-            "Runner resource guard stopped the job before it could destabilize the runner daemon: {message}. Trusted jobs may request a bounded process budget with HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT; the runner-owned HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT ceiling still applies. RSS policy remains runner-owned through HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES."
+            "Runner resource guard stopped the job before it could destabilize the runner daemon: {}. Guard policy is runner-owned: {}",
+            violation.operator_message(),
+            violation.remedy()
         ));
     }
 
     Some(error)
 }
 
-fn runner_resource_guard_message(output: &RunnerExecOutput) -> Option<&str> {
+fn runner_resource_guard_violation(
+    output: &RunnerExecOutput,
+) -> Option<&homeboy_runner_contract::RunnerResourceGuardViolation> {
     output
         .metrics
         .as_ref()
         .and_then(|metrics| metrics.guard_violation.as_ref())
-        .map(|violation| violation.message.as_str())
 }
 
 /// Reads a string field out of an optional structured runner error object.

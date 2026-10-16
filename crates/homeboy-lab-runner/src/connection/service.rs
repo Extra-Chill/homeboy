@@ -97,29 +97,25 @@ fn render_service_unit_for(runner_id: &str, controller_id: &str, startup_token: 
     render_service_unit_with_env(runner_id, controller_id, startup_token, &[])
 }
 
-/// Runner-owned daemon policy that the runner daemon reads from its own
-/// process environment, never from a job's env. Setting these in the
-/// runner's `env` (`homeboy runner set <id> --json '{"env":{...}}'`) renders
-/// them into the service unit on the next install or repoint (#15751).
-const DAEMON_POLICY_ENV_KEYS: &[&str] = &[
-    homeboy_runner_contract::PROCESS_COUNT_CEILING_ENV,
-    "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES",
-];
-
-/// The runner-owned daemon policy entries from a runner's `env`, sorted.
+/// The runner-owned resource-guard policy entries from a runner's `env`,
+/// sorted. The daemon reads these from its own process environment, never
+/// from a job's env, so setting them in the runner's `env`
+/// (`homeboy runner set <id> --json '{"env":{...}}'`) renders them into the
+/// service unit on the next install or repoint (#15751).
 /// Only allowlisted keys with plain non-negative integer values are rendered,
 /// so nothing a runner config holds can inject into a systemd unit line.
 pub(crate) fn daemon_policy_env(
     env: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, String)> {
-    let mut entries: Vec<(String, String)> = DAEMON_POLICY_ENV_KEYS
-        .iter()
-        .filter_map(|key| {
-            let value = env.get(*key)?.trim();
-            (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-                .then(|| ((*key).to_string(), value.to_string()))
-        })
-        .collect();
+    let mut entries: Vec<(String, String)> =
+        homeboy_runner_contract::RESOURCE_GUARD_POLICY_ENV_KEYS
+            .iter()
+            .filter_map(|key| {
+                let value = env.get(*key)?.trim();
+                (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                    .then(|| ((*key).to_string(), value.to_string()))
+            })
+            .collect();
     entries.sort();
     entries
 }
@@ -865,6 +861,10 @@ mod tests {
                     "1024".to_string()
                 ),
                 (
+                    "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT".to_string(),
+                    "512".to_string()
+                ),
+                (
                     "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES".to_string(),
                     "68719476736".to_string()
                 ),
@@ -879,8 +879,8 @@ mod tests {
         assert!(
             unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES=68719476736\n")
         );
+        assert!(unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT=512\n"));
         assert!(!unit.contains("HOMEBOY_COMMAND"));
-        assert!(!unit.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT="));
         assert!(unit.contains(
             "Environment=HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES=68719476736\nExecStart="
         ));

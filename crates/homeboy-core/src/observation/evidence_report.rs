@@ -2014,7 +2014,12 @@ mod tests {
                                     "rss_bytes": rss_bytes,
                                     "rss_limit_bytes": rss_limit_bytes,
                                     "process_count": 141,
-                                    "process_count_limit": 128
+                                    "process_count_limit": 128,
+                                    "process_count_limit_source": "default",
+                                    "top_processes": [
+                                        {"name": "rustc", "count": 32},
+                                        {"name": "cc", "count": 21}
+                                    ]
                                 }
                             }
                         }
@@ -2034,11 +2039,11 @@ mod tests {
         );
         assert!(error.contains("141"), "{error}");
         assert!(error.contains("128"), "{error}");
+        assert!(error.contains("(top: rustc×32, cc×21)"), "{error}");
         assert!(
-            failure
-                .hints
-                .iter()
-                .any(|hint| hint.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")),
+            failure.hints.iter().any(|hint| hint.starts_with(
+                "process limit 128 is the runner default (16/core); run `homeboy runner set <runner> --json"
+            ) && hint.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")),
             "{:?}",
             failure.hints
         );

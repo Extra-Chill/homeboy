@@ -9706,7 +9706,9 @@ mod tests {
                         "rss_bytes": rss_bytes,
                         "rss_limit_bytes": rss_limit_bytes,
                         "process_count": 141,
-                        "process_count_limit": 128
+                        "process_count_limit": 128,
+                        "process_count_limit_source": "default",
+                        "top_processes": [{"name": "rustc", "count": 32}]
                     }
                 }
             }
@@ -9720,6 +9722,16 @@ mod tests {
         );
         assert!(blocker.message.contains("141"), "{}", blocker.message);
         assert!(blocker.message.contains("128"), "{}", blocker.message);
+        assert!(
+            blocker.message.ends_with("(top: rustc×32)"),
+            "{}",
+            blocker.message
+        );
+        let reason = blocker.reason.expect("guard remedy");
+        assert!(
+            reason.starts_with("process limit 128 is the runner default (16/core); run `homeboy runner set <runner> --json"),
+            "{reason}"
+        );
         let resume = resource
             .action_eligibility
             .expect("eligibility")

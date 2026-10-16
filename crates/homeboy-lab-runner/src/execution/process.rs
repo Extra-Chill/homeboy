@@ -287,6 +287,7 @@ pub(crate) fn prepare_runner_process(
             &env,
         )?);
     }
+    drop_runner_owned_guard_policy(&mut env);
 
     let mut source_snapshot = request
         .source_snapshot
@@ -317,7 +318,6 @@ pub(crate) fn prepare_runner_process(
         cwd,
         command,
         env,
-        resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
@@ -422,6 +422,7 @@ pub(crate) fn prepare_daemon_local_process(
         &mut env,
         runner.settings.homeboy_path.as_deref(),
     );
+    drop_runner_owned_guard_policy(&mut env);
     let source_snapshot = request.source_snapshot.unwrap_or_else(|| {
         homeboy_core::source_snapshot::collect_local(
             &runner.id,
@@ -436,11 +437,20 @@ pub(crate) fn prepare_daemon_local_process(
         cwd,
         command: resolve_configured_homeboy_argv(request.command, &env),
         env,
-        resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+/// Resource-guard policy is owned by the runner daemon's own environment,
+/// rendered from the runner's `env` into its service unit. A runner config or
+/// request copy of it must not ride along with a job, where nested Homeboy
+/// commands would read it as their own guard policy.
+fn drop_runner_owned_guard_policy(env: &mut HashMap<String, String>) {
+    env.retain(|key, _| {
+        !homeboy_runner_contract::RESOURCE_GUARD_POLICY_ENV_KEYS.contains(&key.as_str())
+    });
 }
 
 pub(super) fn resolve_configured_homeboy_argv(
@@ -516,11 +526,7 @@ pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<Pro
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan, &temp_owner)?;
 
-    command_output(
-        &mut command,
-        &plan.resource_guard_env,
-        plan.runner.settings.concurrency_limit,
-    )
+    command_output(&mut command, plan.runner.settings.concurrency_limit)
 }
 
 pub(crate) fn execute_runner_process_until_cancelled_with_progress(
@@ -549,7 +555,6 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         require_child_identity_acknowledgement,
         child_started,
         &plan.env,
-        &plan.resource_guard_env,
         &plan.secret_env_names,
         plan.runner.settings.concurrency_limit,
     )
@@ -646,7 +651,6 @@ mod tests {
             cwd: original.display().to_string(),
             command: vec!["sh".to_string(), "-c".to_string(), "cat marker".to_string()],
             env: HashMap::new(),
-            resource_guard_env: HashMap::new(),
             secret_env_names: Vec::new(),
             source_snapshot: SourceSnapshot::default(),
             require_paths: Vec::new(),
@@ -718,7 +722,6 @@ mod tests {
             cwd: cwd.display().to_string(),
             command,
             env,
-            resource_guard_env: HashMap::new(),
             secret_env_names: Vec::new(),
             source_snapshot: SourceSnapshot::default(),
             require_paths: Vec::new(),
@@ -1794,10 +1797,9 @@ fn is_socket(path: &Path) -> bool {
 
 pub(super) fn command_output(
     command: &mut std::process::Command,
-    env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
-    let measured = measured_command_output(command, env, concurrency_limit)?;
+    let measured = measured_command_output(command, concurrency_limit)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -1810,7 +1812,7 @@ pub(super) fn command_output(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Cancellation, progress, child identity, redaction, and resource guard inputs are independently security-relevant."
+    reason = "Cancellation, progress, child identity, and redaction inputs are independently security-relevant."
 )]
 pub(super) fn command_output_until_cancelled_with_progress(
     command: &mut std::process::Command,
@@ -1819,7 +1821,6 @@ pub(super) fn command_output_until_cancelled_with_progress(
     require_child_identity_acknowledgement: bool,
     child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     env: &HashMap<String, String>,
-    resource_guard_env: &HashMap<String, String>,
     secret_env_names: &[String],
     concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
@@ -1842,7 +1843,6 @@ pub(super) fn command_output_until_cancelled_with_progress(
         require_child_identity_acknowledgement,
         stdout_line_observer,
         child_started,
-        resource_guard_env,
         concurrency_limit,
     )?;
     let output = measured.output;
