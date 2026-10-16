@@ -224,18 +224,37 @@ fn ensure_ancestry_for_ref(path: &str, git_ref: &str) -> Result<()> {
     if has_merge_base(path, git_ref) {
         return Ok(());
     }
+
+    let repository = Path::new(path);
+    let (remote, reference) = remote_and_ref(path, git_ref);
+    let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
+    let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+
     if !is_shallow_repo(path) {
+        // A full checkout can simply be missing the remote-tracking ref (for
+        // example a gate candidate checkout materialized without
+        // `refs/remotes/origin/<base>`). Fetch the ref from its configured
+        // remote and re-check before failing.
+        if remote_exists(path, &remote) {
+            eprintln!("Ref {git_ref} is not reachable locally — fetching it from {remote}");
+            let fetched = fetch_remote_tracking_refs_until(
+                repository,
+                &["fetch", &remote, &refspec],
+                "git fetch changed-since ref",
+                &[],
+                deadline,
+            );
+            if fetched.is_ok() && has_merge_base(path, git_ref) {
+                return Ok(());
+            }
+        }
         return Err(Error::git_command_failed(format!(
             "Cannot resolve merge base for {git_ref}: ref is not reachable and repository is not shallow (is the ref valid?)"
         )));
     }
 
     eprintln!("Shallow clone detected — deepening to resolve merge base for {git_ref}");
-    let repository = Path::new(path);
-    let (remote, reference) = remote_and_ref(path, git_ref);
-    let tracking_ref = reference.strip_prefix("refs/heads/").unwrap_or(&reference);
-    let refspec = format!("{reference}:refs/remotes/{remote}/{tracking_ref}");
-    let deadline = Instant::now() + Duration::from_secs(30);
     fetch_remote_tracking_refs_until(
         repository,
         &["fetch", &remote, &refspec, "--depth=50"],
@@ -293,6 +312,18 @@ fn remote_and_ref(path: &str, git_ref: &str) -> (String, String) {
     }
 
     (resolve_default_remote(Path::new(path)), git_ref.to_string())
+}
+
+fn remote_exists(path: &str, remote: &str) -> bool {
+    execute_git(path, &["remote"])
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .any(|name| name == remote)
+        })
 }
 
 fn is_shallow_repo(path: &str) -> bool {
@@ -740,6 +771,85 @@ mod tests {
         let merge_base = resolve_merge_base(checkout_path, "upstream/main")
             .expect("resolve through upstream rather than branch origin");
         assert!(!merge_base.is_empty());
+    }
+
+    /// Regression: a full (non-shallow) clone that is merely missing its
+    /// `refs/remotes/origin/main` tracking ref — the Lab gate candidate
+    /// checkout shape — must fetch the ref from its configured remote and
+    /// resolve the merge base instead of failing immediately.
+    #[test]
+    fn resolve_merge_base_fetches_missing_remote_tracking_ref_in_full_clone() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let checkout = dir.path().join("checkout");
+        fs::create_dir(&source).expect("create source");
+        let source_path = source.to_str().expect("utf-8 source path");
+        init_repo_with_initial_commit(source_path);
+        git(source_path, &["checkout", "-qb", "feature"]);
+        fs::write(source.join("feature.txt"), "feature\n").expect("write feature commit");
+        git(source_path, &["add", "."]);
+        git(source_path, &["commit", "-qm", "feature"]);
+        git(
+            source_path,
+            &[
+                "init",
+                "--bare",
+                "-q",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(
+            source_path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("utf-8 remote path"),
+            ],
+        );
+        git(source_path, &["push", "-q", "origin", "main", "feature"]);
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                "--branch",
+                "feature",
+                &format!("file://{}", remote.display()),
+                checkout.to_str().expect("utf-8 checkout path"),
+            ])
+            .output()
+            .expect("clone full checkout");
+        assert!(clone.status.success(), "full clone must succeed");
+        let checkout_path = checkout.to_str().expect("utf-8 checkout path");
+        // Simulate a checkout materialized without the base tracking ref.
+        git(
+            checkout_path,
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+
+        let merge_base = resolve_merge_base(checkout_path, "origin/main")
+            .expect("fetch origin/main into the full clone and resolve the merge base");
+        assert!(!merge_base.is_empty());
+    }
+
+    /// A non-shallow repository with no configured remote has nowhere to
+    /// fetch the missing ref from and must keep the existing error.
+    #[test]
+    fn resolve_merge_base_errors_without_configured_remote_for_unreachable_ref() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().to_str().unwrap();
+        init_repo_with_initial_commit(path);
+
+        let error = resolve_merge_base(path, "origin/main")
+            .expect_err("no remote means the missing ref cannot be fetched");
+        assert!(
+            error
+                .to_string()
+                .contains("ref is not reachable and repository is not shallow"),
+            "unexpected error: {error}"
+        );
     }
 
     fn init_repo_with_initial_commit(path: &str) {
