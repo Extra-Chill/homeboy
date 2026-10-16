@@ -471,9 +471,10 @@ pub(crate) fn execute_upgrade(
 }
 
 /// The canonical installer published as the `homeboy-installer.sh` release
-/// asset. Bootstrap (`curl | sh`) and `homeboy upgrade` share this one source
-/// for the platform asset mapping, checksum, and archive-member checks.
-pub(crate) const RELEASE_INSTALLER_SCRIPT: &str = include_str!(concat!(
+/// asset. Bootstrap (`curl | sh`), `homeboy upgrade`, and runner release
+/// acquisition (`runner refresh-homeboy`) share this one source for the
+/// platform asset mapping, checksum, and archive-member checks.
+pub const RELEASE_INSTALLER_SCRIPT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/homeboy-installer.sh"
 ));
