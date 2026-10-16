@@ -1031,8 +1031,8 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
         &self,
     ) -> Result<ControllerUpgradeAdmission> {
         agent_task_lifecycle::quarantine_verified_fixture_runner_records()?;
-        // A run cancelled by its retained `run.cancelled` receipt already reads
-        // as terminal, so upgrade admission no longer needs a repair pass.
+        // Cancellation is committed with its provenance in one write, so a
+        // cancelled run's stored state is already terminal; no repair pass.
         self.controller_upgrade_admission()
     }
 }

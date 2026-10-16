@@ -1443,6 +1443,11 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
         record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", false, 1)
             .expect("record terminal Cook result");
     assert_eq!(
+        terminal.state,
+        AgentTaskRunState::Cancelled,
+        "a no-candidate result does not erase the cancellation that caused it"
+    );
+    assert_eq!(
         terminal.metadata["cook_progress"]["terminal_success"],
         false
     );

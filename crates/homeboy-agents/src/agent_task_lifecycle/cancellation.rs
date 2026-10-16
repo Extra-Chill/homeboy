@@ -62,7 +62,7 @@ fn already_terminal_error(record: &AgentTaskRunRecord) -> Error {
 /// The run's retained `run.cancelled` receipt. Its payload is exempt from the
 /// bounded event-payload pruning, so it is found however many newer events the
 /// run has accumulated (#15718).
-pub(super) fn retained_cancellation_receipt(
+fn retained_cancellation_receipt(
     observation: &homeboy_core::observation::ObservationStore,
     run_id: &str,
 ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEvent>> {
@@ -77,48 +77,37 @@ pub(super) fn retained_cancellation_receipt(
     observation.durable_control_plane_event(&run, "run.cancelled")
 }
 
-/// Project the cancellation a retained receipt proves onto a non-terminal
-/// snapshot: run and live tasks cancelled, running provider executions
-/// terminalized, and the receipt's immutable provenance restored. Existing
-/// terminal results are left intact. Pure; the caller decides whether the
-/// projection is ever persisted.
-pub(super) fn project_retained_cancellation(
-    record: &mut AgentTaskRunRecord,
-    receipt: &homeboy_control_plane_contract::ControlPlaneEvent,
-) -> bool {
-    if record.state.is_terminal() {
-        return false;
+/// Cancellation is a write invariant (#15718): a record carries
+/// `cancellation_provenance` only in the commit that makes it `Cancelled`.
+///
+/// The provenance is what emits the run's immutable `run.cancelled` receipt,
+/// so a live run carrying it would mint a cancellation that `runs.status`, the
+/// active-run SQL and the lifecycle read all disagree about. Checked once, by
+/// the single lifecycle write path, so no commit kind can bypass it.
+pub(crate) fn validate_cancellation_invariant(record: &AgentTaskRunRecord) -> Result<()> {
+    if record.state == AgentTaskRunState::Cancelled
+        || record.metadata.get("cancellation_provenance").is_none()
+    {
+        return Ok(());
     }
-    let Some(provenance) = receipt
-        .data
-        .get("provenance")
-        .filter(|provenance| provenance.is_object())
-        .cloned()
-    else {
-        return false;
-    };
-    let cancelled_at = provenance["timestamp"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| receipt.occurred_at.clone())
-        .unwrap_or_else(now_timestamp);
-    set_run_state(record, AgentTaskRunState::Cancelled);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Cancelled;
-        }
-    }
-    let metadata = record.ensure_metadata_object();
-    terminalize_running_provider_executions(metadata, &cancelled_at);
-    metadata.insert("cancellation_provenance".to_string(), provenance);
-    metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-    true
+    Err(Error::validation_invalid_argument(
+        "cancellation_provenance",
+        format!(
+            "agent-task run '{}' cannot record cancellation provenance in state {:?}; \
+             provenance is committed only with the transition to Cancelled",
+            record.run_id, record.state
+        ),
+        Some(record.run_id.clone()),
+        None,
+    ))
 }
 
-/// The event ledger can outlive a runner's record projection. Reuse the first
-/// immutable cancellation payload when an operator later terminalizes that run;
-/// writing a different payload under the same event key would roll back the
-/// record mutation with an idempotency collision.
+/// The event ledger can outlive the cancellation it records: a runner's late
+/// acceptance supersedes the synthetic cancellation of an expired Lab handoff
+/// and drops its provenance, but the receipt stays. Reuse that first immutable
+/// cancellation payload when an operator later cancels the run; writing a
+/// different payload under the same event key would roll back the record
+/// mutation with an idempotency collision.
 fn canonical_cancellation_provenance_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -510,8 +499,9 @@ pub(crate) fn cancel_exact_run_in_store(
                 "cancel_reason".to_string(),
                 json!(reason.unwrap_or("cancel requested")),
             );
-            // A prior runner cancellation may already have emitted run.cancelled
-            // while this record was still running. Its keyed event is immutable.
+            // A superseded cancellation (an expired Lab handoff the runner later
+            // accepted) may already have emitted run.cancelled. Its keyed event
+            // is immutable.
             if let Some(provenance) = canonical_provenance.clone() {
                 metadata.insert("cancellation_provenance".to_string(), provenance);
             } else {

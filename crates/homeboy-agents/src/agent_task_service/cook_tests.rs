@@ -15915,12 +15915,21 @@ fn promotion_recovers_from_durable_executor_outcome_when_aggregate_is_missing() 
             .write_record(&record)
             .expect("persist missing aggregate state");
 
-        assert!(super::super::recover_missing_promotion_aggregate(run_id)
-            .expect("repair promotion aggregate before pinned-runtime delegation"));
-        assert!(!super::super::recover_missing_promotion_aggregate(run_id)
-            .expect("aggregate recovery is idempotent"));
+        assert!(
+            lifecycle_store.aggregate_source_exact(run_id).is_err(),
+            "fixture starts without a mirrored aggregate"
+        );
         let (recovered, source_path) =
             super::super::promotion_source(run_id).expect("read reconstructed promotion source");
+        assert!(
+            lifecycle_store.aggregate_source_exact(run_id).is_ok(),
+            "the promotion read persists the reconstructed aggregate"
+        );
+        assert_eq!(
+            super::super::promotion_source(run_id).expect("re-read promotion source"),
+            (recovered.clone(), source_path.clone()),
+            "aggregate recovery is idempotent"
+        );
 
         let aggregate: crate::agent_task_scheduler::AgentTaskAggregate =
             serde_json::from_str(&recovered).expect("decode reconstructed aggregate");

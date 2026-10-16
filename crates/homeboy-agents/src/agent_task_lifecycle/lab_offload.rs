@@ -860,6 +860,10 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+    // A late acceptance supersedes the synthetic expiry cancellation, so the
+    // running record no longer carries its provenance; the retained
+    // `run.cancelled` receipt stays as the first cause a later cancel reuses.
+    metadata.remove("cancellation_provenance");
     // Fenced at the revision the acceptance was validated against: a write
     // committed since (a cancellation request, progress, a competing
     // acceptance) fails this commit instead of being overwritten (#15718).

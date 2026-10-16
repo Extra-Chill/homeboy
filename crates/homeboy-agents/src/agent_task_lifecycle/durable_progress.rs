@@ -199,10 +199,13 @@ pub(crate) fn prepared_progress_events(
             provenance,
         )?);
     }
+    // The receipt is minted only by the commit that cancels the run; the
+    // single write path refuses provenance on any other state (#15718).
     if let Some(provenance) = record
         .metadata
         .get("cancellation_provenance")
         .and_then(Value::as_object)
+        .filter(|_| record.state == AgentTaskRunState::Cancelled)
     {
         events.push(prepare_provenance_event(
             &run,

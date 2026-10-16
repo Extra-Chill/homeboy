@@ -346,3 +346,62 @@ fn a_terminal_record_commit_rebases_over_live_writes_but_yields_to_a_terminal_wi
     assert_eq!(store.read_record(RUN_ID).unwrap(), winner);
     assert_eq!(transition_events(&store).len(), 1);
 }
+
+/// Cancellation is a write invariant (#15718): a record carries
+/// `cancellation_provenance` only in the commit that makes it `Cancelled`.
+///
+/// An annotation used to be able to stamp the provenance on a live run. The
+/// write emitted the `run.cancelled` receipt and the read projection reported
+/// `Cancelled`, while `runs.status` and the active-run SQL kept answering
+/// `running`: reads and admission disagreed about the same run.
+#[test]
+fn a_non_terminal_annotation_cannot_mint_a_cancellation_receipt() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = seeded(&context);
+    let mut annotated = store.read_record(RUN_ID).unwrap();
+    assert_eq!(annotated.state, AgentTaskRunState::Running);
+    let before = annotated.revision;
+    annotated.metadata["cancellation_provenance"] = json!({
+        "actor": "runner",
+        "cause": "runner_job_cancelled",
+        "reason": "runner job was cancelled",
+        "timestamp": "2026-10-20T00:00:00Z",
+        "recovery_action": "inspect retained runner cancellation evidence",
+    });
+
+    let committed = store.commit_record(&mut annotated);
+
+    let read = store.read_record(RUN_ID).unwrap();
+    let row = store
+        .open_observation_readonly()
+        .unwrap()
+        .get_run(RUN_ID)
+        .unwrap()
+        .expect("stored row");
+    assert_eq!(
+        (
+            read.state,
+            row.status.as_str(),
+            &row.metadata_json["agent_task_run"]["state"]
+        ),
+        (AgentTaskRunState::Running, "running", &json!("running")),
+        "the lifecycle read, `runs.status` and the active-run SQL disagree about the run"
+    );
+    let error = committed.expect_err("a live run cannot carry cancellation provenance");
+    assert_eq!(
+        error.details["field"], "cancellation_provenance",
+        "{error:?}"
+    );
+    assert_eq!(read.revision, before, "a refused commit writes nothing");
+    assert!(read.metadata.get("cancellation_provenance").is_none());
+    let run = homeboy_control_plane_contract::RunId::new(RUN_ID).unwrap();
+    assert!(
+        store
+            .open_observation_readonly()
+            .unwrap()
+            .durable_control_plane_event(&run, "run.cancelled")
+            .unwrap()
+            .is_none(),
+        "no cancellation receipt is minted for a live run"
+    );
+}

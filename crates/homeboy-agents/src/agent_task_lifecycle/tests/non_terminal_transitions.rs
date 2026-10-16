@@ -260,3 +260,143 @@ fn annotations_cannot_change_state_or_ownership() {
         Some(AgentTaskLabHandoffState::Pending)
     );
 }
+
+/// The runner may accept a Lab handoff after its acceptance deadline expired
+/// and cancelled the run. Whatever that late acceptance commits, the expiry's
+/// `run.cancelled` receipt is immutable and every view of the run agrees: the
+/// lifecycle read, `runs.status` and the active-run SQL report one state, and
+/// only a `Cancelled` record carries cancellation provenance. A later operator
+/// cancellation reuses the receipt's first cause instead of colliding with it.
+/// Successor of `operator_cancellation_recovers_provenance_missing_from_running_record`,
+/// whose running-with-provenance fixture is now unwritable (#15718).
+#[test]
+fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    planned_proxy(&store);
+    rewrite_record_for_test_in_store(&store, RUN_ID, |record| {
+        if let Some(metadata) = record.metadata.as_object_mut() {
+            metadata.remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+        }
+    })
+    .expect("drop the stub runtime pin");
+    let mut pending = store.read_record(RUN_ID).expect("queued proxy");
+    pending.lab_handoff = Some(crate::agent_task_lifecycle::AgentTaskLabHandoff::pending(
+        RUNNER_ID,
+        "1999-12-31T23:00:00Z".to_string(),
+        "2000-01-01T00:00:00Z".to_string(),
+    ));
+    store
+        .advance_record(
+            &mut pending,
+            crate::agent_task_lifecycle::AgentTaskAdvance::PendLabHandoff,
+        )
+        .expect("publish a handoff whose acceptance deadline has passed");
+    assert!(
+        crate::agent_task_lifecycle::expire_unaccepted_lab_handoff_in_store(&store, RUN_ID)
+            .expect("expire the handoff")
+    );
+    let expired = store.read_record(RUN_ID).expect("expired");
+    assert_eq!(expired.state, AgentTaskRunState::Cancelled);
+    let provenance = expired.metadata["cancellation_provenance"].clone();
+    assert!(provenance.is_object(), "{:?}", expired.metadata);
+    let run = homeboy_control_plane_contract::RunId::new(RUN_ID).unwrap();
+    let receipt = || {
+        store
+            .open_observation_readonly()
+            .unwrap()
+            .durable_control_plane_event(&run, "run.cancelled")
+            .unwrap()
+    };
+    let original = receipt().expect("the expiry cancellation minted a receipt");
+    assert_eq!(original.data["provenance"], provenance);
+
+    let command = command();
+    record_detached_lab_run_in_store(
+        &store,
+        DetachedLabRunRecord {
+            run_id: RUN_ID,
+            runner_id: RUNNER_ID,
+            remote_workspace: "/runner/workspace/repo",
+            runner_job_id: RUNNER_JOB_ID,
+            remote_command: &command,
+        },
+    )
+    .expect("the runner's late acceptance is answered");
+
+    let bound = store
+        .read_record(RUN_ID)
+        .expect("after the late acceptance");
+    let row = store
+        .open_observation_readonly()
+        .unwrap()
+        .get_run(RUN_ID)
+        .unwrap()
+        .expect("stored row");
+    assert_eq!(
+        row.metadata_json["agent_task_run"]["state"],
+        serde_json::json!(bound.state),
+        "the lifecycle read and the active-run SQL agree"
+    );
+    assert_eq!(
+        row.status == "running",
+        !bound.state.is_terminal(),
+        "the lifecycle read and `runs.status` agree"
+    );
+    assert_eq!(
+        bound.metadata.get("cancellation_provenance").is_some(),
+        bound.state == AgentTaskRunState::Cancelled,
+        "only a cancelled record carries cancellation provenance"
+    );
+    assert_eq!(
+        receipt(),
+        Some(original.clone()),
+        "the receipt is immutable"
+    );
+
+    let _provider = RunnerContinuationTestGuard::install(Box::new(RemovedRunner));
+    let cancelled = crate::agent_task_lifecycle::cancel_run_in_store(
+        &store,
+        RUN_ID,
+        Some("operator requested stop"),
+    )
+    .expect("operator cancellation converges");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(
+        cancelled.metadata["cancellation_provenance"], provenance,
+        "the operator cancellation reuses the receipt's first cause"
+    );
+    assert_eq!(receipt(), Some(original), "no second receipt is minted");
+}
+
+/// A runner whose authority was removed has no remote job left to cancel, so
+/// cancellation of its run completes locally.
+struct RemovedRunner;
+
+impl RunnerContinuationProvider for RemovedRunner {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<RunnerJobLogSnapshot> {
+        Err(Error::internal_unexpected("not used by this fixture"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        false
+    }
+
+    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
+        RunnerAuthority::Removed
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected("not used by this fixture"))
+    }
+}
