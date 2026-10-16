@@ -7189,6 +7189,11 @@ fn run_cook_spine(
                             "loaded the terminal persisted no-changes promotion",
                             1,
                         ),
+                        AgentTaskCookLoopStatus::AgentReportedIncomplete => (
+                            "candidate_recoverable",
+                            "loaded the terminal persisted promotion; the agent's review form declares the task incomplete, so it was not published",
+                            1,
+                        ),
                         AgentTaskCookLoopStatus::NoOpGateFailed => (
                             "no_op_gate_failed",
                             "loaded the terminal persisted no-changes gate failure",
@@ -8169,6 +8174,25 @@ fn run_cook_spine(
                         review_form.as_ref(),
                         attempt,
                         attempt_limit,
+                    )),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
+            AgentTaskCookLoopStatus::AgentReportedIncomplete => {
+                let reason = review_form
+                    .as_ref()
+                    .and_then(|form| form.incomplete_reason())
+                    .unwrap_or("no reason recorded")
+                    .to_string();
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "candidate_recoverable",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(format!(
+                        "the agent's review form declares the task incomplete, so the green candidate was kept for recovery and not published: {reason}"
                     )),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),

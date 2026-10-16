@@ -373,6 +373,8 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
         verification: Vec::new(),
         used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
+        completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
+        incomplete_reason: String::new(),
     }
 }
 
@@ -7691,7 +7693,8 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
             "summary",
             "what_changed",
             "compatibility",
-            "used_for"
+            "used_for",
+            "completion"
         ])
     );
     // The contract is data (#15818): the prompt stays the operator's.
