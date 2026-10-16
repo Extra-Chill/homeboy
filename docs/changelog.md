@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.11] - 2026-10-16
+
+### Changed
+- keep terminal workspace authority in the coordination store
+- replace PID-only dispatch and snapshot leases with coordination leases
+
 ## [0.428.10] - 2026-10-16
 
 ### Changed
