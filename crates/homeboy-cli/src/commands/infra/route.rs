@@ -902,13 +902,7 @@ fn admit_unmaterialized_cook(
         .as_ref()
         .map(|value| value.state.as_str())
         .unwrap_or("absent");
-    let state = unmaterialized_admission_state(preflight.lab_readiness.as_ref());
-    let reason = preflight
-        .lab_readiness
-        .as_ref()
-        .and_then(|value| value.reasons.first())
-        .map(String::as_str)
-        .unwrap_or("no eligible Lab runner is currently available");
+    let (state, reason) = unmaterialized_admission_state(preflight.lab_readiness.as_ref());
     let digest_json =
         |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
     let current_notification = homeboy::core::notification_route::current();
@@ -1010,7 +1004,7 @@ fn admit_unmaterialized_cook(
             &cook_id,
             binding.expect("new admission binding"),
             state,
-            reason,
+            &reason,
         )?;
         let _ = record;
         agent_task_lifecycle::recover_unmaterialized_cook_input_publication(&cook_id)?
@@ -1741,6 +1735,11 @@ const TERMINAL_COOK_WORKER_POLL: Duration = Duration::from_secs(1);
 /// recoverable work; fail the job rather than respawn forever.
 const TERMINAL_COOK_MAX_INTERRUPTED_WORKERS: u32 = 3;
 
+/// Submission key and active fence for one continuation job. Each retry
+/// generation is a fresh durable job, fenced against other generations of the
+/// same attempt. The fence is per attempt: attempt N+1's continuation must
+/// never wait on attempt N's still-running job, and each attempt's claim on its
+/// own lifecycle row already serializes consumers of that attempt.
 fn terminal_cook_job_idempotency_keys(
     cook_id: &str,
     run_id: &str,
@@ -1748,7 +1747,7 @@ fn terminal_cook_job_idempotency_keys(
 ) -> (String, String) {
     (
         format!("terminal-cook:{cook_id}:{run_id}:generation-{generation}"),
-        format!("terminal-cook:{cook_id}"),
+        format!("terminal-cook:{cook_id}:{run_id}"),
     )
 }
 
@@ -2452,15 +2451,34 @@ fn execution_step_run_arguments(
     Ok((cli, argv))
 }
 
+/// Admission state and the reason it names for a Cook admitted before it
+/// materializes. A ready runner, or a healthy one at capacity, is waiting on
+/// scheduling or a slot, not unavailable: the durable admission is `queued`
+/// and replays through its execution step.
 fn unmaterialized_admission_state(
     readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
-) -> &'static str {
+) -> (&'static str, String) {
+    let runner = readiness
+        .and_then(|value| value.selected_runner_id.as_deref())
+        .unwrap_or("the selected Lab runner");
+    let reported = |fallback: String| {
+        readiness
+            .and_then(|value| value.reasons.first())
+            .cloned()
+            .unwrap_or(fallback)
+    };
+    let unavailable = || "no eligible Lab runner is currently available".to_string();
     match readiness.map(|value| value.state.as_str()) {
-        Some("stale") => "blocked_runner_stale",
-        // A healthy runner at capacity is waiting for a slot, not unavailable:
-        // the durable admission replays once the runner reports capacity.
-        Some("capacity_blocked") => "queued",
-        _ => "blocked_runner_unavailable",
+        Some("connected_ready") => (
+            "queued",
+            format!("admitted to {runner}; waiting for execution scheduling"),
+        ),
+        Some("capacity_blocked") => (
+            "queued",
+            reported(format!("{runner} is at capacity; waiting for a free slot")),
+        ),
+        Some("stale") => ("blocked_runner_stale", reported(unavailable())),
+        _ => ("blocked_runner_unavailable", reported(unavailable())),
     }
 }
 

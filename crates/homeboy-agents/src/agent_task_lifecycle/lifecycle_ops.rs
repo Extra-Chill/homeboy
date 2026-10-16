@@ -1552,6 +1552,13 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
         }
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"]["materializing_attempt_run_id"] = json!(attempt_run_id);
+        if let Some(admission) = metadata.get_mut("unmaterialized_cook_admission") {
+            advance_unmaterialized_admission(
+                admission,
+                "materializing",
+                format!("materializing attempt {attempt_run_id}"),
+            );
+        }
         record.updated_at = Some(now_timestamp());
         true
     })?;
@@ -1756,12 +1763,35 @@ fn complete_detached_cook_handoff_parent_in_store(
                 .remove("materializing_attempt_run_id");
             let mut metadata = serde_json::Map::new();
             metadata.insert("detached_cook_handoff".to_string(), handoff);
+            if let Some(mut admission) = record
+                .metadata
+                .get("unmaterialized_cook_admission")
+                .filter(|admission| admission.is_object())
+                .cloned()
+            {
+                advance_unmaterialized_admission(
+                    &mut admission,
+                    "materialized",
+                    format!("materialized as attempt {attempt_run_id}"),
+                );
+                metadata.insert("unmaterialized_cook_admission".to_string(), admission);
+            }
             Some(AgentTaskTransition::Terminate {
                 outcome: AgentTaskTerminalOutcome::Succeeded,
                 metadata,
             })
         })?;
     Ok(())
+}
+
+/// Advance an unmaterialized Cook admission once its first attempt takes
+/// custody, so status never reports the pre-materialization blocker on a Cook
+/// that is materializing or running. Records without an admission are untouched.
+fn advance_unmaterialized_admission(admission: &mut Value, state: &str, reason: String) {
+    if let Some(admission) = admission.as_object_mut() {
+        admission.insert("state".to_string(), json!(state));
+        admission.insert("reason".to_string(), json!(reason));
+    }
 }
 
 /// A detached Cook parent is admission state, never an executable queued plan.

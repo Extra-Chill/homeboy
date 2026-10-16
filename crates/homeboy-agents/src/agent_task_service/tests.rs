@@ -435,25 +435,28 @@ fn execution_step_drain_lost_ack_reuses_the_same_durable_step_job() {
             })
         };
         let first = Mutex::new(None);
-        assert!(
-            homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
-                *first.lock().unwrap() = Some(submit(&intent.payload)?);
-                Err(homeboy_core::Error::internal_unexpected("lost source ACK"))
-            })
-            .is_err()
-        );
-        let receipt = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+        let lost_ack = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+            *first.lock().unwrap() = Some(submit(&intent.payload)?);
+            Err(homeboy_core::Error::internal_unexpected("lost source ACK"))
+        })
+        .unwrap();
+        assert_eq!(lost_ack["deferred"][0]["last_error"], "lost source ACK");
+        homeboy_core::observation::ObservationStore::open_initialized()
+            .unwrap()
+            .expire_work_intent_backoff()
+            .unwrap();
+        let replay = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
             submit(&intent.payload)
         })
         .unwrap();
-        assert_eq!(Some(receipt.clone()), *first.lock().unwrap());
+        assert_eq!(Some(replay["scheduled"][0].clone()), *first.lock().unwrap());
         assert_eq!(jobs.list().len(), original_jobs + 1);
         assert_eq!(
             homeboy_core::daemon::orchestration::drain_work_intents_with(|_| panic!(
                 "ACKed intent must not submit again"
             ))
             .unwrap()["scheduled"],
-            false
+            serde_json::json!([])
         );
     });
 }
@@ -761,6 +764,47 @@ fn execution_step_delivery_leaves_controller_staged_lab_attempt_to_its_controlle
         let after = store.read_record(child).unwrap();
         assert_eq!(after.revision, before.revision);
         assert!(!after.state.is_terminal(), "{:?}", after.state);
+    });
+}
+
+#[test]
+fn unmaterialized_admission_advances_as_its_first_attempt_materializes() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let parent = "advancing-admission";
+        let child = "advancing-admission-attempt-1";
+        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            parent,
+            serde_json::json!({}),
+            "blocked_runner_unavailable",
+            "no eligible Lab runner is currently available",
+        )
+        .unwrap();
+        agent_task_lifecycle::reserve_detached_cook_handoff_materialization_in_store(
+            &store, parent, child,
+        )
+        .unwrap();
+        let admission =
+            &store.read_record(parent).unwrap().metadata["unmaterialized_cook_admission"];
+        assert_eq!(admission["state"], "materializing");
+        assert_eq!(
+            admission["reason"],
+            format!("materializing attempt {child}")
+        );
+
+        agent_task_lifecycle::submit_plan_in_store(&store, &test_plan(), Some(child)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, parent, 1, child).unwrap();
+        let parent_record = store.read_record(parent).unwrap();
+        let admission = &parent_record.metadata["unmaterialized_cook_admission"];
+        assert_eq!(admission["state"], "materialized");
+        assert_eq!(
+            admission["reason"],
+            format!("materialized as attempt {child}")
+        );
+        assert_eq!(
+            parent_record.metadata["detached_cook_handoff"]["admission_state"],
+            "materialized"
+        );
     });
 }
 
