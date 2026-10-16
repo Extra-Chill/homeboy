@@ -21,7 +21,7 @@ const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
 
 pub use crate::workspace_claim::WorkspaceIdentity;
 pub use reaping::{
-    read_task_worktree_reaping_audit_in_root, reaping_audit_path,
+    read_task_worktree_reaping_audit_in_root, TASK_WORKTREE_REAPING_AUDIT_NAMESPACE,
     TASK_WORKTREE_REAPING_AUDIT_SCHEMA,
 };
 pub use store_ops::inventory_apply_would_reconcile;
@@ -785,7 +785,7 @@ pub fn reclaim(options: WorktreeReclaimOptions) -> Result<WorktreeReclaimOutput>
     reclaim_with_store(options, &metadata_dir()?)
 }
 
-/// Rate the reaping audit trail under the current test home.
+/// Read the reaping audit trail under the current Homeboy data root.
 pub fn read_task_worktree_reaping_audit() -> Result<Vec<TaskWorktreeReapingAudit>> {
     read_task_worktree_reaping_audit_in_root(&paths::homeboy_data()?)
 }

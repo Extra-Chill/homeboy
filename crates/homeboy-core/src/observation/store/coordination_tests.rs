@@ -499,4 +499,20 @@ fn audit_appends_and_reads_a_bounded_newest_first_window_per_subject() {
             .len(),
         5
     );
+
+    let all = second
+        .coordination_audit_in_namespace(NAMESPACE, usize::MAX)
+        .unwrap();
+    assert_eq!(all.len(), 6);
+    assert_eq!(all[0].subject_key, "other");
+    assert!(all
+        .windows(2)
+        .all(|pair| pair[0].sequence > pair[1].sequence));
+    assert_eq!(
+        second
+            .coordination_audit_in_namespace(NAMESPACE, 2)
+            .unwrap()
+            .len(),
+        2
+    );
 }

@@ -9,7 +9,7 @@
 //! released durably and reported as part of the reclaim output.
 //!
 //! Claim lifecycle precedence: live owner lease wins over any reaper, and a
-//! reaping audit line is never written for a plan that removed nothing.
+//! reaping audit row is never written for a plan that removed nothing.
 
 use std::path::Path;
 
@@ -20,7 +20,7 @@ use super::types::{
     WorktreeReclaimOptions, WorktreeReclaimOutput, WorktreeReclaimRemoved, WorktreeReclaimSkipped,
     WorktreeRemoveOptions, WorktreeStaleLeaseRelease,
 };
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Classify one active record against the reclaim gates and claim store.
 fn reclaim_candidate(
@@ -114,15 +114,6 @@ pub(super) fn reclaim_with_store(
     let mut skipped = Vec::new();
     let mut removed = Vec::new();
     let mut released_stale_leases = Vec::new();
-    let audit_path = reaping::reaping_audit_path(store_dir.parent().ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "task worktree store `{}` has no data root",
-            store_dir.display()
-        ))
-    })?)
-    .display()
-    .to_string();
-
     let records: Vec<TaskWorktreeRecord> = super::list_with_store(store_dir)?
         .worktrees
         .into_iter()
@@ -209,7 +200,7 @@ pub(super) fn reclaim_with_store(
         removed,
         skipped,
         released_stale_leases,
-        audit_path,
+        audit_namespace: reaping::TASK_WORKTREE_REAPING_AUDIT_NAMESPACE.to_string(),
     })
 }
 
