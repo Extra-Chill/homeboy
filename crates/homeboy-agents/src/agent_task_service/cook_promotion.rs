@@ -3694,6 +3694,14 @@ fn cook_finalization_options_with_stores_and_review_form(
     } else {
         None
     };
+    let pr_title = form_title
+        .clone()
+        .unwrap_or_else(|| options.finalization.title.clone());
+    let commit_message = cook_commit_message(
+        &options.finalization.commit_message,
+        &pr_title,
+        selected_component_id,
+    );
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         component_id: selected_component_id.map(str::to_string),
@@ -3701,11 +3709,9 @@ fn cook_finalization_options_with_stores_and_review_form(
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
         head: options.finalization.head.clone(),
-        title: form_title
-            .clone()
-            .unwrap_or_else(|| options.finalization.title.clone()),
+        title: pr_title,
         cook_form_title: form_title,
-        commit_message: options.finalization.commit_message.clone(),
+        commit_message,
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
         accept_inherited_failures: options.gates.accept_inherited_failures,
@@ -3746,6 +3752,29 @@ fn cook_finalization_options_with_stores_and_review_form(
         draft_pr: options.finalization.draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
+}
+
+/// The subject a Cook candidate is committed under.
+///
+/// An explicit `--commit-message` always wins. Otherwise the commit carries the
+/// PR title, which is the validated agent-authored title unless the operator
+/// supplied one: a Cook PR has one commit, and GitHub squash-merges a
+/// single-commit PR under that commit's subject, so a generic message here
+/// becomes the permanent history entry (#16052). The generic subject remains
+/// only for a Cook with no title at all.
+pub(crate) fn cook_commit_message(
+    explicit: &str,
+    pr_title: &str,
+    component_id: Option<&str>,
+) -> String {
+    if !explicit.trim().is_empty() {
+        return explicit.to_string();
+    }
+    let title = pr_title.trim();
+    if !title.is_empty() {
+        return title.to_string();
+    }
+    format!("fix: cook {}", component_id.unwrap_or("agent task"))
 }
 
 fn terminal_form_title(
@@ -7409,7 +7438,11 @@ fn dirty_candidate_adoption_recovery_actions(
                 "git -C {} add -A && git -C {} commit -m {}",
                 quote_arg(workspace),
                 quote_arg(workspace),
-                quote_arg(&options.finalization.commit_message),
+                quote_arg(&cook_commit_message(
+                    &options.finalization.commit_message,
+                    &options.finalization.title,
+                    None,
+                )),
             ),
         },
         super::AgentTaskCookRecoveryAction {

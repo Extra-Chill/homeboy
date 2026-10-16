@@ -7946,10 +7946,10 @@ fn run_preflight_cook_execution(
     }
     // Empty recipe title delegates to the validated agent form after candidate gates.
     let title = args.title.clone().unwrap_or_default();
-    let commit_message = args
-        .commit_message
-        .clone()
-        .unwrap_or_else(|| default_loop_commit_message(&args));
+    // Empty commit message likewise delegates to the validated PR title at
+    // finalization: a Cook PR has one commit, and GitHub squash-merges a
+    // single-commit PR under that commit's subject (#16052).
+    let commit_message = args.commit_message.clone().unwrap_or_default();
     let selected_identity = initial_plan.tasks.first().map(|task| {
         (
             task.executor.backend.clone(),
@@ -10925,11 +10925,6 @@ fn git_head_sha(path: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
-    let target = args.dispatch.repo.as_deref().unwrap_or("agent task");
-    format!("fix: cook {target}")
 }
 
 pub(super) fn run_plan(args: RunPlanArgs) -> CmdResult<Value> {
