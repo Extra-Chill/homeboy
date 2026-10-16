@@ -452,6 +452,23 @@ fn execute_with_context_and_resources(
             .variables
             .insert("PATH".to_string(), lab_gate_path(context.runtime_id()));
     }
+    if !environment
+        .variables
+        .contains_key("PLAYWRIGHT_BROWSERS_PATH")
+        && !environment
+            .preserve
+            .contains_key("PLAYWRIGHT_BROWSERS_PATH")
+    {
+        let mut values = BTreeMap::new();
+        let mut report = AgentTaskGateEnvironment::default();
+        preserve_playwright_cache_mapping(
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            &mut values,
+            &mut report,
+        );
+        environment.variables.extend(values);
+        environment.preserve.extend(report.preserved);
+    }
     if let Some(resources) = resources {
         if resources.len() != environment.extension_inputs.len()
             || resources.iter().zip(&environment.extension_inputs).any(
@@ -764,6 +781,38 @@ mod tests {
                 Path::new(gate_home),
                 home.path(),
                 "gate HOME stays isolated"
+            );
+        });
+    }
+
+    #[test]
+    fn lab_gate_preserves_runner_playwright_cache_in_replace_environment() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let cache = home.path().join(".cache/ms-playwright");
+            fs::create_dir_all(&cache).unwrap();
+            let _cache_env =
+                homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH");
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let mut request = gate_printing_path_and_home(temp.path());
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\"".to_string(),
+            ];
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
+
+            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            assert_eq!(receipt.report.stdout, cache.display().to_string());
+            assert_eq!(
+                receipt
+                    .report
+                    .environment
+                    .preserved
+                    .get("PLAYWRIGHT_BROWSERS_PATH"),
+                Some(&"HOME/.cache/ms-playwright".to_string())
             );
         });
     }

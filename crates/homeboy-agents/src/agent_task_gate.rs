@@ -3586,6 +3586,16 @@ fn selected_gate_environment(
     })
 }
 
+pub(super) fn playwright_cache_path(host_home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from) {
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    let cache = host_home?.join(PLAYWRIGHT_CACHE_SUBPATH);
+    cache.is_dir().then_some(cache)
+}
+
 fn preserve_playwright_cache(
     policy: &AgentTaskGateEnvironmentPolicy,
     host_home: Option<&Path>,
@@ -3593,21 +3603,31 @@ fn preserve_playwright_cache(
     report: &mut AgentTaskGateEnvironment,
 ) {
     const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
-    if policy.mode == AgentTaskGateEnvironmentMode::Replace
-        || (!policy.isolate_home && !policy.isolate_xdg)
+    if (!policy.isolate_home && !policy.isolate_xdg)
         || policy.variables.contains_key(NAME)
         || policy.preserve.contains_key(NAME)
     {
         return;
     }
-    let Some(cache) = host_home.map(|home| home.join(PLAYWRIGHT_CACHE_SUBPATH)) else {
-        return;
-    };
-    if cache.is_dir() {
+    preserve_playwright_cache_mapping(host_home, values, report);
+}
+
+pub(super) fn preserve_playwright_cache_mapping(
+    host_home: Option<&Path>,
+    values: &mut BTreeMap<String, String>,
+    report: &mut AgentTaskGateEnvironment,
+) {
+    const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
+    if let Some(cache) = playwright_cache_path(host_home) {
         values.insert(NAME.to_string(), cache.display().to_string());
-        report
-            .preserved
-            .insert(NAME.to_string(), format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"));
+        report.preserved.insert(
+            NAME.to_string(),
+            if host_home.is_some_and(|home| cache.starts_with(home)) {
+                format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}")
+            } else {
+                cache.display().to_string()
+            },
+        );
     }
 }
 
@@ -8293,7 +8313,11 @@ mod tests {
                     mode: AgentTaskGateEnvironmentMode::Replace,
                     ..AgentTaskGateEnvironmentPolicy::default()
                 },
-                None,
+                Some(format!(
+                    "{}/{}",
+                    home.path().display(),
+                    PLAYWRIGHT_CACHE_SUBPATH
+                )),
             ),
             (
                 AgentTaskGateEnvironmentPolicy {
@@ -8311,7 +8335,16 @@ mod tests {
             }
             preserve_playwright_cache(&policy, Some(home.path()), &mut values, &mut report);
             assert_eq!(values.get("PLAYWRIGHT_BROWSERS_PATH"), existing.as_ref());
-            assert!(report.preserved.is_empty());
+            if existing.is_some() {
+                assert!(report.preserved.is_empty());
+            } else if policy.mode == AgentTaskGateEnvironmentMode::Replace {
+                assert_eq!(
+                    report.preserved.get("PLAYWRIGHT_BROWSERS_PATH"),
+                    Some(&format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"))
+                );
+            } else {
+                assert!(report.preserved.is_empty());
+            }
         }
     }
 
