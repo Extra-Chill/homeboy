@@ -259,8 +259,7 @@ This is the shape `homeboy --placement lab agent-task fanout cook-batch --repo h
       "join": { "min_succeeded": 2 },
       "cook": { "repo": "homeboy-cook-scratch", "task-url": "{{item.issue_url}}", "prompt": "{{item.prompt}}",
                 "head": "{{item.branch}}", "to-worktree": "{{item.worktree}}",
-                "base": "{{steps.prepare.output/base}}", "title": "{{item.title}}",
-                "commit-message": "{{item.commit_message}}",
+                "base": "{{steps.prepare.output/base}}",
                 "verify": ["test -f DONE"], "placement": "lab" } }
   ]
 }
