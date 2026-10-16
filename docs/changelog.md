@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.15] - 2026-10-16
+
+### Changed
+- keep deploy recovery checkpoints and admission in the coordination store
+
 ## [0.428.14] - 2026-10-16
 
 ### Fixed
