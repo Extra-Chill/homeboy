@@ -3366,9 +3366,8 @@ pub fn release_cook_terminal_notification_claim_in_store(
 // callers were the `agent_task_notify` entry points, which now record the
 // outcome in the store they claimed against (#7505).
 
-/// Store the latest compact notification delivery outcome beside the injected
-/// store's own Cook index. The marker is a file next to `index.json`, not an
-/// observation row, so it follows this store's data root rather than the
+/// Store the latest compact notification delivery outcome in the injected
+/// store's own Cook directory. The marker is a file, not an observation row, so it follows this store's data root rather than the
 /// ambient one.
 pub fn record_cook_terminal_notification_outcome_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -7999,8 +7998,8 @@ pub fn reconcile_scope_run_ids_in_store(
 /// This maps the alias through the durable Cook index and returns the id
 /// unchanged when it is not an alias.
 ///
-/// This is a **pure read**: `store::read_cook_index` is a single
-/// `fs::read_to_string` of `agent-task-cooks/<id>/index.json` and writes
+/// This is a **pure read**: `store::read_cook_index` resolves the Cook alias
+/// through the read-only `control_plane_resources` projection and writes
 /// nothing. Read models that must not mutate persisted state (`activity`,
 /// #10308) may use it; reconciliation may not.
 pub(crate) fn resolve_run_id(run_id: &str) -> Result<String> {

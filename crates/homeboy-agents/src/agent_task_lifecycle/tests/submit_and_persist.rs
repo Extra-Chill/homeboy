@@ -1571,13 +1571,13 @@ fn cook_write_siblings_persist_into_the_injected_store_and_not_a_second_root() {
             .expect("submit the same run identity into both roots");
     }
 
-    // The terminal notification outcome is a file beside the Cook index rather
+    // The terminal notification outcome is a file in the Cook directory rather
     // than an observation row, so it is checked at the path each store owns.
     let notification_outcome_path =
         |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore| {
             lifecycle_store
-                .cook_index_path(cook_id)
-                .with_file_name("notification-outcome.json")
+                .cook_dir(cook_id)
+                .join("notification-outcome.json")
         };
 
     persist_controller_plan_in_store(&seeded, plan_only_run_id, &plan)
@@ -1754,14 +1754,14 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     let notification_claim_path =
         |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore| {
             lifecycle_store
-                .cook_index_path(notification_cook_id)
-                .with_file_name("notification-claim.json")
+                .cook_dir(notification_cook_id)
+                .join("notification-claim.json")
         };
     let notification_path =
         |lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore| {
             lifecycle_store
-                .cook_index_path(notification_cook_id)
-                .with_file_name("notification.json")
+                .cook_dir(notification_cook_id)
+                .join("notification.json")
         };
 
     // Expire the detached parent first so it is terminal, and therefore no
@@ -1892,9 +1892,7 @@ fn claim_family_siblings_coordinate_only_inside_the_injected_store() {
     // A blank Cook id must not have minted a durable Cook directory beside the
     // one this test named.
     let cook_root = seeded
-        .cook_index_path(notification_cook_id)
-        .parent()
-        .expect("a Cook index lives in its own directory")
+        .cook_dir(notification_cook_id)
         .parent()
         .expect("Cook directories share one root")
         .to_path_buf();

@@ -1535,14 +1535,14 @@ mod tests {
             run_id
         );
         assert!(left_lifecycle_store
-            .cook_index_path(cook_id)
+            .cook_dir(cook_id)
             .starts_with(left_context.data_dir()));
         assert!(right_lifecycle_store
-            .cook_index_path(cook_id)
+            .cook_dir(cook_id)
             .starts_with(right_context.data_dir()));
         assert_ne!(
-            left_lifecycle_store.cook_index_path(cook_id),
-            right_lifecycle_store.cook_index_path(cook_id)
+            left_lifecycle_store.cook_dir(cook_id),
+            right_lifecycle_store.cook_dir(cook_id)
         );
         assert_eq!(
             left_recipe_store.load_recipe(cook_id).unwrap().attempts[0]
@@ -1698,7 +1698,7 @@ mod tests {
             .run_dir(run_id)
             .starts_with(lifecycle_context.data_dir()));
         assert!(lifecycle_store
-            .cook_index_path(cook_id)
+            .cook_dir(cook_id)
             .starts_with(lifecycle_context.data_dir()));
         assert!(recipe_store.recipe_exists(cook_id));
 

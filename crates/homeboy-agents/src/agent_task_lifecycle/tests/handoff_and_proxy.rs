@@ -2647,13 +2647,11 @@ fn cook_index_keeps_repeated_attempts_unique_with_stable_latest_alias() {
     assert!(path.display().to_string().contains(&second_run_id));
 }
 
-/// (#14579). SQLite owns the Cook index; the file beside it is a derived
-/// projection this module writes best effort and deliberately exercises
-/// failing. Attempt validation therefore has to read the canonical projection:
-/// trusting the file skipped validation entirely whenever that write was lost,
-/// which let one run claim two different attempt numbers.
+/// (#14579). SQLite owns the Cook index and there is no file beside it.
+/// Attempt validation reads the canonical projection, so one run can never
+/// claim two different attempt numbers.
 #[test]
-fn cook_attempt_validation_survives_a_missing_derived_index_file() {
+fn cook_attempt_validation_reads_the_canonical_projection() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -2669,10 +2667,13 @@ fn cook_attempt_validation_survives_a_missing_derived_index_file() {
         .expect("attempt aggregate recorded");
     record_cook_attempt_in_store(&lifecycle_store, cook_id, 1, &run_id).expect("attempt indexed");
 
-    // Reproduce the state the projection-write failure hook exists to create.
-    let derived = lifecycle_store.cook_index_path(cook_id);
-    assert!(derived.exists(), "the derived projection is written first");
-    std::fs::remove_file(&derived).expect("drop the derived Cook index projection");
+    assert!(
+        !lifecycle_store
+            .cook_dir(cook_id)
+            .join("index.json")
+            .exists(),
+        "the Cook index is never materialized as a file"
+    );
 
     let error = record_cook_attempt_in_store(&lifecycle_store, cook_id, 2, &run_id)
         .expect_err("one run cannot also claim a second attempt number");

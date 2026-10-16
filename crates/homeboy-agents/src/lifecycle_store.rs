@@ -89,12 +89,15 @@ impl AgentTaskLifecycleStore {
         self.run_dir(run_id).join("lab-handoff.lock")
     }
 
-    pub fn cook_index_path(&self, cook_id: &str) -> PathBuf {
+    /// The Cook's blob directory (recipe, input, notification markers).
+    ///
+    /// The Cook index itself is not a file: it lives only in the canonical
+    /// `control_plane_resources` projection owned by the Cook alias.
+    pub fn cook_dir(&self, cook_id: &str) -> PathBuf {
         self.roots
             .data()
             .join("agent-task-cooks")
             .join(sanitize_run_id(cook_id))
-            .join("index.json")
     }
 
     /// The observation database below these roots.
@@ -782,14 +785,14 @@ impl AgentTaskLifecycleStore {
     }
 
     /// Persist the latest bounded, secret-safe terminal notification outcome
-    /// beside this store's own Cook index rather than the ambient one.
+    /// in this store's own Cook directory rather than the ambient one.
     pub fn write_cook_notification_outcome(&self, cook_id: &str, outcome: &Value) -> Result<()> {
         write_cook_notification_outcome_in_store(self, cook_id, outcome)
     }
 
     /// Claim the one terminal notification this store's Cook may deliver.
     ///
-    /// The `O_EXCL` marker is created beside this store's own Cook index, so
+    /// The `O_EXCL` marker is created in this store's own Cook directory, so
     /// two stores hold two independent claims rather than contending for the
     /// ambient one.
     pub fn claim_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<bool> {
@@ -865,7 +868,7 @@ impl AgentTaskLifecycleStore {
         )
     }
 
-    /// Commit a confirmed terminal delivery beside this store's own Cook index.
+    /// Commit a confirmed terminal delivery in this store's own Cook directory.
     pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
         confirm_cook_notification_in_store(self, cook_id, marker)
     }
@@ -1917,9 +1920,6 @@ thread_local! {
     static FAIL_NEXT_RECORD_WRITE: Cell<bool> = const { Cell::new(false) };
     /// One-shot post-commit failure owned by the test thread that armed it.
     static INTERRUPT_AFTER_TERMINAL_COMMIT: Cell<bool> = const { Cell::new(false) };
-    /// Fail only the derived Cook-index materialization. Its SQLite projection
-    /// is already committed when this hook runs.
-    static FAIL_NEXT_COOK_INDEX_PROJECTION_WRITE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// A crashed notifier cannot release its provisional claim. A bounded lease
@@ -2113,11 +2113,6 @@ pub(super) fn fail_next_record_write_for_test() {
 #[cfg(test)]
 pub(super) fn interrupt_after_terminal_commit_for_test() {
     INTERRUPT_AFTER_TERMINAL_COMMIT.set(true);
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(super) fn fail_next_cook_index_projection_write_for_test() {
-    FAIL_NEXT_COOK_INDEX_PROJECTION_WRITE.set(true);
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2778,8 +2773,8 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
     Ok(index)
 }
 
-/// Commit one complete Cook index: its canonical SQLite projection, the alias
-/// it owns, and the derived compatibility file.
+/// Commit one complete Cook index: its canonical SQLite projection and the
+/// alias it owns. There is no filesystem copy.
 ///
 /// Callers hand over the whole index rather than a set of attempt fields, so a
 /// mutation to any other field — a cancellation fence above all — is persisted
@@ -2789,7 +2784,6 @@ pub(super) fn persist_cook_index_in_store(
     index: &AgentTaskCookIndex,
 ) -> Result<()> {
     let cook_id = sanitize_run_id(&index.cook_id);
-    let path = store.cook_index_path(&cook_id);
     // Publishing an alias is an index operation, not a record read: a root may
     // legitimately index an attempt whose lifecycle record it does not hold.
     let latest_projection = match store.read_record(&index.latest_run_id) {
@@ -2831,10 +2825,7 @@ pub(super) fn persist_cook_index_in_store(
         )?);
     }
     projections.push(latest_projection);
-    // SQLite is canonical for action resolution. The filesystem index is a
-    // derived compatibility projection written only after this commit.
-    observations.replace_control_plane_resource_projections(&projections)?;
-    write_cook_index_projection(&path, index)
+    observations.replace_control_plane_resource_projections(&projections)
 }
 
 #[cfg(test)]
@@ -2861,8 +2852,7 @@ pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()
                 "source": "agent_task_lifecycle_test_fixture",
                 "cook_index": index,
             }),
-        })?;
-    write_json(&cook_index_path(&cook_id)?, index)
+        })
 }
 
 pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
@@ -2875,9 +2865,6 @@ pub(super) fn read_cook_index_in_store(
 ) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     if let Some(index) = projected_cook_index_in_store(store, &cook_id)? {
-        // The file is a derived compatibility projection. A failed retry must
-        // not turn an otherwise authoritative SQLite read into an outage.
-        let _ = write_cook_index_projection(&store.cook_index_path(&cook_id), &index);
         return Ok(index);
     }
     Err(Error::validation_invalid_argument(
@@ -2925,18 +2912,7 @@ fn projected_cook_index_in_store(
     Ok(Some(index))
 }
 
-fn write_cook_index_projection(path: &PathBuf, index: &AgentTaskCookIndex) -> Result<()> {
-    #[cfg(any(test, feature = "test-support"))]
-    if FAIL_NEXT_COOK_INDEX_PROJECTION_WRITE.replace(false) {
-        return Err(Error::internal_io(
-            "injected Cook-index projection persistence failure",
-            Some(path.display().to_string()),
-        ));
-    }
-    write_json(path, index)
-}
-
-/// Claim within one explicitly rooted store. `cook_index_path` as a free
+/// Claim within one explicitly rooted store. `cook_dir` as a free
 /// function is `default_store()?`, so the store's own method is used here: the
 /// claim marker is a bare filesystem create with no record read in front of it,
 /// and an ambient reach would land the marker in another home without failing.
@@ -2962,8 +2938,8 @@ fn claim_cook_notification_event_in_store(
     marker: &Value,
 ) -> Result<bool> {
     let delivered_path = store
-        .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name(format!("{event}.json"));
+        .cook_dir(&sanitize_run_id(cook_id))
+        .join(format!("{event}.json"));
     if delivered_path.exists() {
         return Ok(false);
     }
@@ -3033,8 +3009,8 @@ fn confirm_cook_notification_event_in_store(
     marker: &Value,
 ) -> Result<()> {
     let delivered_path = store
-        .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name(format!("{event}.json"));
+        .cook_dir(&sanitize_run_id(cook_id))
+        .join(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
 }
 
@@ -3059,8 +3035,8 @@ fn release_cook_notification_event_claim_in_store(
     event: &str,
 ) -> Result<()> {
     let path = store
-        .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name(format!("{event}-claim.json"));
+        .cook_dir(&sanitize_run_id(cook_id))
+        .join(format!("{event}-claim.json"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -3077,14 +3053,13 @@ pub(super) fn write_cook_notification_outcome_in_store(
     outcome: &Value,
 ) -> Result<()> {
     let path = store
-        .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification-outcome.json");
+        .cook_dir(&sanitize_run_id(cook_id))
+        .join("notification-outcome.json");
     write_private_json(&path, outcome)
 }
 
 pub(super) fn read_cook_notification_outcome(cook_id: &str) -> Result<Option<Value>> {
-    let path =
-        cook_index_path(&sanitize_run_id(cook_id))?.with_file_name("notification-outcome.json");
+    let path = cook_dir(&sanitize_run_id(cook_id))?.join("notification-outcome.json");
     if !path.exists() {
         return Ok(None);
     }
@@ -3111,10 +3086,7 @@ pub(super) fn validate_cook_index_attempt_in_store(
 ) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    // SQLite owns the Cook index. The filesystem copy is a derived projection
-    // this module writes best effort and deliberately exercises failing, so
-    // reading it here would skip validation whenever that write was lost and
-    // reject a valid attempt whenever it went stale.
+    // SQLite owns the Cook index; there is no filesystem copy.
     let Some(index) = projected_cook_index_in_store(store, &cook_id)? else {
         return Ok(());
     };
@@ -3525,6 +3497,6 @@ pub(super) fn run_dir(run_id: &str) -> Result<PathBuf> {
     Ok(default_store()?.run_dir(run_id))
 }
 
-fn cook_index_path(cook_id: &str) -> Result<PathBuf> {
-    Ok(default_store()?.cook_index_path(cook_id))
+fn cook_dir(cook_id: &str) -> Result<PathBuf> {
+    Ok(default_store()?.cook_dir(cook_id))
 }

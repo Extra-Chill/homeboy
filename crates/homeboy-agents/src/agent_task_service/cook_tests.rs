@@ -3482,7 +3482,7 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
         .run_dir(run_id)
         .starts_with(lifecycle_context.data_dir()));
     assert!(lifecycle_store
-        .cook_index_path(cook_id)
+        .cook_dir(cook_id)
         .starts_with(lifecycle_context.data_dir()));
 
     // The negatives: neither root holds the other's durable state, so the
@@ -3953,10 +3953,7 @@ fn candidate_adoption_lifecycle_and_promotion_evidence_do_not_alias_across_expli
     }
 
     assert_ne!(left_store.run_dir(run_id), right_store.run_dir(run_id));
-    assert_ne!(
-        left_store.cook_index_path(cook_id),
-        right_store.cook_index_path(cook_id)
-    );
+    assert_ne!(left_store.cook_dir(cook_id), right_store.cook_dir(cook_id));
 }
 
 #[test]
@@ -15885,19 +15882,6 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
             ),
             Some(second_run_id.to_string()),
             "continuation must keep the selected substantive attempt, not the latest alias"
-        );
-        std::fs::remove_file(
-            homeboy_core::paths::homeboy_data()
-                .unwrap()
-                .join("agent-task-cooks")
-                .join(cook_id)
-                .join("index.json"),
-        )
-        .expect("remove legacy-missing Cook index fixture");
-        assert_eq!(
-            super::super::resolve_cook_continuation_run_id(cook_id)
-                .expect("recipe attempts preserve chronological continuation without an index"),
-            third_run_id
         );
     });
 }

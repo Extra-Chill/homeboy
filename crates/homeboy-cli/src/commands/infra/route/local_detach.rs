@@ -1537,36 +1537,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).expect("read output"), stdout);
     }
 
-    /// A corrupt, unparseable on-disk index for an unrelated Cook must not
-    /// block admission of a new one: the index is a derived projection and
-    /// SQLite is the lifecycle authority (#14962).
-    #[test]
-    fn detached_cook_admission_survives_a_corrupt_historical_cook_index() {
-        crate::test_support::with_isolated_home(|_| {
-            let store = test_lifecycle_store();
-            let corrupt_index_path = store.cook_index_path("unrelated-historical-cook");
-            std::fs::create_dir_all(
-                corrupt_index_path
-                    .parent()
-                    .expect("corrupt historical index parent"),
-            )
-            .expect("create corrupt historical index parent");
-            std::fs::write(&corrupt_index_path, b"{ this is not valid json")
-                .expect("write corrupt historical Cook index");
-
-            let cook_id = "cook-admits-despite-corrupt-history";
-            let mut admission = DetachedCookAdmission::establish(cook_id).expect(
-                "a corrupt unrelated historical Cook index must not block admission (#14962)",
-            );
-
-            let parent = store
-                .read_record_bounded(cook_id)
-                .expect("newly admitted parent is durable despite the corrupt sibling index");
-            assert_eq!(parent.metadata["detached_cook_handoff"]["cook_id"], cook_id);
-            admission.release();
-        });
-    }
-
     #[test]
     fn interrupted_pre_supervisor_admission_is_terminal_and_discoverable() {
         crate::test_support::with_isolated_home(|_| {
