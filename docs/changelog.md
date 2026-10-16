@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.23] - 2026-10-16
+
+### Fixed
+- fetch a missing base ref in full clones before failing --changed-since
+- Fix Playwright cache mapping for Lab gates
+- keep the poll grace window when a job-owner reattach cannot reach the daemon yet
+
 ## [0.428.22] - 2026-10-16
 
 ### Fixed
