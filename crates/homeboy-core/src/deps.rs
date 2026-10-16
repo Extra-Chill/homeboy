@@ -2,6 +2,7 @@ use crate::component::{self, Component};
 use crate::cooperative_control::CooperativeControl;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -140,12 +141,20 @@ pub struct DependencyHydrationProgress {
     pub last_progress_ms_ago: Option<u128>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct DependencyHydrationEnvironment {
+    pub clear: bool,
+    pub remove: Vec<String>,
+    pub set: BTreeMap<String, String>,
+}
+
 pub struct DependencyHydrationPolicy {
     pub timeout: Duration,
     pub no_progress_timeout: Duration,
     pub heartbeat_interval: Duration,
     pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     pub on_progress: Arc<dyn Fn(&DependencyHydrationProgress) + Send + Sync>,
+    pub environment: DependencyHydrationEnvironment,
 }
 
 impl Default for DependencyHydrationPolicy {
@@ -156,6 +165,7 @@ impl Default for DependencyHydrationPolicy {
             heartbeat_interval: Duration::from_secs(5),
             is_cancelled: Arc::new(|| false),
             on_progress: Arc::new(|_| {}),
+            environment: DependencyHydrationEnvironment::default(),
         }
     }
 }
@@ -453,6 +463,13 @@ fn run_hydration_command(
             declared_program.to_path_buf()
         };
     let mut process = Command::new(resolved_program);
+    if policy.environment.clear {
+        process.env_clear();
+    }
+    for name in &policy.environment.remove {
+        process.env_remove(name);
+    }
+    process.envs(&policy.environment.set);
     process
         .args(&command.args)
         .current_dir(&command.cwd)
@@ -1922,6 +1939,7 @@ mod tests {
             on_progress: Arc::new(move |event| {
                 progress.lock().unwrap().push(event.phase.clone());
             }),
+            environment: DependencyHydrationEnvironment::default(),
         }
     }
 
@@ -2423,6 +2441,7 @@ mod tests {
                     heartbeat_interval: Duration::from_millis(10),
                     is_cancelled: Arc::new(|| false),
                     on_progress: Arc::new(|_| {}),
+                    environment: DependencyHydrationEnvironment::default(),
                 },
             )
             .expect("bounded hydration outcome");
@@ -2435,6 +2454,49 @@ mod tests {
             // The rejected implementation took about 1.14s here because its
             // reaping grace began after the 120ms operation budget.
             assert!(started.elapsed() < Duration::from_millis(900));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hydration_commands_run_under_the_declared_environment() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy-deps.json"),
+                r#"{
+                    "provider":"fixture-provider",
+                    "commands":{
+                        "install":{"argv":["/bin/sh","-c","printf '%s|%s|%s' \"$GATE_MARKER\" \"${GATE_REMOVED-unset}\" \"$CI\" > prepared.state"]}
+                    },
+                    "outputs":[{"path":"prepared.state","kind":"file"}]
+                }"#,
+            )
+            .expect("provider manifest");
+            let mut environment = DependencyHydrationEnvironment::default();
+            environment
+                .set
+                .insert("GATE_MARKER".to_string(), "gate-env".to_string());
+            environment.remove.push("GATE_REMOVED".to_string());
+            // The removed variable must not survive from the parent process.
+            let _removed = crate::test_support::EnvVarGuard::set("GATE_REMOVED", "leaked");
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &DependencyHydrationPolicy {
+                    environment,
+                    ..DependencyHydrationPolicy::default()
+                },
+            )
+            .expect("hydration outcome");
+
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("prepared.state")).expect("state"),
+                "gate-env|unset|true"
+            );
         });
     }
 
