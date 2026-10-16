@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.10] - 2026-10-16
+
+### Changed
+- delete the Cook index.json compatibility file
+- keep controller fallback receipts in the coordination store
+- move package ownership and operation records into the coordination store
+
 ## [0.428.9] - 2026-10-16
 
 ### Changed
