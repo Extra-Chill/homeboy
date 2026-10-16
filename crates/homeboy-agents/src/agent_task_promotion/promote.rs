@@ -2472,6 +2472,19 @@ fn run_promotion_gates(
     let candidate_setup = Vec::new();
     let gate_workspace = promotion_gate_workspace(options, worktree_path, gate_workspace);
     let destination_gate_setup = if gate_workspace.is_dir() {
+        // Local setup runs under the gates' environment (#16024). A Lab
+        // runner resolves its environment on the runner, not here.
+        let gate_hydration = options
+            .gates
+            .gate_environment
+            .lab_runner
+            .is_none()
+            .then(|| {
+                crate::agent_task_gate::GateHydrationEnvironment::prepare(
+                    &options.gates.gate_environment,
+                )
+            })
+            .transpose()?;
         let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
             timeout: options.gates.gate_timeout(),
             no_progress_timeout: options.gates.gate_no_progress_timeout(),
@@ -2490,6 +2503,10 @@ fn run_promotion_gates(
                     )),
                 );
             }),
+            environment: gate_hydration
+                .as_ref()
+                .map(|hydration| hydration.environment())
+                .unwrap_or_default(),
         };
         // Detached gate workspaces have no submodules until initialized
         // (#15355). Recorded with the setup evidence; a failure here does not
@@ -2524,7 +2541,15 @@ fn run_promotion_gates(
                 "destination_gate_workspace",
                 error,
             )
-        })?;
+        });
+        if let Some(gate_hydration) = gate_hydration {
+            gate_hydration.finish(setup.as_ref().is_ok_and(|setup| {
+                setup.iter().all(|outcome| {
+                    outcome.status != homeboy_core::deps::DependencyHydrationStatus::Failed
+                })
+            }));
+        }
+        let setup = setup?;
         if let Some(failed) = setup
             .iter()
             .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)

@@ -2553,14 +2553,28 @@ impl SelectedGateEnvironment {
         Ok(())
     }
 
+    fn hydration_environment(&self) -> homeboy_core::deps::DependencyHydrationEnvironment {
+        homeboy_core::deps::DependencyHydrationEnvironment {
+            clear: self.report.mode == AgentTaskGateEnvironmentMode::Replace,
+            remove: self
+                .report
+                .sanitized
+                .iter()
+                .map(|variable| variable.name.clone())
+                .collect(),
+            set: self.values.clone(),
+        }
+    }
+
     fn apply(&self, process: &mut Command) {
-        if self.report.mode == AgentTaskGateEnvironmentMode::Replace {
+        let environment = self.hydration_environment();
+        if environment.clear {
             process.env_clear();
         }
-        for variable in &self.report.sanitized {
-            process.env_remove(&variable.name);
+        for name in environment.remove {
+            process.env_remove(name);
         }
-        process.envs(&self.values);
+        process.envs(&environment.set);
     }
 
     fn configure_rust_cache(&mut self, cwd: &Path) -> Result<()> {
@@ -3435,6 +3449,39 @@ fn gate_temp_root(runtime_tmpdir: &Path) -> Result<PathBuf> {
         )
     })?;
     Ok(root)
+}
+
+/// The gate environment for destination dependency setup. Setup runs under
+/// the same resolved environment as the gates that follow it (#16024), with its
+/// own invocation temp dir so `Replace` mode still has a valid TMPDIR.
+pub(crate) struct GateHydrationEnvironment {
+    selected: SelectedGateEnvironment,
+    _invocation: homeboy_core::engine::invocation::InvocationGuard,
+    run_dir: homeboy_core::engine::run_dir::RunDir,
+}
+
+impl GateHydrationEnvironment {
+    pub(crate) fn prepare(policy: &AgentTaskGateEnvironmentPolicy) -> Result<Self> {
+        let run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+        let invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &homeboy_core::engine::invocation::InvocationRequirements::default(),
+        )?;
+        let selected = selected_gate_environment(policy, Some(&invocation.context().tmp_dir))?;
+        Ok(Self {
+            selected,
+            _invocation: invocation,
+            run_dir,
+        })
+    }
+
+    pub(crate) fn environment(&self) -> homeboy_core::deps::DependencyHydrationEnvironment {
+        self.selected.hydration_environment()
+    }
+
+    pub(crate) fn finish(self, succeeded: bool) {
+        self.run_dir.finish(succeeded);
+    }
 }
 
 fn selected_gate_environment(
@@ -9077,6 +9124,40 @@ mod tests {
                 Some(&expected),
                 "{name} must resolve to the invocation temp dir"
             );
+        }
+    }
+
+    #[test]
+    fn dependency_setup_environment_matches_the_gate_command_environment() {
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        for mode in [
+            AgentTaskGateEnvironmentMode::Inherit,
+            AgentTaskGateEnvironmentMode::Replace,
+        ] {
+            let mut policy = AgentTaskGateEnvironmentPolicy {
+                mode,
+                ..AgentTaskGateEnvironmentPolicy::default()
+            };
+            policy
+                .variables
+                .insert("PATH".to_string(), "/gate-toolchain/bin".to_string());
+            let selected = selected_gate_environment(&policy, Some(runtime_tmpdir.path()))
+                .expect("gate environment");
+
+            let setup = selected.hydration_environment();
+            assert_eq!(setup.clear, mode == AgentTaskGateEnvironmentMode::Replace);
+            assert_eq!(setup.set, selected.values);
+            assert_eq!(
+                setup.set.get("PATH").map(String::as_str),
+                Some("/gate-toolchain/bin")
+            );
+            let sanitized: Vec<String> = selected
+                .report
+                .sanitized
+                .iter()
+                .map(|variable| variable.name.clone())
+                .collect();
+            assert_eq!(setup.remove, sanitized);
         }
     }
 
