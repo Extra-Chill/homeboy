@@ -252,13 +252,10 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
                 )
             })?;
 
-            let remote_path = remote_path.unwrap_or_default();
             let repo_path = Path::new(&local_path);
             let id = derive_component_id_for_create(repo_path, &local_path)?;
-            let mut new_component =
-                Component::new(id.clone(), local_path.clone(), remote_path, build_artifact);
 
-            new_component.version_targets = if let Some(json_spec) = version_targets_json {
+            let explicit_version_targets = if let Some(json_spec) = version_targets_json {
                 let raw = homeboy::core::config::read_json_spec_to_string(&json_spec)?;
                 serde_json::from_str::<Vec<homeboy::core::component::VersionTarget>>(&raw)
                     .map_err(|e| {
@@ -275,23 +272,35 @@ pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
                 None
             };
 
-            new_component.extract_command = extract_command;
-            // Respect an explicit --changelog-target flag; otherwise auto-detect
-            // the actual changelog location on disk so generated homeboy.json
-            // files don't ship with a path that doesn't exist. (#1128)
-            new_component.changelog_target = changelog_target.or_else(|| {
-                homeboy_release::release::changelog::discover_changelog_relative_path(repo_path)
-            });
+            let overlay = CreateOverlay {
+                remote_path,
+                build_artifact,
+                version_targets: explicit_version_targets,
+                extract_command,
+                changelog_target,
+                extensions,
+            };
 
-            if !extensions.is_empty() {
-                let mut extension_map = std::collections::HashMap::new();
-                for extension_id in extensions {
-                    extension_map.insert(extension_id, component::ScopedExtensionConfig::default());
+            let new_component = if repo_path.join("homeboy.json").exists() {
+                // Existing repo-owned config is the source of truth: load it and
+                // overlay only the flags passed explicitly (#16027).
+                create_from_existing_portable(repo_path, &local_path, overlay)?
+            } else {
+                let mut new_component =
+                    Component::new(id.clone(), local_path.clone(), String::new(), None);
+                overlay.apply(&mut new_component);
+                // Respect an explicit --changelog-target flag; otherwise auto-detect
+                // the actual changelog location on disk so generated homeboy.json
+                // files don't ship with a path that doesn't exist. (#1128)
+                if new_component.changelog_target.is_none() {
+                    new_component.changelog_target =
+                        homeboy_release::release::changelog::discover_changelog_relative_path(
+                            repo_path,
+                        );
                 }
-                new_component.extensions = Some(extension_map);
-            }
-
-            component::write_portable_config(repo_path, &new_component)?;
+                component::write_portable_config(repo_path, &new_component)?;
+                new_component
+            };
 
             // Always persist a standalone registration so the component is
             // discoverable by ID from any directory (#1131). This is a
@@ -533,6 +542,83 @@ fn suggest_project_for_path(local_path: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Fields explicitly passed to `component create`. `None`/empty means the flag
+/// was omitted and the corresponding field must not be touched.
+struct CreateOverlay {
+    remote_path: Option<String>,
+    build_artifact: Option<String>,
+    version_targets: Option<Vec<component::VersionTarget>>,
+    extract_command: Option<String>,
+    changelog_target: Option<String>,
+    extensions: Vec<String>,
+}
+
+impl CreateOverlay {
+    fn apply(self, component: &mut Component) {
+        if let Some(remote_path) = self.remote_path {
+            component.remote_path = remote_path;
+        }
+        if let Some(build_artifact) = self.build_artifact {
+            component.build_artifact = Some(build_artifact);
+        }
+        if let Some(version_targets) = self.version_targets {
+            component.version_targets = Some(version_targets);
+        }
+        if let Some(extract_command) = self.extract_command {
+            component.extract_command = Some(extract_command);
+        }
+        if let Some(changelog_target) = self.changelog_target {
+            component.changelog_target = Some(changelog_target);
+        }
+        if !self.extensions.is_empty() {
+            let extension_map = component.extensions.get_or_insert_with(Default::default);
+            for extension_id in self.extensions {
+                extension_map.entry(extension_id).or_default();
+            }
+        }
+    }
+}
+
+/// Load an existing `<repo>/homeboy.json`, overlay explicit create flags, and
+/// write it back only when the overlay changed the portable config.
+fn create_from_existing_portable(
+    repo_path: &Path,
+    local_path: &str,
+    overlay: CreateOverlay,
+) -> homeboy::core::Result<Component> {
+    let mut existing = component::try_discover_from_portable(repo_path)?.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "local_path",
+            format!("No homeboy.json found at {}", repo_path.display()),
+            None,
+            None,
+        )
+    })?;
+    existing.local_path = local_path.to_string();
+
+    // Discovery may enrich `remote_url` from git; that is not repo-owned
+    // config, so keep it out of the change comparison and any write-back.
+    let file_has_remote_url = std::fs::read_to_string(repo_path.join("homeboy.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .is_some_and(|value| value.get("remote_url").is_some());
+
+    let mut updated = existing.clone();
+    overlay.apply(&mut updated);
+
+    let before = component::portable_json(&existing)?;
+    let after = component::portable_json(&updated)?;
+    if before != after {
+        let mut to_write = updated.clone();
+        if !file_has_remote_url {
+            to_write.remote_url = None;
+        }
+        component::write_portable_config(repo_path, &to_write)?;
+    }
+
+    Ok(updated)
 }
 
 fn derive_component_id_for_create(
@@ -1145,6 +1231,153 @@ mod tests {
             .expect("portable id should be used");
 
         assert_eq!(id, "homeboy");
+    }
+
+    fn run_create(extra: &[&str], repo: &Path) -> CmdResult<ComponentOutput> {
+        let repo_str = repo.to_string_lossy().to_string();
+        let mut argv = vec!["component", "create", "--local-path", repo_str.as_str()];
+        argv.extend_from_slice(extra);
+        let cli = TestCli::try_parse_from(argv).expect("component create should parse");
+        run(cli.component)
+    }
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).expect("read json")).expect("parse json")
+    }
+
+    fn registration_path(id: &str) -> std::path::PathBuf {
+        homeboy::core::paths::components()
+            .expect("components dir")
+            .join(format!("{id}.json"))
+    }
+
+    #[test]
+    fn component_create_preserves_existing_config_byte_for_byte() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let repo = temp.path().join("my-plugin");
+            fs::create_dir_all(&repo).expect("repo dir");
+            fs::write(repo.join("CHANGELOG.md"), "# Changelog\n").expect("changelog");
+            let original = r#"{
+  "id": "my-plugin",
+  "remote_path": "wp-content/plugins/my-plugin",
+  "extensions": { "wordpress": {} },
+  "version_targets": [
+    { "file": "my-plugin.php", "pattern": "Version: (.*)" },
+    { "file": "package.json" }
+  ]
+}
+"#;
+            fs::write(repo.join("homeboy.json"), original).expect("homeboy.json");
+
+            run_create(&[], &repo).expect("create should succeed");
+
+            let after = fs::read_to_string(repo.join("homeboy.json")).expect("read");
+            assert_eq!(after, original, "homeboy.json must be unchanged");
+
+            let registration = read_json(&registration_path("my-plugin"));
+            assert_eq!(
+                registration["local_path"],
+                serde_json::json!(repo.to_string_lossy())
+            );
+        });
+    }
+
+    #[test]
+    fn component_create_preserves_fields_when_merging_explicit_flags() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let repo = temp.path().join("my-plugin");
+            fs::create_dir_all(&repo).expect("repo dir");
+            fs::write(
+                repo.join("homeboy.json"),
+                r#"{
+  "id": "my-plugin",
+  "remote_path": "wp-content/plugins/my-plugin",
+  "extract_command": "unzip -o {{artifact}}",
+  "extensions": { "wordpress": { "settings": { "keep": true } } },
+  "version_targets": [
+    { "file": "my-plugin.php", "pattern": "Version: (.*)" },
+    { "file": "package.json" }
+  ]
+}
+"#,
+            )
+            .expect("homeboy.json");
+
+            run_create(
+                &[
+                    "--extension",
+                    "rust",
+                    "--changelog-target",
+                    "docs/CHANGELOG.md",
+                ],
+                &repo,
+            )
+            .expect("create should succeed");
+
+            let after = read_json(&repo.join("homeboy.json"));
+            assert_eq!(after["id"], "my-plugin");
+            assert_eq!(after["remote_path"], "wp-content/plugins/my-plugin");
+            assert_eq!(after["extract_command"], "unzip -o {{artifact}}");
+            assert_eq!(after["changelog_target"], "docs/CHANGELOG.md");
+            assert_eq!(
+                after["extensions"]["wordpress"]["keep"],
+                serde_json::json!(true),
+                "existing extension settings must survive: {after}"
+            );
+            assert!(after["extensions"].get("rust").is_some());
+            let targets = after["version_targets"].as_array().expect("targets");
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0]["file"], "my-plugin.php");
+            assert_eq!(targets[1]["file"], "package.json");
+            assert!(after.get("local_path").is_none());
+            assert!(after.get("remote_url").is_none());
+        });
+    }
+
+    #[test]
+    fn component_create_preserves_invalid_config_and_errors() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let repo = temp.path().join("my-plugin");
+            fs::create_dir_all(&repo).expect("repo dir");
+            let original = "{ \"id\": \"my-plugin\", \"extensions\": ";
+            fs::write(repo.join("homeboy.json"), original).expect("homeboy.json");
+
+            let Err(err) = run_create(&["--extension", "rust"], &repo) else {
+                panic!("invalid homeboy.json must error");
+            };
+            assert!(
+                err.to_string().to_lowercase().contains("json"),
+                "error should describe invalid JSON: {err}"
+            );
+
+            let after = fs::read_to_string(repo.join("homeboy.json")).expect("read");
+            assert_eq!(after, original, "invalid homeboy.json must be untouched");
+            assert!(!registration_path("my-plugin").exists());
+        });
+    }
+
+    #[test]
+    fn component_create_preserves_remote_path_when_flag_omitted() {
+        crate::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let repo = temp.path().join("my-plugin");
+            fs::create_dir_all(&repo).expect("repo dir");
+            fs::write(
+                repo.join("homeboy.json"),
+                r#"{"id":"my-plugin","remote_path":"wp-content/plugins/my-plugin"}"#,
+            )
+            .expect("homeboy.json");
+
+            run_create(&["--build-artifact", "build/my-plugin.zip"], &repo)
+                .expect("create should succeed");
+
+            let after = read_json(&repo.join("homeboy.json"));
+            assert_eq!(after["remote_path"], "wp-content/plugins/my-plugin");
+            assert_eq!(after["build_artifact"], "build/my-plugin.zip");
+        });
     }
 
     #[test]

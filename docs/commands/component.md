@@ -34,6 +34,19 @@ Options:
 `component create` initializes repo-owned `homeboy.json` from explicit flags,
 then registers the component for ID-based discovery.
 
+When `<local_path>/homeboy.json` already exists, it is the source of truth:
+`create` loads it and overlays only the flags passed explicitly
+(`--remote-path`, `--build-artifact`, `--version-target(s)`,
+`--extract-command`, `--changelog-target`, `--extension`). Fields not named on
+the command line (for example existing `extensions`, `version_targets`, or
+`remote_path`) are kept, `--extension` adds to the existing extension map, and
+the file is rewritten only when the overlay changes something. A plain
+`homeboy component create --local-path <repo>` leaves an existing valid
+`homeboy.json` byte-for-byte unchanged and only writes the standalone
+registration. An invalid existing `homeboy.json` fails with a validation error
+and is not overwritten. Changelog auto-detection only applies when no
+`homeboy.json` exists yet.
+
 #### Extract Command Execution Context
 
 The `extract_command` runs **inside the target directory**. During deploy, Homeboy:
