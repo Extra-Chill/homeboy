@@ -864,8 +864,8 @@ fn linux_process_state_from_stat(stat: &str) -> Option<char> {
 
 /// Install a Ctrl-C / SIGINT handler that flips `stop` to `true` on the first
 /// signal, giving long-running loops a cooperative shutdown flag. The `context`
-/// label is woven into the error message so callers (reverse runner worker,
-/// preview client, ...) surface a distinct diagnostic on failure (#5092).
+/// label is woven into the error message so callers (preview client, ...)
+/// surface a distinct diagnostic on failure (#5092).
 /// Set by the async-signal-safe SIGTERM handler installed by
 /// [`install_terminate_handler`].
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);

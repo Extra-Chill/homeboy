@@ -16,22 +16,10 @@ pub(super) fn run_broker(
         RunnerBrokerCommand::Pair {
             id,
             runner_id,
-            submit,
-            work,
             no_install,
         } => {
-            let mut scopes: BTreeSet<runner::BrokerScope> = BTreeSet::new();
-            if submit {
-                scopes.insert(runner::BrokerScope::Submit);
-            }
-            if work {
-                scopes.insert(runner::BrokerScope::Work);
-            }
-            if scopes.is_empty() {
-                // Default to a worker credential, the most common pairing.
-                scopes.insert(runner::BrokerScope::Work);
-            }
-            let minted = store.pair(id, runner_id, scopes)?;
+            let minted =
+                store.pair(id, runner_id, BTreeSet::from([runner::BrokerScope::Submit]))?;
             if !no_install {
                 install_store_on_ssh_runner(&minted.runner_id, &store)?;
             }
@@ -113,8 +101,8 @@ fn install_store_on_ssh_runner(
     let remote_dir = ".config/homeboy";
     let remote_path = ".config/homeboy/broker_auth.json";
     // Merge into the runner's existing store rather than replacing it: other
-    // controllers and the runner's own worker may have paired credentials
-    // there that this controller does not know about (#15368).
+    // controllers may have paired credentials there that this controller does
+    // not know about (#15368).
     let read = client.execute(&format!(
         "if [ -f {path} ]; then cat {path}; fi",
         path = shell::quote_path(remote_path)
@@ -199,7 +187,6 @@ fn install_store_on_ssh_runner(
 fn scope_label(scope: &runner::BrokerScope) -> String {
     match scope {
         runner::BrokerScope::Submit => "submit".to_string(),
-        runner::BrokerScope::Work => "work".to_string(),
     }
 }
 

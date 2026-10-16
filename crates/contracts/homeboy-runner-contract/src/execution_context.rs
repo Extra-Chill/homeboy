@@ -3,37 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA: &str = "homeboy/runner-job-execution-context/v1";
-pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY: &str = "runner-job-execution-context";
-pub const RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION: u32 = 2;
-
-/// The worker capability negotiated before a claim can carry an execution
-/// context assertion.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobExecutionProtocol {
-    pub capability: String,
-    pub version: u32,
-}
-
-impl RunnerJobExecutionProtocol {
-    pub fn current() -> Self {
-        Self {
-            capability: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY.to_string(),
-            version: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
-        }
-    }
-
-    /// Only the current version is served. Controllers, brokers and workers
-    /// upgrade together, so an older version is never negotiated down.
-    pub fn is_supported(&self) -> bool {
-        self.capability == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY
-            && self.version == RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION
-    }
-}
 
 /// A transport assertion of a durable runner-job execution context.
 ///
 /// This value is not live authority. The implementation that owns the durable
-/// claim must verify it before provider invocation.
+/// job must verify it before provider invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerJobExecutionContextAssertion {
     pub schema: String,
@@ -86,22 +60,5 @@ mod tests {
         assert!(!is_internal_control_env(RUNNER_HOSTED_EXEC_ENV));
         assert!(!is_internal_control_env(RUNNER_ID_ENV));
         assert!(!is_internal_control_env("HOMEBOY_LAB_EXECUTION_RUNNER_ID"));
-    }
-
-    #[test]
-    fn only_the_current_execution_protocol_is_supported() {
-        assert!(RunnerJobExecutionProtocol::current().is_supported());
-        for version in [0, 1, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION + 1] {
-            assert!(!RunnerJobExecutionProtocol {
-                capability: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY.to_string(),
-                version,
-            }
-            .is_supported());
-        }
-        assert!(!RunnerJobExecutionProtocol {
-            capability: "other".to_string(),
-            version: RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
-        }
-        .is_supported());
     }
 }

@@ -390,7 +390,7 @@ fn runner_secret_env_resolution_accepts_secret_env_plan_names() {
 
 #[test]
 fn runner_secret_env_plan_resolution_fails_closed_before_provider_execution() {
-    // Extra-Chill/homeboy#14382: a durable reverse-runner job carries secret
+    // Extra-Chill/homeboy#14382: a durable runner job carries secret
     // references only. When the runner cannot resolve a planned provider
     // credential from its own sources, the worker must fail with a clear
     // readiness error instead of crashing inside the provider.

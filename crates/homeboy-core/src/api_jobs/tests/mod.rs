@@ -18,15 +18,6 @@ pub(super) fn durable_snapshot(path: &std::path::Path) -> serde_json::Value {
         .expect("ledger snapshot is JSON")
 }
 
-/// Replace the durable ledger with `snapshot`, to tamper with persisted state.
-pub(super) fn replace_durable_store(path: &std::path::Path, snapshot: &serde_json::Value) {
-    JobStore::replace_ledger_at_path(
-        path,
-        &serde_json::to_vec(snapshot).expect("encode ledger snapshot"),
-    )
-    .expect("replace ledger");
-}
-
 /// Bytes the daemon job ledger's rows hold in the observation store.
 pub(super) fn ledger_bytes(path: &std::path::Path) -> u64 {
     let connection = rusqlite::Connection::open(path).expect("open ledger");

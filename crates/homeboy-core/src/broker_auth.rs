@@ -1,31 +1,28 @@
-//! Trust model for the reverse runner broker (`/runner/*` routes).
+//! Trust model for the runner daemon's authenticated `/runner/*` routes.
 //!
-//! The reverse runner broker lets a Homeboy controller submit jobs and remote
-//! Lab workers claim/execute/finish them over HTTP. On loopback or private
-//! tunnels that is acceptable, but a VPS-hosted broker is reachable beyond the
-//! trust boundary and therefore must authenticate every caller (#2990).
+//! A controller reaches a runner's own daemon over an SSH tunnel and submits
+//! staged work and file transfers to it over HTTP. Every `/runner/*` request
+//! must present a paired bearer credential.
 //!
 //! ## Trust model
 //!
-//! * **Pairing.** An operator pairs a worker by minting a *runner credential*
-//!   on the broker host (`broker_auth_pair`). Pairing generates a random bearer
-//!   token, stores its SHA-256 hash for enforcement, and binds it to a single
-//!   `runner_id` with a set of [`BrokerScope`]s. The controller copy may retain
-//!   the plaintext token so controller-side submit/file requests can attach it;
-//!   enforcement-host installs strip plaintext token material and keep hashes
-//!   only.
-//! * **Controller submit.** Job submission (`POST /runner/jobs`) is authorized
-//!   by a credential carrying the [`BrokerScope::Submit`] scope. Worker claims
-//!   are authorized by [`BrokerScope::Work`]. A credential may hold both.
-//! * **Runner-id binding.** Worker routes carry a `runner_id` in their body.
-//!   The presented token must belong to a credential whose `runner_id` matches,
-//!   so a paired runner can never claim, progress, or finish jobs on behalf of a
-//!   different runner id.
+//! * **Pairing.** An operator pairs a controller with a runner by minting a
+//!   *runner credential* (`broker_auth_pair`). Pairing generates a random
+//!   bearer token, stores its SHA-256 hash for enforcement, and binds it to a
+//!   single `runner_id` with a set of [`BrokerScope`]s. The controller copy
+//!   may retain the plaintext token so controller-side submit/file requests can
+//!   attach it; enforcement-host installs strip plaintext token material and
+//!   keep hashes only.
+//! * **Controller submit.** Staged submission and runner file transfer are
+//!   authorized by a credential carrying the [`BrokerScope::Submit`] scope.
+//! * **Runner-id binding.** Requests carry a `runner_id`. The presented token
+//!   must belong to a credential whose `runner_id` matches, so a credential
+//!   paired for one runner can never act on a different runner id.
 //! * **Revocation.** Credentials are revocable by id; revoked credentials are
 //!   retained (so their ids stay reserved) but reject every request.
-//! * **Secure by default.** If no auth store exists the broker refuses all
+//! * **Secure by default.** If no auth store exists the daemon refuses all
 //!   `/runner/*` traffic. An operator must explicitly opt a credential-less
-//!   broker into loopback-only smoke mode, which is gated to loopback binds.
+//!   daemon into loopback-only smoke mode, which is gated to loopback binds.
 //!
 //! Tokens live in `~/.config/homeboy/broker_auth.json` with `0600` perms on
 //! Unix. Plaintext token material is only kept in the controller-side copy and
@@ -74,17 +71,14 @@ pub fn broker_submit_token_for_runner(runner_id: &str) -> Result<Option<String>>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerScope {
-    /// Controller-side job submission (`POST /runner/jobs`).
+    /// Controller-side staged submission and runner file transfer.
     Submit,
-    /// Worker-side register/claim/event/finish/heartbeat/cancel.
-    Work,
 }
 
 impl BrokerScope {
     fn as_str(self) -> &'static str {
         match self {
             BrokerScope::Submit => "submit",
-            BrokerScope::Work => "work",
         }
     }
 }
@@ -94,7 +88,7 @@ impl BrokerScope {
 pub struct BrokerCredential {
     /// Stable credential id (operator-facing label for revocation).
     pub id: String,
-    /// Runner id this credential is bound to. Worker routes must match it.
+    /// Runner id this credential is bound to. Requests must match it.
     pub runner_id: String,
     /// Lowercase hex SHA-256 of the bearer token. Never the plaintext.
     pub token_sha256: String,
@@ -205,7 +199,7 @@ impl BrokerAuthStore {
                 "broker has no paired runner credentials configured",
                 runner_id.map(str::to_string),
                 vec![
-                    "Pair and install a runner credential with `homeboy runner broker pair <id> --runner-id <runner> --submit --work`, or use `--no-install` only when you will copy broker_auth.json to the broker enforcement host yourself."
+                    "Pair and install a runner credential with `homeboy runner broker pair <id> --runner-id <runner>`, or use `--no-install` only when you will copy broker_auth.json to the broker enforcement host yourself."
                         .to_string(),
                     "For loopback-only smoke runs, set allow_unauthenticated_loopback in broker_auth.json."
                         .to_string(),
@@ -258,8 +252,7 @@ impl BrokerAuthStore {
                     "broker token is bound to a different runner id",
                     Some(requested_runner.to_string()),
                     vec![
-                        "A paired runner may only act on its own runner id; claims cannot be stolen."
-                            .to_string(),
+                        "A credential may only act on the runner id it was paired for.".to_string(),
                     ],
                 ));
             }
@@ -301,7 +294,7 @@ impl BrokerAuthStore {
                 "scopes",
                 "broker credential requires at least one scope",
                 None,
-                Some(vec!["Grant `submit`, `work`, or both.".to_string()]),
+                Some(vec!["Grant the `submit` scope.".to_string()]),
             ));
         }
         if self
@@ -354,8 +347,8 @@ impl BrokerAuthStore {
     ///
     /// Credentials are matched by id: this store's version replaces the
     /// existing one (so revocations propagate), and credentials only the
-    /// existing store has are kept. Several controllers and the runner's own
-    /// worker can each have paired credentials on the same broker host, so
+    /// existing store has are kept. Several controllers can each have paired
+    /// credentials on the same runner host, so
     /// installing from one controller must never drop the others (#15368).
     /// The result never carries plaintext tokens.
     pub fn merged_enforcement_store(&self, existing: &Self) -> Self {
@@ -403,7 +396,7 @@ impl BrokerAuthStore {
 }
 
 /// The one-time result of minting a credential. The plaintext `token` must be
-/// delivered to the worker immediately; it cannot be recovered later.
+/// delivered to the controller immediately; it cannot be recovered later.
 #[derive(Debug, Clone)]
 pub struct MintedCredential {
     pub id: String,
@@ -566,7 +559,7 @@ mod tests {
     fn unconfigured_store_rejects_by_default() {
         let store = BrokerAuthStore::default();
         let err = store
-            .authorize(true, None, BrokerScope::Work, Some("runner-a"))
+            .authorize(true, None, BrokerScope::Submit, Some("runner-a"))
             .expect_err("secure by default");
         assert_eq!(err.code.as_str(), "broker.auth_denied");
         assert!(err.hints.iter().any(|hint| {
@@ -582,50 +575,50 @@ mod tests {
         };
         // Loopback bind: permitted.
         store
-            .authorize(true, None, BrokerScope::Work, Some("runner-a"))
+            .authorize(true, None, BrokerScope::Submit, Some("runner-a"))
             .expect("loopback open");
         // Non-loopback bind: still rejected even with opt-in.
         let err = store
-            .authorize(false, None, BrokerScope::Work, Some("runner-a"))
+            .authorize(false, None, BrokerScope::Submit, Some("runner-a"))
             .expect_err("non-loopback rejected");
         assert_eq!(err.code.as_str(), "broker.auth_denied");
     }
 
     #[test]
     fn missing_token_is_rejected_when_configured() {
-        let (store, _token) = store_with("runner-a", BrokerScope::Work);
+        let (store, _token) = store_with("runner-a", BrokerScope::Submit);
         let err = store
-            .authorize(false, None, BrokerScope::Work, Some("runner-a"))
+            .authorize(false, None, BrokerScope::Submit, Some("runner-a"))
             .expect_err("missing token");
         assert!(err.message.contains("missing broker bearer token"));
     }
 
     #[test]
     fn paired_runner_can_authorize_its_own_runner_id() {
-        let (store, token) = store_with("runner-a", BrokerScope::Work);
+        let (store, token) = store_with("runner-a", BrokerScope::Submit);
         let grant = store
-            .authorize(false, Some(&token), BrokerScope::Work, Some("runner-a"))
+            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-a"))
             .expect("authorized");
         assert_eq!(grant.runner_id, "runner-a");
     }
 
     #[test]
-    fn wrong_runner_id_cannot_claim() {
-        let (store, token) = store_with("runner-a", BrokerScope::Work);
+    fn wrong_runner_id_is_rejected() {
+        let (store, token) = store_with("runner-a", BrokerScope::Submit);
         let err = store
-            .authorize(false, Some(&token), BrokerScope::Work, Some("runner-b"))
-            .expect_err("cross-runner claim rejected");
+            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-b"))
+            .expect_err("cross-runner request rejected");
         assert!(err.message.contains("different runner id"));
     }
 
     #[test]
     fn wrong_token_is_rejected() {
-        let (store, _token) = store_with("runner-a", BrokerScope::Work);
+        let (store, _token) = store_with("runner-a", BrokerScope::Submit);
         let err = store
             .authorize(
                 false,
                 Some("hbk_bogus"),
-                BrokerScope::Work,
+                BrokerScope::Submit,
                 Some("runner-a"),
             )
             .expect_err("bad token");
@@ -634,7 +627,8 @@ mod tests {
 
     #[test]
     fn scope_is_enforced() {
-        let (store, token) = store_with("runner-a", BrokerScope::Work);
+        let (mut store, token) = store_with("runner-a", BrokerScope::Submit);
+        store.credentials[0].scopes.clear();
         let err = store
             .authorize(false, Some(&token), BrokerScope::Submit, None)
             .expect_err("submit needs submit scope");
@@ -643,10 +637,10 @@ mod tests {
 
     #[test]
     fn revoked_credential_is_rejected() {
-        let (mut store, token) = store_with("runner-a", BrokerScope::Work);
+        let (mut store, token) = store_with("runner-a", BrokerScope::Submit);
         assert!(store.revoke("cred-1"));
         let err = store
-            .authorize(false, Some(&token), BrokerScope::Work, Some("runner-a"))
+            .authorize(false, Some(&token), BrokerScope::Submit, Some("runner-a"))
             .expect_err("revoked");
         assert!(
             err.message.contains("no paired runner credentials") || err.message.contains("revoked")
@@ -673,7 +667,7 @@ mod tests {
 
     #[test]
     fn minted_token_is_high_entropy_and_controller_store_keeps_plaintext() {
-        let (store, token) = store_with("runner-a", BrokerScope::Work);
+        let (store, token) = store_with("runner-a", BrokerScope::Submit);
         assert!(token.starts_with("hbk_"));
         assert!(token.len() > 32);
         assert_eq!(store.credentials[0].token_sha256, sha256_hex(&token));
@@ -682,7 +676,7 @@ mod tests {
 
     #[test]
     fn enforcement_copy_strips_plaintext_tokens() {
-        let (store, token) = store_with("runner-a", BrokerScope::Work);
+        let (store, token) = store_with("runner-a", BrokerScope::Submit);
         let enforcement_store = store.enforcement_copy();
 
         assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
@@ -703,11 +697,7 @@ mod tests {
             .pair("cred-1", "runner-a", scopes(&[BrokerScope::Submit]))
             .expect("pair first");
         let newest = store
-            .pair(
-                "cred-2",
-                "runner-a",
-                scopes(&[BrokerScope::Submit, BrokerScope::Work]),
-            )
+            .pair("cred-2", "runner-a", scopes(&[BrokerScope::Submit]))
             .expect("pair second");
         store
             .pair("cred-3", "runner-b", scopes(&[BrokerScope::Submit]))
@@ -741,11 +731,7 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let mut store = BrokerAuthStore::default();
             let minted = store
-                .pair(
-                    "cred-1",
-                    "runner-a",
-                    scopes(&[BrokerScope::Submit, BrokerScope::Work]),
-                )
+                .pair("cred-1", "runner-a", scopes(&[BrokerScope::Submit]))
                 .expect("pair");
             let path = store.save().expect("save store");
 
@@ -758,10 +744,10 @@ mod tests {
                 .authorize(
                     false,
                     Some(&minted.token),
-                    BrokerScope::Work,
+                    BrokerScope::Submit,
                     Some("runner-a"),
                 )
-                .expect("work token survives store round trip");
+                .expect("runner-bound token survives store round trip");
             assert_eq!(
                 loaded.submit_token_for_runner("runner-a").as_deref(),
                 Some(minted.token.as_str())
@@ -771,9 +757,9 @@ mod tests {
 
     #[test]
     fn duplicate_active_credential_id_is_rejected() {
-        let (mut store, _token) = store_with("runner-a", BrokerScope::Work);
+        let (mut store, _token) = store_with("runner-a", BrokerScope::Submit);
         let err = store
-            .pair("cred-1", "runner-a", scopes(&[BrokerScope::Work]))
+            .pair("cred-1", "runner-a", scopes(&[BrokerScope::Submit]))
             .expect_err("duplicate id");
         assert!(err.message.contains("already exists"));
     }

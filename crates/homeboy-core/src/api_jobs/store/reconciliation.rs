@@ -191,9 +191,6 @@ impl JobStore {
         &self,
         expected_lease_id: &str,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        // Remote claims are broker-owned, not daemon-child processes. Expire
-        // them through the broker lifecycle before considering daemon recovery.
-        self.reconcile_expired_remote_runner_claims(timestamp_ms())?;
         self.reconcile_dead_daemon_lease_jobs_with_local_child_liveness(
             expected_lease_id,
             local_child_liveness,
@@ -990,10 +987,8 @@ impl JobStore {
     /// owns a store whose current daemon lease is missing. Historical job leases
     /// remain evidence; they cannot prove a current owner or be adopted as one.
     pub fn reconcile_leaseless_orphan_jobs(&self) -> Result<LeaselessOrphanJobDiagnostics> {
-        // Claims are broker-owned and must be expired before classifying local
-        // child identity. The per-lease call below is the same typed disposition
-        // engine used by dead-lease recovery.
-        self.reconcile_expired_remote_runner_claims(timestamp_ms())?;
+        // The per-lease call below is the same typed disposition engine used by
+        // dead-lease recovery.
         let (historical_lease_ids, has_unowned_jobs) = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             let mut leases = Vec::new();

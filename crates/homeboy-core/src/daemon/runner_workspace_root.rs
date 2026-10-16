@@ -10,24 +10,17 @@
 //! back on, so the caller reports the same "requires workspace_root" error it
 //! would for a runner without one.
 
-/// Looks up configured fields from a runner's config by id, for the daemon's
-/// runner-broker endpoints (file API, job claim).
+/// Looks up a runner's configured workspace root by id, for the daemon's
+/// runner file API.
 pub trait RunnerWorkspaceRootProvider: Send + Sync {
     /// The configured `workspace_root` for `runner_id`, if any.
     fn runner_workspace_root(&self, runner_id: &str) -> Option<String>;
-
-    /// The configured `concurrency_limit` for `runner_id`, if any.
-    fn runner_concurrency_limit(&self, runner_id: &str) -> Option<usize>;
 }
 
 struct NoopProvider;
 
 impl RunnerWorkspaceRootProvider for NoopProvider {
     fn runner_workspace_root(&self, _runner_id: &str) -> Option<String> {
-        None
-    }
-
-    fn runner_concurrency_limit(&self, _runner_id: &str) -> Option<usize> {
         None
     }
 }
@@ -46,9 +39,4 @@ homeboy_engine_primitives::provider_registry! {
 /// Resolve a runner's configured workspace root via the registered provider.
 pub(crate) fn runner_workspace_root(runner_id: &str) -> Option<String> {
     with_provider(|p| p.runner_workspace_root(runner_id))
-}
-
-/// Resolve a runner's configured concurrency limit via the registered provider.
-pub(crate) fn runner_concurrency_limit(runner_id: &str) -> Option<usize> {
-    with_provider(|p| p.runner_concurrency_limit(runner_id))
 }

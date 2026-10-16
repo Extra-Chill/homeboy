@@ -12,10 +12,6 @@ impl RunnerWorkspaceRootProvider for RunnerWorkspaceRoot {
     fn runner_workspace_root(&self, runner_id: &str) -> Option<String> {
         crate::load(runner_id).ok()?.workspace_root
     }
-
-    fn runner_concurrency_limit(&self, runner_id: &str) -> Option<usize> {
-        crate::load(runner_id).ok()?.settings.concurrency_limit
-    }
 }
 
 /// Register the runner workspace-root provider with core. Called once at startup.

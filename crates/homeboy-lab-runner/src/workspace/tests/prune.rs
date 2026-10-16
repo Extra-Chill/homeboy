@@ -444,7 +444,7 @@ fn runner_job_authority_requires_exact_transport_state_and_consistent_snapshot()
             "live",
         ),
         (
-            "reverse-live",
+            "queued-live",
             Ok(JobStatus::Queued),
             Some(&active[..]),
             "live",

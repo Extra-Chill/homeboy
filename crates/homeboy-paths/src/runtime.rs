@@ -193,33 +193,6 @@ pub fn runner_controller_session_file(id: &str, controller_id: &str) -> Result<P
     ))
 }
 
-/// Runner-owned durable reverse-execution evidence below an already-resolved
-/// config root.
-pub fn runner_job_execution_context_evidence_file_in_root(
-    config_root: &Path,
-    runner_id: &str,
-    context_id: &str,
-) -> PathBuf {
-    config_root
-        .join("runner-job-execution-context")
-        .join(sanitize_path_segment(runner_id))
-        .join(format!("{}.json", sanitize_path_segment(context_id)))
-}
-
-/// Runner-owned durable reverse-execution evidence. This is distinct from the
-/// controller's job event record so a restarted runner can resolve the exact
-/// broker-issued context it persisted before starting a child process.
-pub fn runner_job_execution_context_evidence_file(
-    runner_id: &str,
-    context_id: &str,
-) -> Result<PathBuf> {
-    Ok(runner_job_execution_context_evidence_file_in_root(
-        &homeboy()?,
-        runner_id,
-        context_id,
-    ))
-}
-
 /// Managed service tunnel runtime state directory below an already-resolved
 /// data root.
 pub fn service_tunnel_runtime_dir_in_root(data_root: &Path, id: &str) -> PathBuf {

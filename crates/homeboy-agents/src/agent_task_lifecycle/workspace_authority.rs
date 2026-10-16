@@ -508,7 +508,7 @@ mod tests {
             let receipt = WorkspaceTerminalAuthorityReceipt {
                 schema: WORKSPACE_TERMINAL_AUTHORITY_SCHEMA.to_string(),
                 run_id: "run-1".to_string(),
-                runner_id: "reverse-or-direct".to_string(),
+                runner_id: "lab-runner".to_string(),
                 runner_job_id: "job-1".to_string(),
                 remote_workspace: "/runner/_lab_workspaces/workspace-1".to_string(),
             };
@@ -523,7 +523,7 @@ mod tests {
 
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("job-1")
             )
@@ -531,7 +531,7 @@ mod tests {
             .is_some());
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("other-job")
             )
@@ -539,32 +539,32 @@ mod tests {
             assert!(resolve_retained_workspace("run-1").is_err());
             begin_workspace_terminal_authority_release(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("begin workspace cleanup");
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("job-1")
             )
             .is_err());
             assert!(workspace_terminal_authority_release_is_pending(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("pending cleanup authority"));
             abort_workspace_terminal_authority_release(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("abort failed workspace cleanup");
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("job-1")
             )
@@ -572,27 +572,27 @@ mod tests {
             .is_some());
             remove_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("remove after workspace cleanup");
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("job-1")
             )
             .is_err());
             persist_workspace_terminal_authority_for_test(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "job-1",
                 "/runner/_lab_workspaces/workspace-1",
             )
             .expect("late terminal projection is suppressed");
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
-                "reverse-or-direct",
+                "lab-runner",
                 "/runner/_lab_workspaces/workspace-1",
                 Some("job-1")
             )

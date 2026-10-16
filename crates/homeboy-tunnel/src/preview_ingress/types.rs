@@ -6,8 +6,25 @@ use crate::preview_client::{
     PreviewIngressRequest, PreviewIngressResponse, PreviewIngressResponseChunk,
     PreviewWebSocketFrame, PreviewWebSocketOpen, PreviewWebSocketOpenResult,
 };
-use homeboy_core::daemon::ServiceIdentity;
 use homeboy_core::plan::HomeboyPlan;
+
+/// Unix service identity (system user + group) the preview-ingress daemon runs
+/// as. Serialized flat via `#[serde(flatten)]` so the install plan keeps its
+/// top-level `service_user` / `service_group` JSON keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceIdentity {
+    pub service_user: String,
+    pub service_group: String,
+}
+
+impl Default for ServiceIdentity {
+    fn default() -> Self {
+        Self {
+            service_user: "homeboy".to_string(),
+            service_group: "homeboy".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreviewIngressRoute {

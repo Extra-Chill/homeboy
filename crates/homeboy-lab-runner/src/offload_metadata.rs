@@ -277,7 +277,7 @@ mod tests {
             &plan,
             "automatic",
             Some("lab"),
-            Some("reverse"),
+            Some("daemon"),
             "fallback",
             None,
             Some("runner connect timed out after 3s"),

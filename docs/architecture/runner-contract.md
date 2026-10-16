@@ -175,7 +175,8 @@ owner lease remains live. Composite reconciliation acquires local and remote
 components independently. Each authority validates its own opaque token and
 store-issued epoch; a composite generation identifies the composition but is
 not an authority epoch. Runner daemons expose the same owner operations at
-`/runner/workspace-owners/register`, `validate`, `renew`, and `release`.
+`/workspace-owners/register`, `validate`, `renew`, and `release`, reached
+through the controller's SSH loopback tunnel.
 
 Managed task worktrees use the portable `task-worktree` workspace identity with
 the registry component and handle as its locator. The task-worktree manifest
@@ -189,16 +190,17 @@ mutations; terminal reconciliation is the authority for historical recovery.
 
 ## Runner API v1 `watch` operation
 
-The reverse broker serves a job's durable event log to controllers through the
-versioned Runner API `watch` operation at `POST /runner/jobs/watch`
+The runner daemon serves a job's durable event log to controllers through the
+versioned Runner API `watch` operation at the local read-only route
+`GET /jobs/:id/watch?after_sequence=<n>&limit=<n>`
 (`homeboy/runner-api-watch-request/v1`, `homeboy/runner-api-watch-response/v1`,
 defined in `crates/contracts/homeboy-runner-contract/src/watch.rs`). A
 controller that loses its connection mid-job does not re-read the log from the
 beginning and does not guess at what it missed: it resumes from a sequence
 number.
 
-Request: `schema`, `api_version`, `runner_id`, `job_id`, `after_sequence`, and
-optional `limit`. Response: the `job_id`, the events with
+The route builds the request from the path and query: `after_sequence`
+defaults to `0` and `limit` is optional. Response: the `job_id`, the events with
 `sequence > after_sequence` in ascending order, `next_sequence` (the highest
 returned sequence, or the request's `after_sequence` when nothing was
 returned), `terminal` (whether the job reached a terminal status), and
@@ -215,15 +217,10 @@ gaps and no duplicates.
 
 Operation-level failures are typed values in the response's `failure` field
 using the shared `RunnerApiOperationFailure` vocabulary: `job_not_found` for
-an unknown job id, `runner_not_authorized` when the authenticated runner does
-not own the job, and `unsupported_api_version` when the request names a major
-version the broker does not serve. Missing or invalid bearer credentials
-remain an HTTP-level `401`, as on every other broker route. Authorization uses
-the same reader scope as the neighbouring job reads: a Work-scoped credential
-first, falling back to Submit, with ownership bounded by the job's target
-runner id.
+an unknown job id. The route is a local daemon read like `GET /jobs/:id`; the
+controller's SSH loopback tunnel is the trust boundary.
 
-The broker advertises the operation as the `runner-api-watch` capability
+The daemon advertises the operation as the `runner-api-watch` capability
 (version 1) in `GET /capabilities`, so controllers can negotiate it before
 relying on it. Controller-side adoption — the Cook handoff consuming `watch` —
 is a later step of

@@ -1,21 +1,15 @@
-//! Authenticated execution identity for a claimed runner job.
+//! Authenticated execution identity for an accepted runner job.
 //!
-//! This is deliberately built from the durable broker job and its live claim,
-//! not from environment or runner-local lifecycle projections. Consumers may
-//! project it into those surfaces for child-process compatibility, but cannot
-//! construct authority from them.
+//! This is deliberately built from the durable daemon job and its local-child
+//! reservation, not from environment or runner-local lifecycle projections.
+//! Consumers may project it into those surfaces for child-process
+//! compatibility, but cannot construct authority from them.
 
 use homeboy_engine_primitives::content_hash;
 use homeboy_runner_contract::{RunnerJobExecutionContextAssertion, RunnerJobExecutionVerification};
-pub use homeboy_runner_contract::{
-    RunnerJobExecutionProtocol, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY,
-    RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
-};
 use serde::{Deserialize, Serialize};
 
-use crate::api_jobs::Job;
 use crate::error::{Error, ErrorCode, Result};
-use crate::runner_execution_envelope::RunnerExecutionEnvelope;
 
 /// Re-exported from the owning contract so the wire identifier has one
 /// definition rather than two that can drift apart at a version bump.
@@ -46,13 +40,13 @@ pub struct RunnerJobExecutionContext {
     runner_job_id: String,
     accepted_handoff_id: String,
     runtime_id: String,
-    /// Opaque reference to the broker claim/reservation. Raw claim material
+    /// Opaque reference to the job reservation. Raw reservation material
     /// never crosses a durable evidence or provider-process boundary.
     claim_ref: String,
     dispatch_receipt: String,
     verification: RunnerJobExecutionVerificationLocal,
     /// Authority is intentionally process-local. A wire value is only an
-    /// assertion until it has been recomputed from the live durable claim.
+    /// assertion until it has been recomputed from the durable job.
     #[serde(skip)]
     authenticated: bool,
 }
@@ -77,77 +71,6 @@ impl std::fmt::Debug for RunnerJobExecutionContext {
 }
 
 impl RunnerJobExecutionContext {
-    /// Construct the only remote context source: a durable accepted job with a
-    /// live broker claim. Generic runner jobs use their durable run/job identity
-    /// as their controller attempt; agent-task callers retain their explicit IDs.
-    pub fn from_claim(job: &Job, envelope: &RunnerExecutionEnvelope) -> Result<Self> {
-        let dispatch = envelope
-            .dispatch
-            .as_ref()
-            .ok_or_else(|| rejected("accepted dispatch has no typed runner dispatch"))?;
-        let runner_id = required(&job.claimed_by_runner_id, "claimed runner")?;
-        let expected_runner_id = required(&job.target_runner_id, "target runner")?;
-        if runner_id != expected_runner_id || runner_id != dispatch.runner_id.trim() {
-            return Err(rejected(
-                "runner identity does not match the accepted dispatch receipt",
-            ));
-        }
-        let claim_id = required(&job.claim_id, "claim")?;
-        let controller_run_id = metadata_id(&envelope.metadata, "controller_run_id")
-            .or_else(|| {
-                envelope
-                    .lifecycle
-                    .as_ref()
-                    .and_then(|l| l.durable_run_id.clone())
-            })
-            .or_else(|| {
-                envelope
-                    .metadata
-                    .get("run_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| job.id.to_string());
-        let controller_attempt_id = metadata_id(&envelope.metadata, "controller_attempt_id")
-            .unwrap_or_else(|| controller_run_id.clone());
-        let accepted_handoff_id = metadata_id(&envelope.metadata, "accepted_handoff_id")
-            .unwrap_or_else(|| format!("{}:{}", controller_attempt_id, job.id));
-        let runtime_id = dispatch
-            .command
-            .first()
-            .map(String::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| rejected("accepted dispatch has no runtime command"))?
-            .to_string();
-        let dispatch_receipt = receipt(
-            &controller_run_id,
-            &controller_attempt_id,
-            &runner_id,
-            &job.id.to_string(),
-            &accepted_handoff_id,
-            &runtime_id,
-            &claim_id,
-        );
-
-        Ok(Self {
-            schema: RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA.to_string(),
-            id: context_id(&dispatch_receipt),
-            controller_run_id,
-            controller_attempt_id,
-            runner_id,
-            runner_job_id: job.id.to_string(),
-            accepted_handoff_id,
-            runtime_id,
-            claim_ref: claim_ref(&claim_id),
-            dispatch_receipt,
-            verification: RunnerJobExecutionVerificationLocal {
-                state: "verified".to_string(),
-                verified_at_ms: job.updated_at_ms,
-            },
-            authenticated: false,
-        })
-    }
-
     pub fn local(runtime_id: impl Into<String>) -> Self {
         let runtime_id = runtime_id.into();
         let dispatch_receipt = "local".to_string();
@@ -170,9 +93,9 @@ impl RunnerJobExecutionContext {
         }
     }
 
-    /// Direct-daemon jobs are accepted by the durable local-child reservation
-    /// rather than a reverse-broker claim. The reservation is the lease/receipt
-    /// that binds this context to the accepted daemon job.
+    /// Direct-daemon jobs are accepted by the durable local-child reservation.
+    /// The reservation is the lease/receipt that binds this context to the
+    /// accepted daemon job.
     pub fn direct_daemon(
         controller_run_id: Option<&str>,
         runner_id: &str,
@@ -247,55 +170,6 @@ impl RunnerJobExecutionContext {
         })
     }
 
-    /// Turn a received assertion into a capability after proving it against the
-    /// actual broker claim. The authentication bit is never serialized, so a
-    /// forged JSON payload cannot reach a provider entry point.
-    pub fn verify_claim(&self, job: &Job, envelope: &RunnerExecutionEnvelope) -> Result<Self> {
-        if job.status != crate::api_jobs::JobStatus::Running
-            || job
-                .claim_expires_at_ms
-                .is_none_or(|expires_at| expires_at <= crate::api_jobs::timestamp_ms())
-        {
-            return Err(rejected("durable runner claim is no longer live"));
-        }
-        let verified = Self::from_claim(job, envelope)?;
-        if self != &verified {
-            return Err(rejected(
-                "dispatch receipt does not match the accepted runner job",
-            ));
-        }
-        Ok(Self {
-            authenticated: true,
-            ..verified
-        })
-    }
-
-    /// Validate a received canonical claim assertion before the broker consumes
-    /// its durable receipt. Receipt consumption remains the live authority
-    /// check; this only binds the assertion to the claim projection.
-    pub fn verify_claimed_execution(
-        &self,
-        job_id: &str,
-        runner_id: &str,
-        claim_expires_at_ms: u64,
-    ) -> Result<Self> {
-        if claim_expires_at_ms <= crate::api_jobs::timestamp_ms()
-            || self.schema != RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA
-            || self.id != context_id(&self.dispatch_receipt)
-            || self.runner_job_id != job_id
-            || self.runner_id != runner_id
-            || self.verification.state != "verified"
-        {
-            return Err(rejected(
-                "execution context does not match the claimed runner job",
-            ));
-        }
-        Ok(Self {
-            authenticated: true,
-            ..self.clone()
-        })
-    }
-
     /// Verify the self-contained form used by process-boundary consumers before
     /// they serialize it into a provider command payload.
     pub fn verify_integrity(&self) -> Result<()> {
@@ -344,28 +218,6 @@ impl RunnerJobExecutionContext {
                 state: self.verification.state.clone(),
                 verified_at_ms: self.verification.verified_at_ms,
             },
-        }
-    }
-
-    /// Rehydrate a transport assertion before verifying it against durable
-    /// claim state. This never grants authenticated authority by itself.
-    pub fn from_assertion(assertion: RunnerJobExecutionContextAssertion) -> Self {
-        Self {
-            schema: assertion.schema,
-            id: assertion.id,
-            controller_run_id: assertion.controller_run_id,
-            controller_attempt_id: assertion.controller_attempt_id,
-            runner_id: assertion.runner_id,
-            runner_job_id: assertion.runner_job_id,
-            accepted_handoff_id: assertion.accepted_handoff_id,
-            runtime_id: assertion.runtime_id,
-            claim_ref: assertion.claim_ref,
-            dispatch_receipt: assertion.dispatch_receipt,
-            verification: RunnerJobExecutionVerificationLocal {
-                state: assertion.verification.state,
-                verified_at_ms: assertion.verification.verified_at_ms,
-            },
-            authenticated: false,
         }
     }
 
@@ -491,8 +343,7 @@ impl RunnerJobExecutionContext {
                 serde_json::json!({ "phase": "runner_job_execution_context" }),
             )
         })?;
-        // Evidence establishes durable identity, not runtime authority. A
-        // reverse worker must still call `verify_claim` with its broker payload.
+        // Evidence establishes durable identity, not runtime authority.
         if context.schema != RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA
             || context.id != context_id(&context.dispatch_receipt)
             || !matches!(context.verification.state.as_str(), "verified" | "local")
@@ -501,24 +352,6 @@ impl RunnerJobExecutionContext {
         }
         Ok(context)
     }
-}
-
-fn metadata_id(metadata: &serde_json::Value, key: &str) -> Option<String> {
-    metadata
-        .get(key)?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn required(value: &Option<String>, label: &str) -> Result<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .ok_or_else(|| rejected(&format!("accepted dispatch is missing its {label} receipt")))
 }
 
 fn required_environment(value: Option<String>, name: &str) -> Result<String> {
