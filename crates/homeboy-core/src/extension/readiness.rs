@@ -491,7 +491,13 @@ mod tests {
             let cached = extension_ready_status_with(&manifest, ExtensionReadinessMode::Cached);
             assert_eq!(cached.ready, Some(true));
             assert_eq!(cached.state, ExtensionReadinessState::Ready);
-            assert_eq!(cached.cache_age_seconds, Some(0));
+            // Whole-second age: a second boundary can pass between the live
+            // probe and this read on a loaded host (#15987).
+            assert!(
+                cached.cache_age_seconds.is_some_and(|age| age <= 5),
+                "fresh cache age: {:?}",
+                cached.cache_age_seconds
+            );
             assert_eq!(
                 cached.follow_up_command.as_deref(),
                 Some("homeboy extension show fixture --live-readiness")
