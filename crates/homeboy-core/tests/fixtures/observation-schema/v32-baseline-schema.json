@@ -2132,7 +2132,7 @@
     },
     {
       "name": "control_plane_work_intents",
-      "sql": "CREATE TABLE control_plane_work_intents (\n    id TEXT PRIMARY KEY,\n    run_id TEXT NOT NULL,\n    kind TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    payload_json TEXT NOT NULL,\n    state TEXT NOT NULL DEFAULT 'pending',\n    receipt_json TEXT,\n    created_at TEXT NOT NULL,\n    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,\n    CHECK(state IN ('pending', 'submitted')),\n    CHECK(version > 0)\n)",
+      "sql": "CREATE TABLE control_plane_work_intents (\n    id TEXT PRIMARY KEY,\n    run_id TEXT NOT NULL,\n    kind TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    payload_json TEXT NOT NULL,\n    state TEXT NOT NULL DEFAULT 'pending',\n    receipt_json TEXT,\n    created_at TEXT NOT NULL,\n    attempts INTEGER NOT NULL DEFAULT 0,\n    next_attempt_ms INTEGER NOT NULL DEFAULT 0,\n    last_error TEXT,\n    FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,\n    CHECK(state IN ('pending', 'submitted')),\n    CHECK(version > 0)\n)",
       "tbl_name": "control_plane_work_intents",
       "type": "table"
     },
@@ -2246,9 +2246,9 @@
     }
   ],
   "recorded_versions": [
-    31
+    32
   ],
-  "schema_version": 31,
+  "schema_version": 32,
   "tables": {
     "artifact_publication_intents": {
       "columns": [
@@ -3095,6 +3095,33 @@
           "hidden": 0,
           "name": "created_at",
           "notnull": 1,
+          "pk": 0,
+          "type": "TEXT"
+        },
+        {
+          "cid": 8,
+          "dflt_value": "0",
+          "hidden": 0,
+          "name": "attempts",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 9,
+          "dflt_value": "0",
+          "hidden": 0,
+          "name": "next_attempt_ms",
+          "notnull": 1,
+          "pk": 0,
+          "type": "INTEGER"
+        },
+        {
+          "cid": 10,
+          "dflt_value": null,
+          "hidden": 0,
+          "name": "last_error",
+          "notnull": 0,
           "pk": 0,
           "type": "TEXT"
         }

@@ -49,16 +49,66 @@ fn terminal_cook_uses_shared_work_job_with_the_existing_active_fence() {
 }
 
 #[test]
-fn terminal_cook_job_retry_epoch_changes_submission_key_but_keeps_active_fence() {
+fn terminal_cook_job_retry_epoch_changes_submission_key_but_keeps_attempt_fence() {
     let first = terminal_cook_job_idempotency_keys("cook", "run", 0);
     let retry = terminal_cook_job_idempotency_keys("cook", "run", 1);
     assert_ne!(first.0, retry.0, "a retry must create a fresh durable job");
-    assert_eq!(first.1, retry.1, "concurrent jobs share one active fence");
-    assert_eq!(
+    assert_eq!(first.1, retry.1, "one attempt's generations share a fence");
+    assert_ne!(
         first.1,
         terminal_cook_job_idempotency_keys("cook", "follow-up", 0).1,
-        "follow-up attempts for the same Cook must not finalize concurrently"
+        "each attempt of a Cook has its own fence"
     );
+}
+
+/// Attempt 2's continuation is admitted while attempt 1's job is still
+/// active (#16053); a second generation of attempt 1 stays fenced.
+#[test]
+fn next_attempt_continuation_schedules_while_previous_attempt_job_is_active() {
+    use homeboy::core::daemon::controller_job_driver::ControllerJobDriver;
+
+    homeboy::core::test_support::with_isolated_home(|_| {
+        register_execution_orchestration();
+        crate::agents::agent_task_service::register_work_job_driver();
+        let continuation = |run_id: &str, generation: u64| {
+            terminal_cook_work_submission(&serde_json::json!({
+                "schema": "homeboy/terminal-cook-continuation-request/v1",
+                "cook_id": "cook",
+                "run_id": run_id,
+                "generation": generation,
+            }))
+            .expect("typed work submission")
+        };
+        let driver: Arc<dyn ControllerJobDriver> =
+            Arc::new(crate::agents::agent_task_service::WorkJobDriver);
+        let harness = homeboy::core::test_support::ControllerJobHarness::new(
+            driver,
+            continuation("attempt-0", 0)["request"].clone(),
+        )
+        .expect("job store harness");
+
+        let attempt_one = harness
+            .admit_keyed(continuation("attempt-1", 0))
+            .expect("attempt 1 continuation admitted");
+        assert!(!attempt_one.status.is_terminal());
+        let attempt_two = harness
+            .admit_keyed(continuation("attempt-2", 0))
+            .expect("attempt 2 is not fenced by attempt 1's active job");
+        assert_ne!(attempt_two.id, attempt_one.id);
+        assert!(!harness
+            .store()
+            .get(attempt_one.id)
+            .expect("attempt 1 job")
+            .status
+            .is_terminal());
+
+        let same_attempt = harness
+            .admit_keyed(continuation("attempt-1", 1))
+            .expect_err("a new generation of an active attempt is fenced");
+        assert!(same_attempt
+            .message
+            .contains("controller idempotency key is already bound"));
+    });
 }
 
 /// A claimed terminal continuation that failed retryably is handed to its

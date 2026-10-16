@@ -6261,7 +6261,7 @@ mod tests {
                         panic!("receipt replay must not duplicate completed scheduling")
                     })
                     .unwrap()["scheduled"],
-                    false
+                    json!([])
                 );
                 assert_eq!(
                     homeboy_agents::agent_task_lifecycle::exact_record(run_id)

@@ -498,8 +498,9 @@ fn work_intent_commits_atomically_with_run_and_ack_replays_after_restart() {
     store
         .upsert_imported_run_with_events_and_intents(&run, true, None, None, &[], &[intent.clone()])
         .expect("commit source and intent");
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     assert_eq!(
-        store.next_pending_work_intent().expect("pending"),
+        store.next_pending_work_intent(now_ms).expect("pending"),
         Some(intent.clone())
     );
     let mut conflicting = intent.clone();
@@ -525,14 +526,18 @@ fn work_intent_commits_atomically_with_run_and_ack_replays_after_restart() {
 
     let restarted = ObservationStore::open_initialized_in_roots(&roots).expect("restart");
     assert_eq!(
-        restarted.next_pending_work_intent().unwrap(),
+        restarted.next_pending_work_intent(now_ms).unwrap(),
         Some(intent.clone())
     );
     // Simulate daemon acceptance followed by a crash before ACK. The same
     // stable id is replayed to the daemon, which returns its original job.
     let receipt = serde_json::json!({"scheduled": true, "job_id": "same-durable-job"});
     assert_eq!(
-        restarted.next_pending_work_intent().unwrap().unwrap().id,
+        restarted
+            .next_pending_work_intent(now_ms)
+            .unwrap()
+            .unwrap()
+            .id,
         intent.id
     );
     restarted
@@ -541,10 +546,106 @@ fn work_intent_commits_atomically_with_run_and_ack_replays_after_restart() {
     restarted
         .acknowledge_work_intent(&intent.id, &receipt)
         .expect("ACK replay");
-    assert!(restarted.next_pending_work_intent().unwrap().is_none());
+    assert!(restarted
+        .next_pending_work_intent(now_ms)
+        .unwrap()
+        .is_none());
     assert!(restarted
         .acknowledge_work_intent(&intent.id, &serde_json::json!({"job_id":"different"}))
         .is_err());
+}
+
+#[test]
+fn deferred_work_intent_backs_off_without_blocking_newer_intents() {
+    use crate::observation::WorkIntent;
+
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut run = sample_import_run("work-intent-backoff-run");
+    run.status = "running".to_string();
+    run.finished_at = None;
+    let intent = |id: &str| WorkIntent {
+        id: id.to_string(),
+        run_id: run.id.clone(),
+        kind: "terminal-cook-continuation".to_string(),
+        version: 1,
+        payload: serde_json::json!({ "id": id }),
+    };
+    let (head, newer) = (intent("backoff:head"), intent("backoff:newer"));
+    store
+        .upsert_imported_run_with_events_and_intents(
+            &run,
+            true,
+            None,
+            None,
+            &[],
+            &[head.clone(), newer.clone()],
+        )
+        .expect("commit source and intents");
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    assert_eq!(
+        store.next_pending_work_intent(now_ms).unwrap(),
+        Some(head.clone())
+    );
+
+    let first = store
+        .defer_work_intent(&head.id, now_ms, "active fence held")
+        .unwrap()
+        .expect("pending intent is deferred");
+    assert_eq!(first.attempts, 1);
+    assert_eq!(first.next_attempt_ms, now_ms + 1_000);
+    assert_eq!(first.last_error, "active fence held");
+    assert_eq!(
+        store.next_pending_work_intent(now_ms).unwrap(),
+        Some(newer.clone()),
+        "a deferred head never blocks a newer due intent"
+    );
+    store
+        .acknowledge_work_intent(&newer.id, &serde_json::json!({"job_id": "newer"}))
+        .unwrap();
+    assert!(store.next_pending_work_intent(now_ms).unwrap().is_none());
+    drop(store);
+
+    let restarted = ObservationStore::open_initialized_in_roots(&roots).expect("restart");
+    assert!(
+        restarted
+            .next_pending_work_intent(now_ms + 999)
+            .unwrap()
+            .is_none(),
+        "restart keeps the durable deadline"
+    );
+    let due = now_ms + 1_000;
+    assert_eq!(
+        restarted.next_pending_work_intent(due).unwrap(),
+        Some(head.clone())
+    );
+    let second = restarted
+        .defer_work_intent(&head.id, due, "still held")
+        .unwrap()
+        .expect("still pending");
+    assert_eq!((second.attempts, second.next_attempt_ms), (2, due + 2_000));
+    for _ in 0..8 {
+        restarted
+            .defer_work_intent(&head.id, due, "still held")
+            .unwrap();
+    }
+    assert_eq!(
+        restarted
+            .defer_work_intent(&head.id, due, "still held")
+            .unwrap()
+            .expect("still pending")
+            .next_attempt_ms,
+        due + 60_000,
+        "backoff is bounded"
+    );
+    restarted
+        .acknowledge_work_intent(&head.id, &serde_json::json!({"job_id": "head"}))
+        .unwrap();
+    assert!(restarted
+        .defer_work_intent(&head.id, due, "late failure")
+        .unwrap()
+        .is_none());
 }
 
 #[test]

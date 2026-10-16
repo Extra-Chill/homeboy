@@ -12815,9 +12815,15 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                     "daemon stopped after accepting WorkJob before ACK",
                 ))
             })
-            .expect_err("unacknowledged intent remains visible after daemon interruption");
-            assert!(lost_ack.message.contains("before ACK"));
+            .expect("unacknowledged intent is deferred after daemon interruption");
+            assert!(lost_ack["deferred"][0]["last_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("before ACK")));
             assert_eq!(accepted_before_ack.get(), 1);
+            homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store")
+                .expire_work_intent_backoff()
+                .expect("deferred intent backoff elapses");
             let scheduled = std::cell::Cell::new(0);
             let recovery = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
                 scheduled.set(scheduled.get() + 1);
@@ -12829,7 +12835,7 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                 Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
             })
             .expect("daemon recovers durable pending work after interrupted event submission");
-            assert_eq!(recovery["scheduled"], true);
+            assert_eq!(recovery["scheduled"][0]["job_id"], "shared-work-job");
             let reconciled = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
             assert_eq!(reconciled.run_id, run_id);
             assert_eq!(scheduled.get(), 1);
@@ -12838,7 +12844,7 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                     panic!("an acknowledged intent must not schedule a second job")
                 })
                 .expect("ACK settles indexed intent")["scheduled"],
-                false
+                serde_json::json!([])
             );
             let claim = recipe_store
                 .claim_continuation_for(cook_id, run_id)
