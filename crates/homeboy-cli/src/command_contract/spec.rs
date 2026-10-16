@@ -701,7 +701,7 @@ const RUNNER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "mutates runner configuration, trust policy, or runner lifecycle state",
     ),
     paths_safety(
-        &["connect", "work"],
+        &["connect"],
         with_risk_exemption(
             operator_safety(None, &[]),
             "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",

@@ -5,9 +5,9 @@ use homeboy::core::api_jobs::{Job, JobEvent, JobStatus};
 use homeboy::core::{EntityCrudOutput, EntityRows};
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
-    PeerSessionMaintenanceReport, ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary,
-    RunnerAvailability, RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport,
-    RunnerExecOutput, RunnerStatusReport,
+    PeerSessionMaintenanceReport, Runner, RunnerAdmissionSummary, RunnerAvailability,
+    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput,
+    RunnerStatusReport,
 };
 
 use std::collections::BTreeMap;
@@ -555,7 +555,6 @@ pub enum RunnerCommandOutput {
     RefreshHomeboy(Box<RunnerRefreshHomeboyCommandOutput>),
     DevSync(Box<homeboy::runner::runners::RunnerDevSyncOutput>),
     CachePrune(Box<homeboy::runner::runners::RunnerBinaryCachePruneOutput>),
-    Worker(Box<ReverseRunnerWorkerOutput>),
     Workspace(Box<workspace::RunnerWorkspaceOutput>),
     RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
     Broker(Box<RunnerBrokerOutput>),

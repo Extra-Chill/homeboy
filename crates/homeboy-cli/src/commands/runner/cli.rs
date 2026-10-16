@@ -528,49 +528,6 @@ pub(super) enum RunnerCommand {
         #[command(subcommand)]
         command: RunnerJobCommand,
     },
-    /// Claim and execute one brokered reverse-runner job from this machine
-    Work {
-        /// Runner ID on this machine
-        runner_id: String,
-
-        /// Controller/broker daemon URL
-        #[arg(long)]
-        broker_url: String,
-
-        /// Paired broker bearer token. Falls back to the HOMEBOY_BROKER_TOKEN
-        /// environment variable when omitted. Required when the broker enforces
-        /// auth; omit only for loopback-open smoke setups.
-        #[arg(long)]
-        broker_token: Option<String>,
-
-        /// Optional project filter for claimed jobs
-        #[arg(long)]
-        project: Option<String>,
-
-        /// Claim lease duration in milliseconds
-        #[arg(long, default_value_t = 30_000)]
-        lease_ms: u64,
-
-        /// Keep claiming jobs until SIGINT/SIGTERM instead of exiting after one claim
-        #[arg(long)]
-        r#loop: bool,
-
-        /// Initial sleep after an empty claim in loop mode
-        #[arg(long, default_value_t = 1_000)]
-        idle_backoff_ms: u64,
-
-        /// Maximum sleep after repeated empty claims in loop mode
-        #[arg(long, default_value_t = 30_000)]
-        max_idle_backoff_ms: u64,
-
-        /// Sleep after transient broker failures in loop mode
-        #[arg(long, default_value_t = 5_000)]
-        broker_failure_backoff_ms: u64,
-
-        /// Consecutive broker failures allowed before the worker exits non-zero
-        #[arg(long, default_value_t = 5)]
-        broker_retry_limit: u32,
-    },
     /// Materialize local workspaces on a configured runner
     Workspace {
         #[command(subcommand)]

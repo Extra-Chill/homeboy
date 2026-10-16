@@ -26,7 +26,7 @@ use super::execution::{
 use super::Runner;
 
 struct DaemonPreparedPlan {
-    _private_files: super::worker::PrivateAtFileCleanup,
+    _private_files: super::staged_workspace::PrivateAtFileCleanup,
     plan: PreparedRunnerProcess,
     extension_env_providers: Vec<String>,
     authoritative_run_id: Option<String>,
@@ -35,7 +35,7 @@ struct DaemonPreparedPlan {
 
 struct DaemonStagedPlan {
     envelope: RunnerExecutionEnvelope,
-    workspace: Option<super::worker::StagedWorkspaceDirectory>,
+    workspace: Option<super::staged_workspace::StagedWorkspaceDirectory>,
 }
 
 /// The runner layer's `RunnerExecDriver`. Registered with core at startup.
@@ -55,12 +55,12 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
         // The sealed submission is the source authority. Only the runner driver
         // may derive its workspace location after extracting and verifying it.
         let mut materialized_envelope = envelope.clone();
-        let workspace = super::worker::materialize_staged_source_artifact(
+        let workspace = super::staged_workspace::materialize_staged_source_artifact(
             &request.runner_id,
             &job_id.to_string(),
             &mut materialized_envelope,
         )?;
-        super::worker::verify_staged_workspace_before_execution(
+        super::staged_workspace::verify_staged_workspace_before_execution(
             &request.runner_id,
             &materialized_envelope,
             workspace.as_ref(),
@@ -106,7 +106,8 @@ fn prepare_daemon_exec(
     mut request: RunnerExecPrepareRequest,
     staged: Option<DaemonStagedPlan>,
 ) -> Result<PreparedDaemonExec> {
-    let private_files = super::worker::verify_private_command_arguments(&mut request.command)?;
+    let private_files =
+        super::staged_workspace::verify_private_command_arguments(&mut request.command)?;
     let runner: Option<Runner> = match request.runner {
         Some(value) => Some(serde_json::from_value(value).map_err(|err| {
             homeboy_core::error::Error::validation_invalid_argument(
@@ -237,7 +238,7 @@ fn execute_daemon_exec(
         // Revalidate immediately before providers can inspect the workspace or
         // a child can be spawned. The retained descriptor remains authoritative
         // while capacity admission waits.
-        super::worker::verify_staged_workspace_before_execution(
+        super::staged_workspace::verify_staged_workspace_before_execution(
             &prepared.runner_id,
             &staged.envelope,
             staged.workspace.as_ref(),
@@ -280,7 +281,7 @@ fn execute_daemon_exec(
         base.staged
             .as_ref()
             .and_then(|staged| staged.workspace.as_ref())
-            .map(super::worker::StagedWorkspaceDirectory::fd),
+            .map(super::staged_workspace::StagedWorkspaceDirectory::fd),
     )?;
     let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
         output.stdout,

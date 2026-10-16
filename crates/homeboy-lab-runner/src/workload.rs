@@ -639,27 +639,6 @@ fn workload_error(field: &str, message: String) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
 }
 
-pub(crate) fn lab_runner_workload_with_result_refs(
-    mut workload: LabRunnerWorkload,
-    job_id: Option<&str>,
-    mirror_run_id: Option<&str>,
-    artifacts: &[homeboy_core::api_jobs::JobArtifactMetadata],
-) -> LabRunnerWorkload {
-    workload.result_refs.job_id = job_id.map(str::to_string);
-    workload.result_refs.mirror_run_id = mirror_run_id.map(str::to_string);
-    workload.result_refs.artifacts = artifacts
-        .iter()
-        .map(|artifact| homeboy_core::lab_contract::JobArtifactMetadata {
-            id: artifact.id.clone(),
-            name: artifact.name.clone(),
-            path: artifact.path.clone(),
-            url: artifact.url.clone(),
-            ..Default::default()
-        })
-        .collect();
-    workload
-}
-
 fn required_capabilities(command: &LabOffloadCommand) -> Vec<LabRunnerWorkloadCapability> {
     let mut capabilities = Vec::new();
     if command.routing_policy.requires_extension_parity || !command.required_extensions.is_empty() {
@@ -709,7 +688,6 @@ fn workspace_mode_policy_label(policy: LabOffloadWorkspaceModePolicy) -> &'stati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_core::api_jobs::JobArtifactMetadata;
     use homeboy_core::plan::{HomeboyPlan, PlanKind};
 
     /// Register a stub command-label resolver for tests.
@@ -1144,22 +1122,13 @@ mod tests {
 
     #[test]
     fn lab_runner_workload_validation_rejects_blank_result_refs_artifact_ids() {
-        let workload = lab_runner_workload_with_result_refs(
-            workload(),
-            Some("job-1"),
-            Some("mirror-1"),
-            &[JobArtifactMetadata {
-                id: " ".to_string(),
-                name: Some("trace.zip".to_string()),
-                path: Some("/tmp/trace.zip".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: Some(42),
-                sha256: None,
-                content_base64: None,
-                metadata: None,
-            }],
-        );
+        let mut workload = workload();
+        workload.result_refs.artifacts = vec![homeboy_core::lab_contract::JobArtifactMetadata {
+            id: " ".to_string(),
+            name: Some("trace.zip".to_string()),
+            path: Some("/tmp/trace.zip".to_string()),
+            ..Default::default()
+        }];
 
         let err = validate_lab_runner_workload_dispatch(
             Some(&workload),
@@ -1766,54 +1735,6 @@ mod tests {
             None,
         )
         .is_none());
-    }
-
-    #[test]
-    fn lab_runner_workload_result_refs_use_actual_artifacts() {
-        let plan = plan();
-        let command = command();
-        let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
-            plan: &plan,
-            command: &command,
-            capture_patch: false,
-            mutation_flag: None,
-            allow_dirty_lab_workspace: false,
-            runner_id: "lab-a",
-            runner_mode: "direct_ssh",
-            assignment_source: "explicit",
-            status: "offloaded",
-            remote_workspace: Some("/srv/homeboy/work"),
-            fallback_reason: None,
-            workspace_mapping_ref: None,
-            proof_id: None,
-        });
-        let workload = lab_runner_workload_with_result_refs(
-            workload,
-            Some("job-1"),
-            Some("mirror-1"),
-            &[JobArtifactMetadata {
-                id: "artifact-1".to_string(),
-                name: Some("trace.zip".to_string()),
-                path: Some("/tmp/trace.zip".to_string()),
-                url: None,
-                mime: None,
-                size_bytes: Some(42),
-                sha256: None,
-                content_base64: None,
-                metadata: None,
-            }],
-        );
-
-        assert_eq!(workload.result_refs.job_id.as_deref(), Some("job-1"));
-        assert_eq!(
-            workload.result_refs.mirror_run_id.as_deref(),
-            Some("mirror-1")
-        );
-        assert_eq!(workload.result_refs.artifacts[0].id, "artifact-1");
-        assert_eq!(
-            workload.result_refs.artifacts[0].name.as_deref(),
-            Some("trace.zip")
-        );
     }
 
     #[test]

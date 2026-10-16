@@ -66,7 +66,6 @@ mod recovery;
 pub(crate) mod redaction;
 mod secrets;
 mod submission;
-mod worker;
 
 #[cfg(test)]
 mod tests;
@@ -123,7 +122,6 @@ pub(crate) use secrets::provision_provider_file_secret_sources_for_runner;
 #[cfg(test)]
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
-pub(crate) use worker::exec_worker_local_until_cancelled_with_progress;
 
 mod request;
 pub use request::{exec_request, RunnerExecRequest};

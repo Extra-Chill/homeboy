@@ -178,8 +178,8 @@ facts through the same compiled admission plan before reserving a daemon admissi
 reservation. Wrapper order is preflight, durable run persistence, then setup and
 materialization.
 
-Safety manifest metadata marks `runner connect` and `runner work` as explicit
-operator lifecycle actions. They do not currently expose dry-run contracts; use
+Safety manifest metadata marks `runner connect` as an explicit operator
+lifecycle action. It does not currently expose a dry-run contract; use
 `runner doctor` for preflight diagnostics before changing runner lifecycle state.
 
 Use `--scope lab-offload` before serious Lab evidence runs. It adds checks for
@@ -658,38 +658,6 @@ That guide is machine-agnostic and intentionally explicit about what is availabl
 now and what remains gated by #2990, #2991, #2992, and #2947 before production
 broker exposure.
 
-### `work`
-
-```sh
-homeboy runner work <runner-id> --broker-url <url> --broker-token <token>
-homeboy runner work <runner-id> --broker-url <url> --project <project-id> --lease-ms 30000
-HOMEBOY_BROKER_TOKEN=<token> homeboy runner work <runner-id> --broker-url <url> --loop
-```
-
-Pass the paired token with `--broker-token` or the `HOMEBOY_BROKER_TOKEN`
-environment variable. The token is required whenever the broker enforces auth;
-omit it only for a loopback-open smoke broker.
-
-Claims one brokered reverse-runner job for the runner, executes it on the runner
-machine under the runner's local policy, streams a progress event, and finishes
-the broker job with stdout, stderr, and exit code. This is the runner-side half
-of reverse `runner exec`; it uses outbound HTTP from the lab to the controller
-broker and does not require inbound SSH or a public listening port on the lab.
-
-The command exits `0` when no job is available, with `claimed: false` in the JSON
-payload. When a job is claimed, the process exit code matches the executed
-command's exit code.
-
-Use `--loop` for a long-running reverse runner service. Loop mode emits one
-structured JSON status line per lifecycle event to stderr so systemd/journald can
-index startup, idle backoff, job completion, transient broker failures, and
-shutdown without mixing those events into the final stdout JSON payload. Empty
-queues use exponential backoff controlled by `--idle-backoff-ms` and
-`--max-idle-backoff-ms`, so workers do not hot-spin when no work is available.
-Transient broker failures sleep for `--broker-failure-backoff-ms` and exit
-non-zero after `--broker-retry-limit` consecutive failures. `SIGINT` and
-`SIGTERM` request graceful shutdown after the current claim attempt or job.
-
 ### `broker`
 
 ```sh
@@ -757,35 +725,6 @@ same continuation command without cancelling remote work. A job absent after a
 successful authoritative recovery is reported as retention/eviction rather than
 a transient connection failure. `cancel` uses the same owner recovery path when
 its current controller tunnel has disappeared.
-
-Minimal Homeboy Lab systemd unit:
-
-```ini
-[Unit]
-Description=Homeboy reverse runner worker
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=deploy
-WorkingDirectory=/home/user
-Environment=HOMEBOY_BROKER_TOKEN=<paired-token>
-ExecStart=/usr/local/bin/homeboy runner work homeboy-lab --broker-url https://controller.example.com --loop --idle-backoff-ms 1000 --max-idle-backoff-ms 30000 --broker-retry-limit 12
-Restart=on-failure
-RestartSec=10
-KillSignal=SIGTERM
-
-[Install]
-WantedBy=multi-user.target
-```
-
-The worker authenticates with the broker using the paired bearer token. Prefer
-delivering it through `HOMEBOY_BROKER_TOKEN` — via a systemd
-`EnvironmentFile=/etc/homeboy/broker.env` with `0600` permissions rather than an
-inline `Environment=` line — so the secret never lands in `systemctl show`
-output. Pair the credential on the broker host with `homeboy runner broker pair`
-(see [Broker authentication and pairing](#broker-authentication-and-pairing)).
 
 ### `status`
 
