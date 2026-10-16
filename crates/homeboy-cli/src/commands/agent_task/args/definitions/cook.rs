@@ -101,8 +101,9 @@ pub struct VerifyGateArgs {
         value_name = "SECONDS"
     )]
     pub gate_heartbeat_interval_seconds: u64,
-    /// Maximum time, in seconds, a gate may run without a structured
-    /// `HOMEBOY_PROGRESS` marker (default 300 = 5 min).
+    /// Maximum time, in seconds, a gate may go without a liveness signal
+    /// (default 300 = 5 min). Any output counts until the gate emits its first
+    /// `HOMEBOY_PROGRESS` marker; after that, only markers count.
     #[arg(
         long = "gate-no-progress-timeout-seconds",
         default_value_t = 5 * 60,
