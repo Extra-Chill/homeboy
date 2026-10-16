@@ -399,18 +399,19 @@ fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
 
     left.write_record(&terminal).expect("terminal record");
 
-    assert!(left_context
-        .data_dir()
-        .join("workspace-terminal-authority")
-        .join("by-run")
-        .read_dir()
-        .expect("left terminal index")
-        .next()
-        .is_some());
-    assert!(!right_context
-        .data_dir()
-        .join("workspace-terminal-authority")
-        .exists());
+    let authority = |context: &homeboy_core::test_support::HermeticTestContext| {
+        homeboy_core::observation::ObservationStore::open_initialized_for_lifecycle_in_roots(
+            &context.path_roots(),
+        )
+        .expect("observation store")
+        .coordination_record("workspace-terminal-authority", run_id)
+        .expect("terminal authority read")
+    };
+    assert!(
+        authority(&left_context).is_some(),
+        "left terminal authority"
+    );
+    assert!(authority(&right_context).is_none());
     assert!(right.read_record(run_id).is_err());
 }
 
