@@ -26,8 +26,9 @@ pub use cargo_targets::{
 };
 mod automatic_retention;
 pub use automatic_retention::{
-    run_automatic_cargo_retention, run_automatic_runtime_temp_retention, AutomaticRetentionOutput,
-    RuntimeTempRetentionOutput,
+    begin_automatic_retention_pass, run_automatic_cargo_retention,
+    run_automatic_runtime_temp_retention, AutomaticRetentionKind, AutomaticRetentionOutput,
+    AutomaticRetentionPass, RuntimeTempRetentionOutput, AUTOMATIC_RETENTION_NAMESPACE,
 };
 pub mod degraded;
 pub use degraded::{

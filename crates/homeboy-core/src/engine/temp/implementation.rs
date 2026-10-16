@@ -2305,7 +2305,7 @@ fn ensure_runtime_tmp_dir() -> Result<PathBuf> {
                 let mut exhausted = preflight.error().expect("exhausted preflight has an error");
                 exhausted.details["runtime_cleanup"] = serde_json::json!({
                     "status": "busy",
-                    "state_path": output.state_path,
+                    "state_key": output.state_key,
                     "resume_command": output.resume_command,
                     "lock": runtime_temp_cleanup_lock_status(),
                 });
