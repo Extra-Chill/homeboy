@@ -1,13 +1,26 @@
 //! Durable, provider-agnostic records for operations that cross process boundaries.
-use std::fs::{self, OpenOptions};
-use std::path::{Path, PathBuf};
+//!
+//! Each record is a coordination record in the observation store (#15947),
+//! keyed by `owner_run_ref`. Every update is a read-modify-write guarded by a
+//! revision compare-and-set and retried on conflict, so a recovered finalizer
+//! can never race a still-running owner into a lost update.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use homeboy_core::observation::coordination::{
+    CoordinationRecord, ExpectedRevision, RecordOutcome, RecordWrite,
+};
+use homeboy_core::observation::ObservationStore;
 use homeboy_core::{paths, Error, Result};
+
+/// Coordination namespace owned by release operation records.
+pub(crate) const NAMESPACE: &str = "release-operation-records";
+
+/// Bound on compare-and-set retries for one update. Each retry means another
+/// writer committed in between, so exhausting this is a genuine livelock.
+const MAX_UPDATE_ATTEMPTS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationRecord {
@@ -50,71 +63,86 @@ impl OperationRecord {
     }
 }
 
-/// Durable operation records below one explicitly injected data root.
+/// Durable operation records in the observation store of one explicitly
+/// injected home.
 ///
 /// Stateful on purpose. A single release workspace lifecycle writes this store
 /// roughly a dozen times — publish ownership, record the provisioned path,
-/// mark a failed verification, claim finalization, complete it — and the
-/// ambient form resolved a data root independently for every one of them.
-/// Binding the root once at construction is what makes those writes provably
-/// the same home's, rather than incidentally so (#7505).
+/// mark a failed verification, claim finalization, complete it — and binding
+/// the roots once at construction is what makes those writes provably the same
+/// home's, rather than incidentally so (#7505).
 pub struct OperationRecordStore {
-    data_root: PathBuf,
+    roots: paths::PathRoots,
 }
 
 impl OperationRecordStore {
-    /// Bind the store to the data root its caller already resolved.
+    /// Bind the store to the roots its caller already resolved.
     pub fn in_roots(roots: &paths::PathRoots) -> Self {
         Self {
-            data_root: roots.data().to_path_buf(),
+            roots: roots.clone(),
         }
+    }
+
+    fn open(&self) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
     }
 
     pub fn create(&self, record: &OperationRecord) -> Result<OperationRecord> {
         self.update(&record.owner_run_ref, |_| Ok(record.clone()))
     }
 
-    /// Compare/update is serialized across processes and atomically replaces the
-    /// record, so a recovered finalizer cannot race a still-running owner.
-    ///
-    /// The lock and the record path derive from one root. The ambient form
-    /// resolved the data root twice — once inside `lock()` and again inside
-    /// `record_path()` — so a repoint between them could have serialized
-    /// against one home's `.lock` while replacing the other home's record.
+    /// Compare/update against the stored revision. A concurrent writer makes
+    /// the write conflict; the update is then re-applied to the fresh record,
+    /// so `update` may run more than once and must not consume its captures.
     pub(crate) fn update(
         &self,
         owner_run_ref: &str,
-        update: impl FnOnce(Option<OperationRecord>) -> Result<OperationRecord>,
+        mut update: impl FnMut(Option<OperationRecord>) -> Result<OperationRecord>,
     ) -> Result<OperationRecord> {
-        let data_root = self.data_root.as_path();
-        let _lock = lock_in_roots(data_root)?;
-        let path = record_path_in_roots(data_root, owner_run_ref);
-        let current = read_path(&path)?;
-        let next = update(current)?;
-        if next.owner_run_ref != owner_run_ref {
-            return Err(Error::validation_invalid_argument(
-                "owner_run_ref",
-                "operation record owner reference cannot change",
-                Some(owner_run_ref.to_string()),
-                None,
-            ));
+        let store = self.open()?;
+        let mut current = store.coordination_record(NAMESPACE, owner_run_ref)?;
+        for _ in 0..MAX_UPDATE_ATTEMPTS {
+            let expected = current.as_ref().map_or(ExpectedRevision::Absent, |row| {
+                ExpectedRevision::Revision(row.revision)
+            });
+            let existing = current.as_ref().map(parse_record).transpose()?;
+            let next = update(existing)?;
+            if next.owner_run_ref != owner_run_ref {
+                return Err(Error::validation_invalid_argument(
+                    "owner_run_ref",
+                    "operation record owner reference cannot change",
+                    Some(owner_run_ref.to_string()),
+                    None,
+                ));
+            }
+            let payload = serde_json::to_value(&next).map_err(|error| {
+                Error::internal_json(error.to_string(), Some(owner_run_ref.to_string()))
+            })?;
+            match store.put_coordination_record(
+                NAMESPACE,
+                owner_run_ref,
+                expected,
+                RecordWrite {
+                    state: &next.finalization_status,
+                    payload: &payload,
+                    expires_at_ms: None,
+                },
+            )? {
+                RecordOutcome::Applied(_) => return Ok(next),
+                RecordOutcome::Conflict { current: latest } => current = latest,
+            }
         }
-        let json = serde_json::to_vec_pretty(&next).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(owner_run_ref.to_string()))
-        })?;
-        homeboy_core::io::write_output_file_atomically(
-            &path,
-            [json, b"\n".to_vec()].concat(),
-            homeboy_core::io::OutputWriteOptions::artifact(),
-        )
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-        Ok(next)
+        Err(Error::internal_unexpected(format!(
+            "operation record '{owner_run_ref}' kept changing during {MAX_UPDATE_ATTEMPTS} update attempts"
+        )))
     }
 
     pub fn load(&self, owner_run_ref: &str) -> Result<Option<OperationRecord>> {
-        let data_root = self.data_root.as_path();
-        let _lock = lock_in_roots(data_root)?;
-        read_path(&record_path_in_roots(data_root, owner_run_ref))
+        self.open()?
+            .coordination_record(NAMESPACE, owner_run_ref)?
+            .as_ref()
+            .map(parse_record)
+            .transpose()
     }
 
     /// Claims finalization before an external provider call. A live lease is
@@ -195,7 +223,7 @@ impl OperationRecordStore {
             record.finalization_lease_started_ms = None;
             record
                 .attributes
-                .insert("finalization_receipt".to_string(), receipt);
+                .insert("finalization_receipt".to_string(), receipt.clone());
             record
                 .continuation_evidence
                 .push("provider finalization completed".to_string());
@@ -252,7 +280,7 @@ impl OperationRecordStore {
             record.lifecycle_state = "finalization_pending".to_string();
             record.finalization_lease = None;
             record.finalization_lease_started_ms = None;
-            record.continuation_evidence.push(error);
+            record.continuation_evidence.push(error.clone());
             Ok(record)
         })
     }
@@ -263,29 +291,14 @@ impl OperationRecordStore {
         subject: &str,
         pending_only: bool,
     ) -> Result<Vec<OperationRecord>> {
-        let data_root = self.data_root.as_path();
-        let _lock = lock_in_roots(data_root)?;
-        let dir = store_dir_in_roots(data_root);
         let mut records = Vec::new();
-        if !dir.exists() {
-            return Ok(records);
-        }
-        for entry in fs::read_dir(&dir).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(dir.display().to_string()))
-        })? {
-            let entry = entry.map_err(|error| {
-                Error::internal_io(error.to_string(), Some(dir.display().to_string()))
-            })?;
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            if let Some(record) = read_path(&entry.path())? {
-                if record.operation == operation
-                    && record.subject == subject
-                    && (!pending_only || record.finalization_pending())
-                {
-                    records.push(record);
-                }
+        for row in self.open()?.coordination_records(NAMESPACE)? {
+            let record = parse_record(&row)?;
+            if record.operation == operation
+                && record.subject == subject
+                && (!pending_only || record.finalization_pending())
+            {
+                records.push(record);
             }
         }
         records.sort_by(|left, right| left.owner_run_ref.cmp(&right.owner_run_ref));
@@ -300,59 +313,9 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-/// The operation-record store below an explicitly injected data root.
-///
-/// The ambient form resolved `paths::observation_db()` and took its parent.
-/// `observation_db()` is `homeboy_data()?.join(OBSERVATION_DB_FILENAME)`, so that
-/// parent is exactly the data root: the database path was only ever a detour
-/// through it, and this store has never read or written the database itself.
-/// Naming the data root directly removes both the detour and the infallible
-/// `parent()` failure branch it required.
-fn store_dir_in_roots(data_root: &Path) -> PathBuf {
-    data_root.join("operation-records")
-}
-
-fn record_path_in_roots(data_root: &Path, owner_run_ref: &str) -> PathBuf {
-    store_dir_in_roots(data_root).join(format!(
-        "{}.json",
-        paths::sanitize_path_segment(owner_run_ref)
-    ))
-}
-
-fn lock_in_roots(data_root: &Path) -> Result<std::fs::File> {
-    let dir = store_dir_in_roots(data_root);
-    homeboy_core::engine::local_files::create_dir_all_durably(&dir)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        // The lock is never written; retain any existing bytes while reopening it.
-        .truncate(false)
-        .open(dir.join(".lock"))
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("open operation record lock".to_string()),
-            )
-        })?;
-    file.lock_exclusive().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("lock operation records".to_string()),
-        )
-    })?;
-    Ok(file)
-}
-
-fn read_path(path: &Path) -> Result<Option<OperationRecord>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_slice(&raw)
-        .map(Some)
-        .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+fn parse_record(row: &CoordinationRecord) -> Result<OperationRecord> {
+    serde_json::from_value(row.payload.clone())
+        .map_err(|error| Error::internal_json(error.to_string(), Some(row.key.clone())))
 }
 
 #[cfg(test)]
@@ -365,19 +328,11 @@ mod tests {
 
     /// A record store bound to a caller-owned data root.
     ///
-    /// Deliberately not `with_isolated_home`. This store reads and writes
-    /// nothing but files below the root it is constructed with -- the lock, the
-    /// record directory, and the record file are all `*_in_roots` joins -- so a
-    /// test can name its own directory instead of mutating `HOME` and reading
-    /// it straight back out through `from_environment`.
-    ///
-    /// That is the payoff #7505 is aiming at. A test that owns its root needs
-    /// neither the environment nor the process-global mutex `HomeGuard` takes
-    /// to protect it, so it runs beside every other test instead of queueing
-    /// behind all of them.
-    ///
-    /// Only the data root is meaningful here; config and artifacts are given
-    /// the same directory because this store never consults them.
+    /// Deliberately not `with_isolated_home`: the store opens the observation
+    /// database below the injected data root and nothing else, so a test can
+    /// name its own directory instead of mutating `HOME` and queueing behind
+    /// the process-global mutex that guards it (#7505). Config and artifacts
+    /// share the directory because this store never consults them.
     fn test_store_at(data_root: &std::path::Path) -> OperationRecordStore {
         OperationRecordStore::in_roots(&homeboy_core::paths::PathRoots::new(
             data_root.to_path_buf(),
@@ -433,6 +388,83 @@ mod tests {
             .expect("pending")
             .iter()
             .any(|record| record.owner_run_ref == "release/test-owner"));
+    }
+
+    #[test]
+    fn records_survive_reopening_the_store_and_list_by_subject() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let pending = record();
+        let mut completed = record();
+        completed.owner_run_ref = "release/completed-owner".to_string();
+        completed.finalization_status = "completed".to_string();
+        let mut other_subject = record();
+        other_subject.owner_run_ref = "release/other-owner".to_string();
+        other_subject.subject = "other".to_string();
+        {
+            let store = test_store_at(data_root.path());
+            for record in [&pending, &completed, &other_subject] {
+                store.create(record).expect("persist");
+            }
+        }
+
+        let reopened = test_store_at(data_root.path());
+        assert_eq!(
+            reopened.load(&pending.owner_run_ref).expect("load"),
+            Some(pending.clone())
+        );
+        let owners = |pending_only| {
+            reopened
+                .for_subject("provider_workspace", "component", pending_only)
+                .expect("for subject")
+                .into_iter()
+                .map(|record| record.owner_run_ref)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            owners(false),
+            ["release/completed-owner", "release/test-owner"]
+        );
+        assert_eq!(owners(true), ["release/test-owner"]);
+        assert!(reopened.load("release/missing").expect("load").is_none());
+    }
+
+    #[test]
+    fn concurrent_updates_are_never_lost() {
+        const WRITERS: usize = 8;
+        let data_root = tempfile::tempdir().expect("data root");
+        let record = record();
+        test_store_at(data_root.path())
+            .create(&record)
+            .expect("persist");
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let workers = (0..WRITERS)
+            .map(|writer| {
+                let barrier = Arc::clone(&barrier);
+                let owner = record.owner_run_ref.clone();
+                let root = data_root.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let store = test_store_at(&root);
+                    barrier.wait();
+                    store
+                        .update(&owner, |current| {
+                            let mut current = current.expect("record");
+                            current
+                                .continuation_evidence
+                                .push(format!("writer {writer}"));
+                            Ok(current)
+                        })
+                        .expect("update");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("writer thread");
+        }
+        let stored = test_store_at(data_root.path())
+            .load(&record.owner_run_ref)
+            .expect("load")
+            .expect("record");
+        assert_eq!(stored.continuation_evidence.len(), WRITERS + 1);
     }
 
     #[test]

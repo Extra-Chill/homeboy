@@ -129,6 +129,58 @@ fn record_writes_compare_and_set_on_revision() {
 }
 
 #[test]
+fn listing_a_namespace_returns_its_live_records_in_key_order() {
+    let (_dir, store, other) = store_pair();
+    let payload = json!({});
+    for key in ["b", "a"] {
+        applied(
+            store
+                .put_coordination_record(
+                    NAMESPACE,
+                    key,
+                    ExpectedRevision::Absent,
+                    write("live", &payload),
+                )
+                .unwrap(),
+        );
+    }
+    // An already-expired write applies but reads back as absent.
+    assert!(matches!(
+        store
+            .put_coordination_record(
+                NAMESPACE,
+                "expired",
+                ExpectedRevision::Absent,
+                RecordWrite {
+                    state: "live",
+                    payload: &payload,
+                    expires_at_ms: Some(1),
+                },
+            )
+            .unwrap(),
+        RecordOutcome::Applied(None)
+    ));
+    applied(
+        store
+            .put_coordination_record(
+                "coordination-test-other",
+                "c",
+                ExpectedRevision::Absent,
+                write("live", &payload),
+            )
+            .unwrap(),
+    );
+
+    let keys: Vec<_> = other
+        .coordination_records(NAMESPACE)
+        .unwrap()
+        .into_iter()
+        .map(|record| record.key)
+        .collect();
+    assert_eq!(keys, ["a", "b"]);
+}
+
+#[test]
 fn an_expired_record_reads_as_absent_and_continues_its_revision() {
     let (_dir, store, _) = store_pair();
     let payload = json!({});

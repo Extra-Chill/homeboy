@@ -195,7 +195,7 @@ fn complete_readiness_operation(
         record.finalization_status = "completed".to_string();
         record
             .attributes
-            .insert("downstream_release".to_string(), downstream_release);
+            .insert("downstream_release".to_string(), downstream_release.clone());
         Ok(record)
     })?;
     Ok(())

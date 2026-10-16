@@ -21,7 +21,6 @@ homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-rel
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-fs4 = "0.13"
 regex = "1.11"
 zip = "0.6"
 chrono = "0.4"
