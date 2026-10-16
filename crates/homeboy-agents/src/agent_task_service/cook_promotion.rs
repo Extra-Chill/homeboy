@@ -4061,6 +4061,7 @@ pub struct AgentTaskSuppliedReviewForm {
 impl AgentTaskSuppliedReviewForm {
     fn validate(&self) -> Result<()> {
         self.form.validate()?;
+        self.form.ensure_publishable()?;
         for (field, value) in [
             ("review_form.tool", &self.tool),
             ("review_form.model", &self.model),
@@ -6427,6 +6428,7 @@ fn review_form_for_finalization_in_store(
             )
         })?;
     form.validate()?;
+    form.ensure_publishable()?;
     Ok(form)
 }
 

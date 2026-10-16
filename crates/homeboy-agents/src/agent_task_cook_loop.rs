@@ -83,6 +83,10 @@ pub struct AgentTaskCookLoopReport {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskCookLoopStatus {
     GreenCompleted,
+    /// Gates are green and the review form is valid, but its author declared
+    /// the task incomplete. The candidate is kept for recovery and never
+    /// published (#16051).
+    AgentReportedIncomplete,
     /// The candidate and immutable baseline failed identically. The candidate
     /// is not a regression, but required verification is still red.
     BaselineRed,
@@ -362,6 +366,15 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             None => review_form_requirement_gap(&options.review_form),
         });
 
+    // A valid form that declares the task incomplete is the agent's verdict
+    // on its own candidate. Gates prove only that the repository still
+    // passes, so a green gate cannot overrule it (#16051).
+    let agent_reported_incomplete = matches!(review_form_gap, Some(None))
+        && options
+            .review_form
+            .as_ref()
+            .is_some_and(|form| form.incomplete_reason().is_some());
+
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
             &options,
@@ -389,6 +402,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if agent_reported_incomplete {
+        AgentTaskCookLoopStatus::AgentReportedIncomplete
     } else if gate_budget_exceeded {
         AgentTaskCookLoopStatus::GateBudgetExceeded
     } else if invalid_gate_declaration {
@@ -2328,6 +2343,8 @@ mod tests {
             compatibility: "Internal only; no compatibility impact.".to_string(),
             verification: Vec::new(),
             used_for: "Reproduced the crash, isolated the null path, added a guard, and verified with a focused gate before finalizing.".to_string(),
+            completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
+            incomplete_reason: String::new(),
         }
     }
 
@@ -2548,6 +2565,64 @@ mod tests {
 
         assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
         assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn green_change_with_incomplete_review_form_is_not_completed() {
+        // #16051: gates prove the repository still passes, not that the task
+        // was done. An agent that says it did not finish must not be published.
+        let mut form = valid_review_form();
+        form.completion = Some(crate::agent_task_review_dossier::AiReviewCompletion::Incomplete);
+        form.incomplete_reason = "The regression test could not be run.".to_string();
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-incomplete".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: Some(form),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::AgentReportedIncomplete
+        );
+        assert!(report.follow_up_request.is_none());
+    }
+
+    #[test]
+    fn green_change_with_review_form_missing_completion_requests_it() {
+        let mut form = valid_review_form();
+        form.completion = None;
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Applied,
+                vec![green_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-no-completion".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: Some(form),
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = report
+            .follow_up_request
+            .expect("a missing completion verdict nudges for the form");
+        assert!(request.inputs["cook_loop"]["review_form_feedback"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("completion"));
     }
 
     #[test]

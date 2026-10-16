@@ -183,9 +183,11 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
         schema: AI_REVIEW_FORM_OUTPUT_SCHEMA.to_string(),
         structural_schema: serde_json::json!({
             "type": "object",
-            "required": ["pr_title", "summary", "what_changed", "compatibility", "used_for"],
+            "required": ["pr_title", "summary", "what_changed", "compatibility", "used_for", "completion"],
             "properties": {
                 "pr_title": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "completion": { "type": "string", "enum": ["complete", "incomplete"] },
+                "incomplete_reason": { "type": "string" },
                 "summary": { "type": "string" },
                 "what_changed": {
                     "type": "array",
@@ -235,6 +237,27 @@ pub struct AiFilledReviewForm {
     /// deliberately distinct from `summary` (which describes *what* changed).
     #[serde(deserialize_with = "prose_field")]
     pub used_for: String,
+    /// The agent's own verdict on whether the requested task is done. Gates
+    /// prove the repository still passes, not that the task was completed;
+    /// only the agent can declare that, and it must do so structurally rather
+    /// than in prose (#16051). Absent means the form is incomplete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<AiReviewCompletion>,
+    /// Why the task is not complete. Required when `completion` is `incomplete`.
+    #[serde(
+        default,
+        deserialize_with = "prose_field",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub incomplete_reason: String,
+}
+
+/// Agent-declared completion of the requested task.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiReviewCompletion {
+    Complete,
+    Incomplete,
 }
 
 /// Accept a prose field as either a string or a list of strings.
@@ -340,7 +363,8 @@ impl AiFilledReviewForm {
         // A validation fact about the declared output schema, not agent
         // instructions: Homeboy authors no agent-facing prose (#15818).
         "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
-`summary`, `what_changed` (a non-empty list), `compatibility`, and `used_for` (distinct from `summary`)."
+`summary`, `what_changed` (a non-empty list), `compatibility`, `used_for` (distinct from `summary`), and `completion` \
+(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`)."
     }
 
     /// Validate that the agent filled every required slot with real content.
@@ -383,6 +407,21 @@ impl AiFilledReviewForm {
         if self.used_for.trim().is_empty() {
             return Err(review_form_gap("review_form.used_for", "used_for is empty"));
         }
+        match self.completion {
+            None => {
+                return Err(review_form_gap(
+                    "review_form.completion",
+                    "completion is missing; it must be `complete` or `incomplete`",
+                ));
+            }
+            Some(AiReviewCompletion::Incomplete) if self.incomplete_reason.trim().is_empty() => {
+                return Err(review_form_gap(
+                    "review_form.incomplete_reason",
+                    "incomplete_reason is empty; an incomplete form must say what is unfinished",
+                ));
+            }
+            _ => {}
+        }
         if used_for_is_placeholder(&self.used_for) {
             return Err(review_form_gap(
                 "review_form.used_for",
@@ -401,6 +440,30 @@ impl AiFilledReviewForm {
             ));
         }
         Ok(())
+    }
+
+    /// The agent's declared reason the task is unfinished, when it declared
+    /// the task incomplete.
+    pub fn incomplete_reason(&self) -> Option<&str> {
+        (self.completion == Some(AiReviewCompletion::Incomplete))
+            .then_some(self.incomplete_reason.trim())
+    }
+
+    /// Refuse publication of a form whose author declared the task incomplete.
+    /// A green gate proves only that the repository still passes; it cannot
+    /// overrule the agent's own report that the task is unfinished (#16051).
+    pub fn ensure_publishable(&self) -> Result<()> {
+        match self.incomplete_reason() {
+            Some(reason) => Err(Error::validation_invalid_argument(
+                "review_form.completion",
+                format!(
+                    "the review form declares the task incomplete, so the candidate is not published: {reason}"
+                ),
+                None,
+                None,
+            )),
+            None => Ok(()),
+        }
     }
 
     pub fn verify_against_promotion(
@@ -1537,6 +1600,7 @@ mod tests {
                 "what_changed": ["one", "two"],
                 "compatibility": ["No breaking changes.", "Default is off."],
                 "used_for": ["Diagnosed the failure.", "Wrote the regression test."],
+                "completion": "complete",
             }
         });
 
@@ -1569,6 +1633,7 @@ mod tests {
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
                 "compatibility": "Additive.\nNo existing behavior changes.",
                 "used_for": "Read the issue.\n- Wrote the plan.\n- Ran lint.",
+                "completion": "complete",
             }
         });
 
@@ -1739,6 +1804,8 @@ mod tests {
             compatibility: "No compatibility impact; internal only.".into(),
             verification: Vec::new(),
             used_for: "I traced the null deref to the reload path, added a guard, and verified with a focused test before finalizing.".into(),
+            completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
+            incomplete_reason: String::new(),
         }
     }
 
@@ -1779,6 +1846,59 @@ mod tests {
             "operator_notification": { "status": "completed", "message": "fixture" }
         }))
         .expect("fixture promotion")
+    }
+
+    #[test]
+    fn completion_is_a_required_structured_verdict() {
+        // #16051: completion is declared in the schema, not in prose.
+        let declaration = review_form_output_declaration();
+        assert!(declaration.structural_schema["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "completion")));
+
+        let mut missing = valid_form();
+        missing.completion = None;
+        let error = missing.validate().expect_err("completion is required");
+        assert!(error.message.contains("completion"), "{}", error.message);
+
+        let mut unexplained = valid_form();
+        unexplained.completion = Some(AiReviewCompletion::Incomplete);
+        let error = unexplained
+            .validate()
+            .expect_err("an incomplete form must say why");
+        assert!(
+            error.message.contains("incomplete_reason"),
+            "{}",
+            error.message
+        );
+
+        assert!(valid_form().ensure_publishable().is_ok());
+    }
+
+    #[test]
+    fn incomplete_form_is_valid_but_never_publishable() {
+        let value = serde_json::json!({ "review_form": {
+            "pr_title": "Guard the reload path against a null config",
+            "summary": "Adds a guard.",
+            "what_changed": ["Guard reload"],
+            "compatibility": "No behaviour change for valid configs.",
+            "used_for": "Traced the crash, then stopped before writing the test.",
+            "completion": "incomplete",
+            "incomplete_reason": "I could not run the requested regression test."
+        }});
+        let form = AiFilledReviewForm::from_outcome_outputs(&value)
+            .expect("parses")
+            .expect("present");
+        form.validate()
+            .expect("an honest incomplete form is a valid form");
+        assert_eq!(
+            form.incomplete_reason(),
+            Some("I could not run the requested regression test.")
+        );
+        let error = form
+            .ensure_publishable()
+            .expect_err("an incomplete form blocks publication");
+        assert!(error.message.contains("not published"), "{}", error.message);
     }
 
     #[test]
