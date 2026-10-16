@@ -964,7 +964,7 @@ impl AgentTaskLifecycleStore {
         &self,
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
-        records_with_health(self, observation_runs_bounded_in_store(self, limit)?)
+        records_with_health(observation_runs_bounded_in_store(self, limit)?)
     }
 
     /// Read every durable registry record in this store without a display bound.
@@ -972,13 +972,10 @@ impl AgentTaskLifecycleStore {
         &self,
     ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
         let store = self.open_observation_readonly()?;
-        records_with_health(
-            self,
-            store.list_runs_all(RunListFilter {
-                kind: Some("agent-task".to_string()),
-                ..Default::default()
-            })?,
-        )
+        records_with_health(store.list_runs_all(RunListFilter {
+            kind: Some("agent-task".to_string()),
+            ..Default::default()
+        })?)
     }
 
     /// Non-terminal agent-task records. Queued and running states persist as
@@ -991,7 +988,7 @@ impl AgentTaskLifecycleStore {
             .into_iter()
             .filter(|run| run.kind == "agent-task")
             .collect();
-        Ok(records_with_health(self, active)?
+        Ok(records_with_health(active)?
             .0
             .into_iter()
             .filter(|record| !record.state.is_terminal())
@@ -1036,7 +1033,7 @@ impl AgentTaskLifecycleStore {
                 ..Default::default()
             })?;
         let physical_count = page.runs.len();
-        let (records, health) = page_records_with_health(self, page.runs)?;
+        let (records, health) = page_records_with_health(page.runs)?;
         Ok((
             records,
             health,
@@ -1057,7 +1054,7 @@ impl AgentTaskLifecycleStore {
         let records = page
             .runs
             .iter()
-            .map(|run| record_from_run(&observation, run))
+            .map(snapshot_from_run)
             .collect::<Result<Vec<_>>>()?;
         Ok((records, page.truncated, page.next_cursor))
     }
@@ -1178,7 +1175,7 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        record_and_aggregate_from_run(&store, &run)
+        record_and_aggregate_from_run(&run)
     }
 
     /// Replace a record unconditionally, ignoring its revision. Test fixtures
@@ -2259,6 +2256,7 @@ pub(super) fn write_record_guarded(
     fence: RecordWriteFence<'_>,
 ) -> Result<GuardedRecordWrite> {
     let guard = fence.guard();
+    super::cancellation::validate_cancellation_invariant(record)?;
     #[cfg(any(test, feature = "test-support"))]
     if FAIL_NEXT_RECORD_WRITE.replace(false) {
         return Err(Error::internal_io(
@@ -2511,7 +2509,7 @@ pub(super) fn write_record_guarded(
             }
         }
     }
-    record_from_run(&store, &committed).map(GuardedRecordWrite::Committed)
+    snapshot_from_run(&committed).map(GuardedRecordWrite::Committed)
 }
 
 fn work_intents_for_record(
@@ -2635,7 +2633,7 @@ pub(super) fn read_record_in_store(
             None,
         )
     })?;
-    let record = record_from_run(&store, &run)?;
+    let record = snapshot_from_run(&run)?;
     // Existing lifecycle rows predate the resource table. Their exact run
     // projection is backfilled once, on first read.
     if store
@@ -2676,7 +2674,7 @@ pub(super) fn read_record_bounded_in_store(
             None,
         )
     })?;
-    record_from_run(&store, &run)
+    snapshot_from_run(&run)
 }
 
 /// Bypass typed record validation solely to seed corruption-recovery fixtures.
@@ -3125,11 +3123,7 @@ pub(super) fn validate_cook_index_attempt_in_store(
 fn read_records_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
 ) -> Result<Vec<AgentTaskRunRecord>> {
-    Ok(records_with_health(
-        lifecycle_store,
-        observation_runs_bounded_in_store(lifecycle_store, 1000)?,
-    )?
-    .0)
+    Ok(records_with_health(observation_runs_bounded_in_store(lifecycle_store, 1000)?)?.0)
 }
 
 /// Bound on a single source run's retry lineage. Deliberately far above any
@@ -3171,14 +3165,10 @@ pub(super) fn read_retry_successors_in_store(
              refusing to answer from a truncated lineage"
         )));
     }
-    page.runs
-        .iter()
-        .map(|run| record_from_run(&observation, run))
-        .collect()
+    page.runs.iter().map(snapshot_from_run).collect()
 }
 
 fn records_with_health(
-    lifecycle_store: &AgentTaskLifecycleStore,
     observation_runs: Vec<RunRecord>,
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();
@@ -3192,8 +3182,6 @@ fn records_with_health(
             Err(item) => super::health::record_health_item(&mut health, item),
         }
     }
-    // Health judges the stored snapshot; callers receive the projected record.
-    project_retained_cancellations(lifecycle_store, records.iter_mut())?;
     Ok((records, health))
 }
 
@@ -3201,7 +3189,6 @@ fn records_with_health(
 /// even if record health separately flags an inconsistent projection. Only an
 /// unreadable row is omitted, while its diagnostic remains in the page health.
 fn page_records_with_health(
-    lifecycle_store: &AgentTaskLifecycleStore,
     observation_runs: Vec<RunRecord>,
 ) -> Result<(
     Vec<AgentTaskRecordPageRecord>,
@@ -3229,12 +3216,6 @@ fn page_records_with_health(
             }
         }
     }
-    project_retained_cancellations(
-        lifecycle_store,
-        records
-            .iter_mut()
-            .map(|page_record| &mut page_record.record),
-    )?;
     Ok((records, health))
 }
 
@@ -3288,57 +3269,11 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
     existing
 }
 
-/// The single lifecycle read projection: the stored snapshot plus the
-/// cancellation its retained `run.cancelled` receipt proves (#15718).
+/// The single lifecycle read: the stored snapshot exactly as persisted.
 ///
-/// The receipt is immutable and outlives payload pruning, so a stale snapshot
-/// write can no longer erase a cancellation. Pure: this never writes.
-pub(crate) fn record_from_run(
-    observation: &ObservationStore,
-    run: &RunRecord,
-) -> Result<AgentTaskRunRecord> {
-    let mut record = snapshot_from_run(run)?;
-    project_retained_cancellation_in(observation, &mut record)?;
-    Ok(record)
-}
-
-fn project_retained_cancellation_in(
-    observation: &ObservationStore,
-    record: &mut AgentTaskRunRecord,
-) -> Result<()> {
-    // A terminal snapshot is authoritative; only non-terminal reads pay for
-    // the receipt lookup.
-    if record.state.is_terminal() {
-        return Ok(());
-    }
-    if let Some(receipt) =
-        super::cancellation::retained_cancellation_receipt(observation, &record.run_id)?
-    {
-        super::cancellation::project_retained_cancellation(record, &receipt);
-    }
-    Ok(())
-}
-
-fn project_retained_cancellations<'a>(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    records: impl Iterator<Item = &'a mut AgentTaskRunRecord>,
-) -> Result<()> {
-    let mut observation = None;
-    for record in records {
-        if record.state.is_terminal() {
-            continue;
-        }
-        if observation.is_none() {
-            observation = Some(lifecycle_store.open_observation_readonly()?);
-        }
-        project_retained_cancellation_in(observation.as_ref().expect("opened"), record)?;
-    }
-    Ok(())
-}
-
-/// Decode the stored snapshot exactly as persisted, without the read
-/// projection. Only callers that hold no store handle (action admission runs
-/// inside the store's own transaction) and health classification use this.
+/// There is no read projection. Cancellation is a write invariant enforced by
+/// [`write_record_guarded`], and every production write is fenced on the
+/// revision it read, so the stored snapshot is the run's state (#15718).
 pub(crate) fn snapshot_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     let record = parse_record_from_run(run)?;
     if record.schema != super::records::schemas::RUN {
@@ -3357,16 +3292,15 @@ pub(crate) fn snapshot_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
 }
 
 fn record_and_aggregate_from_run(
-    observation: &ObservationStore,
     run: &RunRecord,
 ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>)> {
-    Ok((record_from_run(observation, run)?, aggregate_from_run(run)?))
+    Ok((snapshot_from_run(run)?, aggregate_from_run(run)?))
 }
 
 /// Decode a durable record without requiring the current schema.
 ///
 /// Health reconciliation uses this boundary to classify and migrate legacy
-/// schemas. All normal reads go through [`record_from_run`], which accepts only
+/// schemas. All normal reads go through [`snapshot_from_run`], which accepts only
 /// the current schema.
 pub(super) fn decode_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     let record = parse_record_from_run(run)?;

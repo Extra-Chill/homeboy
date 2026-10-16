@@ -211,32 +211,6 @@ pub(crate) fn promotion_source_in_store(
     }
 }
 
-/// Repair immutable promotion state before dispatching to a historical pinned
-/// controller that cannot recover its own missing aggregate.
-pub fn recover_missing_promotion_aggregate(run_id: &str) -> Result<bool> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let resolved =
-        agent_task_lifecycle::resolve_cook_reader_run_id_in_store(&lifecycle_store, run_id)?;
-    let record = lifecycle_store.read_record(&resolved)?;
-    let aggregate_error = match lifecycle_store.aggregate_source_exact(&record.run_id) {
-        Ok(_) => return Ok(false),
-        Err(error) => error,
-    };
-    recover_executor_outcome_source(&lifecycle_store, &record, &aggregate_error).map_err(
-        |error| {
-            promotion_reconstruction_error(
-                &lifecycle_store,
-                run_id,
-                &record,
-                &aggregate_error,
-                &error,
-            )
-        },
-    )?;
-    Ok(true)
-}
-
 /// Replayable dry-run command for a recoverable Cook, or a structured reason
 /// that promotion cannot be reconstructed. Does not write aggregate state.
 pub fn promotion_replay_guidance(requested_id: &str) -> Value {

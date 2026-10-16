@@ -4378,7 +4378,10 @@ pub fn record_cook_terminal_result_in_store(
         progress.insert("terminal_status".to_string(), json!(terminal_status));
         progress.insert("terminal_success".to_string(), json!(terminal_success));
         progress.insert("exit_code".to_string(), json!(exit_code));
-        if terminal_status == "no_candidate" {
+        // A cancelled Cook keeps its cancellation: the provenance that minted
+        // its `run.cancelled` receipt is valid only on a `Cancelled` record
+        // (#15718), and the cancellation is the cause of the missing candidate.
+        if terminal_status == "no_candidate" && record.state != AgentTaskRunState::Cancelled {
             set_run_state(record, AgentTaskRunState::PartialFailure);
         }
         true

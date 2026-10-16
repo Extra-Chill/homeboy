@@ -10,8 +10,8 @@ pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 
 /// Canonical event kinds whose payload outlives the bounded progress window.
 ///
-/// `run.cancelled` is an authority, not telemetry: lifecycle reads project a
-/// run's cancellation from it (#15718). Its payload is copied into the
+/// `run.cancelled` is an authority, not telemetry: it is a run's immutable
+/// first cancellation cause, which a later cancellation reuses (#15718). Its payload is copied into the
 /// `durable_event_json` column at insert, which the per-run pruning never
 /// touches. The bounded stream (`event_json`) and its retention cursor are
 /// unchanged, so pagination never sees a gap.
