@@ -3164,13 +3164,14 @@ fn status_repairs_missing_source_checkout_from_component_checkout() {
 }
 
 #[test]
-fn status_reports_missing_source_checkout_as_validation_diagnostic() {
+fn status_reports_missing_source_checkout_with_existing_worktree_as_validation_diagnostic() {
     use crate::test_support::with_isolated_home;
 
     with_isolated_home(|_| {
         let dir = tempfile::tempdir().unwrap();
         let missing_source = dir.path().join("removed-source");
         let worktree = dir.path().join("fixture@task");
+        fs::create_dir_all(&worktree).unwrap();
         let store = dir.path().join("store");
         let record = fixture_record(&missing_source, &worktree);
         write_record(&store, &record).unwrap();
@@ -3185,6 +3186,11 @@ fn status_reports_missing_source_checkout_as_validation_diagnostic() {
         assert!(err
             .to_string()
             .contains("Task worktree source checkout is missing"));
+        // An existing worktree is not an orphan: no metadata-only remediation.
+        assert!(!err
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("is an orphan")));
     });
 }
 
@@ -4592,4 +4598,233 @@ fn run_git_status(path: &Path, args: &[&str]) -> std::result::Result<(), ()> {
         .status()
         .map_err(|_| ())
         .and_then(|status| if status.success() { Ok(()) } else { Err(()) })
+}
+
+fn orphan_remove_options(id: &str, force: bool) -> WorktreeRemoveOptions {
+    WorktreeRemoveOptions {
+        id: id.to_string(),
+        force,
+        cleanup_branch: true,
+        allow_unmerged_branch: false,
+        reason: None,
+        reaper: None,
+    }
+}
+
+/// Both the worktree and the recorded source checkout are deleted: the record
+/// is an orphan and only its metadata remains (#16028).
+fn orphan_record_fixture(data_root: &Path) -> (PathBuf, TaskWorktreeRecord) {
+    let scratch = data_root.join("deleted-scratch");
+    let source = scratch.join("clone");
+    let worktree = scratch.join("clone-task-worktree");
+    let store = data_root.join("task-worktrees");
+    let record = fixture_record(&source, &worktree);
+    write_record(&store, &record).unwrap();
+    assert!(!source.exists() && !worktree.exists());
+    (store, record)
+}
+
+#[test]
+fn orphan_worktree_record_is_retired_as_metadata_and_no_longer_listed() {
+    let data_root = tempfile::tempdir().unwrap();
+    let (store, record) = orphan_record_fixture(data_root.path());
+
+    // A live owner lease still refuses retirement.
+    let claims = workspace_claim_store_for_worktrees(&store).unwrap();
+    let now = now_ms();
+    let owner = claims
+        .register_owner(
+            record.effective_workspace_identity().unwrap(),
+            "live-agent",
+            60_000,
+            now,
+        )
+        .unwrap();
+    let error = remove_with_store(orphan_remove_options(&record.id, true), &store)
+        .expect_err("orphan retirement must honor durable live owners");
+    assert!(error.message.contains("durable live owner"));
+    claims.release_owner(&owner, now + 1).unwrap();
+
+    let removed = remove_with_store(orphan_remove_options(&record.id, false), &store).unwrap();
+    assert!(removed.removed);
+    assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+    assert_eq!(removed.record.lifecycle_revision, 1);
+    assert!(removed.safety.worktree_missing);
+    assert!(removed.safety.source_checkout_missing);
+    assert!(!removed.branch_cleanup.deleted);
+    assert_eq!(
+        removed.branch_cleanup.status,
+        BranchCleanupStatus::Preserved
+    );
+    // Metadata-only: no filesystem path was created or touched.
+    assert!(!data_root.path().join("deleted-scratch").exists());
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Removed
+    );
+    assert!(list_with_store(&store)
+        .unwrap()
+        .worktrees
+        .iter()
+        .all(|listed| listed.id != record.id));
+}
+
+#[test]
+fn orphan_worktree_record_status_reports_missing_flags() {
+    use crate::test_support::with_isolated_home;
+
+    with_isolated_home(|home| {
+        let data_root = tempfile::tempdir().unwrap();
+        let (store, record) = orphan_record_fixture(data_root.path());
+        assert_orphan_status(&store, &record);
+
+        // The reported case: the component is registered to a new checkout
+        // whose parent does not contain the deleted scratch worktree. Status
+        // must still report the orphan instead of adopting that checkout.
+        let registered_root = git_repo();
+        let registered = registered_root.path().join("checkouts").join("fixture");
+        fs::create_dir_all(registered.parent().unwrap()).unwrap();
+        run_git(
+            registered_root.path(),
+            &["clone", "-q", ".", &registered.to_string_lossy()],
+        );
+        write_component_registration(home.path(), "fixture", &registered);
+        assert_orphan_status(&store, &record);
+        let removed = remove_with_store(orphan_remove_options(&record.id, true), &store).unwrap();
+        assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+        assert!(registered.join("README.md").exists());
+    });
+}
+
+fn assert_orphan_status(store: &Path, record: &TaskWorktreeRecord) {
+    let status = status_with_store(&record.id, store).unwrap();
+    let safety = status
+        .safety
+        .expect("orphan status carries a safety report");
+    assert!(safety.worktree_missing);
+    assert!(safety.source_checkout_missing);
+    assert!(!safety.safe);
+    assert!(safety
+        .reasons
+        .iter()
+        .any(|reason| reason.starts_with("source_checkout_missing")));
+    assert!(safety
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("homeboy worktree remove fixture@task")));
+    assert_eq!(status.record.state, TaskWorktreeState::Active);
+    assert_eq!(
+        read_record(store, &record.id).unwrap().source_checkout,
+        record.source_checkout,
+        "status must not rewrite the orphan's recorded source checkout"
+    );
+}
+
+#[test]
+fn orphan_worktree_record_create_identity_error_names_remove_command() {
+    let data_root = tempfile::tempdir().unwrap();
+    let (_store, record) = orphan_record_fixture(data_root.path());
+    let source = git_repo();
+    let source = source.path().canonicalize().unwrap();
+    let worktree = sibling_worktree_path(&source, "task");
+    let identity = task_worktree_workspace_identity(&record.component_id, &record.id).unwrap();
+
+    let error = verify_create_record_identity(
+        &record,
+        &record.component_id,
+        &source,
+        &worktree,
+        &record.branch,
+        &identity,
+    )
+    .expect_err("an orphan record cannot prove a new checkout's identity");
+    assert!(error.hints.iter().any(|hint| hint
+        .message
+        .contains("homeboy worktree remove fixture@task")));
+}
+
+#[test]
+fn orphan_worktree_record_existing_worktree_outside_parent_is_still_refused() {
+    let data_root = tempfile::tempdir().unwrap();
+    let store = data_root.path().join("task-worktrees");
+    // Nest the checkout so its parent excludes the sibling `elsewhere` dir.
+    let source_root = git_repo();
+    let source = source_root.path().join("checkouts").join("source");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    run_git(
+        source_root.path(),
+        &["clone", "-q", ".", &source.to_string_lossy()],
+    );
+    let worktree = source_root
+        .path()
+        .join("elsewhere")
+        .join("outside-worktree");
+    run_git(
+        &source,
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    let record = fixture_record(&source, &worktree);
+    write_record(&store, &record).unwrap();
+    assert!(!is_orphan_record(&record));
+
+    let error = remove_with_store(orphan_remove_options(&record.id, true), &store)
+        .expect_err("an existing worktree outside the parent keeps the hard gate");
+    assert!(
+        error.message.contains("hard removal safety gates")
+            && error
+                .details
+                .to_string()
+                .contains("outside the component checkout parent"),
+        "{error:?}"
+    );
+    assert!(worktree.exists());
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
+
+    // A deleted source checkout does not turn an existing worktree into an
+    // orphan: removal still refuses instead of retiring metadata.
+    let mut source_gone = record.clone();
+    source_gone.source_checkout = data_root
+        .path()
+        .join("deleted-source")
+        .to_string_lossy()
+        .to_string();
+    write_record(&store, &source_gone).unwrap();
+    assert!(!is_orphan_record(&source_gone));
+    remove_with_store(orphan_remove_options(&record.id, true), &store)
+        .expect_err("an existing worktree is never retired as an orphan");
+    assert!(worktree.exists());
+    assert_eq!(
+        read_record(&store, &record.id).unwrap().state,
+        TaskWorktreeState::Active
+    );
+}
+
+#[test]
+fn orphan_worktree_record_missing_worktree_with_existing_source_keeps_current_behavior() {
+    let data_root = tempfile::tempdir().unwrap();
+    let store = data_root.path().join("task-worktrees");
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "gone");
+    let record = fixture_record(source.path(), &worktree);
+    write_record(&store, &record).unwrap();
+    assert!(!is_orphan_record(&record));
+
+    let status = status_with_store(&record.id, &store).unwrap();
+    let safety = status.safety.unwrap();
+    assert!(safety.worktree_missing);
+    assert!(!safety.source_checkout_missing);
+    assert!(safety.path_contained);
+    assert!(safety.safe);
+
+    let removed = remove_with_store(orphan_remove_options(&record.id, false), &store).unwrap();
+    assert!(removed.removed);
+    assert!(!removed.safety.source_checkout_missing);
+    assert_ne!(
+        removed.branch_cleanup.reason.as_deref().unwrap_or_default(),
+        "orphan record: source checkout is missing, so no branch was inspected or deleted"
+    );
+    assert!(source.path().exists());
 }

@@ -3480,6 +3480,8 @@ mod tests {
 
     #[test]
     fn worktree_artifact_cleanup_removes_rebuildable_output_and_preserves_source() {
+        // Applying cleanup records an observation run; keep it out of other tests' homes.
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
         write_file(
@@ -5274,6 +5276,8 @@ mod tests {
 
     #[test]
     fn merged_only_preserves_unmerged_worktree_target() {
+        // Applying cleanup records an observation run; keep it out of other tests' homes.
+        let _home = crate::test_support::HomeGuard::new();
         let remote = TempDir::new().expect("remote");
         git(remote.path(), &["init", "--bare", "-b", "main"]);
         let remote_url = remote.path().to_string_lossy().to_string();

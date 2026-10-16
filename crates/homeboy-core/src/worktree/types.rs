@@ -318,6 +318,11 @@ pub struct WorktreeSafetyReport {
     pub primary_checkout: bool,
     pub path_contained: bool,
     pub worktree_missing: bool,
+    /// True when the recorded source checkout is gone too. Together with
+    /// `worktree_missing` this marks an orphan record: nothing exists on disk,
+    /// so `homeboy worktree remove <handle>` retires it as metadata only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub source_checkout_missing: bool,
     pub safe: bool,
     pub reasons: Vec<String>,
 }
