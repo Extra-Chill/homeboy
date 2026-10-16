@@ -442,6 +442,7 @@ fn execute_with_context_and_resources(
     }
     request.verify_materialized_candidate(cwd)?;
     let mut environment = request.environment.clone();
+    let mut playwright_provenance = None;
     environment.lab_runner = None;
     // Runner credentials and its operator registry are not gate inputs. Lab
     // gates receive declared variables/preserve mappings even when the
@@ -453,17 +454,17 @@ fn execute_with_context_and_resources(
             .insert("PATH".to_string(), lab_gate_path(context.runtime_id()));
     }
     if !environment
-        .variables
+        .preserve
         .contains_key("PLAYWRIGHT_BROWSERS_PATH")
-        && !environment
-            .preserve
-            .contains_key("PLAYWRIGHT_BROWSERS_PATH")
     {
+        let declared_playwright_cache = request
+            .environment
+            .variables
+            .get("PLAYWRIGHT_BROWSERS_PATH")
+            .map(PathBuf::from);
+        let host_home = std::env::var_os("HOME").map(PathBuf::from);
         let mut values = BTreeMap::new();
         let mut report = AgentTaskGateEnvironment::default();
-        let declared_playwright_cache =
-            std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from);
-        let host_home = std::env::var_os("HOME").map(PathBuf::from);
         preserve_playwright_cache_mapping(
             declared_playwright_cache.as_deref(),
             host_home.as_deref(),
@@ -471,7 +472,8 @@ fn execute_with_context_and_resources(
             &mut report,
         );
         environment.variables.extend(values);
-        // Resolved paths are policy variables, never preserve-source mappings.
+        playwright_provenance = report.preserved.into_iter().next();
+        // Resolved paths are variables, not preserve-source mappings.
     }
     if let Some(resources) = resources {
         if resources.len() != environment.extension_inputs.len()
@@ -570,6 +572,9 @@ fn execute_with_context_and_resources(
         report.invocation = Some(AgentTaskGateInvocation::DeclaredTest { plan: plan.clone() });
     }
     report.environment.lab_runner = Some(request.runner_id.clone());
+    if let Some((name, source)) = playwright_provenance {
+        report.environment.preserved.insert(name, source);
+    }
     request.verify_materialized_candidate(cwd)?;
     Ok(LabGateReceipt {
         readiness,
@@ -792,7 +797,7 @@ mod tests {
     #[test]
     fn lab_gate_preserves_runner_playwright_cache_in_replace_environment() {
         homeboy_core::test_support::with_isolated_home(|home| {
-            let cache = home.path().join(".cache/ms-playwright");
+            let cache = home.path().join(PLAYWRIGHT_CACHE_SUBPATH);
             fs::create_dir_all(&cache).unwrap();
             let _cache_env =
                 homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH");
@@ -816,8 +821,33 @@ mod tests {
                     .environment
                     .preserved
                     .get("PLAYWRIGHT_BROWSERS_PATH"),
-                Some(&"HOME/.cache/ms-playwright".to_string())
+                Some(&format!("HOME/{PLAYWRIGHT_CACHE_SUBPATH}"))
             );
+        });
+    }
+
+    #[test]
+    fn lab_gate_declared_runner_cache_outside_home_is_used() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let cache_root = tempfile::tempdir().unwrap();
+            let cache = cache_root.path().join("playwright-browsers");
+            fs::create_dir_all(&cache).unwrap();
+            let mut request = gate_printing_path_and_home(temp.path());
+            request.environment.variables.insert(
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                cache.display().to_string(),
+            );
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\"".to_string(),
+            ];
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
+            let receipt = execute_with_context(request, temp.path(), &context).unwrap();
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            assert_eq!(receipt.report.stdout, cache.display().to_string());
         });
     }
 
