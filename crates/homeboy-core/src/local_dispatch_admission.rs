@@ -9,51 +9,63 @@
 //! across 18 CPU(s)"), and Homeboy dispatched into it anyway — saturating the
 //! machine and then failing the last providers on `provider_timeout`.
 //!
-//! This module is the missing enforcement. A lightweight, cross-process lease
-//! directory tracks how many local Cook provider dispatches are active on this
-//! machine right now, and a pure decision function ([`evaluate_local_dispatch_admission`])
+//! This module is the missing enforcement. A counting-semaphore coordination
+//! lease in the observation store (namespace [`NAMESPACE`], #15947) tracks how
+//! many local Cook provider dispatches are active on this machine right now, and a pure decision function ([`evaluate_local_dispatch_admission`])
 //! turns that count plus the already-captured pressure severity into one of
 //! three outcomes: admit, queue, or refuse. Refusal names the observed load so
 //! the operator sees the same evidence the resource-policy warning already
 //! computed, instead of a second silent saturation.
 
-use std::fs;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
-use crate::{Error, Result};
+use crate::observation::coordination::{
+    LeaseAcquire, LeaseAdmission, LeaseHolder, LeaseOwner, LeaseRequest,
+};
+use crate::observation::ObservationStore;
+use crate::Result;
 
-/// Hermetic tests may give an independent provider a separate local-dispatch
-/// admission root while keeping its durable lifecycle and batch stores shared.
-pub const TEST_LOCAL_DISPATCH_LEASE_ROOT_ENV: &str = "HOMEBOY_TEST_LOCAL_DISPATCH_LEASE_ROOT";
+/// Coordination namespace owned by local Cook dispatch admission (#15947).
+pub const NAMESPACE: &str = "local-cook-dispatch";
 
-/// On-disk lease held by one active local Cook provider dispatch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalDispatchLease {
-    run_id: String,
-    pid: u32,
-    started_at: String,
-}
+/// Every local dispatch on this machine competes for the same semaphore key.
+const LEASE_KEY: &str = "local";
 
-/// RAII guard: removes the lease when the local dispatch exits, normally or on
-/// error. A crashed holder is reclaimed by the next caller's liveness prune in
-/// [`active_local_dispatch_count`], so a lease never permanently consumes a
-/// slot.
+/// Upper bound on how long a slot survives without its holder releasing it.
+/// Dead holders are reclaimed far sooner by process-identity reaping; the TTL
+/// only bounds holders whose liveness cannot be proven either way.
+const LEASE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// RAII guard: releases the coordination lease when the local dispatch exits,
+/// normally or on error. A crashed holder is reclaimed by the next caller's
+/// [`ObservationStore::reap_coordination_leases`], which proves the owner gone
+/// by process start identity, so a lease never permanently consumes a slot and
+/// a reused PID never looks like a live owner.
 #[derive(Debug)]
 pub struct ActiveLocalDispatchLease {
-    path: PathBuf,
-    pid: u32,
+    db_path: PathBuf,
+    holder_token: String,
 }
 
 impl Drop for ActiveLocalDispatchLease {
     fn drop(&mut self) {
-        if let Ok(Some(lease)) = read_lease(&self.path) {
-            if lease.pid == self.pid {
-                let _ = fs::remove_file(&self.path);
-            }
+        if let Ok(store) = ObservationStore::open_initialized_for_lifecycle_at(&self.db_path) {
+            let _ = store.release_coordination_lease(NAMESPACE, LEASE_KEY, &self.holder_token);
         }
     }
+}
+
+/// Outcome of [`try_admit_local_dispatch`].
+#[derive(Debug)]
+pub enum LocalDispatchAttempt {
+    /// The decision admitted the dispatch and the slot is now held.
+    Admitted(ActiveLocalDispatchLease),
+    /// The decision queued or refused the dispatch; no slot was taken.
+    NotAdmitted(LocalDispatchAdmission),
 }
 
 /// Decision produced by [`evaluate_local_dispatch_admission`].
@@ -127,103 +139,114 @@ pub fn evaluate_local_dispatch_admission(
     }
 }
 
-fn lease_dir(data_root: &Path) -> PathBuf {
-    if std::env::var_os("HOMEBOY_TEST_DAEMON_NAMESPACE").is_some() {
-        if let Some(root) = std::env::var_os(TEST_LOCAL_DISPATCH_LEASE_ROOT_ENV) {
-            return homeboy_paths::local_cook_dispatch_leases_dir_in_root(&PathBuf::from(root));
-        }
-    }
-    homeboy_paths::local_cook_dispatch_leases_dir_in_root(data_root)
-}
-
-fn lease_path(data_root: &Path, run_id: &str) -> PathBuf {
-    lease_dir(data_root).join(format!(
-        "{}.json",
-        homeboy_paths::sanitize_path_segment(run_id)
+fn open_store(data_root: &Path) -> Result<ObservationStore> {
+    ObservationStore::open_initialized_for_lifecycle_at(crate::paths::observation_db_in_root(
+        data_root,
     ))
 }
 
-fn read_lease(path: &Path) -> Result<Option<LocalDispatchLease>> {
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    if content.trim().is_empty() {
-        return Ok(None);
-    }
-    serde_json::from_str(&content).map(Some).map_err(|error| {
-        Error::validation_invalid_json(
-            error,
-            Some(format!("parse local dispatch lease {}", path.display())),
-            Some(content.chars().take(200).collect()),
-        )
+/// Slots a holder consumes. Every local dispatch weighs one slot.
+fn holder_slots(holder: &LeaseHolder) -> usize {
+    holder
+        .weight
+        .get("slots")
+        .and_then(Value::as_u64)
+        .map_or(1, |slots| slots as usize)
+}
+
+fn active_slots(holders: &[LeaseHolder]) -> usize {
+    holders.iter().map(holder_slots).sum()
+}
+
+fn acquire_in(
+    store: &ObservationStore,
+    run_id: &str,
+    admission: LeaseAdmission<'_>,
+) -> Result<LeaseAcquire> {
+    store.reap_coordination_leases(NAMESPACE)?;
+    let weight = json!({ "slots": 1 });
+    let payload = json!({
+        "run_id": run_id,
+        "started_at": chrono::Utc::now().to_rfc3339(),
+    });
+    store.acquire_coordination_lease(LeaseRequest {
+        namespace: NAMESPACE,
+        key: LEASE_KEY,
+        ttl: LEASE_TTL,
+        owner: LeaseOwner::current_process(),
+        admission,
+        weight: &weight,
+        payload: &payload,
     })
 }
 
-fn lease_files(data_root: &Path) -> Result<Vec<PathBuf>> {
-    let dir = lease_dir(data_root);
-    if !dir.is_dir() {
-        return Ok(Vec::new());
+fn guard(data_root: &Path, holder: LeaseHolder) -> ActiveLocalDispatchLease {
+    ActiveLocalDispatchLease {
+        db_path: crate::paths::observation_db_in_root(data_root),
+        holder_token: holder.holder_token,
     }
-    let mut files = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?
-    {
-        let entry = entry.map_err(|error| {
-            Error::internal_io(error.to_string(), Some(dir.display().to_string()))
-        })?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            files.push(path);
-        }
-    }
-    files.sort();
-    Ok(files)
 }
 
-/// Count of live local dispatch leases below `data_root`, pruning any lease
-/// whose holder process is provably gone first. A dead holder never
+/// Slots held by live local dispatches in the observation store below
+/// `data_root`. Holders whose owner is provably gone (dead, or a reused PID
+/// with a different start identity) are reaped first, so a dead holder never
 /// permanently consumes a concurrency slot.
 pub fn active_local_dispatch_count(data_root: &Path) -> Result<usize> {
-    let mut count = 0;
-    for path in lease_files(data_root)? {
-        match read_lease(&path)? {
-            Some(lease) if crate::process::pid_is_running(lease.pid) => count += 1,
-            _ => {
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-    Ok(count)
+    let store = open_store(data_root)?;
+    store.reap_coordination_leases(NAMESPACE)?;
+    Ok(active_slots(
+        &store.coordination_lease_holders(NAMESPACE, LEASE_KEY)?,
+    ))
 }
 
-/// Unconditionally acquire a lease for `run_id` below `data_root`.
+/// Decide admission and take a slot in one store transaction.
 ///
-/// Callers must have already decided admission via
-/// [`evaluate_local_dispatch_admission`]; this only records the slot so
-/// [`active_local_dispatch_count`] can see it. The returned guard releases the
-/// slot on drop.
+/// `decide` receives the slots held by live dispatches and returns the
+/// admission decision (normally [`evaluate_local_dispatch_admission`]). The
+/// count and the acquire are judged inside the same IMMEDIATE transaction, so
+/// two concurrent callers can never both take the last slot.
+pub fn try_admit_local_dispatch(
+    data_root: &Path,
+    run_id: &str,
+    decide: impl Fn(usize) -> LocalDispatchAdmission,
+) -> Result<LocalDispatchAttempt> {
+    let store = open_store(data_root)?;
+    let decision = Cell::new(None);
+    let admit = |holders: &[LeaseHolder]| {
+        let outcome = decide(active_slots(holders));
+        let admitted = outcome == LocalDispatchAdmission::Admit;
+        decision.set(Some(outcome));
+        admitted
+    };
+    match acquire_in(&store, run_id, LeaseAdmission::Capacity(&admit))? {
+        LeaseAcquire::Acquired(holder) => {
+            Ok(LocalDispatchAttempt::Admitted(guard(data_root, holder)))
+        }
+        LeaseAcquire::Contended(holders) => Ok(LocalDispatchAttempt::NotAdmitted(
+            decision
+                .take()
+                .unwrap_or_else(|| decide(active_slots(&holders))),
+        )),
+    }
+}
+
+/// Unconditionally acquire a slot for `run_id` below `data_root`.
+///
+/// Callers that need admission use [`try_admit_local_dispatch`]; this only
+/// records a slot (for example a fixture filling the ceiling). The returned
+/// guard releases the slot on drop.
 pub fn acquire_local_dispatch_lease(
     data_root: &Path,
     run_id: &str,
 ) -> Result<ActiveLocalDispatchLease> {
-    let dir = lease_dir(data_root);
-    fs::create_dir_all(&dir)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(dir.display().to_string())))?;
-    let pid = std::process::id();
-    let path = lease_path(data_root, run_id);
-    let lease = LocalDispatchLease {
-        run_id: run_id.to_string(),
-        pid,
-        started_at: chrono::Utc::now().to_rfc3339(),
-    };
-    let json = serde_json::to_string_pretty(&lease).map_err(|error| {
-        Error::internal_unexpected(format!("failed to serialize local dispatch lease: {error}"))
-    })?;
-    fs::write(&path, json)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    Ok(ActiveLocalDispatchLease { path, pid })
+    let store = open_store(data_root)?;
+    let accept = |_: &[LeaseHolder]| true;
+    match acquire_in(&store, run_id, LeaseAdmission::Capacity(&accept))? {
+        LeaseAcquire::Acquired(holder) => Ok(guard(data_root, holder)),
+        LeaseAcquire::Contended(_) => Err(crate::Error::internal_unexpected(
+            "unconditional local dispatch lease was refused",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -346,34 +369,131 @@ mod tests {
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
     }
 
-    /// A lease left behind by a process that is provably gone (a pid that
-    /// cannot possibly be this test's own live process) does not permanently
-    /// consume a slot: the next count prunes it.
+    /// Two claimants racing for the last slot: exactly one wins, and the
+    /// loser sees the queue decision judged against the winner's slot.
     #[test]
-    fn a_dead_holder_lease_is_pruned_and_frees_its_slot() {
+    fn two_claimants_for_the_last_slot_admit_exactly_one() {
         let temp = tempfile::tempdir().expect("temp dir");
         let data_root = temp.path();
-        let dir = super::lease_dir(data_root);
-        fs::create_dir_all(&dir).expect("create lease dir");
-        let stale = LocalDispatchLease {
-            run_id: "stale-run".to_string(),
-            // pid 1 is respawned as long-lived (init/launchd) on every
-            // platform this test runs on, so pick an implausible worker pid
-            // whose liveness this test does not depend on ambient state:
-            // u32::MAX is never a valid live process id.
-            pid: u32::MAX,
-            started_at: chrono::Utc::now().to_rfc3339(),
+        // 4 CPUs -> ceiling of 1.
+        let decide = |active| evaluate_local_dispatch_admission(active, "ok", None, 4, false);
+
+        let first = try_admit_local_dispatch(data_root, "run-a", decide).expect("first attempt");
+        let second = try_admit_local_dispatch(data_root, "run-b", decide).expect("second attempt");
+
+        assert!(matches!(first, LocalDispatchAttempt::Admitted(_)));
+        assert!(matches!(
+            second,
+            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Queue {
+                active: 1,
+                ceiling: 1
+            })
+        ));
+        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
+    }
+
+    /// A refused decision takes no slot.
+    #[test]
+    fn a_refused_attempt_holds_no_slot() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_root = temp.path();
+        let attempt = try_admit_local_dispatch(data_root, "run-hot", |active| {
+            evaluate_local_dispatch_admission(active, "hot", Some(30.4), 18, false)
+        })
+        .expect("attempt");
+        assert!(matches!(
+            attempt,
+            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Refuse { .. })
+        ));
+        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
+    }
+
+    /// Leases live in the store, not the process: a reopened store (a fresh
+    /// connection, as a second cook process would open) sees the held slot.
+    #[test]
+    fn a_held_slot_survives_reopening_the_store() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_root = temp.path();
+        let lease = acquire_local_dispatch_lease(data_root, "run-a").expect("acquire");
+
+        let reopened = open_store(data_root).expect("reopen store");
+        let holders = reopened
+            .coordination_lease_holders(NAMESPACE, LEASE_KEY)
+            .expect("holders");
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0].payload["run_id"], "run-a");
+
+        drop(lease);
+        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
+    }
+
+    /// The PID-reuse bug this migration fixes: a holder recorded with this
+    /// process's PID but a different process start identity is a different,
+    /// dead process that happened to get the same PID. It must not hold a
+    /// slot; the next count reaps it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_reused_pid_with_a_different_start_identity_does_not_hold_a_slot() {
+        use crate::process::ProcessStartIdentity;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_root = temp.path();
+        let live = LeaseOwner::current_process();
+        let reused_pid = LeaseOwner {
+            start_identity: Some(
+                match live
+                    .start_identity
+                    .clone()
+                    .expect("current process start identity")
+                {
+                    ProcessStartIdentity::Linux { starttime_ticks } => {
+                        ProcessStartIdentity::Linux {
+                            starttime_ticks: starttime_ticks.wrapping_add(1),
+                        }
+                    }
+                    ProcessStartIdentity::Macos {
+                        start_seconds,
+                        start_microseconds,
+                    } => ProcessStartIdentity::Macos {
+                        start_seconds: start_seconds.wrapping_add(1),
+                        start_microseconds,
+                    },
+                },
+            ),
+            ..live
         };
-        fs::write(
-            super::lease_path(data_root, &stale.run_id),
-            serde_json::to_string_pretty(&stale).unwrap(),
-        )
-        .expect("write stale lease");
+        let store = open_store(data_root).expect("open store");
+        let weight = json!({ "slots": 1 });
+        let payload = json!({ "run_id": "stale-run" });
+        let accept = |_: &[LeaseHolder]| true;
+        let outcome = store
+            .acquire_coordination_lease(LeaseRequest {
+                namespace: NAMESPACE,
+                key: LEASE_KEY,
+                ttl: LEASE_TTL,
+                owner: reused_pid,
+                admission: LeaseAdmission::Capacity(&accept),
+                weight: &weight,
+                payload: &payload,
+            })
+            .expect("seed reused-pid holder");
+        assert!(matches!(outcome, LeaseAcquire::Acquired(_)));
+        assert_eq!(
+            store
+                .coordination_lease_holders(NAMESPACE, LEASE_KEY)
+                .unwrap()
+                .len(),
+            1,
+            "the reused-pid holder row exists before reaping"
+        );
 
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
-        assert!(
-            !super::lease_path(data_root, &stale.run_id).is_file(),
-            "stale lease must be pruned from disk"
-        );
+
+        // And the freed slot admits a real dispatch on a ceiling of one.
+        let attempt = try_admit_local_dispatch(data_root, "fresh-run", |active| {
+            evaluate_local_dispatch_admission(active, "ok", None, 4, false)
+        })
+        .expect("attempt");
+        assert!(matches!(attempt, LocalDispatchAttempt::Admitted(_)));
     }
 }

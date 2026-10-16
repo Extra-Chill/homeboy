@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::fs::OpenOptions;
-use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -3152,21 +3151,19 @@ fn snapshot_capacity_error(
 
 const SNAPSHOT_RESERVATION_TTL: Duration = Duration::from_secs(15 * 60);
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct SnapshotFilesystemReservationRecord {
-    lease_id: String,
-    controller_pid: u32,
-    created_unix_seconds: u64,
-    bytes: u64,
-    inodes: u64,
-}
+/// Coordination namespace owned by snapshot filesystem admission (#15947).
+/// Each key is one reserved filesystem identity; each holder weighs the bytes
+/// and inodes its snapshot materialization reserves.
+const SNAPSHOT_RESERVATION_NAMESPACE: &str = "snapshot-filesystem-reservations";
 
-/// Admission stays live only during materialization. The ledger survives an
-/// interrupted controller so the next admission can recover a dead lease.
+/// Admission stays live only during materialization. A holder row survives an
+/// interrupted controller; the next admission reaps it once the owner is
+/// proven gone by process start identity or its TTL lapses.
 #[derive(Debug)]
 struct SnapshotFilesystemAdmission {
     scratch: std::path::PathBuf,
-    leases: Vec<(std::path::PathBuf, String)>,
+    db_path: std::path::PathBuf,
+    leases: Vec<(String, String)>,
 }
 
 impl SnapshotFilesystemAdmission {
@@ -3181,185 +3178,124 @@ impl SnapshotFilesystemAdmission {
         requirement: SnapshotFilesystemRequirement,
         runner: &super::super::Runner,
     ) -> Result<Self> {
+        use homeboy_core::observation::coordination::{
+            LeaseAcquire, LeaseAdmission, LeaseHolder, LeaseOwner, LeaseRequest,
+        };
+
         let mut unique = std::collections::BTreeMap::new();
         for probe in probes {
             unique.entry(probe.identity.clone()).or_insert(probe);
         }
+        let db_path = homeboy_core::paths::observation_db_in_root(data_root);
+        let store = snapshot_reservation_store(&db_path)?;
+        store.reap_coordination_leases(SNAPSHOT_RESERVATION_NAMESPACE)?;
         let lease_id = uuid::Uuid::new_v4().to_string();
-        let mut leases = Vec::new();
+        let weight = serde_json::json!({
+            "bytes": requirement.bytes,
+            "inodes": requirement.inodes,
+        });
+        let payload = serde_json::json!({ "lease_id": lease_id });
+        let mut admission = Self {
+            scratch,
+            db_path,
+            leases: Vec::new(),
+        };
         for probe in unique.into_values() {
-            let path = snapshot_reservation_path_in_roots(data_root, &probe.identity)?;
-            let _lock = snapshot_reservation_lock(&path)?;
-            let mut records = read_snapshot_reservation_records(&path)?;
-            records.retain(snapshot_reservation_is_live);
-            let reserved_bytes = records.iter().map(|record| record.bytes).sum::<u64>();
-            let reserved_inodes = records.iter().map(|record| record.inodes).sum::<u64>();
-            if probe.available_bytes.saturating_sub(reserved_bytes) < requirement.bytes
-                || probe.available_inodes.saturating_sub(reserved_inodes) < requirement.inodes
-            {
-                let mut error = snapshot_capacity_error(probe, requirement, runner, None);
-                error.details["active_reservations"] = serde_json::json!(records);
-                error.details["reserved_bytes"] = serde_json::json!(reserved_bytes);
-                error.details["reserved_inodes"] = serde_json::json!(reserved_inodes);
-                drop(leases);
-                return Err(error);
+            let fits = |holders: &[LeaseHolder]| {
+                let (bytes, inodes) = snapshot_reserved_totals(holders);
+                probe.available_bytes.saturating_sub(bytes) >= requirement.bytes
+                    && probe.available_inodes.saturating_sub(inodes) >= requirement.inodes
+            };
+            match store.acquire_coordination_lease(LeaseRequest {
+                namespace: SNAPSHOT_RESERVATION_NAMESPACE,
+                key: &probe.identity,
+                ttl: SNAPSHOT_RESERVATION_TTL,
+                owner: LeaseOwner::current_process(),
+                admission: LeaseAdmission::Capacity(&fits),
+                weight: &weight,
+                payload: &payload,
+            })? {
+                LeaseAcquire::Acquired(holder) => admission
+                    .leases
+                    .push((probe.identity.clone(), holder.holder_token)),
+                LeaseAcquire::Contended(holders) => {
+                    let (reserved_bytes, reserved_inodes) = snapshot_reserved_totals(&holders);
+                    let mut error = snapshot_capacity_error(probe, requirement, runner, None);
+                    error.details["active_reservations"] = serde_json::json!(holders
+                        .iter()
+                        .map(snapshot_reservation_view)
+                        .collect::<Vec<_>>());
+                    error.details["reserved_bytes"] = serde_json::json!(reserved_bytes);
+                    error.details["reserved_inodes"] = serde_json::json!(reserved_inodes);
+                    // Dropping releases the filesystems already reserved.
+                    drop(admission);
+                    return Err(error);
+                }
             }
-            records.push(SnapshotFilesystemReservationRecord {
-                lease_id: lease_id.clone(),
-                controller_pid: std::process::id(),
-                created_unix_seconds: snapshot_reservation_now(),
-                bytes: requirement.bytes,
-                inodes: requirement.inodes,
-            });
-            write_snapshot_reservation_records_unlocked(&path, &records)?;
-            leases.push((path, lease_id.clone()));
         }
-        Ok(Self { scratch, leases })
+        Ok(admission)
     }
 }
 
 impl Drop for SnapshotFilesystemAdmission {
     fn drop(&mut self) {
-        for (path, lease_id) in &self.leases {
-            let Ok(_lock) = snapshot_reservation_lock(path) else {
-                continue;
-            };
-            if let Ok(mut records) = read_snapshot_reservation_records(path) {
-                records.retain(|record| {
-                    record.lease_id != *lease_id && snapshot_reservation_is_live(record)
-                });
-                let _ = write_snapshot_reservation_records_unlocked(path, &records);
-            }
+        if self.leases.is_empty() {
+            return;
+        }
+        let Ok(store) = snapshot_reservation_store(&self.db_path) else {
+            return;
+        };
+        for (identity, holder_token) in &self.leases {
+            let _ = store.release_coordination_lease(
+                SNAPSHOT_RESERVATION_NAMESPACE,
+                identity,
+                holder_token,
+            );
         }
     }
 }
 
-/// Locate one filesystem's reservation ledger below an explicitly injected data
-/// root. Admission and release must agree on the ledger, and `Drop` releases
-/// against the stored path, so the root is fixed once at acquisition (#7505).
-fn snapshot_reservation_path_in_roots(
-    data_root: &Path,
-    identity: &str,
-) -> Result<std::path::PathBuf> {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    identity.hash(&mut hasher);
-    let root = data_root.join("snapshot-filesystem-reservations");
-    fs::create_dir_all(&root).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create snapshot reservation ledger".to_string()),
-        )
-    })?;
-    Ok(root.join(format!("{:016x}.json", hasher.finish())))
+fn snapshot_reservation_store(
+    db_path: &Path,
+) -> Result<homeboy_core::observation::ObservationStore> {
+    homeboy_core::observation::ObservationStore::open_initialized_for_lifecycle_at(db_path)
 }
 
-#[cfg(test)]
-fn snapshot_reservation_records(path: &Path) -> Result<Vec<SnapshotFilesystemReservationRecord>> {
-    let _lock = snapshot_reservation_lock(path)?;
-    read_snapshot_reservation_records(path)
+fn snapshot_holder_weight(
+    holder: &homeboy_core::observation::coordination::LeaseHolder,
+    field: &str,
+) -> u64 {
+    holder
+        .weight
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
-fn read_snapshot_reservation_records(
-    path: &Path,
-) -> Result<Vec<SnapshotFilesystemReservationRecord>> {
-    match fs::read_to_string(path) {
-        Ok(value) => serde_json::from_str(&value).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse snapshot reservation ledger".to_string()),
+fn snapshot_reserved_totals(
+    holders: &[homeboy_core::observation::coordination::LeaseHolder],
+) -> (u64, u64) {
+    holders
+        .iter()
+        .fold((0u64, 0u64), |(bytes, inodes), holder| {
+            (
+                bytes.saturating_add(snapshot_holder_weight(holder, "bytes")),
+                inodes.saturating_add(snapshot_holder_weight(holder, "inodes")),
             )
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some("read snapshot reservation ledger".to_string()),
-        )),
-    }
+        })
 }
 
-fn write_snapshot_reservation_records_unlocked(
-    path: &Path,
-    records: &[SnapshotFilesystemReservationRecord],
-) -> Result<()> {
-    let json = serde_json::to_vec(records).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("encode snapshot reservation ledger".to_string()),
-        )
-    })?;
-    let mut staged =
-        tempfile::NamedTempFile::new_in(parent_or_current_dir(path)).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("stage snapshot reservation ledger".to_string()),
-            )
-        })?;
-    staged.write_all(&json).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("write snapshot reservation ledger".to_string()),
-        )
-    })?;
-    staged.persist(path).map_err(|error| {
-        Error::internal_io(
-            error.error.to_string(),
-            Some("publish snapshot reservation ledger".to_string()),
-        )
-    })?;
-    Ok(())
-}
-
-fn snapshot_reservation_lock(path: &Path) -> Result<std::fs::File> {
-    let lock = path.with_extension("lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("lock snapshot reservation ledger".to_string()),
-            )
-        })?;
-    #[cfg(unix)]
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
-        return Err(Error::internal_io(
-            std::io::Error::last_os_error().to_string(),
-            Some("lock snapshot reservation ledger".to_string()),
-        ));
-    }
-    Ok(file)
-}
-
-fn snapshot_reservation_now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn snapshot_reservation_is_live(record: &SnapshotFilesystemReservationRecord) -> bool {
-    let fresh = snapshot_reservation_now().saturating_sub(record.created_unix_seconds)
-        < SNAPSHOT_RESERVATION_TTL.as_secs();
-    fresh && snapshot_reservation_pid_is_live(record.controller_pid)
-}
-
-#[cfg(unix)]
-fn snapshot_reservation_pid_is_live(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    unsafe {
-        libc::kill(pid, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-}
-
-#[cfg(not(unix))]
-fn snapshot_reservation_pid_is_live(_pid: u32) -> bool {
-    true
+fn snapshot_reservation_view(
+    holder: &homeboy_core::observation::coordination::LeaseHolder,
+) -> serde_json::Value {
+    serde_json::json!({
+        "lease_id": holder.payload.get("lease_id"),
+        "controller_pid": holder.owner.pid,
+        "acquired_at_ms": holder.acquired_at_ms,
+        "expires_at_ms": holder.expires_at_ms,
+        "bytes": snapshot_holder_weight(holder, "bytes"),
+        "inodes": snapshot_holder_weight(holder, "inodes"),
+    })
 }
 
 fn require_runner_workspace_disk_headroom(
@@ -4883,9 +4819,9 @@ mod tests {
     use super::{
         is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
         runner_workspace_disk_is_critical, snapshot_capacity_error,
-        snapshot_filesystem_requirement, snapshot_reservation_path_in_roots,
-        snapshot_reservation_records, RunnerWorkspaceDiskProbe, SnapshotFilesystemAdmission,
-        SnapshotFilesystemProbe, SnapshotFilesystemRequirement,
+        snapshot_filesystem_requirement, snapshot_reservation_store, RunnerWorkspaceDiskProbe,
+        SnapshotFilesystemAdmission, SnapshotFilesystemProbe, SnapshotFilesystemRequirement,
+        SNAPSHOT_RESERVATION_NAMESPACE, SNAPSHOT_RESERVATION_TTL,
     };
     use homeboy_core::error::{Error, ErrorCode};
     use homeboy_core::server::CommandOutput;
@@ -5091,8 +5027,8 @@ mod tests {
             .any(|hint| hint.message.contains("workspace prune")));
     }
 
-    /// The reservation ledger is the only Homeboy state these two tests touch,
-    /// and it is now injected, so neither needs `with_isolated_home` — no
+    /// The reservation leases live in an observation store below an injected
+    /// data root, so none of these tests needs `with_isolated_home` — no
     /// environment mutation, no shared home mutex (#7505).
     #[test]
     fn snapshot_reservations_prevent_overcommit_then_release() {
@@ -5138,8 +5074,27 @@ mod tests {
         .expect("released reservation admits retry");
     }
 
+    fn reservation_holders(
+        data_root: &std::path::Path,
+        identity: &str,
+    ) -> Vec<homeboy_core::observation::coordination::LeaseHolder> {
+        snapshot_reservation_store(&homeboy_core::paths::observation_db_in_root(data_root))
+            .expect("store")
+            .coordination_lease_holders(SNAPSHOT_RESERVATION_NAMESPACE, identity)
+            .expect("holders")
+    }
+
+    /// A holder recorded with this process's PID but a different start
+    /// identity belongs to a dead process whose PID was reused. It must not
+    /// keep holding filesystem capacity: the next admission reaps it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn snapshot_reservation_reclaims_dead_lease() {
+    fn snapshot_reservation_reclaims_reused_pid_lease() {
+        use homeboy_core::observation::coordination::{
+            LeaseAcquire, LeaseAdmission, LeaseHolder, LeaseOwner, LeaseRequest,
+        };
+        use homeboy_core::process::ProcessStartIdentity;
+
         let data_root = tempfile::tempdir().expect("data root");
         let runner = reservation_runner();
         let requirement = SnapshotFilesystemRequirement {
@@ -5147,37 +5102,88 @@ mod tests {
             inodes: 100,
         };
         let filesystem = probe("root-recovery", 150, 150);
-        let path = snapshot_reservation_path_in_roots(data_root.path(), &filesystem.identity)
-            .expect("ledger path");
-        let _lock = super::snapshot_reservation_lock(&path).expect("lock");
-        super::write_snapshot_reservation_records_unlocked(
-            &path,
-            &[super::SnapshotFilesystemReservationRecord {
-                lease_id: "dead".to_string(),
-                controller_pid: u32::MAX,
-                created_unix_seconds: 0,
-                bytes: 100,
-                inodes: 100,
-            }],
-        )
-        .expect("write stale lease");
-        drop(_lock);
+        let live = LeaseOwner::current_process();
+        let reused_pid = LeaseOwner {
+            start_identity: Some(match live.start_identity.clone().expect("start identity") {
+                ProcessStartIdentity::Linux { starttime_ticks } => ProcessStartIdentity::Linux {
+                    starttime_ticks: starttime_ticks.wrapping_add(1),
+                },
+                ProcessStartIdentity::Macos {
+                    start_seconds,
+                    start_microseconds,
+                } => ProcessStartIdentity::Macos {
+                    start_seconds: start_seconds.wrapping_add(1),
+                    start_microseconds,
+                },
+            }),
+            ..live
+        };
+        let store = snapshot_reservation_store(&homeboy_core::paths::observation_db_in_root(
+            data_root.path(),
+        ))
+        .expect("store");
+        let weight = serde_json::json!({ "bytes": 100, "inodes": 100 });
+        let payload = serde_json::json!({ "lease_id": "dead" });
+        let accept = |_: &[LeaseHolder]| true;
+        assert!(matches!(
+            store
+                .acquire_coordination_lease(LeaseRequest {
+                    namespace: SNAPSHOT_RESERVATION_NAMESPACE,
+                    key: &filesystem.identity,
+                    ttl: SNAPSHOT_RESERVATION_TTL,
+                    owner: reused_pid,
+                    admission: LeaseAdmission::Capacity(&accept),
+                    weight: &weight,
+                    payload: &payload,
+                })
+                .expect("seed stale lease"),
+            LeaseAcquire::Acquired(_)
+        ));
 
         let admission = SnapshotFilesystemAdmission::acquire(
             data_root.path(),
             tempfile::tempdir().expect("scratch").keep(),
-            &[filesystem],
+            std::slice::from_ref(&filesystem),
             requirement,
             &runner,
         )
-        .expect("dead lease must be recovered");
-        assert_eq!(
-            snapshot_reservation_records(&path).expect("records").len(),
-            1
-        );
+        .expect("reused-pid lease must be recovered");
+        let holders = reservation_holders(data_root.path(), &filesystem.identity);
+        assert_eq!(holders.len(), 1);
+        assert_ne!(holders[0].payload["lease_id"], "dead");
         drop(admission);
-        assert!(snapshot_reservation_records(&path)
-            .expect("records")
-            .is_empty());
+        assert!(reservation_holders(data_root.path(), &filesystem.identity).is_empty());
+    }
+
+    /// A refused multi-filesystem admission releases the filesystems it had
+    /// already reserved instead of leaking their capacity.
+    #[test]
+    fn snapshot_reservation_refusal_releases_partial_reservations() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let runner = reservation_runner();
+        let requirement = SnapshotFilesystemRequirement {
+            bytes: 100,
+            inodes: 100,
+        };
+        let roomy = probe("a-roomy", 1_000, 1_000);
+        let tight = probe("b-tight", 150, 150);
+        let _holder = SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            std::slice::from_ref(&tight),
+            requirement,
+            &runner,
+        )
+        .expect("hold the tight filesystem");
+
+        SnapshotFilesystemAdmission::acquire(
+            data_root.path(),
+            tempfile::tempdir().expect("scratch").keep(),
+            &[roomy.clone(), tight],
+            requirement,
+            &runner,
+        )
+        .expect_err("tight filesystem must refuse");
+        assert!(reservation_holders(data_root.path(), &roomy.identity).is_empty());
     }
 }

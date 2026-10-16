@@ -7774,23 +7774,29 @@ fn admit_local_cook_dispatch_with_clock(
     mut on_queue: impl FnMut(usize, usize),
 ) -> homeboy::core::Result<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease> {
     use homeboy::core::local_dispatch_admission::{
-        acquire_local_dispatch_lease, active_local_dispatch_count,
-        evaluate_local_dispatch_admission, LocalDispatchAdmission,
+        evaluate_local_dispatch_admission, try_admit_local_dispatch, LocalDispatchAdmission,
+        LocalDispatchAttempt,
     };
 
     let mut waited = Duration::ZERO;
     loop {
-        let active = active_local_dispatch_count(data_root)?;
-        match evaluate_local_dispatch_admission(
-            active,
-            &context.severity,
-            context.host.load_one,
-            context.host.cpu_count,
-            context.local_override,
-        ) {
-            LocalDispatchAdmission::Admit => {
-                return acquire_local_dispatch_lease(data_root, run_id);
-            }
+        let attempt = try_admit_local_dispatch(data_root, run_id, |active| {
+            evaluate_local_dispatch_admission(
+                active,
+                &context.severity,
+                context.host.load_one,
+                context.host.cpu_count,
+                context.local_override,
+            )
+        })?;
+        let decision = match attempt {
+            LocalDispatchAttempt::Admitted(lease) => return Ok(lease),
+            LocalDispatchAttempt::NotAdmitted(decision) => decision,
+        };
+        match decision {
+            // An admitting decision always takes the slot in the same
+            // transaction; re-run admission rather than trust a stale one.
+            LocalDispatchAdmission::Admit => continue,
             LocalDispatchAdmission::Refuse { reason } => {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "resource-policy",
