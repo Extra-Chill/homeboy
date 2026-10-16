@@ -353,9 +353,11 @@ struct TargetOutcome {
     timings: homeboy_core::phase_timing::PhaseTimingReport,
 }
 
+/// A multi-target deploy's checkpoint together with the run row that stores it.
+type CheckpointedRun = (lifecycle::DeployLifecycleRun, lifecycle::DeployObservation);
+
 fn persist_target_outcome(
-    data_root: &std::path::Path,
-    lifecycle_run: &std::sync::Mutex<Option<lifecycle::DeployLifecycleRun>>,
+    lifecycle_run: &std::sync::Mutex<Option<CheckpointedRun>>,
     project_id: &str,
     result: &Result<DeployOrchestrationResult>,
     timings: &homeboy_core::phase_timing::PhaseTimingReport,
@@ -363,7 +365,7 @@ fn persist_target_outcome(
     let mut lifecycle_run = lifecycle_run
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(run) = lifecycle_run.as_mut() else {
+    let Some((run, observation)) = lifecycle_run.as_mut() else {
         return Ok(());
     };
     let (status, error) = match result {
@@ -396,7 +398,7 @@ fn persist_target_outcome(
         ),
     };
     run.update_target(project_id, status, error, Some(timings.clone()));
-    lifecycle::save_in_roots(data_root, run)
+    observation.save_checkpoint(run)
 }
 
 /// Record which deliverable each dual-deliverable component actually deployed.
@@ -602,26 +604,11 @@ pub fn run_multi(
         }
     );
 
-    // One resolution for the whole run. Every checkpoint read and write below
-    // addresses this data root, so a resumed run cannot read its checkpoint
-    // from one home and then record target outcomes into another (#7505). The
-    // observation store admitted alongside it still resolves its own roots
-    // inside `homeboy-core`, which is not reachable from here.
+    // One resolution for the whole run. The checkpoint lives on the aggregate
+    // deploy run's observation row, so every checkpoint read and write below
+    // addresses the store under this root (#7505).
     let roots = homeboy_core::paths::PathRoots::from_environment()?;
     let identity = lifecycle_identity(project_ids, component_ids, config);
-    let mut lifecycle_run = if config.dry_run || config.check {
-        None
-    } else if let Some(id) = config.resume_run_id.as_deref() {
-        let mut run = lifecycle::load_in_roots(roots.data(), id)?;
-        run.resume(&identity)?;
-        lifecycle::save_in_roots(roots.data(), &run)?;
-        Some(run)
-    } else {
-        let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity.clone());
-        lifecycle::save_in_roots(roots.data(), &run)?;
-        Some(run)
-    };
-    let checkpoint_run_id = lifecycle_run.as_ref().map(|run| run.id.clone());
     let control_plane_lineage = config
         .prepared_projection
         .as_ref()
@@ -630,26 +617,25 @@ pub fn run_multi(
         .prepared_artifact
         .as_ref()
         .map(|artifact| artifact.sha256.as_str());
-    let mut aggregate_observation = checkpoint_run_id
-        .as_deref()
-        .map(|id| {
-            if config.resume_run_id.is_some() {
-                lifecycle::DeployObservation::resume_with_control_plane_in_roots(&roots, id)
-            } else {
-                lifecycle::DeployObservation::start_with_control_plane_in_roots(
-                    &roots,
-                    Some(id),
-                    "multi",
-                    &identity.source,
-                    control_plane_lineage,
-                    artifact_sha256,
-                )
-            }
-        })
-        .transpose()?;
-    let deploy_run_id = aggregate_observation
-        .as_ref()
-        .map(|run| run.run_id().to_string());
+    let mut lifecycle_run: Option<CheckpointedRun> = if config.dry_run || config.check {
+        None
+    } else if let Some(id) = config.resume_run_id.as_deref() {
+        let (observation, run) =
+            lifecycle::DeployObservation::resume_checkpointed_in_roots(&roots, id, &identity)?;
+        Some((run, observation))
+    } else {
+        let run = lifecycle::DeployLifecycleRun::new(Uuid::new_v4().to_string(), identity.clone());
+        let observation = lifecycle::DeployObservation::start_checkpointed_in_roots(
+            &roots,
+            &run,
+            "multi",
+            control_plane_lineage,
+            artifact_sha256,
+        )?;
+        Some((run, observation))
+    };
+    let checkpoint_run_id = lifecycle_run.as_ref().map(|(run, _)| run.id.clone());
+    let deploy_run_id = checkpoint_run_id.clone();
 
     let mut project_results = Vec::new();
     let mut succeeded: u32 = 0;
@@ -694,7 +680,7 @@ pub fn run_multi(
 
         if lifecycle_run
             .as_ref()
-            .is_some_and(|run| run.target_skips_mutation_retry(project_id))
+            .is_some_and(|(run, _)| run.target_skips_mutation_retry(project_id))
         {
             let mut timer = PhaseTimer::new();
             timer.record_skipped("transfer");
@@ -702,7 +688,7 @@ pub fn run_multi(
             timer.record_skipped("verify");
             let status = lifecycle_run
                 .as_ref()
-                .and_then(|run| run.target_status(project_id))
+                .and_then(|(run, _)| run.target_status(project_id))
                 .expect("skip status from lifecycle state");
             project_results.push(ProjectDeployResult {
                 project_id: project_id.to_string(),
@@ -733,14 +719,14 @@ pub fn run_multi(
             continue;
         }
 
-        if let Some(run) = lifecycle_run.as_mut() {
+        if let Some((run, observation)) = lifecycle_run.as_mut() {
             run.update_target(
                 project_id,
                 lifecycle::DeployTargetStatus::Running,
                 None,
                 None,
             );
-            lifecycle::save_in_roots(roots.data(), run)?;
+            observation.save_checkpoint(run)?;
         }
         let mut timer = PhaseTimer::new();
         let preparation = timer.time("prepare", || {
@@ -781,9 +767,7 @@ pub fn run_multi(
             Err(error) => Err(error),
         };
         let timings = timer.into_report();
-        if let Err(error) =
-            persist_target_outcome(roots.data(), &lifecycle_run, &project_id, &result, &timings)
-        {
+        if let Err(error) = persist_target_outcome(&lifecycle_run, &project_id, &result, &timings) {
             result = Err(error);
         }
         TargetOutcome {
@@ -793,6 +777,10 @@ pub fn run_multi(
         }
     });
 
+    let mut aggregate_observation = lifecycle_run
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .map(|(_, observation)| observation);
     for outcome in target_outcomes {
         let TargetOutcome {
             project_id,
