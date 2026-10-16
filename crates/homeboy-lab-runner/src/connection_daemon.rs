@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use homeboy_lab_runner_contract::LabCapabilityVersion;
+use homeboy_lab_contract::LabCapabilityVersion;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;

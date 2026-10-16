@@ -293,7 +293,7 @@ pub fn materialize_rig_spec_with_default_source_root(path: &Path) -> Result<serd
 /// Materialize a rig into the shared, versioned resource contract.
 pub fn materialize_rig_resource_with_default_source_root(
     path: &Path,
-) -> Result<homeboy_rig_contract::MaterializedRigResource> {
+) -> Result<crate::materialized_rig::MaterializedRigResource> {
     materialize_rig_resource(path, &default_materialize_source_root(path))
 }
 
@@ -304,7 +304,7 @@ pub fn materialize_rig_resource_with_default_source_root(
 pub fn materialize_rig_resource(
     path: &Path,
     source_root: &Path,
-) -> Result<homeboy_rig_contract::MaterializedRigResource> {
+) -> Result<crate::materialized_rig::MaterializedRigResource> {
     let rig = materialize_rig_spec(path, source_root)?;
     let rig_id = rig
         .get("id")
@@ -328,8 +328,8 @@ pub fn materialize_rig_resource(
         })?;
     let digest = format!("sha256:{:x}", Sha256::digest(canonical));
 
-    Ok(homeboy_rig_contract::MaterializedRigResource {
-        schema: homeboy_rig_contract::MATERIALIZED_RIG_RESOURCE_SCHEMA.to_string(),
+    Ok(crate::materialized_rig::MaterializedRigResource {
+        schema: crate::materialized_rig::MATERIALIZED_RIG_RESOURCE_SCHEMA.to_string(),
         rig_id,
         materialized_rig_json_sha256: digest,
         rig,

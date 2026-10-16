@@ -239,8 +239,8 @@ pub(crate) fn reject_gates_unexecutable_under_resolved_placement(
     let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
         return Ok(());
     };
-    let selected_local = result.placement.selected
-        == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local;
+    let selected_local =
+        result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Local;
     let lab_ready = result
         .lab_readiness
         .as_ref()

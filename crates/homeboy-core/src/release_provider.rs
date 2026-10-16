@@ -11,7 +11,7 @@
 //! subsystem present) the no-op reports empty/None so status reporting degrades
 //! gracefully rather than failing.
 
-use homeboy_release_contract::{
+use crate::release_state::{
     ChangelogSnapshotData, ComponentDeployStatus, ComponentVersionSnapshot,
     FinalizedReleaseSnapshot, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };

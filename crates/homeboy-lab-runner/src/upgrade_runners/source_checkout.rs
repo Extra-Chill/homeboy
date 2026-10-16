@@ -4,7 +4,7 @@ use crate::Runner;
 use crate::RunnerExecOptions;
 use homeboy_core::git::output_allow_empty;
 use homeboy_core::Result;
-use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
+use homeboy_lab_contract::RunnerWorkspaceSyncOptions;
 use homeboy_runner_contract::RunnerCapabilityPreflight;
 use homeboy_runner_contract::RunnerKind;
 use homeboy_runner_contract::RunnerRequiredTool;

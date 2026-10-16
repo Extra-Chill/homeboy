@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{OnceLock, RwLock};
 
 use crate::resource_policy_context::ResourcePolicyContext;
-use homeboy_lab_runner_contract::{
+use homeboy_lab_contract::{
     EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementFallback,
     ExecutionPlacementIdentity, ExecutionPlacementOverrideAuthorization,
     ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, Placement,
@@ -477,9 +477,9 @@ pub fn resolve_parsed_command_preflight(
                 input.runner,
                 RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
             ) {
-                homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+                homeboy_lab_contract::RunnerSelectionSource::Explicit
             } else {
-                homeboy_lab_runner_contract::RunnerSelectionSource::Policy
+                homeboy_lab_contract::RunnerSelectionSource::Policy
             },
         });
     let fallback =
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn placement_directive_finalizes_only_late_identity() {
-        use homeboy_lab_runner_contract::{
+        use homeboy_lab_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
             ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement, Placement,
         };
@@ -1028,7 +1028,7 @@ mod tests {
         .expect("the bounded setup action is admitted");
         assert_eq!(
             repair.placement.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab
         );
 
         let mut unrelated = input;
@@ -1084,7 +1084,7 @@ mod tests {
             .expect("auto falls through to the ready local route");
         assert_eq!(
             result.placement.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local
         );
         assert!(result.placement.runner.is_none());
         assert!(result.selected_runner_id.is_none());
@@ -1203,7 +1203,7 @@ mod tests {
 
         assert_eq!(
             result.placement.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab
         );
         assert_eq!(
             result.placement.required,
@@ -1229,7 +1229,7 @@ mod tests {
             .expect("explicit local placement must not inspect Lab admission");
         assert_eq!(
             result.placement.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local
         );
         assert!(result.placement.override_authorization.authorized);
     }
@@ -1254,7 +1254,7 @@ mod tests {
 
         assert_eq!(
             result.placement.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local
         );
         assert_eq!(result.fallback, FallbackDirective::LocalAllowed);
         assert!(result.placement.fallback.local_allowed);

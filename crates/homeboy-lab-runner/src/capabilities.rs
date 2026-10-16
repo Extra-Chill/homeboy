@@ -31,7 +31,7 @@ pub use homeboy_runner_contract::RunnerCapabilityPreflight;
 pub use homeboy_runner_contract::RunnerToolCapabilityRequirement;
 pub use homeboy_runner_contract::RunnerToolchainReadinessProbe;
 
-pub use homeboy_lab_runner_contract::{
+pub use homeboy_lab_contract::{
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
     PreparedLabRunnerCapability,
 };

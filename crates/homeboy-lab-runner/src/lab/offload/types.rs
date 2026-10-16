@@ -3,11 +3,11 @@
 pub struct LabOffloadRequest<'a> {
     /// Canonical controller-owned placement decision. This is deliberately
     /// separate from #10943's authenticated runner-job execution context.
-    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    pub placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub placement: homeboy_lab_runner_contract::Placement,
+    pub placement: homeboy_lab_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     /// Skip post-materialization dependency hydration for Lab workspace exec
@@ -61,25 +61,25 @@ impl<'a> LabOffloadRequest<'a> {
     /// This remains test-only so production callers must set every policy field.
     pub(crate) fn for_test(normalized_args: &'a [String]) -> Self {
         Self {
-            placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            placement_decision: homeboy_lab_contract::ExecutionPlacementDecision::new(
                 "test",
                 "1",
-                homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                homeboy_lab_contract::ExecutionPlacementIdentity {
                     repository: "test".to_string(),
                     workspace: "test".to_string(),
                     task: "test".to_string(),
                     candidate: None,
                     base: None,
                 },
-                homeboy_lab_runner_contract::Placement::Auto,
-                homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                homeboy_lab_contract::Placement::Auto,
+                homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Local,
                 None,
-                homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                homeboy_lab_contract::ExecutionPlacementFallback {
                     local_allowed: false,
                     reason: None,
                 },
-                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                     authorized: false,
                     authority: None,
                 },
@@ -87,7 +87,7 @@ impl<'a> LabOffloadRequest<'a> {
             command: None,
             normalized_args,
             explicit_runner: None,
-            placement: homeboy_lab_runner_contract::Placement::Auto,
+            placement: homeboy_lab_contract::Placement::Auto,
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
@@ -149,12 +149,12 @@ mod tests {
 
         assert_eq!(
             placement_decision.selected,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local
         );
         assert!(command.is_none());
         assert_eq!(normalized_args, args);
         assert!(explicit_runner.is_none());
-        assert_eq!(placement, homeboy_lab_runner_contract::Placement::Auto);
+        assert_eq!(placement, homeboy_lab_contract::Placement::Auto);
         assert!(!allow_local_fallback);
         assert!(!allow_dirty_lab_workspace);
         assert!(!skip_deps_hydration);

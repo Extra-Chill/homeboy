@@ -40,14 +40,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .placement_decision
             .runner
             .as_ref()
-            .filter(|runner| {
-                runner.source == homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
-            })
+            .filter(|runner| runner.source == homeboy_lab_contract::RunnerSelectionSource::Explicit)
             .map(|runner| runner.runner_id.as_str())
     });
     let allow_local_fallback = request.placement_decision.permits_local_fallback();
     if request.placement_decision.selected
-        == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        == homeboy_lab_contract::EffectiveExecutionPlacement::Local
     {
         if !request.placement_decision.permits_local_execution() {
             return Err(local_execution_denied_error(
@@ -63,13 +61,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 "lab.select_runner",
                 PlanStepStatus::Skipped,
             )
-            .skip_reason(
-                if placement == homeboy_lab_runner_contract::Placement::Auto {
-                    "no_selected_runner"
-                } else {
-                    "canonical_local_placement"
-                },
-            )
+            .skip_reason(if placement == homeboy_lab_contract::Placement::Auto {
+                "no_selected_runner"
+            } else {
+                "canonical_local_placement"
+            })
             .build(),
         );
         return Ok(LabOffloadOutcome::RunLocal {
@@ -119,7 +115,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 resolve_lab_runner_hint().unsupported_message,
             ));
         }
-        if placement == homeboy_lab_runner_contract::Placement::Lab {
+        if placement == homeboy_lab_contract::Placement::Lab {
             if is_build_command(request.normalized_args) {
                 return Err(unsupported_build_lab_error("placement_lab", None));
             }
@@ -145,7 +141,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             );
             return Err(unsupported_runner_error(runner_id, message));
         }
-        if placement == homeboy_lab_runner_contract::Placement::Lab {
+        if placement == homeboy_lab_contract::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         plan = disabled_select_runner_plan(plan, reason);
@@ -162,7 +158,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     // machine before auto-offloading, so a merely `warm` controller does not
     // pay the full Lab round-trip for work that finishes faster locally.
     if !contract.routing_policy.default_lab_offload
-        && placement == homeboy_lab_runner_contract::Placement::Auto
+        && placement == homeboy_lab_contract::Placement::Auto
         && contract.source_path_mode
             != homeboy_core::lab_contract::LabSourcePathMode::RunnerResident
         && homeboy_core::resource_policy_context::captured_context().is_some_and(|context| {
@@ -211,10 +207,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         .map(|runner| LabRunnerSelection {
             runner_id: runner.runner_id.clone(),
             source: match runner.source {
-                homeboy_lab_runner_contract::RunnerSelectionSource::Explicit => {
+                homeboy_lab_contract::RunnerSelectionSource::Explicit => {
                     LabRunnerSelectionSource::Explicit
                 }
-                homeboy_lab_runner_contract::RunnerSelectionSource::Policy => {
+                homeboy_lab_contract::RunnerSelectionSource::Policy => {
                     LabRunnerSelectionSource::Default
                 }
             },
@@ -222,10 +218,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         });
     selection_timer.finish();
     let Some(selection) = selection else {
-        if placement == homeboy_lab_runner_contract::Placement::Auto {
+        if placement == homeboy_lab_contract::Placement::Auto {
             fail_if_no_default_runner_accepts_jobs(&contract)?;
         }
-        let reason = if placement == homeboy_lab_runner_contract::Placement::Local {
+        let reason = if placement == homeboy_lab_contract::Placement::Local {
             "placement_local_override"
         } else {
             "no_default_runner"
@@ -240,7 +236,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             .skip_reason(reason)
             .build(),
         );
-        if placement == homeboy_lab_runner_contract::Placement::Lab {
+        if placement == homeboy_lab_contract::Placement::Lab {
             return Err(local_execution_denied_error(reason, None));
         }
         // No runner was selected: record the skip reason as the fallback so the
@@ -324,9 +320,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                         "release_gate",
                     ));
                     }
-                    if request.placement_decision.verifies_outcome(
-                        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
-                    ) && matches!(selection.source, LabRunnerSelectionSource::Default)
+                    if request
+                        .placement_decision
+                        .verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local)
+                        && matches!(selection.source, LabRunnerSelectionSource::Default)
                     {
                         let reason = format!("runner_unavailable: {}", error.message);
                         overhead.set_fallback_reason(&reason);
@@ -387,7 +384,7 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                     "release_gate",
                 ));
             }
-            if placement == homeboy_lab_runner_contract::Placement::Lab {
+            if placement == homeboy_lab_contract::Placement::Lab {
                 return Err(local_execution_denied_error(
                     &reason,
                     Some(&selection.runner_id),
@@ -451,7 +448,7 @@ pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()
     let outcome = request
         .placement_decision
         .outcome(
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             None,
         )
         .ok_or_else(|| {
@@ -466,11 +463,11 @@ pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()
 }
 
 fn should_skip_managed_runner_placement(
-    placement: homeboy_lab_runner_contract::Placement,
+    placement: homeboy_lab_contract::Placement,
     explicit_runner: Option<&str>,
     managed_runner_placement: bool,
 ) -> bool {
-    placement == homeboy_lab_runner_contract::Placement::Auto
+    placement == homeboy_lab_contract::Placement::Auto
         && explicit_runner.is_none()
         && managed_runner_placement
 }
@@ -484,12 +481,12 @@ mod tests {
         // A controller re-entering from a managed runner must still honor a new
         // explicit selection so selection can report that runner's own status.
         assert!(should_skip_managed_runner_placement(
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             None,
             true,
         ));
         assert!(!should_skip_managed_runner_placement(
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
             Some("homeboy-lab"),
             true,
         ));

@@ -5,11 +5,7 @@ mod runner_job_preparation;
 mod sql_store;
 mod store;
 mod summary;
-// The pure job-model data types (Job/JobStatus/JobEvent + companions) were
-// extracted to the homeboy-api-jobs-contract leaf crate. Re-exported as
-// `api_jobs::types` so existing `crate::api_jobs::types::*` paths keep
-// resolving. The job store / persistence / remote-runner behavior stays here.
-use homeboy_api_jobs_contract::types;
+mod types;
 
 pub use crate::runner_job_execution_context::RunnerJobExecutionContext;
 pub(crate) use persistence::timestamp_ms;

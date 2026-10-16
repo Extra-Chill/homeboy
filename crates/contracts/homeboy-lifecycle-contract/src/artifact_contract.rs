@@ -5,7 +5,7 @@
 //! field aliases, and non-empty target normalization.
 //!
 //! Evidence *references* (a labelled pointer at an artifact) live in
-//! `homeboy-artifact-ref-contract` as `EvidenceRef`. There is no second
+//! `homeboy_core::artifact_ref` as `EvidenceRef`. There is no second
 //! `EvidenceContract` shape: the one that used to live here had no producer and
 //! no consumer anywhere in the workspace (#10310).
 

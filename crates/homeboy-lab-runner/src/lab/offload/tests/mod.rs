@@ -52,16 +52,16 @@ pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand 
 }
 
 pub(super) fn test_placement_decision(
-    selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement,
+    selected: homeboy_lab_contract::EffectiveExecutionPlacement,
     runner_id: Option<&str>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-    use homeboy_lab_runner_contract::{
+) -> homeboy_lab_contract::ExecutionPlacementDecision {
+    use homeboy_lab_contract::{
         ExecutionPlacementFallback, ExecutionPlacementIdentity,
         ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
         ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
     };
 
-    homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+    homeboy_lab_contract::ExecutionPlacementDecision::new(
         "test",
         "1",
         ExecutionPlacementIdentity {
@@ -71,12 +71,12 @@ pub(super) fn test_placement_decision(
             candidate: None,
             base: None,
         },
-        if selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab {
+        if selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab {
             Placement::Lab
         } else {
             Placement::Local
         },
-        if selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab {
+        if selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab {
             ExecutionPlacementRequirement::Lab
         } else {
             ExecutionPlacementRequirement::Either

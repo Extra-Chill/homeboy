@@ -1,14 +1,14 @@
-//! Lab routing and handoff contracts used by `homeboy-core` and
-//! the optional `homeboy-runner` feature crate.
+//! Lab runner routing and handoff contracts used by `homeboy-core` and
+//! the optional `homeboy-lab-runner` feature crate. Re-exported at the
+//! `homeboy-lab-contract` crate root.
 //!
 //! Runner is an optional Lab-offload feature; core must not depend on runner
 //! *behavior*. Generic runner concepts are canonical in
-//! `homeboy-runner-contract`; this crate owns only Lab-specific policy and
-//! handoff contracts.
+//! `homeboy-runner-contract`; this module owns only Lab-specific runner policy
+//! and handoff contracts.
 //!
-//! Two single-type crates were folded in here for the same reason they existed
-//! separately — both are behavior-free runner contracts below core, and both
-//! were already depended on by a subset of this crate's dependents:
+//! Two single-type crates were folded in here earlier for the same reason —
+//! both are behavior-free runner contracts below core:
 //!
 //! - [`Placement`] (was `homeboy-cli-contract`): the requested execution
 //!   location, read by core's Lab routing and by the runner's Lab selection.

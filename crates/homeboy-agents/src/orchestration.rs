@@ -4366,13 +4366,12 @@ fn location(record: &AgentTaskRunRecord) -> Option<ControlPlaneLocation> {
 }
 
 fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
-    use homeboy_lab_runner_contract::{EffectiveExecutionPlacement, Placement};
+    use homeboy_lab_contract::{EffectiveExecutionPlacement, Placement};
 
-    let decision =
-        serde_json::from_value::<homeboy_lab_runner_contract::ExecutionPlacementDecision>(
-            record.metadata.get("execution_placement_decision")?.clone(),
-        )
-        .ok()?;
+    let decision = serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        record.metadata.get("execution_placement_decision")?.clone(),
+    )
+    .ok()?;
     if !decision.is_valid() {
         return None;
     }
@@ -4420,7 +4419,7 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
         .get("execution_placement_outcome")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .filter(
-            |outcome: &homeboy_lab_runner_contract::ExecutionPlacementOutcome| {
+            |outcome: &homeboy_lab_contract::ExecutionPlacementOutcome| {
                 outcome.decision_id == decision.decision_id
                     && decision.outcome(outcome.effective, outcome.runner_id.clone())
                         == Some(outcome.clone())
@@ -6398,16 +6397,16 @@ mod tests {
     }
 
     fn runner_placement_decision(
-        requested: homeboy_lab_runner_contract::Placement,
+        requested: homeboy_lab_contract::Placement,
         fallback: bool,
-    ) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
-        use homeboy_lab_runner_contract::{
+    ) -> homeboy_lab_contract::ExecutionPlacementDecision {
+        use homeboy_lab_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
             ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
             ExecutionPlacementRunnerSelection, RunnerSelectionSource,
         };
 
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        homeboy_lab_contract::ExecutionPlacementDecision::new(
             "route",
             "1",
             ExecutionPlacementIdentity {
@@ -9221,17 +9220,17 @@ mod tests {
     #[test]
     fn placement_projects_a_controller_decision_without_runner_inference() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+        let decision = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
             "route",
             "1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "repo".to_string(),
                 workspace: "workspace".to_string(),
                 task: "task".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Local,
+            homeboy_lab_contract::Placement::Local,
         );
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
@@ -9245,17 +9244,17 @@ mod tests {
     #[test]
     fn placement_projects_ready_lab_admission_before_cook_materialization() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
-            homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+        let decision = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
+            homeboy_lab_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
             "v1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "controller-local".to_string(),
                 workspace: "controller-local".to_string(),
                 task: "detached-cook".to_string(),
                 candidate: None,
                 base: None,
             },
-            homeboy_lab_runner_contract::Placement::Auto,
+            homeboy_lab_contract::Placement::Auto,
         );
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
@@ -9277,8 +9276,7 @@ mod tests {
     #[test]
     fn placement_preserves_lab_or_local_request() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::LabOrLocal, true);
+        let decision = runner_placement_decision(homeboy_lab_contract::Placement::LabOrLocal, true);
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
         let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
@@ -9289,11 +9287,10 @@ mod tests {
     #[test]
     fn placement_projects_a_correlated_runner_outcome() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        let decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
         let outcome = decision
             .outcome(
-                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
                 Some("runner-1".to_string()),
             )
             .unwrap();
@@ -9310,11 +9307,10 @@ mod tests {
     #[test]
     fn placement_projects_a_verified_controller_fallback() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::LabOrLocal, true);
+        let decision = runner_placement_decision(homeboy_lab_contract::Placement::LabOrLocal, true);
         let outcome = decision
             .outcome(
-                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Local,
                 None,
             )
             .unwrap();
@@ -9329,11 +9325,10 @@ mod tests {
     #[test]
     fn placement_omits_an_outcome_with_a_mismatched_decision_id() {
         let mut record = record(AGENT_TASK_RUN);
-        let decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        let decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
         let mut outcome = decision
             .outcome(
-                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
                 Some("runner-1".to_string()),
             )
             .unwrap();
@@ -9354,8 +9349,7 @@ mod tests {
     #[test]
     fn placement_omits_a_decision_with_a_forged_content_identity() {
         let mut record = record(AGENT_TASK_RUN);
-        let mut decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
+        let mut decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
         decision.decision_id = "forged-decision".to_string();
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
@@ -9365,9 +9359,8 @@ mod tests {
     #[test]
     fn placement_omits_an_invalid_local_decision() {
         let mut record = record(AGENT_TASK_RUN);
-        let mut decision =
-            runner_placement_decision(homeboy_lab_runner_contract::Placement::Lab, false);
-        decision.selected = homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local;
+        let mut decision = runner_placement_decision(homeboy_lab_contract::Placement::Lab, false);
+        decision.selected = homeboy_lab_contract::EffectiveExecutionPlacement::Local;
         decision.runner = None;
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 

@@ -115,8 +115,8 @@ fn format_resolved_execution_placement_line(
 ) -> String {
     let requested = cli_placement_str(directive.requested);
     let selected = match directive.selected {
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Lab => "lab",
     };
     if selected == requested {
         format!("cook: placement: {selected}")
@@ -131,12 +131,12 @@ fn format_resolved_execution_placement_line(
     }
 }
 
-fn cli_placement_str(placement: homeboy_lab_runner_contract::Placement) -> &'static str {
+fn cli_placement_str(placement: homeboy_lab_contract::Placement) -> &'static str {
     match placement {
-        homeboy_lab_runner_contract::Placement::Auto => "auto",
-        homeboy_lab_runner_contract::Placement::Local => "local",
-        homeboy_lab_runner_contract::Placement::Lab => "lab",
-        homeboy_lab_runner_contract::Placement::LabOrLocal => "lab-or-local",
+        homeboy_lab_contract::Placement::Auto => "auto",
+        homeboy_lab_contract::Placement::Local => "local",
+        homeboy_lab_contract::Placement::Lab => "lab",
+        homeboy_lab_contract::Placement::LabOrLocal => "lab-or-local",
     }
 }
 
@@ -1657,10 +1657,10 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
                     .flatten()
             })
         }) {
-        Some("local") => homeboy_lab_runner_contract::Placement::Local,
-        Some("lab") => homeboy_lab_runner_contract::Placement::Lab,
-        Some("lab-or-local") => homeboy_lab_runner_contract::Placement::LabOrLocal,
-        _ => homeboy_lab_runner_contract::Placement::Auto,
+        Some("local") => homeboy_lab_contract::Placement::Local,
+        Some("lab") => homeboy_lab_contract::Placement::Lab,
+        Some("lab-or-local") => homeboy_lab_contract::Placement::LabOrLocal,
+        _ => homeboy_lab_contract::Placement::Auto,
     };
     if let ResourceAdmissionDecision::Rejected {
         label, evidence, ..
@@ -1676,7 +1676,7 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
     }
     if crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
         requested, &result,
-    ) && requested == homeboy_lab_runner_contract::Placement::Auto
+    ) && requested == homeboy_lab_contract::Placement::Auto
         && crate::commands::infra::route::auto_cook_unavailable_lab_state(&result).is_some()
     {
         let readiness = result.lab_readiness.as_ref().expect("checked above");
@@ -1689,7 +1689,7 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
     }
     match result.resource_admission {
         ResourceAdmissionDecision::NotRequired | ResourceAdmissionDecision::Admitted
-            if requested == homeboy_lab_runner_contract::Placement::LabOrLocal
+            if requested == homeboy_lab_contract::Placement::LabOrLocal
                 || !crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
                     requested,
                     &result,
@@ -1844,8 +1844,8 @@ fn apply_resolved_placement(policy: &mut Value) {
     };
     let directive = result.placement;
     let selected = match directive.selected {
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
-        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_contract::EffectiveExecutionPlacement::Lab => "lab",
     };
     policy["selected"] = serde_json::json!(selected);
     if let Some(runner) = directive.runner.as_ref() {
@@ -3104,19 +3104,18 @@ mod preview_tests {
     #[test]
     fn resolved_execution_placement_line_names_a_local_fallback() {
         let directive = crate::core::parsed_command_preflight::PlacementDirective {
-            requested: homeboy_lab_runner_contract::Placement::Auto,
-            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            requested: homeboy_lab_contract::Placement::Auto,
+            required: homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             runner: None,
-            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            fallback: homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: true,
                 reason: Some("the configured Lab runner is disconnected".to_string()),
             },
-            override_authorization:
-                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
-                    authorized: false,
-                    authority: None,
-                },
+            override_authorization: homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
         };
 
         assert_eq!(
@@ -3128,19 +3127,18 @@ mod preview_tests {
     #[test]
     fn resolved_execution_placement_line_is_silent_when_nothing_diverged() {
         let directive = crate::core::parsed_command_preflight::PlacementDirective {
-            requested: homeboy_lab_runner_contract::Placement::Local,
-            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            requested: homeboy_lab_contract::Placement::Local,
+            required: homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             runner: None,
-            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            fallback: homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: false,
                 reason: None,
             },
-            override_authorization:
-                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
-                    authorized: true,
-                    authority: Some("operator --placement local".to_string()),
-                },
+            override_authorization: homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
+                authorized: true,
+                authority: Some("operator --placement local".to_string()),
+            },
         };
 
         assert_eq!(
@@ -4443,13 +4441,13 @@ where
 
 fn explicit_local_continuation_decision(
     plan: &homeboy::agents::agent_task_scheduler::AgentTaskPlan,
-) -> homeboy::core::Result<Option<homeboy_lab_runner_contract::ExecutionPlacementDecision>> {
+) -> homeboy::core::Result<Option<homeboy_lab_contract::ExecutionPlacementDecision>> {
     if !homeboy::core::resource_policy_context::captured_context()
         .is_some_and(|context| context.local_override)
     {
         return Ok(None);
     }
-    let prior: homeboy_lab_runner_contract::ExecutionPlacementDecision = serde_json::from_value(
+    let prior: homeboy_lab_contract::ExecutionPlacementDecision = serde_json::from_value(
         plan.metadata["execution_placement_decision"].clone(),
     )
     .map_err(|error| {
@@ -4460,25 +4458,23 @@ fn explicit_local_continuation_decision(
             None,
         )
     })?;
-    Ok(Some(
-        homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
-            prior.policy_id,
-            prior.policy_revision,
-            prior.identity,
-            homeboy_lab_runner_contract::Placement::Local,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
-            None,
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
-                local_allowed: false,
-                reason: None,
-            },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
-                authorized: true,
-                authority: Some("operator --placement local".to_string()),
-            },
-        ),
-    ))
+    Ok(Some(homeboy_lab_contract::ExecutionPlacementDecision::new(
+        prior.policy_id,
+        prior.policy_revision,
+        prior.identity,
+        homeboy_lab_contract::Placement::Local,
+        homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+        homeboy_lab_contract::EffectiveExecutionPlacement::Local,
+        None,
+        homeboy_lab_contract::ExecutionPlacementFallback {
+            local_allowed: false,
+            reason: None,
+        },
+        homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
+            authorized: true,
+            authority: Some("operator --placement local".to_string()),
+        },
+    )))
 }
 
 fn apply_explicit_local_continuation(
@@ -4502,7 +4498,7 @@ fn apply_explicit_local_continuation(
 
 fn apply_local_continuation_decision(
     options: &mut homeboy::agents::agent_task_service::CookRequest,
-    decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    decision: homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<()> {
     options.identity.initial_plan.metadata["execution_placement_decision"] =
         serde_json::to_value(decision)
@@ -7885,9 +7881,7 @@ fn run_preflight_cook_execution(
             .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     resolve_cook_execution_budget(&args, &mut initial_plan)?;
     if let Some(preflight) = homeboy::core::parsed_command_preflight::captured_result() {
-        if preflight.placement.selected
-            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
-        {
+        if preflight.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab {
             let placement = serde_json::json!({
                 "selected": "lab",
                 "selected_runner": preflight.selected_runner_id,
@@ -11154,10 +11148,8 @@ pub(super) fn run_resume_with_executor(
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
-    let explicit_local =
-        homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
-            result.placement.requested == homeboy_lab_runner_contract::Placement::Local
-        });
+    let explicit_local = homeboy::core::parsed_command_preflight::captured_result()
+        .is_some_and(|result| result.placement.requested == homeboy_lab_contract::Placement::Local);
     let reconstruct = if explicit_local {
         reconstruct_local_cook_attempt_dispatcher
     } else {
@@ -11305,7 +11297,7 @@ fn explicit_local_retry_admission_refusal(
     preflight: Option<&homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult>,
 ) -> Option<Error> {
     let result = preflight?;
-    if result.placement.requested != homeboy_lab_runner_contract::Placement::Local {
+    if result.placement.requested != homeboy_lab_contract::Placement::Local {
         return None;
     }
     let homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {

@@ -77,8 +77,8 @@ struct SelfIdentityReport {
     active_binary: String,
     #[serde(flatten)]
     build_identity: build_identity::BuildIdentity,
-    lab_handoff_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
-    daemon_recovery_capabilities: Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+    lab_handoff_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
+    daemon_recovery_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
 }
 
 #[derive(Serialize)]
@@ -96,8 +96,8 @@ pub(crate) fn identity_report() -> Value {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".to_string()),
         build_identity: build_identity::current(),
-        lab_handoff_capabilities: homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
-        daemon_recovery_capabilities: homeboy_lab_runner_contract::daemon_recovery_capabilities(),
+        lab_handoff_capabilities: homeboy_lab_contract::required_lab_handoff_capabilities(),
+        daemon_recovery_capabilities: homeboy_lab_contract::daemon_recovery_capabilities(),
     })
     .expect("identity report serializes")
 }
@@ -467,7 +467,7 @@ mod tests {
             .expect("self identity advertises daemon_recovery_capabilities");
         assert_eq!(
             advertised,
-            &serde_json::to_value(homeboy_lab_runner_contract::daemon_recovery_capabilities())
+            &serde_json::to_value(homeboy_lab_contract::daemon_recovery_capabilities())
                 .expect("capabilities serialize")
         );
 
@@ -477,7 +477,7 @@ mod tests {
             report
                 .get("lab_handoff_capabilities")
                 .expect("self identity still advertises lab_handoff_capabilities"),
-            &serde_json::to_value(homeboy_lab_runner_contract::required_lab_handoff_capabilities())
+            &serde_json::to_value(homeboy_lab_contract::required_lab_handoff_capabilities())
                 .expect("capabilities serialize")
         );
     }

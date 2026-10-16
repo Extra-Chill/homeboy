@@ -14,10 +14,12 @@ pub mod path_materialization;
 mod resource;
 pub mod secret_env_plan;
 mod session;
+pub mod source_snapshot;
 mod submission;
 mod watch;
 mod workspace;
 mod workspace_authority;
+pub mod workspace_content_identity;
 
 pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
@@ -78,7 +80,7 @@ use std::collections::HashMap;
 
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::secret_env_plan::SecretEnvPlan;
-use homeboy_source_snapshot_contract::SourceSnapshot;
+use crate::source_snapshot::SourceSnapshot;
 
 /// The one artifact reference carried by runner execution records,
 /// projections, lab workloads, and the runner job model.

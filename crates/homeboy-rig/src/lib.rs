@@ -30,6 +30,7 @@ mod json_config;
 pub mod lease;
 pub mod lint;
 mod local_artifact;
+mod materialized_rig;
 mod pipeline;
 pub mod provider;
 mod resource_lifecycle;
@@ -54,7 +55,6 @@ pub use artifact_index::{
 pub use artifact_index::{RigRunArtifactRef, RigRunFailedStepRef};
 
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
-pub use homeboy_rig_contract::{MaterializedRigResource, MATERIALIZED_RIG_RESOURCE_SCHEMA};
 pub use install::{
     default_materialize_source_root, discover_rigs, install, install_with_local_source_copy,
     materialize_rig_resource, materialize_rig_resource_with_default_source_root,
@@ -68,6 +68,7 @@ pub(crate) use lease::{
     RIG_LEASE_TTL_ENV,
 };
 pub use lease::{active_run_leases, release_active_run_lease, ReleaseLeaseOutcome};
+pub use materialized_rig::{MaterializedRigResource, MATERIALIZED_RIG_RESOURCE_SCHEMA};
 
 pub use local_artifact::{register_current_run_artifact, LocalArtifactRegistration};
 pub use pipeline::PipelineOutcome;

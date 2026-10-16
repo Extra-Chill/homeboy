@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-use crate::config::{
+use super::config::{
     is_default_github_config, ArtifactInput, CleanupArtifactDeclaration, ComponentDeployConfig,
     ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge,
     DeploymentProviderAttachment, GitDeployConfig, GithubConfig, PackageArtifact, ScopeConfig,

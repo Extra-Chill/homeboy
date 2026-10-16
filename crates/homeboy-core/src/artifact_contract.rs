@@ -7,9 +7,8 @@
 //! docs also used to claim these conversions "cannot live in the leaf contract
 //! crate" because they couple to `ArtifactRecord` — but `ArtifactRecord` is
 //! itself defined in `homeboy-lifecycle-contract`. The real reason the surviving
-//! conversion lives here is `ArtifactRef`, which is owned by a *different* leaf
-//! crate (`homeboy-artifact-ref-contract`) that lifecycle-contract does not
-//! depend on.
+//! conversion lives here is `ArtifactRef`, which is owned by core's
+//! `artifact_ref` module, which lifecycle-contract does not depend on.
 
 use crate::artifact_ref::{ArtifactRef, ARTIFACT_REF_SCHEMA};
 

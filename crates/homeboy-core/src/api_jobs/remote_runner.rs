@@ -37,7 +37,7 @@ const MAX_COMMAND_ASSET_COUNT: usize = 16;
 const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
 const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
 
-pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
+pub use homeboy_runner_contract::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
 
 /// Caller-owned identity required to cancel one daemon-local runner projection.
 /// This is deliberately distinct from the operator-facing job cancellation API.

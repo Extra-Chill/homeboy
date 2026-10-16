@@ -3655,7 +3655,7 @@ mod tests {
             let request = LabOffloadRequest {
                 normalized_args: &args,
                 explicit_runner: Some("lab-managed-worktree-stage"),
-                placement: homeboy_lab_runner_contract::Placement::Lab,
+                placement: homeboy_lab_contract::Placement::Lab,
                 detach_after_handoff: true,
                 source_path: Some(source.as_path()),
                 ..LabOffloadRequest::for_test(&args)

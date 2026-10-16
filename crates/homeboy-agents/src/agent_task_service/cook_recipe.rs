@@ -5710,7 +5710,7 @@ mod tests {
         let (recipe, plan) = persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
-                let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
                     repository: "fixture".to_string(),
                     workspace: "fixture".to_string(),
                     task: "task".to_string(),
@@ -5718,11 +5718,11 @@ mod tests {
                     base: None,
                 };
                 record.metadata["execution_placement_decision"] = serde_json::to_value(
-                    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                    homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                         "fixture",
                         "v1",
                         identity,
-                        homeboy_lab_runner_contract::Placement::Local,
+                        homeboy_lab_contract::Placement::Local,
                     ),
                 )
                 .unwrap();

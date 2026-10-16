@@ -657,8 +657,8 @@ pub(crate) fn is_provider_readiness_query(args: &[String]) -> bool {
 fn materialized_placement_identity(
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementIdentity {
-    homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+) -> homeboy_lab_contract::ExecutionPlacementIdentity {
+    homeboy_lab_contract::ExecutionPlacementIdentity {
         repository: source_path
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
@@ -692,7 +692,7 @@ fn finalize_placement(
     directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+) -> homeboy_lab_contract::ExecutionPlacementDecision {
     directive.finalize(materialized_placement_identity(task, source_path))
 }
 
@@ -702,7 +702,7 @@ fn fixture_preflight_decision(
     runner_id: Option<&str>,
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+) -> homeboy::core::Result<homeboy_lab_contract::ExecutionPlacementDecision> {
     let normalized = vec!["homeboy".to_string()];
     let result = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
         normalized.clone(),
@@ -723,7 +723,7 @@ fn placement_decision(
     runner_id: Option<&str>,
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+) -> homeboy::core::Result<homeboy_lab_contract::ExecutionPlacementDecision> {
     fixture_preflight_decision(cli, runner_id, task, source_path)
 }
 
@@ -2967,7 +2967,7 @@ fn run_split_placement_cook_with_runtime(
 #[derive(Debug, Clone)]
 struct LabCookAttemptDispatcher {
     runner_id: String,
-    placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
     allow_local_fallback: bool,
     allow_dirty_lab_workspace: bool,
     skip_deps_hydration: bool,
@@ -3301,29 +3301,27 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
 }
 
 fn finalize_replacement_attempt(
-    prior: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    prior: &homeboy_lab_contract::ExecutionPlacementDecision,
     runner_id: &str,
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy_lab_runner_contract::ExecutionPlacementDecision {
+) -> homeboy_lab_contract::ExecutionPlacementDecision {
     let directive = homeboy::core::parsed_command_preflight::PlacementDirective {
         requested: prior.requested,
         required: prior.required,
         selected: prior.selected,
-        runner: Some(
-            homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
-                runner_id: runner_id.to_string(),
-                source: prior
-                    .runner
-                    .as_ref()
-                    .map(|runner| runner.source)
-                    .unwrap_or(homeboy_lab_runner_contract::RunnerSelectionSource::Explicit),
-            },
-        ),
+        runner: Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.to_string(),
+            source: prior
+                .runner
+                .as_ref()
+                .map(|runner| runner.source)
+                .unwrap_or(homeboy_lab_contract::RunnerSelectionSource::Explicit),
+        }),
         fallback: prior.fallback.clone(),
         override_authorization: prior.override_authorization.clone(),
     };
-    directive.finalize(homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+    directive.finalize(homeboy_lab_contract::ExecutionPlacementIdentity {
         repository: source_path
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
@@ -3344,11 +3342,11 @@ fn finalize_replacement_attempt(
 fn resolve_cook_attempt_placement_decision(
     plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     run_id: &str,
-    initial: &homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    initial: &homeboy_lab_contract::ExecutionPlacementDecision,
     runner_id: &str,
     task: &str,
     source_path: Option<&Path>,
-) -> homeboy::core::Result<homeboy_lab_runner_contract::ExecutionPlacementDecision> {
+) -> homeboy::core::Result<homeboy_lab_contract::ExecutionPlacementDecision> {
     let replacement = finalize_replacement_attempt(initial, runner_id, task, source_path);
     let persisted = plan
         .metadata
@@ -3777,7 +3775,7 @@ fn materialize_generic_detached_lab_handoff(
     args: &[String],
     source_path: &Path,
     command: &runners::LabOffloadCommand,
-    placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> homeboy::core::Result<GenericDetachedLabHandoff> {
     let run_id =
         explicit_run_id(args).unwrap_or_else(|| format!("lab-offload-{}", uuid::Uuid::new_v4()));

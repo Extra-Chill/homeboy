@@ -102,7 +102,7 @@ fn git_paths(path: &std::path::Path, args: &[&str]) -> Option<Vec<String>> {
     )
 }
 
-pub use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
+pub use homeboy_lab_contract::RunnerWorkspaceSyncOptions;
 pub use homeboy_runner_contract::RunnerWorkspaceSyncMode;
 
 #[derive(Debug, Clone, Serialize)]

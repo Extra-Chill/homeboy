@@ -5,7 +5,7 @@ use super::*;
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 #[cfg(test)]
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
-use homeboy_lab_runner_contract::{
+use homeboy_lab_contract::{
     negotiate_lab_capability_handshake, required_lab_handoff_capabilities, LabCapabilityAdmission,
     LabCapabilityHandshake, LabRuntimeAncestry, LabRuntimeIdentity,
 };
@@ -168,10 +168,10 @@ pub(crate) fn capability_admission_error(
 pub(super) fn hash_bound_runner_command_evidence(
     status: &RunnerStatusReport,
     homeboy: &str,
-    daemon_capabilities: &[homeboy_lab_runner_contract::LabCapabilityVersion],
+    daemon_capabilities: &[homeboy_lab_contract::LabCapabilityVersion],
 ) -> Option<(
     LabRuntimeIdentity,
-    Vec<homeboy_lab_runner_contract::LabCapabilityVersion>,
+    Vec<homeboy_lab_contract::LabCapabilityVersion>,
 )> {
     let session = status.session.as_ref()?;
     let session_identity = session.homeboy_build_identity.as_deref()?;

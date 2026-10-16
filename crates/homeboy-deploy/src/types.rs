@@ -421,11 +421,11 @@ pub(crate) struct DeploymentProvenanceEvidence {
     pub(crate) reference: Option<String>,
 }
 
-// DeployReason and ComponentStatus moved DOWN to homeboy-release-contract so
+// DeployReason and ComponentStatus live in homeboy-core's `release_state` so
 // core's project/context status mechanics can reference them without a
 // cycle. Re-exported here so the deploy/release code keeps its paths.
-pub use homeboy_release_contract::ComponentStatus;
-pub(crate) use homeboy_release_contract::DeployReason;
+pub use homeboy_core::release_state::ComponentStatus;
+pub(crate) use homeboy_core::release_state::DeployReason;
 
 /// Compare the configured source version with the version observed on the target.
 ///
@@ -451,9 +451,9 @@ pub fn compare_deployed_versions(
 }
 
 // ReleaseState, ReleaseStateStatus, ReleaseStateBuckets moved DOWN to
-// homeboy-release-contract (see the DeployReason/ComponentStatus note above).
-pub(crate) use homeboy_release_contract::ReleaseStateBuckets;
-pub use homeboy_release_contract::{ReleaseState, ReleaseStateStatus};
+// homeboy-core's `release_state` (see the DeployReason/ComponentStatus note above).
+pub(crate) use homeboy_core::release_state::ReleaseStateBuckets;
+pub use homeboy_core::release_state::{ReleaseState, ReleaseStateStatus};
 
 /// Bounded, portable evidence from a local/remote tree comparison.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

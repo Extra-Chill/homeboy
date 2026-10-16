@@ -89,10 +89,10 @@ pub fn resolve_changelog_path(component: &Component) -> Result<PathBuf> {
 }
 
 // ChangelogSnapshotData and FinalizedReleaseSnapshot moved DOWN to
-// homeboy-release-contract so core's context status mechanic can receive them
+// homeboy-core's `release_state` so core's context status mechanic can receive them
 // through the release provider hook. Re-exported here so release code paths are
 // unchanged.
-pub use homeboy_release_contract::{ChangelogSnapshotData, FinalizedReleaseSnapshot};
+pub use homeboy_core::release_state::{ChangelogSnapshotData, FinalizedReleaseSnapshot};
 
 pub fn read_component_snapshots(
     component: &Component,

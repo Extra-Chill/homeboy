@@ -2,7 +2,7 @@ use super::*;
 use crate::daemon_repair;
 use crate::session::RunnerConnectFailureEvidenceRef;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
-use homeboy_lab_runner_contract::LabCapabilityVersion;
+use homeboy_lab_contract::LabCapabilityVersion;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader};
@@ -1133,9 +1133,9 @@ pub(super) fn negotiate_ensure_running_operation_id(
     let Some(_) = replacement_operation_id else {
         return Ok(());
     };
-    let advertised = homeboy_lab_runner_contract::daemon_recovery_capability_advertised(
+    let advertised = homeboy_lab_contract::daemon_recovery_capability_advertised(
         daemon_recovery_capabilities,
-        homeboy_lab_runner_contract::DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
+        homeboy_lab_contract::DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
     );
     if !advertised {
         return Err("remote Homeboy must be upgraded: daemon ensure-running does not advertise the --replacement-operation-id capability".to_string());
@@ -2241,7 +2241,7 @@ pub(super) fn persist_ensure_running_failure_evidence_in(
         schema_version: ENSURE_RUNNING_FAILURE_SCHEMA_VERSION,
         run_id: run.id.clone(),
         artifact_id: artifact.id.clone(),
-        uri: homeboy_artifact_ref_contract::artifact_uri(&run.id, &artifact.id),
+        uri: homeboy_core::artifact_ref::artifact_uri(&run.id, &artifact.id),
     })
 }
 

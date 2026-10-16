@@ -200,7 +200,7 @@ mod tests {
         ];
         let request = crate::LabOffloadRequest {
             placement_decision: homeboy_core::lab_routing::compatibility_placement_decision(
-                homeboy_lab_runner_contract::Placement::Lab,
+                homeboy_lab_contract::Placement::Lab,
                 Some("runner-1"),
                 false,
             ),
@@ -211,7 +211,7 @@ mod tests {
                 workload: None,
             }),
             normalized_args: &args,
-            placement: homeboy_lab_runner_contract::Placement::Lab,
+            placement: homeboy_lab_contract::Placement::Lab,
             detach_after_handoff: true,
             source_path: Some(std::path::Path::new("/source")),
             job_overrides: homeboy_core::lab_offload::LabJobOverrides {

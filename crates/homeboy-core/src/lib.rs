@@ -103,8 +103,8 @@ pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.
 pub use homeboy_finding as finding;
-pub use homeboy_gate_contract::gate;
 pub mod control_plane;
+pub mod gate;
 pub mod git;
 pub mod harvest;
 pub mod host_mutation_lifecycle;
@@ -138,7 +138,7 @@ pub mod reaping;
 // homeboy-engine-primitives; this re-export keeps the existing
 // crate::phase_timing path working.
 pub use homeboy_engine_primitives::phase_timing;
-pub use homeboy_gate_contract::plan;
+pub mod plan;
 pub mod process;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
@@ -152,6 +152,7 @@ pub mod quality;
 pub use homeboy_redaction as redaction;
 pub mod release_provider;
 pub mod release_set;
+pub mod release_state;
 pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;

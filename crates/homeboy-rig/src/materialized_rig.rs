@@ -1,4 +1,4 @@
-//! Versioned, behavior-free materialized rig resource contracts.
+//! Versioned, behavior-free materialized rig resource shape.
 
 use serde::{Deserialize, Serialize};
 

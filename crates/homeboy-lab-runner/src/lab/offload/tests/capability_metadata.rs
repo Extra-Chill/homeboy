@@ -649,7 +649,7 @@ fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
-    let capabilities = homeboy_lab_runner_contract::required_lab_handoff_capabilities();
+    let capabilities = homeboy_lab_contract::required_lab_handoff_capabilities();
 
     let evidence = super::super::metadata::hash_bound_runner_command_evidence(
         &status,
@@ -665,7 +665,7 @@ fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is
 
 #[test]
 fn strict_capability_admission_accepts_only_compatible_exact_source() {
-    use homeboy_lab_runner_contract::{
+    use homeboy_lab_contract::{
         LabCapabilityAdmission, LabCapabilityNegotiationProvenance, LabRuntimeAncestry,
         LabRuntimeIdentity,
     };
@@ -732,7 +732,7 @@ fn daemon_capabilities_do_not_substitute_for_a_conflicting_configured_identity()
     assert!(super::super::metadata::hash_bound_runner_command_evidence(
         &status,
         &format!("/runner/homeboy-{hash}/homeboy"),
-        &homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+        &homeboy_lab_contract::required_lab_handoff_capabilities(),
     )
     .is_none());
 }

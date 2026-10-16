@@ -9,10 +9,10 @@ use crate::extension::catalog::{is_extension_linked, load_all_extensions};
 use crate::extension::resolve::is_extension_compatible;
 use crate::project::{self, Project};
 use crate::release_provider::{self, ReleaseStateEntry};
+use crate::release_state::VersionTargetInfo;
 use crate::server::{self, Server};
 use crate::{git, Result};
 use crate::{is_zero, is_zero_u32};
-use homeboy_release_contract::VersionTargetInfo;
 
 use super::{build_component_info, ComponentGap, ContextOutput};
 
@@ -170,7 +170,7 @@ pub struct ChangelogSnapshot {
     pub items: Option<Vec<String>>,
 }
 
-pub type ComponentReleaseState = homeboy_release_contract::ReleaseState;
+pub type ComponentReleaseState = crate::release_state::ReleaseState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentWithState {
@@ -525,7 +525,7 @@ fn collect_focused_components(
 
 fn compute_status(
     components: &[ComponentWithState],
-    release_buckets: &homeboy_release_contract::ReleaseStateBuckets,
+    release_buckets: &crate::release_state::ReleaseStateBuckets,
 ) -> ContextReportStatus {
     let mut config_gaps = 0;
     let mut gap_details = Vec::new();
@@ -898,13 +898,13 @@ fn validate_version_baseline_alignment(
     git: &Option<GitSnapshot>,
 ) -> Option<String> {
     let version_snapshot =
-        version.as_ref().map(
-            |snapshot| homeboy_release_contract::ComponentVersionSnapshot {
+        version
+            .as_ref()
+            .map(|snapshot| crate::release_state::ComponentVersionSnapshot {
                 component_id: snapshot.component_id.clone(),
                 version: snapshot.version.clone(),
                 targets: snapshot.targets.clone(),
-            },
-        );
+            });
 
     release_provider::validate_baseline_alignment(
         version_snapshot.as_ref(),

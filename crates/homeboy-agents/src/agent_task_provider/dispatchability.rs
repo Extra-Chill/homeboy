@@ -1365,7 +1365,7 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
 /// gate Lab admission (#15198).
 pub fn provider_readiness_is_runner_owned() -> bool {
     homeboy_core::parsed_command_preflight::captured_result().is_some_and(|result| {
-        result.placement.selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
     })
 }
 

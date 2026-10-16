@@ -1,7 +1,7 @@
 //! Source-snapshot collection behavior.
 //!
-//! The `SourceSnapshot` / `SourceSnapshotPolicy` data types live in the leaf
-//! `homeboy-source-snapshot-contract` crate. The collection behavior below
+//! The `SourceSnapshot` / `SourceSnapshotPolicy` data types live in
+//! `homeboy-runner-contract`'s `source_snapshot` module. The collection behavior below
 //! (git status/sha hashing, component/extension/gitignore-driven exclude
 //! discovery, env-driven policy) reaches into git, the component inventory, the
 //! extension store, and the filesystem, so it stays in core as free functions.
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-pub use homeboy_source_snapshot_contract::source_snapshot::{
+pub use homeboy_runner_contract::source_snapshot::{
     default_sync_excludes, RepositoryIntegrityEvidence, SourceSnapshot, SourceSnapshotPolicy,
 };
 

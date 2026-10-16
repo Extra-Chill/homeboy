@@ -114,7 +114,7 @@ pub struct LabStagingRecipe {
     pub runner_id: String,
     /// The exact controller routing decision. Recipes without this field are
     /// pre-#10941 and must be recreated rather than silently re-routed.
-    pub placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    pub placement_decision: homeboy_lab_contract::ExecutionPlacementDecision,
     /// Immutable Homeboy build selected by the controller for this handoff.
     /// Optional only for recipes persisted by older controllers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +123,7 @@ pub struct LabStagingRecipe {
     pub tunnel_mode: crate::RunnerTunnelMode,
     pub command: LabStagingCommand,
     pub normalized_args: Vec<String>,
-    pub placement: homeboy_lab_runner_contract::Placement,
+    pub placement: homeboy_lab_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
@@ -4983,13 +4983,13 @@ mod tests {
             // routing. Use the explicit compatibility decision for that fixture
             // boundary; production callers must provide their routed decision.
             placement_decision: homeboy_core::lab_routing::compatibility_placement_decision(
-                homeboy_lab_runner_contract::Placement::Lab,
+                homeboy_lab_contract::Placement::Lab,
                 Some("lab-1"),
                 false,
             ),
             command,
             normalized_args: args,
-            placement: homeboy_lab_runner_contract::Placement::Lab,
+            placement: homeboy_lab_contract::Placement::Lab,
             detach_after_handoff: true,
             source_path: Some(std::path::Path::new("/work/source")),
             require_controller_git_bundle: true,
@@ -8438,7 +8438,7 @@ mod tests {
 
         let mut mismatched = recipe_request(Some(recipe_command()), &args, HashMap::new());
         mismatched.placement_decision = homeboy_core::lab_routing::compatibility_placement_decision(
-            homeboy_lab_runner_contract::Placement::Lab,
+            homeboy_lab_contract::Placement::Lab,
             Some("other-lab"),
             false,
         );

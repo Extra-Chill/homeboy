@@ -767,7 +767,7 @@ pub(crate) fn exec_lab_context(
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
                         if !request.placement_decision.verifies_outcome(
-                            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+                            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
                         ) {
                             Err(selected_runner_fallback_error(
                                 selection,
@@ -861,7 +861,7 @@ pub(crate) fn exec_lab_context(
         let outcome = request
             .placement_decision
             .outcome(
-                homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
                 Some(runner_id.to_string()),
             )
             .ok_or_else(|| {
@@ -1338,7 +1338,7 @@ struct DirectReadinessEvidence {
     status: RunnerStatusReport,
     homeboy_path: String,
     configured_build_identity: Option<String>,
-    capability_admission: homeboy_lab_runner_contract::LabCapabilityAdmission,
+    capability_admission: homeboy_lab_contract::LabCapabilityAdmission,
     controller_build_identity: String,
     observed_at: String,
     generation: DirectReadinessGeneration,
@@ -1536,7 +1536,7 @@ fn detached_direct_staging_fallback_or_refusal(
     plan: &HomeboyPlan,
     status: &RunnerStatusReport,
     runner_homeboy: &serde_json::Value,
-    capability_admission: &homeboy_lab_runner_contract::LabCapabilityAdmission,
+    capability_admission: &homeboy_lab_contract::LabCapabilityAdmission,
     require_exact_runner_version: bool,
     concurrency_limit: Option<usize>,
     hot_label: &str,
@@ -1587,7 +1587,7 @@ fn late_direct_identity_fallback(
         return Ok(None);
     };
     if selection.source != LabRunnerSelectionSource::Default
-        || request.placement_decision.requested != homeboy_lab_runner_contract::Placement::Auto
+        || request.placement_decision.requested != homeboy_lab_contract::Placement::Auto
         || release_gate
         || !request.placement_decision.permits_local_fallback()
     {
@@ -2089,9 +2089,10 @@ pub(crate) fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
-                if !request.placement_decision.verifies_outcome(
-                    homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
-                ) {
+                if !request
+                    .placement_decision
+                    .verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local)
+                {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 overhead.set_fallback_reason(&reason);
@@ -3655,7 +3656,7 @@ mod tests {
 
     #[test]
     fn detached_identity_drift_falls_back_without_controller_staging() {
-        use homeboy_lab_runner_contract::{
+        use homeboy_lab_contract::{
             EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
             ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
             ExecutionPlacementRunnerSelection, Placement, RunnerSelectionSource,
@@ -3669,7 +3670,7 @@ mod tests {
             Some("homeboy 0.339.0+daemon".to_string()),
             Some("homeboy 0.339.0+configured".to_string()),
         ));
-        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let decision = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "test",
             "1",
             ExecutionPlacementIdentity {
@@ -3704,7 +3705,7 @@ mod tests {
         let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
         let admission = matching_capability_admission(
             true,
-            homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+            homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
         );
 
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -3829,7 +3830,7 @@ mod tests {
         .expect("release gate fails closed")
         .is_none());
         let disallowed = LabOffloadRequest {
-            placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+            placement_decision: homeboy_lab_contract::ExecutionPlacementDecision::new(
                 "test",
                 "1",
                 decision.identity,
@@ -3882,7 +3883,7 @@ mod tests {
             (
                 matching_capability_admission(
                     false,
-                    homeboy_lab_runner_contract::LabRuntimeAncestry::ExactSource,
+                    homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
                 ),
                 "capability_incompatible",
                 "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
@@ -3890,7 +3891,7 @@ mod tests {
             (
                 matching_capability_admission(
                     true,
-                    homeboy_lab_runner_contract::LabRuntimeAncestry::Unknown,
+                    homeboy_lab_contract::LabRuntimeAncestry::Unknown,
                 ),
                 "strict_ancestry_unknown",
                 "Lab offload refused runner `homeboy-lab` because strict identity fencing requires exact-source ancestry, but admission reported Unknown. Reconnect the runner to collect exact source provenance, then retry.",
@@ -4175,16 +4176,16 @@ mod tests {
 
     fn matching_capability_admission(
         compatible: bool,
-        ancestry: homeboy_lab_runner_contract::LabRuntimeAncestry,
-    ) -> homeboy_lab_runner_contract::LabCapabilityAdmission {
-        let identity = homeboy_lab_runner_contract::LabRuntimeIdentity {
+        ancestry: homeboy_lab_contract::LabRuntimeAncestry,
+    ) -> homeboy_lab_contract::LabCapabilityAdmission {
+        let identity = homeboy_lab_contract::LabRuntimeIdentity {
             build_identity: "homeboy 0.339.0+83a9bd058619".to_string(),
             source_revision: "83a9bd058619".to_string(),
             clean: true,
         };
-        homeboy_lab_runner_contract::LabCapabilityAdmission {
+        homeboy_lab_contract::LabCapabilityAdmission {
             compatible,
-            provenance: homeboy_lab_runner_contract::LabCapabilityNegotiationProvenance {
+            provenance: homeboy_lab_contract::LabCapabilityNegotiationProvenance {
                 schema: "homeboy/lab-capability-negotiation/v1".to_string(),
                 controller_requirement: identity.clone(),
                 executed_runner_command: identity.clone(),

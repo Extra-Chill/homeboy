@@ -744,7 +744,7 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
         .expect("index timeout run");
     lifecycle_store
         .mutate_record("timeout-run", |record| {
-            let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "fixture".to_string(),
                 workspace: "fixture".to_string(),
                 task: "task".to_string(),
@@ -752,11 +752,11 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
                 base: None,
             };
             record.metadata["execution_placement_decision"] = serde_json::to_value(
-                homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                     "fixture",
                     "v1",
                     identity,
-                    homeboy_lab_runner_contract::Placement::Local,
+                    homeboy_lab_contract::Placement::Local,
                 ),
             )
             .unwrap();
@@ -3839,7 +3839,7 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
 
     left_lifecycle_store
         .mutate_record(run_id, |record| {
-            let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            let identity = homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "fixture".to_string(),
                 workspace: "fixture".to_string(),
                 task: "task".to_string(),
@@ -3847,11 +3847,11 @@ fn moving_base_recovery_isolates_identical_attempts_across_explicit_stores() {
                 base: None,
             };
             record.metadata["execution_placement_decision"] = serde_json::to_value(
-                homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
                     "fixture",
                     "v1",
                     identity,
-                    homeboy_lab_runner_contract::Placement::Local,
+                    homeboy_lab_contract::Placement::Local,
                 ),
             )
             .unwrap();
@@ -14145,30 +14145,28 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
             provenance: None,
         })
         .expect("register original Cook worktree");
-        let prior = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let prior = homeboy_lab_contract::ExecutionPlacementDecision::new(
             "fixture-policy",
             "v1",
-            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+            homeboy_lab_contract::ExecutionPlacementIdentity {
                 repository: "fixture".to_string(),
                 workspace: "fixture-worktree".to_string(),
                 task: "provider".to_string(),
                 candidate: Some("candidate-a".to_string()),
                 base: Some("base-a".to_string()),
             },
-            homeboy_lab_runner_contract::Placement::Auto,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab,
-            Some(
-                homeboy_lab_runner_contract::ExecutionPlacementRunnerSelection {
-                    runner_id: "fixture-lab".to_string(),
-                    source: homeboy_lab_runner_contract::RunnerSelectionSource::Policy,
-                },
-            ),
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::Placement::Auto,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+            Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+                runner_id: "fixture-lab".to_string(),
+                source: homeboy_lab_contract::RunnerSelectionSource::Policy,
+            }),
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: true,
                 reason: Some("fixture policy allows local recovery".to_string()),
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: false,
                 authority: None,
             },
@@ -14186,19 +14184,19 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
             .expect("exhausted transport attempt is durable");
         let recipe_before = super::super::load_recipe(cook_id).expect("durable recipe");
 
-        let local = homeboy_lab_runner_contract::ExecutionPlacementDecision::new(
+        let local = homeboy_lab_contract::ExecutionPlacementDecision::new(
             prior.policy_id.clone(),
             prior.policy_revision.clone(),
             prior.identity.clone(),
-            homeboy_lab_runner_contract::Placement::Local,
-            homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
-            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            homeboy_lab_contract::Placement::Local,
+            homeboy_lab_contract::ExecutionPlacementRequirement::Either,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
             None,
-            homeboy_lab_runner_contract::ExecutionPlacementFallback {
+            homeboy_lab_contract::ExecutionPlacementFallback {
                 local_allowed: false,
                 reason: None,
             },
-            homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+            homeboy_lab_contract::ExecutionPlacementOverrideAuthorization {
                 authorized: true,
                 authority: Some("operator --placement local".to_string()),
             },
