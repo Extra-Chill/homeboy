@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.428.9] - 2026-10-16
+
+### Changed
+- Run Cook gate dependency setup under the gate environment
+- delete reverse runner broker claim routes
+- move the reaping audit into the coordination store
+
 ## [0.428.8] - 2026-10-16
 
 ### Changed
