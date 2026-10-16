@@ -2647,6 +2647,27 @@ pub(crate) fn next_moving_base_recovery(
     recovery
 }
 
+/// Queue the continuation that retries a moving-base recovery, reporting
+/// whether one will actually run: queued now, already pending, or re-armed on
+/// the claim of the continuation driving this pass. An exhausted budget queues
+/// nothing.
+pub(crate) fn queue_moving_base_continuation(
+    store: &super::cook_recipe::CookRecipeStore,
+    recovery: &MovingBaseCookRecovery,
+) -> Result<bool> {
+    if recovery.base_movements >= 3 {
+        return Ok(false);
+    }
+    Ok(
+        store.enqueue_terminal_continuation(&recovery.cook_id, &recovery.run_id)?
+            || super::cook_recipe::continuation_state_in_store(
+                store,
+                &recovery.cook_id,
+                &recovery.run_id,
+            )? == super::cook_recipe::CookContinuationState::Pending,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn moving_base_recovery_from_promotion(
     cook_id: &str,
@@ -2961,6 +2982,9 @@ fn apply_immutable_candidate_to_base(
             None,
         ));
     }
+    // Promotion records the commit its gates ran on, which is always an
+    // ancestor of the candidate's HEAD. A base that is not one was never under
+    // those gates, so its delta is not the authenticated candidate.
     if !git_status(
         path,
         &[

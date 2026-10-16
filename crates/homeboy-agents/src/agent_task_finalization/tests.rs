@@ -70,6 +70,7 @@ struct MockBackend {
     /// Classify and converge the candidate against the real worktree, so a
     /// test observes exactly what finalization would do to the destination.
     real_git: bool,
+    converge_calls: u8,
 }
 
 impl MockBackend {
@@ -222,6 +223,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         path: &str,
         base: &AgentTaskPrResolvedBase,
     ) -> Result<AgentTaskPrBaseConvergence> {
+        self.converge_calls += 1;
         if self.real_git {
             return RealAgentTaskPrFinalizationBackend.converge_base(path, base);
         }
@@ -2856,6 +2858,60 @@ fn uncommitted_candidate_on_lagging_parent_finalizes_without_advancing_destinati
     assert!(backend.last_body.contains(&format!(
         "Candidate committed on its gate-verified promoted parent, 1 commit(s) behind verified main at {advanced_base}"
     )));
+}
+
+/// #15017: a Cook delivering into an existing PR branch holds its candidate
+/// uncommitted on a HEAD that is ahead of base, and the base moved during the
+/// run in the same files. Finalization used to merge the base into the dirty
+/// tree, git refused, and the gate-green candidate was stranded. It must
+/// commit the candidate on its verified parent and push, attempting no merge.
+#[test]
+fn uncommitted_candidate_on_diverged_pr_branch_commits_without_merging_base() {
+    let repo = real_git_repo();
+    let path = repo.path().to_str().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let fork = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.path().join("shared"), "pr branch\n").unwrap();
+    git(&["add", "shared"]);
+    git(&["commit", "-q", "-m", "existing PR commit"]);
+    let pr_head = git(&["rev-parse", "HEAD"]);
+    // The base advances during the Cook in the file the candidate touches.
+    git(&["checkout", "-q", "-b", "advanced-main", &fork]);
+    std::fs::write(repo.path().join("shared"), "from main\n").unwrap();
+    git(&["add", "shared"]);
+    git(&["commit", "-q", "-m", "advance main"]);
+    let advanced_base = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", &pr_head]);
+
+    // The gate-green candidate is promoted, uncommitted, onto the PR head.
+    std::fs::write(repo.path().join("shared"), "pr branch\ncandidate\n").unwrap();
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(path).unwrap();
+    let mut backend = real_git_backend(repo.path(), candidate);
+    backend.real_git = true;
+    let mut options = real_git_finalization_options(repo.path(), vec!["shared".to_string()]);
+    options.verified_base_sha = Some(advanced_base);
+
+    let report = finalize_pr_with_backend(options, &mut backend)
+        .expect("finalization commits the candidate on its verified parent");
+
+    assert_eq!(backend.converge_calls, 0, "no merge into the dirty tree");
+    assert_eq!(git(&["rev-parse", "HEAD"]), pr_head);
+    assert!(!repo.path().join(".git/MERGE_HEAD").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("shared")).unwrap(),
+        "pr branch\ncandidate\n"
+    );
+    assert_eq!(report.changed_files, vec!["shared"]);
+    assert!(backend.committed);
+    assert!(backend.pushed);
 }
 
 /// Real drift is still refused: a candidate whose content changed after

@@ -278,26 +278,23 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let binds_promoted_candidate =
         !options.manual_finalization || options.inherited_gate_evidence.is_some();
     let mut lagging_promoted_parent = None;
-    if let AgentTaskPrCandidateState::BehindBase { behind, ahead, .. } = &candidate {
-        let (behind, ahead) = (*behind, *ahead);
+    if let AgentTaskPrCandidateState::BehindBase { behind, .. } = &candidate {
+        let behind = *behind;
         // A manually verified candidate asserts an immutable commit identity, and
         // merging would move HEAD out from under that proof. Those runs keep the
         // pre-#13695 refusal and stay a human decision.
         if options.verified_candidate_sha.is_none() {
-            // The verified base is the live remote base observed at promotion,
-            // so a destination created before the base advanced holds its
-            // uncommitted candidate on an older ancestor of it. That parent is
-            // what the promotion fingerprint recorded and what the gates ran
-            // on. Merging the base here would fast-forward HEAD beneath the
-            // dirty candidate, and the fingerprint check below would then
-            // reject drift that finalization itself caused (#15473). Commit the
-            // candidate on its recorded parent instead; ahead == 0 proves that
-            // parent is base history, so the PR carries only candidate files.
-            let uncommitted = if binds_promoted_candidate && ahead == 0 {
-                backend.changed_files(&options.path)?
-            } else {
-                Vec::new()
-            };
+            // An uncommitted candidate sits on the parent its gates ran on, which
+            // the promotion fingerprint recorded. The base may have moved since,
+            // and a PR branch carries its own commits ahead of it. Converging the
+            // base here would merge into the dirty tree: git refuses whenever
+            // base and candidate touch the same files (#15017), and a clean
+            // fast-forward would move HEAD beneath the candidate, which the
+            // fingerprint check then rejects as drift (#15473). Commit the
+            // candidate on its recorded parent instead, so the PR carries only
+            // the candidate and the branch's existing commits. Being behind the
+            // base is a normal published state; mergeability is the forge's call.
+            let uncommitted = backend.changed_files(&options.path)?;
             if !uncommitted.is_empty() {
                 lagging_promoted_parent = Some(behind);
                 candidate = AgentTaskPrCandidateState::Dirty {

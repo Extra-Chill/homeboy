@@ -71,9 +71,9 @@ use super::cook_promotion::{
     moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion_in_store,
     moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
-    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure_with_store,
-    CookReportInput, MovingBaseCookRecovery,
+    promote_or_load_attempt_in_store, queue_moving_base_continuation,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -7982,10 +7982,8 @@ fn run_cook_spine(
                                         Error::internal_json(error.to_string(), None)
                                     })?,
                                 )?;
-                                if recovery.base_movements < 3 {
-                                    store.enqueue_terminal_continuation(&cook_id, &run_id)?;
-                                }
-                                let continuation_queued = recovery.base_movements < 3;
+                                let continuation_queued =
+                                    queue_moving_base_continuation(store, &recovery)?;
                                 return Ok(moving_base_recovery_report(
                                     cook_id,
                                     attempts,
@@ -8033,10 +8031,8 @@ fn run_cook_spine(
                                     Error::internal_json(error.to_string(), None)
                                 })?,
                             )?;
-                            if recovery.base_movements < 3 {
-                                store.enqueue_terminal_continuation(&cook_id, &run_id)?;
-                            }
-                            let continuation_queued = recovery.base_movements < 3;
+                            let continuation_queued =
+                                queue_moving_base_continuation(store, &recovery)?;
                             return Ok(moving_base_recovery_report(
                                 cook_id,
                                 attempts,

@@ -254,6 +254,29 @@ mod tests {
         );
     }
 
+    /// #15017: a blocked finalization names its step and the continuation that
+    /// recovers it, not a generic "publication: not attempted".
+    #[test]
+    fn blocked_finalization_names_the_step_and_its_continuation() {
+        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        run.blocker = Some(homeboy_control_plane_contract::ControlPlaneBlocker {
+            code: Some("finalization".to_string()),
+            message: "HEAD is behind or diverged from resolved base `main`".to_string(),
+            state: None,
+            reason: None,
+            retry: None,
+        });
+        let verdict = cook_verdict(&run);
+        assert_eq!(
+            verdict.reason.as_deref(),
+            Some("finalization: HEAD is behind or diverged from resolved base `main`")
+        );
+        assert_eq!(
+            verdict.next_action,
+            "homeboy agent-task cook-continue agent-task-verdict"
+        );
+    }
+
     #[test]
     fn failed_gate_is_the_reason_and_the_category() {
         let mut run = resource(ControlPlaneRunState::CandidateRecoverable);

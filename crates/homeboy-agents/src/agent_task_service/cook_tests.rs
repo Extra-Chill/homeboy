@@ -3988,87 +3988,96 @@ fn divergent_destination_and_repeated_base_movement_are_terminalized() {
     assert_eq!(exhausted.base_movements, 3);
 }
 
+/// Seed a Cook attempt whose provider ran once and whose gate-green candidate
+/// was promoted, ready for a finalization that the moving base blocks.
+fn seed_moving_base_attempt(
+    cook_id: &str,
+    run_id: &str,
+) -> (CookRequest, AgentTaskPromotionReport) {
+    use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{
+        AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
+        AgentTaskProgressEvent,
+    };
+
+    let mut options = batch_cook_options(
+        cook_id,
+        Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    options.identity.initial_run_id = run_id.to_string();
+    options.finalization.no_finalize = false;
+    options.provider_transport.provider_invocation =
+        Some(homeboy_core::command_invocation::CommandInvocation {
+            argv: vec!["fixture-provider".to_string()],
+            ..Default::default()
+        });
+    options.gates = VerifyGateOptions {
+        verify: vec!["public gate".to_string()],
+        private_verify: vec!["private gate".to_string()],
+        private_gate_reveal: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+        ..Default::default()
+    };
+    options.workspace.to_worktree = "homeboy@8058".to_string();
+    persist_initial_recipe(&options).expect("persist moving-base recipe");
+    agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+    agent_task_lifecycle::record_cook_attempt_in_store(
+        &test_lifecycle_store(),
+        &options.identity.cook_id,
+        1,
+        run_id,
+    )
+    .expect("index moving-base attempt");
+    agent_task_lifecycle::record_run_aggregate(
+        run_id,
+        &options.identity.initial_plan,
+        &AgentTaskAggregate {
+            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            plan_id: options.identity.initial_plan.plan_id.clone(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                ..Default::default()
+            },
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "provider".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("provider dispatched once".to_string()),
+                outputs: test_review_form_outputs(),
+                metadata: serde_json::json!({ "model": "fixture-model" }),
+                ..Default::default()
+            }],
+            events: vec![AgentTaskProgressEvent {
+                task_id: "provider".to_string(),
+                state: AgentTaskState::Succeeded,
+                attempt: 1,
+                message: None,
+            }],
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        },
+    )
+    .unwrap();
+    let mut applied = promotion(run_id);
+    applied.provenance["candidate"] =
+        serde_json::json!({"kind":"git","fingerprint":{"tree":"before"}});
+    agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+        .unwrap();
+    agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+        record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+    })
+    .unwrap();
+    (options, applied)
+}
+
 #[test]
 fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
-        use crate::agent_task_scheduler::{
-            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
-            AgentTaskProgressEvent,
-        };
-
         let run_id = "cook-9267-attempt-1";
-        let mut options = batch_cook_options(
-            "cook-9267",
-            Arc::new(RecordingDetachedAttemptDispatcher {
-                dispatches: Arc::new(AtomicUsize::new(0)),
-            }),
-        );
-        options.identity.initial_run_id = run_id.to_string();
-        options.finalization.no_finalize = false;
-        options.provider_transport.provider_invocation =
-            Some(homeboy_core::command_invocation::CommandInvocation {
-                argv: vec!["fixture-provider".to_string()],
-
-                ..Default::default()
-            });
-        options.gates = VerifyGateOptions {
-            verify: vec!["public gate".to_string()],
-            private_verify: vec!["private gate".to_string()],
-            private_gate_reveal: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
-            ..Default::default()
-        };
-        options.workspace.to_worktree = "homeboy@8058".to_string();
-        persist_initial_recipe(&options).expect("persist moving-base recipe");
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            &options.identity.cook_id,
-            1,
-            run_id,
-        )
-        .expect("index moving-base attempt");
-        agent_task_lifecycle::record_run_aggregate(
-            run_id,
-            &options.identity.initial_plan,
-            &AgentTaskAggregate {
-                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-                plan_id: options.identity.initial_plan.plan_id.clone(),
-                status: AgentTaskAggregateStatus::Succeeded,
-                totals: AgentTaskAggregateTotals {
-                    succeeded: 1,
-                    ..Default::default()
-                },
-                outcomes: vec![AgentTaskOutcome {
-                    task_id: "provider".to_string(),
-                    status: AgentTaskOutcomeStatus::Succeeded,
-                    summary: Some("provider dispatched once".to_string()),
-                    outputs: test_review_form_outputs(),
-                    metadata: serde_json::json!({ "model": "fixture-model" }),
-                    ..Default::default()
-                }],
-                events: vec![AgentTaskProgressEvent {
-                    task_id: "provider".to_string(),
-                    state: AgentTaskState::Succeeded,
-                    attempt: 1,
-                    message: None,
-                }],
-                artifact_lineage: Vec::new(),
-                child_runs: Vec::new(),
-                artifact_bindings: Vec::new(),
-                queue: Default::default(),
-            },
-        )
-        .unwrap();
-        let mut applied = promotion(run_id);
-        applied.provenance["candidate"] =
-            serde_json::json!({"kind":"git","fingerprint":{"tree":"before"}});
-        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
-            .unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-        })
-        .unwrap();
+        let (options, applied) = seed_moving_base_attempt("cook-9267", run_id);
 
         let first = run_cook(CookContext {
             side_effects: Some(CookSideEffects::new(|_, _, _, _| {
@@ -4179,6 +4188,65 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         assert!(crate::agent_task_service::claim_continuation()
             .unwrap()
             .is_none());
+    });
+}
+
+/// #15017: a moving-base report claims a queued continuation only when one
+/// will really run. A pending continuation will; one another owner holds
+/// cannot be queued again, so the report says the recovery stopped instead of
+/// promising a retry.
+#[test]
+fn moving_base_report_claims_a_queued_continuation_only_when_one_was_queued() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-15017-attempt-1";
+        let (options, _) = seed_moving_base_attempt("cook-15017", run_id);
+        let behind_base = || {
+            Error::validation_invalid_argument(
+                "base",
+                "HEAD is behind or diverged from resolved base `main`",
+                None,
+                None,
+            )
+        };
+
+        let first = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::new(move |_, _, _, _| Err(behind_base()))),
+            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+        assert!(first
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("continuation is queued")));
+
+        // Another live owner now holds the continuation.
+        let _claim = crate::agent_task_service::claim_continuation()
+            .unwrap()
+            .expect("queued moving-base continuation");
+        let mut owner = Command::new("sleep").arg("30").spawn().expect("live owner");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_continuation"]["owner_pid"] = serde_json::json!(owner.id());
+        })
+        .unwrap();
+        let second = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                |_, _: &CookRequest, _: &MovingBaseCookRecovery| Err(behind_base()),
+                |_, _: &_, _: &_, _: &_| panic!("a blocked recovery must not finalize"),
+            )),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+        owner.kill().expect("stop live owner");
+        owner.wait().expect("reap live owner");
+
+        assert_eq!(second.value.status, "candidate_recoverable");
+        assert!(second
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("moving-base recovery stopped")));
     });
 }
 

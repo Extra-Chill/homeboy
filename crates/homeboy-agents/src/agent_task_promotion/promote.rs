@@ -306,7 +306,7 @@ fn resume_promoted_patch_internal<'a>(
         })?;
     let verified_base = match verified_base {
         Some(verified_base) => Some(verified_base),
-        None => capture_declared_base(target_path, options.base_ref.as_deref())?,
+        None => capture_gate_verified_base(target_path, options.base_ref.as_deref())?,
     };
     let expected_candidate = previous
         .pointer("/provenance/candidate")
@@ -1073,7 +1073,7 @@ fn promote_with_provider_and_checkpoint_internal(
         // candidate delta so Cook can distinguish it from a base-equal no-op.
         let verified_base = worktree_path
             .zip(options.base_ref.as_deref())
-            .map(|(path, base)| capture_declared_base(path, Some(base)))
+            .map(|(path, base)| capture_gate_verified_base(path, Some(base)))
             .transpose()?
             .flatten();
         // Commits already on the destination are not this attempt's candidate
@@ -1227,7 +1227,7 @@ fn promote_with_provider_and_checkpoint_internal(
         let verified_base = if base_verified_before_apply {
             pre_apply_verified_base
         } else {
-            capture_declared_base(worktree_path, options.base_ref.as_deref())?
+            capture_gate_verified_base(worktree_path, options.base_ref.as_deref())?
         };
         (
             run_promotion_gates(
@@ -1837,6 +1837,41 @@ mod declared_base_tests {
         .is_empty());
     }
 
+    /// #15017: a PR branch ahead of a base that advanced during the Cook runs
+    /// its gates on the fork point, not on the live tip promotion observed.
+    #[test]
+    fn gate_verified_base_is_where_the_destination_meets_the_moved_base() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("shared"), "base").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "main"]);
+        let fork = git_output(repo.path(), &["rev-parse", "HEAD"]);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["checkout", "-b", "pr"]);
+        std::fs::write(repo.path().join("shared"), "pr").unwrap();
+        git(repo.path(), &["commit", "-am", "existing PR commit"]);
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("shared"), "advanced").unwrap();
+        git(repo.path(), &["commit", "-am", "advance main"]);
+        git(repo.path(), &["push", "origin", "main"]);
+        git(repo.path(), &["checkout", "pr"]);
+
+        let verified = capture_gate_verified_base(repo.path(), Some("main"))
+            .expect("capture main")
+            .expect("declared base");
+
+        assert_eq!(verified.base, "main");
+        assert_eq!(verified.sha, fork);
+    }
+
     #[cfg(unix)]
     fn write_git_fixture(dir: &Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -2274,7 +2309,7 @@ fn promote_committed_changes(
         let verified_base = if base_verified_before_apply {
             pre_apply_verified_base
         } else {
-            capture_declared_base(path, options.base_ref.as_deref())?
+            capture_gate_verified_base(path, options.base_ref.as_deref())?
         };
         (
             run_promotion_gates(
@@ -3468,7 +3503,23 @@ fn capture_declared_base_before_apply(
             None,
         )
     })?;
-    capture_declared_base(&target_path, base_ref)
+    capture_gate_verified_base(&target_path, base_ref)
+}
+
+/// The base a promotion records as verified: the commit its gates actually
+/// ran on, where the destination HEAD meets the declared base observed on
+/// origin. A destination created before the base advanced, or a PR branch
+/// carrying its own commits, sits on an older ancestor of the live tip; the
+/// tip itself was never under the gates (#15017).
+fn capture_gate_verified_base(
+    worktree_path: &Path,
+    base_ref: Option<&str>,
+) -> Result<Option<AgentTaskPromotionVerifiedBase>> {
+    let Some(mut observed) = capture_declared_base(worktree_path, base_ref)? else {
+        return Ok(None);
+    };
+    observed.sha = git_output(worktree_path, &["merge-base", &observed.sha, "HEAD"])?;
+    Ok(Some(observed))
 }
 
 pub(crate) fn capture_declared_base(
@@ -4010,7 +4061,7 @@ fn post_apply_report(
     // Managed targets pass their pre-apply snapshot. Unmanaged targets may not
     // expose a path until apply, so retain the established best-effort read.
     let verified_base = verified_base.or_else(|| {
-        capture_declared_base(worktree_path, options.base_ref.as_deref())
+        capture_gate_verified_base(worktree_path, options.base_ref.as_deref())
             .ok()
             .flatten()
     });

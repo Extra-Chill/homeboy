@@ -663,6 +663,11 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             return remedy.to_string();
         }
     }
+    // A blocked finalization is recovered by the Cook continuation that owns
+    // publication; resume only re-reads terminal evidence (#15017).
+    if string_value(payload, &["blocker", "code"]) == Some("finalization") {
+        return format!("homeboy agent-task cook-continue {run_id}");
+    }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
