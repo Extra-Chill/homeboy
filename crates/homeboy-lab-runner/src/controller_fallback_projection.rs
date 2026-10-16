@@ -2,19 +2,19 @@
 //! ledger is a pending-receipt queue only: the agent-task lifecycle owns
 //! terminal projection.
 
-use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 
 use homeboy_control_plane_contract::{resolve, IdentityKind, MissionId, ResolveError};
+use homeboy_core::observation::coordination::{
+    CoordinationRecord, ExpectedRevision, LeaseAcquire, LeaseAdmission, LeaseOwner, LeaseRequest,
+    RecordOutcome, RecordWrite,
+};
+use homeboy_core::observation::ObservationStore;
 use homeboy_core::{Error, Result};
 
 use crate::runner_staging_operation::{
@@ -22,14 +22,28 @@ use crate::runner_staging_operation::{
     RemoteRunnerStagingTransport,
 };
 
-/// v3 keys receipts by the exact handoff run id, so each attempt owns its own
-/// admission idempotence and finalization while the resolved mission stays
-/// grouping data on the record. The ledger holds pending receipts only: a
-/// finalized receipt is simply removed, because the agent-task lifecycle is
+/// Coordination namespace owned by the controller fallback projection
+/// (#15947). Each pending receipt is one record keyed by its exact handoff run
+/// id; the reconciliation cursor is the record under [`CURSOR_KEY`].
+pub(crate) const NAMESPACE: &str = "controller-fallback-projection";
+const CURSOR_KEY: &str = "cursor";
+const STATE_PENDING: &str = "pending";
+const STATE_CURSOR: &str = "cursor";
+
+/// Receipt schema. Receipts are keyed by the exact handoff run id, so each
+/// attempt owns its own admission idempotence and finalization while the
+/// resolved mission stays grouping data on the record. Only pending receipts
+/// exist: a finalized receipt is deleted, because the agent-task lifecycle is
 /// the authority for terminal state.
-const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v3";
+const RECEIPT_SCHEMA: &str = "homeboy/controller-fallback-projection/v3";
 const STARTUP_RECONCILIATION_BATCH_SIZE: usize = 8;
 const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound for one finalization claim. A crashed claimant's lease is
+/// reaped once its process is proven dead, or after this TTL otherwise.
+const FINALIZE_LEASE_TTL: Duration = Duration::from_secs(300);
+/// Cursor compare-and-set retries before a reservation gives up. Each conflict
+/// means another reconciler advanced the cursor, so this only bounds a storm.
+const CURSOR_CAS_ATTEMPTS: usize = 32;
 
 /// Controller-visible durable receipt for a runner-owned admission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,7 +58,7 @@ pub struct DeferredControllerReceipt {
 impl DeferredControllerReceipt {
     fn new(mission_id: MissionId, runner_receipt: RemoteRunnerStagingReceipt) -> Self {
         Self {
-            schema: STORE_SCHEMA.to_string(),
+            schema: RECEIPT_SCHEMA.to_string(),
             mission_id,
             runner_receipt,
             controller_projection: "deferred".to_string(),
@@ -52,7 +66,7 @@ impl DeferredControllerReceipt {
     }
 
     fn validate_for(&self, envelope: &RemoteRunnerStagingEnvelope) -> Result<()> {
-        if self.schema != STORE_SCHEMA
+        if self.schema != RECEIPT_SCHEMA
             || self.mission_id.as_str().trim().is_empty()
             || self.controller_projection != "deferred"
         {
@@ -102,54 +116,48 @@ fn resolve_to_error(error: ResolveError, id: &str) -> Error {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct State {
-    schema: String,
-    /// Keyed by the exact handoff run id of the admitted runner receipt.
-    receipts: BTreeMap<String, DeferredControllerReceipt>,
+struct CursorPayload {
+    /// Exact handoff run id of the last receipt reserved by a bounded pass.
+    run_id: String,
 }
 
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            schema: STORE_SCHEMA.to_string(),
-            receipts: BTreeMap::new(),
-        }
-    }
-}
-
-/// File-backed controller receipt queue. Runner admission is atomic in its
-/// own store; this ledger only records accepted receipts, keyed by each
-/// receipt's exact handoff run id, until the agent-task lifecycle finalizes
-/// them. The resolved mission remains grouping data on the record and never
-/// gates a later attempt.
+/// Controller receipt queue kept as coordination records. Runner admission is
+/// atomic in its own store; this queue only records accepted receipts, keyed
+/// by each receipt's exact handoff run id, until the agent-task lifecycle
+/// finalizes them. The resolved mission remains grouping data on the record
+/// and never gates a later attempt.
 pub struct ControllerFallbackProjectionStore {
-    path: PathBuf,
+    database: PathBuf,
 }
 
 impl ControllerFallbackProjectionStore {
-    /// Shared controller ledger survives daemon restarts independently of the
+    /// Shared controller queue survives daemon restarts independently of the
     /// runner-owned staging store.
     pub fn open_default() -> Result<Self> {
         Self::open_in_roots(homeboy_core::paths::PathRoots::from_environment()?.data())
     }
 
     /// [`open_default`](Self::open_default) against an explicitly injected data
-    /// root.
-    ///
-    /// The ledger and scheduling cursor share one owner below the data root;
-    /// every operation derives from `self.path` (including `.cursor` and `.lock`), so
-    /// nothing on this type can reach back into ambient state once it is
-    /// constructed. The reconciliation *callbacks* are a separate matter: they
-    /// are supplied by the caller and are ambient in the production wiring —
-    /// see [`reconcile_on_controller_startup`].
+    /// root: the observation database below it holds the queue and cursor, so
+    /// nothing on this type reaches back into ambient state once constructed.
+    /// The reconciliation *callbacks* are a separate matter: they are supplied
+    /// by the caller and are ambient in the production wiring — see
+    /// [`reconcile_on_controller_startup`].
     pub fn open_in_roots(data_root: &Path) -> Result<Self> {
-        Self::open(data_root.join("controller-fallback-projection.json"))
+        Ok(Self::open_at(homeboy_core::paths::observation_db_in_root(
+            data_root,
+        )))
     }
 
-    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
-        let store = Self { path: path.into() };
-        store.load()?;
-        Ok(store)
+    /// Queue in the observation database at an explicit path.
+    pub fn open_at(database: impl Into<PathBuf>) -> Self {
+        Self {
+            database: database.into(),
+        }
+    }
+
+    fn store(&self) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_for_lifecycle_at(&self.database)
     }
 
     /// Preflight happens inside `submit_remote_runner_staging` before the
@@ -169,22 +177,58 @@ impl ControllerFallbackProjectionStore {
         let receipt = DeferredControllerReceipt::new(mission_id, runner_receipt);
         receipt.validate_for(envelope)?;
         let run_key = receipt.runner_receipt.handoff.run_id.clone();
-        let _lock = self.lock()?;
-        let mut state = self.load()?;
-        if let Some(existing) = state.receipts.get(run_key.as_str()) {
-            if existing != &receipt {
-                return Err(Error::validation_invalid_argument(
-                    "idempotency_key",
-                    "controller fallback run is already bound to a different runner receipt",
-                    Some(run_key),
-                    None,
-                ));
-            }
-            return Ok(existing.clone());
+        if run_key == CURSOR_KEY {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "controller fallback run id collides with the reconciliation cursor key",
+                Some(run_key),
+                None,
+            ));
         }
-        state.receipts.insert(run_key, receipt.clone());
-        self.persist(&state)?;
-        Ok(receipt)
+        let payload = to_payload(&receipt)?;
+        let outcome = self.store()?.put_coordination_record(
+            NAMESPACE,
+            &run_key,
+            ExpectedRevision::Absent,
+            RecordWrite {
+                state: STATE_PENDING,
+                payload: &payload,
+                expires_at_ms: None,
+            },
+        )?;
+        match outcome {
+            RecordOutcome::Applied(_) => Ok(receipt),
+            RecordOutcome::Conflict {
+                current: Some(record),
+            } => {
+                let existing = parse_receipt(&record)?;
+                if existing != receipt {
+                    return Err(Error::validation_invalid_argument(
+                        "idempotency_key",
+                        "controller fallback run is already bound to a different runner receipt",
+                        Some(run_key),
+                        None,
+                    ));
+                }
+                Ok(existing)
+            }
+            RecordOutcome::Conflict { current: None } => Err(Error::internal_unexpected(format!(
+                "controller fallback receipt for `{run_key}` changed while admitting it"
+            ))),
+        }
+    }
+
+    /// Pending receipts in run-id order.
+    fn pending(
+        &self,
+        store: &ObservationStore,
+    ) -> Result<Vec<(String, DeferredControllerReceipt)>> {
+        store
+            .coordination_records(NAMESPACE)?
+            .into_iter()
+            .filter(|record| record.key != CURSOR_KEY)
+            .map(|record| Ok((record.key.clone(), parse_receipt(&record)?)))
+            .collect()
     }
 
     /// Reconcile a bounded receipt batch against authoritative runner jobs. A
@@ -231,13 +275,20 @@ impl ControllerFallbackProjectionStore {
             + 'static,
         Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
     {
-        // No ledger means no deferred receipts. Return before the batch
-        // reservation creates the ledger lock and cursor, so the detached
-        // startup pass leaves an untouched data root untouched.
-        if !self.path.exists() {
+        // No observation database means no deferred receipts. Return before
+        // opening it, so the detached startup pass leaves an untouched data
+        // root untouched.
+        if !self.database.exists() {
             return Ok(Vec::new());
         }
-        let receipts = self.reserve_reconciliation_batch(limit)?;
+        let store = self.store()?;
+        let receipts = self.reserve_reconciliation_batch_in(&store, limit)?;
+        if receipts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A claimant whose process died mid-finalization must not pin its
+        // receipt until the lease TTL runs out.
+        store.reap_coordination_leases(NAMESPACE)?;
         let snapshot = Arc::new(snapshot);
         let mut finalized = Vec::new();
 
@@ -255,204 +306,154 @@ impl ControllerFallbackProjectionStore {
                 Ok(snapshot) if snapshot.job.status.is_terminal() => snapshot,
                 Ok(_) | Err(_) => continue,
             };
-
-            // The ledger lock serializes contenders before they enter lifecycle CAS.
-            // A restart or concurrent controller can then replay the same evidence safely.
-            let _lock = self.lock()?;
-            let mut state = self.load()?;
-            if !state.receipts.contains_key(&run_id) {
-                continue;
+            if finalize_claimed(&store, &run_id, &snapshot, &finalize)? {
+                finalized.push(run_id);
             }
-            if finalize(&run_id, &snapshot).is_err() {
-                // A failed finalization keeps its receipt so the next pass
-                // retries it; the lifecycle store records the failure itself.
-                continue;
-            }
-            state.receipts.remove(&run_id);
-            self.persist(&state)?;
-            finalized.push(run_id);
         }
         Ok(finalized)
     }
 
-    /// Reserve a fair bounded pass under the existing ledger lock. Advance
-    /// before probing, so a timed-out process or overlapping startup cannot
-    /// repeatedly pin reconciliation to the first unreachable receipts.
+    /// Reserve a fair bounded pass by advancing the cursor record through a
+    /// revision compare-and-set. Advance before probing, so a timed-out
+    /// process or overlapping startup cannot repeatedly pin reconciliation to
+    /// the first unreachable receipts; a concurrent reservation that loses
+    /// the CAS recomputes its batch after the winner's cursor.
+    #[cfg(test)]
     fn reserve_reconciliation_batch(
         &self,
+        limit: usize,
+    ) -> Result<Vec<(String, DeferredControllerReceipt)>> {
+        self.reserve_reconciliation_batch_in(&self.store()?, limit)
+    }
+
+    fn reserve_reconciliation_batch_in(
+        &self,
+        store: &ObservationStore,
         limit: usize,
     ) -> Result<Vec<(String, DeferredControllerReceipt)>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let _lock = self.lock()?;
-        let state = self.load()?;
-        let pending = state.receipts.iter().collect::<Vec<_>>();
-        if pending.is_empty() {
-            return Ok(Vec::new());
-        }
-        let cursor = self.reconciliation_cursor()?;
-        let start = cursor
-            .as_ref()
-            .and_then(|cursor| pending.iter().position(|(run_id, _)| *run_id > cursor))
-            .unwrap_or(0);
-        let batch = pending
-            .iter()
-            .cycle()
-            .skip(start)
-            .take(limit.min(pending.len()))
-            .map(|(run_id, receipt)| ((*run_id).clone(), (*receipt).clone()))
-            .collect::<Vec<_>>();
-        // Scheduling metadata shares the ledger's lock and atomic writer, but
-        // leaves receipt bytes readable by active pinned controller versions.
-        self.persist_at(
-            &self.path.with_extension("cursor"),
-            &batch.last().expect("nonempty batch").0,
-        )?;
-        Ok(batch)
-    }
-
-    fn reconciliation_cursor(&self) -> Result<Option<String>> {
-        let path = self.path.with_extension("cursor");
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", path.display())),
-                ));
+        for _ in 0..CURSOR_CAS_ATTEMPTS {
+            let pending = self.pending(store)?;
+            if pending.is_empty() {
+                return Ok(Vec::new());
             }
+            let cursor_record = store.coordination_record(NAMESPACE, CURSOR_KEY)?;
+            let cursor = cursor_record
+                .as_ref()
+                .map(|record| {
+                    serde_json::from_value::<CursorPayload>(record.payload.clone())
+                        .map(|cursor| cursor.run_id)
+                        .map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("parse controller fallback cursor".to_string()),
+                            )
+                        })
+                })
+                .transpose()?;
+            let start = cursor
+                .as_ref()
+                .and_then(|cursor| pending.iter().position(|(run_id, _)| run_id > cursor))
+                .unwrap_or(0);
+            let batch = pending
+                .iter()
+                .cycle()
+                .skip(start)
+                .take(limit.min(pending.len()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let payload = to_payload(&CursorPayload {
+                run_id: batch.last().expect("nonempty batch").0.clone(),
+            })?;
+            let expected = cursor_record.map_or(ExpectedRevision::Absent, |record| {
+                ExpectedRevision::Revision(record.revision)
+            });
+            match store.put_coordination_record(
+                NAMESPACE,
+                CURSOR_KEY,
+                expected,
+                RecordWrite {
+                    state: STATE_CURSOR,
+                    payload: &payload,
+                    expires_at_ms: None,
+                },
+            )? {
+                RecordOutcome::Applied(_) => return Ok(batch),
+                RecordOutcome::Conflict { .. } => continue,
+            }
+        }
+        Err(Error::internal_unexpected(format!(
+            "controller fallback cursor kept changing across {CURSOR_CAS_ATTEMPTS} reservation attempts"
+        )))
+    }
+}
+
+/// Finalize one receipt under an exclusive lease on its run id, so concurrent
+/// reconcilers enter lifecycle finalization at most once. The receipt is read
+/// after the lease is won and deleted at that exact revision; a receipt a
+/// previous holder already finalized reads as absent and is skipped.
+fn finalize_claimed<Finalize>(
+    store: &ObservationStore,
+    run_id: &str,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+    finalize: &Finalize,
+) -> Result<bool>
+where
+    Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
+{
+    let empty = serde_json::json!({});
+    let holder = match store.acquire_coordination_lease(LeaseRequest {
+        namespace: NAMESPACE,
+        key: run_id,
+        ttl: FINALIZE_LEASE_TTL,
+        owner: LeaseOwner::current_process(),
+        admission: LeaseAdmission::Exclusive,
+        weight: &empty,
+        payload: &empty,
+    })? {
+        LeaseAcquire::Acquired(holder) => holder,
+        // Another reconciler is finalizing this run right now.
+        LeaseAcquire::Contended(_) => return Ok(false),
+    };
+    let result = (|| {
+        let Some(record) = store.coordination_record(NAMESPACE, run_id)? else {
+            return Ok(false);
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(format!("parse {}", path.display())))
-        })
-    }
-
-    fn load(&self) -> Result<State> {
-        if !self.path.exists() {
-            return Ok(State::default());
+        if finalize(run_id, snapshot).is_err() {
+            // A failed finalization keeps its receipt so the next pass
+            // retries it; the lifecycle store records the failure itself.
+            return Ok(false);
         }
-        let bytes = fs::read(&self.path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", self.path.display())),
-            )
-        })?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse {}", self.path.display())),
-            )
-        })?;
-        let schema = value
-            .get("schema")
-            .and_then(|schema| schema.as_str())
-            .unwrap_or_default()
-            .to_string();
-        match schema.as_str() {
-            STORE_SCHEMA => serde_json::from_value(value).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some(format!("parse {}", self.path.display())),
-                )
-            }),
-            _ => Err(Error::validation_invalid_argument(
-                "controller_fallback_store",
-                format!(
-                    "unsupported controller fallback projection store schema `{schema}`; expected `{STORE_SCHEMA}`. Older ledgers are not migrated: remove {} to start a fresh ledger",
-                    self.path.display()
-                ),
-                Some(self.path.display().to_string()),
-                None,
+        Ok(matches!(
+            store.delete_coordination_record(NAMESPACE, run_id, record.revision)?,
+            RecordOutcome::Applied(_)
+        ))
+    })();
+    store.release_coordination_lease(NAMESPACE, run_id, &holder.holder_token)?;
+    result
+}
+
+fn parse_receipt(record: &CoordinationRecord) -> Result<DeferredControllerReceipt> {
+    serde_json::from_value(record.payload.clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some(format!(
+                "parse controller fallback receipt `{}`",
+                record.key
             )),
-        }
-    }
+        )
+    })
+}
 
-    fn persist(&self, state: &State) -> Result<()> {
-        self.persist_at(&self.path, state)
-    }
-
-    fn persist_at<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("create {}", parent.display())),
-                )
-            })?;
-        }
-        let bytes = serde_json::to_vec(value).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize controller fallback projection".to_string()),
-            )
-        })?;
-        let parent = path.parent().expect("ledger path has parent");
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("create ledger temporary in {}", parent.display())),
-            )
-        })?;
-        temporary.write_all(&bytes).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write controller fallback projection".to_string()),
-            )
-        })?;
-        temporary.as_file().sync_all().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("sync controller fallback projection".to_string()),
-            )
-        })?;
-        temporary.persist(path).map_err(|error| {
-            Error::internal_io(
-                error.error.to_string(),
-                Some(format!("publish {}", path.display())),
-            )
-        })?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("sync {}", parent.display())),
-                )
-            })
-    }
-
-    fn lock(&self) -> Result<File> {
-        let parent = self.path.parent().expect("ledger path has parent");
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            // This separate lock file protects read-modify-write ledger updates;
-            // ledger state itself is atomically replaced by `persist`.
-            .truncate(false)
-            .open(self.path.with_extension("lock"))
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("open controller fallback lock".to_string()),
-                )
-            })?;
-        file.lock_exclusive().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("lock controller fallback ledger".to_string()),
-            )
-        })?;
-        Ok(file)
-    }
+fn to_payload<T: Serialize>(value: &T) -> Result<serde_json::Value> {
+    serde_json::to_value(value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize controller fallback projection".to_string()),
+        )
+    })
 }
 
 /// Production startup reconciliation for deferred runner staging. It reads at
@@ -519,10 +520,19 @@ mod tests {
         "agent-task-20bf814f-8536-44da-acb2-951d55ee50ca-attempt-3-7ec741b8";
 
     fn store() -> ControllerFallbackProjectionStore {
-        ControllerFallbackProjectionStore::open(
-            tempdir().expect("temp").keep().join("controller.json"),
+        ControllerFallbackProjectionStore::open_at(
+            tempdir().expect("temp").keep().join("observations.sqlite"),
         )
-        .expect("store")
+    }
+
+    fn pending(
+        store: &ControllerFallbackProjectionStore,
+    ) -> std::collections::BTreeMap<String, DeferredControllerReceipt> {
+        store
+            .pending(&store.store().expect("observation store"))
+            .expect("pending receipts")
+            .into_iter()
+            .collect()
     }
 
     fn snapshot(status: JobStatus) -> RunnerJobLogSnapshot {
@@ -600,7 +610,7 @@ mod tests {
 
             assert_eq!(finalized, vec![run_id.clone()]);
             assert!(
-                store.load().expect("ledger").receipts.is_empty(),
+                pending(&store).is_empty(),
                 "a finalized receipt leaves the pending queue"
             );
 
@@ -636,10 +646,10 @@ mod tests {
             .expect("bounded reconciliation with a failed finalization");
 
         assert!(finalized.is_empty());
-        let pending = store.load().expect("ledger").receipts;
-        assert_eq!(pending.len(), 1);
+        let remaining = pending(&store);
+        assert_eq!(remaining.len(), 1);
         assert!(
-            pending.contains_key(run_id.as_str()),
+            remaining.contains_key(run_id.as_str()),
             "a failed finalization keeps its receipt pending"
         );
 
@@ -651,13 +661,13 @@ mod tests {
             )
             .expect("retry pass");
         assert_eq!(finalized, vec![run_id]);
-        assert!(store.load().expect("ledger").receipts.is_empty());
+        assert!(pending(&store).is_empty());
     }
 
     #[test]
     fn startup_reconciliation_without_a_ledger_writes_nothing() {
         // Every mutating command schedules this pass; with no deferred
-        // receipts it must not create the ledger lock or cursor.
+        // receipts it must not create the observation database or cursor.
         let root = tempdir().expect("data root");
         let store = ControllerFallbackProjectionStore::open_in_roots(root.path())
             .expect("open projection store");
@@ -678,6 +688,24 @@ mod tests {
             0,
             "an empty data root stays empty"
         );
+
+        // An existing database with no receipts gains no cursor record.
+        let observations = ObservationStore::open_initialized_for_lifecycle_at(
+            homeboy_core::paths::observation_db_in_root(root.path()),
+        )
+        .expect("create observation store");
+        assert!(store
+            .reconcile_after_controller_restart_with(
+                8,
+                |_, _| panic!("no receipts means no runner query"),
+                |_, _| panic!("no receipts means no finalization"),
+            )
+            .expect("reconcile empty queue")
+            .is_empty());
+        assert!(observations
+            .coordination_records(NAMESPACE)
+            .expect("namespace records")
+            .is_empty());
     }
 
     #[test]
@@ -709,10 +737,10 @@ mod tests {
             "startup reconciliation waited for the blocked runner query"
         );
         assert!(finalized.is_empty());
-        let pending = store.load().expect("ledger").receipts;
-        assert_eq!(pending.len(), 1);
+        let remaining = pending(&store);
+        assert_eq!(remaining.len(), 1);
         assert!(
-            pending.contains_key(run_id.as_str()),
+            remaining.contains_key(run_id.as_str()),
             "a timed-out runner query keeps its receipt pending"
         );
     }
@@ -735,10 +763,10 @@ mod tests {
             .expect("nonterminal reconciliation");
 
         assert!(finalized.is_empty());
-        let pending = store.load().expect("ledger").receipts;
-        assert_eq!(pending.len(), 1);
+        let remaining = pending(&store);
+        assert_eq!(remaining.len(), 1);
         assert!(
-            pending.contains_key(run_id.as_str()),
+            remaining.contains_key(run_id.as_str()),
             "a nonterminal job keeps its receipt pending"
         );
     }
@@ -746,8 +774,8 @@ mod tests {
     #[test]
     fn bounded_batches_reach_terminal_receipts_after_unreachable_jobs_across_restart() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let path = directory.path().join("observations.sqlite");
+        let store = ControllerFallbackProjectionStore::open_at(&path);
         let mut runner = Transport::compatible();
         let mut receipts = Vec::new();
         for index in 0..17 {
@@ -763,8 +791,7 @@ mod tests {
             let queried = Arc::new(AtomicUsize::new(0));
             let query_count = Arc::clone(&queried);
             finalized.extend(
-                ControllerFallbackProjectionStore::open(&path)
-                    .expect("restart ledger")
+                ControllerFallbackProjectionStore::open_at(&path)
                     .reconcile_after_controller_restart_with(
                         8,
                         move |_, job_id| {
@@ -808,16 +835,12 @@ mod tests {
         );
         // Unreachable and nonterminal receipts stay pending for later passes;
         // finalized receipts leave the queue.
-        let pending = ControllerFallbackProjectionStore::open(&path)
-            .expect("restart ledger")
-            .load()
-            .expect("ledger")
-            .receipts;
-        assert_eq!(pending.len(), 15);
-        assert!(!pending.contains_key("fair-15"));
-        assert!(!pending.contains_key("fair-16"));
-        assert!(pending.contains_key("fair-00"));
-        assert!(pending.contains_key("fair-14"));
+        let remaining = pending(&ControllerFallbackProjectionStore::open_at(&path));
+        assert_eq!(remaining.len(), 15);
+        assert!(!remaining.contains_key("fair-15"));
+        assert!(!remaining.contains_key("fair-16"));
+        assert!(remaining.contains_key("fair-00"));
+        assert!(remaining.contains_key("fair-14"));
         assert_eq!(
             runner.calls(),
             17,
@@ -828,8 +851,8 @@ mod tests {
     #[test]
     fn concurrent_startups_reserve_distinct_bounded_batches() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let path = directory.path().join("observations.sqlite");
+        let store = ControllerFallbackProjectionStore::open_at(&path);
         let mut runner = Transport::compatible();
         for index in 0..17 {
             store
@@ -839,7 +862,7 @@ mod tests {
                 )
                 .expect("admit run");
         }
-        let original_receipts = fs::read(&path).expect("receipt ledger");
+        let original_receipts = pending(&store);
         let barrier = Arc::new(Barrier::new(2));
         let mut workers = Vec::new();
         for _ in 0..2 {
@@ -847,8 +870,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             workers.push(thread::spawn(move || {
                 barrier.wait();
-                ControllerFallbackProjectionStore::open(path)
-                    .expect("concurrent ledger")
+                ControllerFallbackProjectionStore::open_at(path)
                     .reserve_reconciliation_batch(8)
                     .expect("reserve batch")
                     .into_iter()
@@ -863,8 +885,12 @@ mod tests {
         assert_eq!(batches[0].len(), 8);
         assert_eq!(batches[1].len(), 8);
         assert!(batches[0].iter().all(|run_id| !batches[1].contains(run_id)));
-        assert_eq!(fs::read(&path).expect("receipt ledger"), original_receipts);
-        let restarted = ControllerFallbackProjectionStore::open(path).expect("restart ledger");
+        assert_eq!(
+            pending(&store),
+            original_receipts,
+            "cursor reservation never rewrites receipts"
+        );
+        let restarted = ControllerFallbackProjectionStore::open_at(path);
         assert_eq!(
             restarted
                 .reserve_reconciliation_batch(1)
@@ -877,8 +903,8 @@ mod tests {
     #[test]
     fn concurrent_reconcilers_enter_lifecycle_finalization_once_and_replay_after_restart() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let path = directory.path().join("observations.sqlite");
+        let store = ControllerFallbackProjectionStore::open_at(&path);
         let mut runner = Transport::compatible();
         store
             .submit_detached(&mut runner, &envelope())
@@ -891,8 +917,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             let finalizations = Arc::clone(&finalizations);
             workers.push(thread::spawn(move || {
-                ControllerFallbackProjectionStore::open(path)
-                    .expect("concurrent store")
+                ControllerFallbackProjectionStore::open_at(path)
                     .reconcile_after_controller_restart_with(
                         8,
                         move |_, _| {
@@ -914,8 +939,7 @@ mod tests {
         }
         assert_eq!(finalizations.load(Ordering::SeqCst), 1);
 
-        let replay = ControllerFallbackProjectionStore::open(path)
-            .expect("restarted store")
+        let replay = ControllerFallbackProjectionStore::open_at(path)
             .reconcile_after_controller_restart_with(
                 8,
                 |_, _| Ok(snapshot(JobStatus::Succeeded)),
@@ -988,8 +1012,8 @@ mod tests {
     #[test]
     fn reconciliation_finalizes_each_attempt_by_its_exact_run_identity() {
         let directory = tempdir().expect("temp directory");
-        let path = directory.path().join("controller.json");
-        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let path = directory.path().join("observations.sqlite");
+        let store = ControllerFallbackProjectionStore::open_at(&path);
         let mut runner = Transport::compatible();
         let first = store
             .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
@@ -1032,9 +1056,9 @@ mod tests {
             finalizations.lock().expect("finalizations").as_slice(),
             [FIRST_ATTEMPT_RUN]
         );
-        let pending = store.load().expect("ledger").receipts;
-        assert_eq!(pending.len(), 1);
-        assert!(pending.contains_key(RETRY_ATTEMPT_RUN));
+        let remaining = pending(&store);
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains_key(RETRY_ATTEMPT_RUN));
 
         // Second bounded pass: the retry attempt reaches its own terminal
         // evidence without re-finalizing the first attempt.
@@ -1063,12 +1087,11 @@ mod tests {
             finalizations.lock().expect("finalizations").as_slice(),
             [FIRST_ATTEMPT_RUN, RETRY_ATTEMPT_RUN]
         );
-        assert!(store.load().expect("ledger").receipts.is_empty());
+        assert!(pending(&store).is_empty());
 
         // A restart replays nothing: both attempts are already finalized under
         // their exact run identities.
-        let replay = ControllerFallbackProjectionStore::open(&path)
-            .expect("restarted store")
+        let replay = ControllerFallbackProjectionStore::open_at(&path)
             .reconcile_after_controller_restart_with(
                 8,
                 |_, _| panic!("finalized attempts must not be re-queried after restart"),
@@ -1076,35 +1099,5 @@ mod tests {
             )
             .expect("restart replay");
         assert!(replay.is_empty());
-    }
-
-    #[test]
-    fn unsupported_ledger_schemas_are_rejected_without_rewriting_evidence() {
-        for schema in [
-            "homeboy/controller-fallback-projection/v1",
-            "homeboy/controller-fallback-projection/v2",
-            "unsupported",
-        ] {
-            let directory = tempdir().expect("temp directory");
-            let path = directory.path().join("controller.json");
-            let mut runner = Transport::compatible();
-            let runner_receipt =
-                submit_remote_runner_staging(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
-                    .expect("admission");
-            let mut state = State {
-                schema: schema.to_string(),
-                ..State::default()
-            };
-            let mut receipt = DeferredControllerReceipt::new(
-                mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("mission"),
-                runner_receipt,
-            );
-            receipt.schema = schema.to_string();
-            state.receipts.insert(COOK_MISSION.to_string(), receipt);
-            let bytes = serde_json::to_vec(&state).expect("serialize evidence");
-            fs::write(&path, &bytes).expect("seed ledger");
-            assert!(ControllerFallbackProjectionStore::open(&path).is_err());
-            assert_eq!(fs::read(&path).expect("retained ledger"), bytes);
-        }
     }
 }
