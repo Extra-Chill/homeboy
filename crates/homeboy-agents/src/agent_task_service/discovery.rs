@@ -1125,17 +1125,14 @@ fn classify_liveness(
         }
         // A queued record has no executing work of its own. Fresh timestamps
         // only prove that it was serialized recently, not that an owner still
-        // exists. Retain it as active solely with a live owner or a complete
-        // runner submission that is still inside its acceptance deadline.
+        // exists. Retain it as active solely with a live owner.
         let has_live_owner = record.owner_process_is_running();
-        let has_live_submission_intent =
-            agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now);
         // The materializing proxy write is the state transition into a planned
         // runner execution. It has no local PID by design, but its fresh
         // heartbeat proves the controller is still advancing toward submission.
         let has_fresh_planned_runner_execution =
             record.has_planned_runner_execution() && record.has_fresh_update();
-        if !has_live_owner && !has_live_submission_intent && !has_fresh_planned_runner_execution {
+        if !has_live_owner && !has_fresh_planned_runner_execution {
             return AgentTaskLiveness::Stale;
         }
         return AgentTaskLiveness::Active;
@@ -1143,12 +1140,6 @@ fn classify_liveness(
 
     if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
         return AgentTaskLiveness::Unreconciled;
-    }
-    // Pending reverse-broker ownership is runner-host authority. A projected
-    // runner PID cannot be probed on this controller; acceptance or expiry is
-    // the durable boundary for resolving its liveness.
-    if agent_task_lifecycle::has_live_pending_runner_submission_intent(record, now) {
-        return AgentTaskLiveness::Active;
     }
     if record.has_planned_runner_execution() && record.has_fresh_update() {
         return AgentTaskLiveness::Active;

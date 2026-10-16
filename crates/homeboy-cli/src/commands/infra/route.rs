@@ -221,7 +221,7 @@ pub(crate) fn route_after_parse_with_provenance(
             return Err(error);
         }
         // Persist before provider execution. The scoped replay selector owns
-        // ready and reverse-capacity admission after this durable boundary.
+        // ready-runner admission after this durable boundary.
         return admit_unmaterialized_cook(
             cli,
             &normalized_args,
@@ -2457,8 +2457,8 @@ fn unmaterialized_admission_state(
 ) -> &'static str {
     match readiness.map(|value| value.state.as_str()) {
         Some("stale") => "blocked_runner_stale",
-        // A healthy reverse runner at capacity owns a durable broker queue. It
-        // is waiting for a slot, not unavailable.
+        // A healthy runner at capacity is waiting for a slot, not unavailable:
+        // the durable admission replays once the runner reports capacity.
         Some("capacity_blocked") => "queued",
         _ => "blocked_runner_unavailable",
     }
@@ -2863,10 +2863,10 @@ fn run_split_placement_cook_with_runtime(
         if cli.detach_after_handoff {
             return Err(Error::validation_invalid_argument(
                 "runner",
-                "a detached Cook requires an eligible Lab runner or reverse-runner durable queue; controller-local execution was not authorized",
+                "a detached Cook requires an eligible Lab runner; controller-local execution was not authorized",
                 None,
                 Some(vec![
-                    "Wait for a reverse runner to reconnect or free capacity, then retry.".to_string(),
+                    "Wait for a Lab runner to reconnect or free capacity, then retry.".to_string(),
                     "Use `--placement local` to explicitly authorize controller execution.".to_string(),
                 ]),
             ));

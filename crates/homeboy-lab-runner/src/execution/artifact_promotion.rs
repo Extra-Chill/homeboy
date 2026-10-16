@@ -79,9 +79,9 @@ pub fn promote_runner_exec_artifact_dirs_in_store(
     let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
         runner::RunnerExecMode::Local => None,
-        runner::RunnerExecMode::Daemon
-        | runner::RunnerExecMode::ReverseBroker
-        | runner::RunnerExecMode::DiagnosticSsh => Some(runner::load(&output.runner_id)?),
+        runner::RunnerExecMode::Daemon | runner::RunnerExecMode::DiagnosticSsh => {
+            Some(runner::load(&output.runner_id)?)
+        }
     };
     let mut records = Vec::new();
     for declared_dir in artifact_dir_outputs {
@@ -343,9 +343,9 @@ fn promote_runner_exec_outputs(
     let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
         runner::RunnerExecMode::Local => None,
-        runner::RunnerExecMode::Daemon
-        | runner::RunnerExecMode::ReverseBroker
-        | runner::RunnerExecMode::DiagnosticSsh => Some(runner::load(&output.runner_id)?),
+        runner::RunnerExecMode::Daemon | runner::RunnerExecMode::DiagnosticSsh => {
+            Some(runner::load(&output.runner_id)?)
+        }
     };
     output_paths
         .iter()

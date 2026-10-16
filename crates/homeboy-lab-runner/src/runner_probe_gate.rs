@@ -3,7 +3,7 @@
 //! Readiness probing is *read-mostly* information — which binaries exist on a
 //! runner, whether its toolchain answers — that many independent controller
 //! call sites ask for. `lab_runner_readiness`, `default_lab_runner_availability`,
-//! `refresh_detached_queue_runner`, dispatch preflight, and the CLI capability
+//! dispatch preflight, and the CLI capability
 //! surfaces each probe the same runner, and every one of them opened its own
 //! `ssh` process. During two concurrent cooks that produced **55 simultaneous**
 //! `ssh -o BatchMode=yes` children against a single Lab host: a self-inflicted

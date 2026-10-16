@@ -1882,7 +1882,6 @@ pub(super) fn exec_output(
     let transport = match mode {
         RunnerExecMode::Daemon => "daemon",
         RunnerExecMode::Local => "local",
-        RunnerExecMode::ReverseBroker => "reverse_broker",
         RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
     };
     let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);

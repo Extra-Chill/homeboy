@@ -603,17 +603,17 @@ pub(super) fn sample_leaseless_recovery() -> DaemonLeaselessRecoveryResult {
     .expect("sample recovery")
 }
 
-pub(super) fn reverse_controller_session() -> RunnerSession {
+pub(super) fn controller_session() -> RunnerSession {
     RunnerSession {
         runner_id: "homeboy-lab".to_string(),
-        mode: RunnerTunnelMode::Reverse,
+        mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
         server_id: None,
         controller_id: Some("extra-chill".to_string()),
-        broker_url: Some("http://127.0.0.1:9876".to_string()),
+        broker_url: None,
         remote_daemon_address: None,
         local_port: None,
-        local_url: None,
+        local_url: Some("http://127.0.0.1:9877".to_string()),
         tunnel_pid: None,
         tunnel_process_start_identity: None,
         proxy_forward: None,
@@ -684,35 +684,16 @@ fn candidate_daemon_freshness_mismatch_reports_expected_and_observed_hashes() {
     assert!(error.message.contains("BinaryHashMismatch"));
 }
 
-fn direct_controller_session() -> RunnerSession {
-    let mut session = reverse_controller_session();
-    session.mode = RunnerTunnelMode::DirectSsh;
-    session.broker_url = None;
-    session.local_url = Some("http://127.0.0.1:9877".to_string());
-    session
+#[test]
+fn artifact_content_endpoint_accepts_direct_sessions_with_a_daemon_url() {
+    ensure_artifact_content_endpoint(&controller_session()).expect("direct endpoint");
 }
 
 #[test]
-fn artifact_content_transport_routes_direct_sessions_to_the_daemon() {
-    assert_eq!(
-        artifact_content_transport(&direct_controller_session()).expect("direct transport"),
-        RunnerArtifactContentTransport::DirectDaemon
-    );
-}
-
-#[test]
-fn artifact_content_transport_routes_reverse_sessions_to_the_broker() {
-    assert_eq!(
-        artifact_content_transport(&reverse_controller_session()).expect("reverse transport"),
-        RunnerArtifactContentTransport::ReverseBroker
-    );
-}
-
-#[test]
-fn artifact_content_transport_rejects_sessions_without_a_managed_endpoint() {
-    let mut session = direct_controller_session();
+fn artifact_content_endpoint_rejects_sessions_without_a_managed_endpoint() {
+    let mut session = controller_session();
     session.local_url = None;
-    let error = artifact_content_transport(&session).expect_err("missing endpoint");
+    let error = ensure_artifact_content_endpoint(&session).expect_err("missing endpoint");
     assert!(error.message.contains("no managed daemon endpoint"));
 }
 

@@ -4790,68 +4790,6 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
     });
 }
 
-#[test]
-fn reconcile_terminalizes_an_unaccepted_controller_handoff_after_its_deadline() {
-    with_isolated_home(|_| {
-        let command = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-        ];
-        agent_task_lifecycle::record_lab_offload_planned(
-            agent_task_lifecycle::LabOffloadProxyPlan {
-                run_id: "controller-handoff-unaccepted",
-                runner_id: "homeboy-lab",
-                remote_workspace: "/runner/workspace/homeboy",
-                remote_command: &command,
-                durable_plan: Some(&discovery_plan()),
-            },
-        )
-        .expect("controller handoff persisted before runner acceptance");
-        let submission_request: homeboy_core::api_jobs::RemoteRunnerJobRequest =
-            serde_json::from_value(serde_json::json!({
-                "runner_id": "homeboy-lab",
-                "command": command,
-                "metadata": { "submission_key": "controller-handoff-unaccepted" }
-            }))
-            .expect("fixture runner submission request");
-        agent_task_lifecycle::record_lab_offload_submission_envelope(
-            "controller-handoff-unaccepted",
-            &crate::agent_task_lifecycle::tests::runner_api_submission(submission_request),
-        )
-        .expect("persist complete pending handoff request");
-        agent_task_lifecycle::rewrite_record_for_test("controller-handoff-unaccepted", |record| {
-            record
-                .lab_handoff
-                .as_mut()
-                .expect("typed handoff")
-                .acceptance_deadline_at = Some("2000-01-01T00:00:00+00:00".to_string());
-        })
-        .expect("expire acceptance deadline");
-
-        let active = discover_runs(AgentTaskDiscoveryFilter::Active).expect("listed");
-        let run = active
-            .runs
-            .iter()
-            .find(|run| run.run_id == "controller-handoff-unaccepted")
-            .expect("unaccepted handoff listed");
-        assert_eq!(run.liveness, Some(AgentTaskLiveness::Unreconciled));
-        assert_eq!(
-            run.commands.status,
-            "homeboy --placement local agent-task status controller-handoff-unaccepted"
-        );
-
-        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
-            RunnerAuthorityFixture::configured_disconnected(),
-        ));
-        let terminal = lifecycle_status("controller-handoff-unaccepted")
-            .expect("terminal controller record after confirmed absence");
-        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
-        assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
-        assert_eq!(terminal.metadata["retryable"], true);
-    });
-}
-
 fn record_stale_accepted_lab_handoff(run_id: &str, runner_id: &str) {
     let command = vec![
         "homeboy".to_string(),
@@ -4955,24 +4893,6 @@ impl agent_task_lifecycle::RunnerContinuationProvider for RunnerAuthorityFixture
         Err(homeboy_core::Error::internal_unexpected(
             "unused in fixture",
         ))
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> homeboy_core::Result<homeboy_core::api_jobs::Job> {
-        Err(homeboy_core::Error::internal_unexpected(
-            "unused in fixture",
-        ))
-    }
-
-    fn lookup_reverse_broker_submission(
-        &self,
-        _runner_id: &str,
-        _submission_key: &str,
-    ) -> homeboy_core::Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
-        Ok(homeboy_core::api_jobs::RemoteRunnerSubmissionLookup::Absent)
     }
 }
 

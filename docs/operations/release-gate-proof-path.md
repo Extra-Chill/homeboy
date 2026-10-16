@@ -77,8 +77,7 @@ non-interactive shell and points you at Lab offload. Honor that routing:
   ```
 
 See [runner](../commands/runner.md) for runner selection, readiness, and managed
-follow-up commands, and [the reverse-runner operator guide](controller-runner-reverse-runner.md)
-for setup and smoke evidence.
+follow-up commands.
 
 ## Local-hot bypass is a debugging aid, not proof
 
@@ -138,5 +137,4 @@ use that routed result as the proof.
 
 - [review](../commands/review.md) — the lint + test umbrella (canonical proof command)
 - [runner](../commands/runner.md) — Lab runner selection, offload routing, and managed follow-ups
-- [Controller to runner reverse-runner setup](controller-runner-reverse-runner.md) — gated reverse-runner path
 - [agent-task](../commands/agent-task.md) — durable lifecycle and runner-side gate dispatch

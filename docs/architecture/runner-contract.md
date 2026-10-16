@@ -39,7 +39,7 @@ does not establish an idle job observation.
 
 The service-observation endpoint is required for this direct path. A runner that
 does not serve it is unobserved, rather than silently falling back to a second
-truth path. Existing forward/reverse transport and generation lifecycle remain
+truth path. Existing transport and generation lifecycle remain
 separate delivery boundaries under #13881; this observation change does not
 claim runner-owned upgrades or automatic retirement of historical generations.
 
@@ -174,7 +174,7 @@ Reconciliation uses short exclusive `workspace-claim` fences only after no
 owner lease remains live. Composite reconciliation acquires local and remote
 components independently. Each authority validates its own opaque token and
 store-issued epoch; a composite generation identifies the composition but is
-not an authority epoch. Reverse brokers expose the same owner operations at
+not an authority epoch. Runner daemons expose the same owner operations at
 `/runner/workspace-owners/register`, `validate`, `renew`, and `release`.
 
 Managed task worktrees use the portable `task-worktree` workspace identity with
@@ -182,15 +182,10 @@ the registry component and handle as its locator. The task-worktree manifest
 persists that identity when created; legacy manifests derive it from those same
 stable fields. Paths, inodes, runner hosts, and agent plan/task IDs are not part
 of this identity. Controllers copy the exact manifest identity into the
-agent-task plan and durable run record before local, direct, or reverse owner
+agent-task plan and durable run record before local or direct owner
 registration, so every authority blocks reconciliation on the same workspace.
 An active legacy run that has no durable owner lease fails closed for ownership
 mutations; terminal reconciliation is the authority for historical recovery.
-
-Reverse submission transport failures are ambiguous until the broker's
-submission-key lookup reports `accepted`, `absent`, or `expired`. Controllers
-retain the original owner lease for accepted or unresolved submissions and
-release it only after authoritative non-acceptance.
 
 ## Runner API v1 `watch` operation
 
@@ -258,7 +253,7 @@ Shape:
 }
 ```
 
-`job_id` is the daemon or reverse-broker runner job id. `persisted_run_id` is the
+`job_id` is the runner daemon job id. `persisted_run_id` is the
 mirrored Homeboy run id when evidence persistence is available. `contract_field`
 is parsed from standard Homeboy JSON error envelopes (`error.details.field`,
 `error.field`, or `contract_field`) when present; otherwise it is omitted and the
@@ -328,7 +323,7 @@ Shape:
 }
 ```
 
-`runner_job_id` is the runner daemon or reverse-broker job id. `run_id`,
+`runner_job_id` is the runner daemon job id. `run_id`,
 `persisted_run_id`, and `mirror_run_id` are present when durable mirrored run
 evidence exists. `remote_cwd` and `artifact_refs` identify runner-side evidence
 paths; local persistence or download remains an explicit follow-up action.

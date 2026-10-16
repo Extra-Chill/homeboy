@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::mpsc;
 use std::thread;
 
 use reqwest::header;
@@ -17,8 +16,8 @@ fn test_roots() -> homeboy_core::paths::PathRoots {
 }
 
 use homeboy_core::api_jobs::{
-    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RemoteRunnerObservationRunDetail,
-    RunnerJobLifecycleMetadata, RunnerJobProjection,
+    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata,
+    RunnerJobProjection,
 };
 use homeboy_core::error::{Error, ErrorCode};
 use homeboy_core::observation::{
@@ -33,11 +32,10 @@ use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
     mirror_daemon_evidence, mirror_job_run, mirror_job_run_request,
     mirror_remote_observation_runs_by_id_with,
-    mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
-    mirror_terminal_job_artifacts_with, mirrored_patch_result, mirrored_runner_job_identity,
-    primary_mirrored_run, refresh_mirrored_daemon_evidence, refresh_mirrored_daemon_evidence_with,
-    runner_job_log_snapshot_with_owner_recovery_with, MirrorEvidenceRequest,
-    ReverseBrokerEvidenceContext, MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    mirror_remote_observation_runs_by_id_with_downloader, mirror_terminal_job_artifacts_with,
+    mirrored_patch_result, mirrored_runner_job_identity, primary_mirrored_run,
+    refresh_mirrored_daemon_evidence_with, runner_job_log_snapshot_with_owner_recovery_with,
+    MirrorEvidenceRequest, MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 
 use super::tokens::{
@@ -158,79 +156,6 @@ fn terminal_runner_job() -> Job {
         artifacts: Vec::new(),
         runner_job_projection: None,
     }
-}
-
-fn reverse_broker_fixture(
-    job: Job,
-    events: Vec<JobEvent>,
-) -> (String, mpsc::Sender<()>, thread::JoinHandle<Vec<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("broker listener");
-    let url = format!("http://{}", listener.local_addr().expect("broker address"));
-    let (shutdown, shutdown_signal) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let mut paths = Vec::new();
-        listener.set_nonblocking(true).expect("nonblocking broker");
-        loop {
-            let (mut stream, _) = match listener.accept() {
-                Ok(connection) => connection,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if shutdown_signal.try_recv().is_ok() {
-                        break;
-                    }
-                    thread::yield_now();
-                    continue;
-                }
-                Err(error) => panic!("broker request: {error}"),
-            };
-            stream
-                .set_nonblocking(false)
-                .expect("blocking request stream");
-            let mut request = Vec::new();
-            loop {
-                let mut byte = [0];
-                stream.read_exact(&mut byte).expect("request byte");
-                request.push(byte[0]);
-                if request.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let request = String::from_utf8(request).expect("request text");
-            let content_length = request
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or_default();
-            if content_length > 0 {
-                let mut body = vec![0; content_length];
-                stream.read_exact(&mut body).expect("request body");
-            }
-            let path = request
-                .lines()
-                .next()
-                .expect("request line")
-                .split_whitespace()
-                .nth(1)
-                .expect("request path")
-                .to_string();
-            let body = if path.ends_with("/events") {
-                json!({ "events": events.clone() })
-            } else if path == "/runner/jobs/reconcile" {
-                json!({})
-            } else {
-                json!({ "job": job.clone() })
-            };
-            paths.push(path);
-            let body = json!({ "success": true, "data": { "body": body } }).to_string();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            )
-            .expect("broker response");
-        }
-        paths
-    });
-    (url, shutdown, handle)
 }
 
 #[test]
@@ -831,24 +756,6 @@ fn explicit_agent_task_run_skips_missing_remote_run_projection() {
 
         assert_eq!(evidence.run.id, run_id);
         assert!(evidence.run.metadata_json.get("agent_task_run").is_some());
-
-        let reverse = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &command,
-                &job,
-                &[],
-                &result,
-                Some(run_id),
-                None,
-            ),
-            broker_url: "http://127.0.0.1:1",
-        })
-        .expect("reverse broker also skips the controller agent-task run")
-        .expect("reverse terminal evidence");
-
-        assert_eq!(reverse.run.id, run_id);
     });
 }
 
@@ -2202,234 +2109,6 @@ fn terminal_mirroring_rejects_url_only_declared_artifacts() {
 }
 
 #[test]
-fn reverse_broker_lookup_projects_only_embedded_typed_run_details() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let job = terminal_runner_job();
-        let run = RunRecord {
-            id: "embedded-run".to_string(),
-            kind: "bench".to_string(),
-            started_at: "2026-01-01T00:00:00Z".to_string(),
-            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
-            status: "succeeded".to_string(),
-            metadata_json: json!({}),
-            ..Default::default()
-        };
-        let result = json!({
-            "exit_code": 0,
-            "observation_run_ids": [run.id.clone()],
-            "observation_run_details": [RemoteRunnerObservationRunDetail::v1(run, Vec::new())],
-        });
-
-        let mirrored = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &["homeboy".to_string(), "bench".to_string()],
-                &job,
-                &[],
-                &result,
-                None,
-                None,
-            ),
-            broker_url: "http://127.0.0.1:1",
-        })
-        .expect("embedded terminal detail does not request a broker run endpoint")
-        .expect("terminal evidence is mirrored");
-        assert_eq!(mirrored.run.id, "embedded-run");
-
-        let legacy = json!({ "exit_code": 0, "observation_run_ids": ["legacy-run"] });
-        let mirrored = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &["homeboy".to_string(), "bench".to_string()],
-                &job,
-                &[],
-                &legacy,
-                None,
-                None,
-            ),
-            broker_url: "http://127.0.0.1:1",
-        })
-        .expect("old worker terminal result retains controller-owned evidence")
-        .expect("terminal evidence is mirrored");
-        assert_ne!(mirrored.run.id, "legacy-run");
-        let store = ObservationStore::open_initialized().expect("store");
-        let run = store
-            .get_run(&mirrored.run.id)
-            .expect("run lookup")
-            .expect("controller synthetic run");
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["unresolved_run_refs"],
-            json!(["legacy-run"])
-        );
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["observation_run_details"],
-            json!("unavailable_legacy")
-        );
-    });
-}
-
-#[test]
-fn reverse_failure_mirror_retains_terminal_failure_projection() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let mut job = terminal_runner_job();
-        job.status = JobStatus::Failed;
-        let mirrored = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext { request: MirrorEvidenceRequest::new(
-            &ssh_runner(),
-            "/runner/project",
-            &["homeboy".to_string(), "bench".to_string()],
-            &job,
-            &[],
-            &json!({
-                "exit_code": 2,
-                "stderr": "invalid runner input",
-                "data": {
-                    "phase": "preflight",
-                    "error": { "code": "validation.invalid_argument", "message": "invalid input" },
-                    "execution_record": { "runner_id": "lab", "transport": "reverse_broker" },
-                    "orchestration_provenance": { "source": "reverse" }
-                },
-                "artifact_refs": [{ "id": "failure-log", "path": "runner-artifact://lab/job/failure-log" }]
-            }),
-            None,
-            None,
-        ), broker_url: "http://127.0.0.1:1" })
-        .expect("reverse failure mirror")
-        .expect("mirrored failure");
-
-        let failure = &mirrored.run.metadata_json["lab"]["failure"];
-        assert_eq!(failure["failure_code"], "validation.invalid_argument");
-        assert_eq!(failure["phase"], "preflight");
-        assert_eq!(failure["execution_record"]["transport"], "reverse_broker");
-        assert_eq!(failure["artifact_refs"], json!([]));
-    });
-}
-
-#[test]
-fn reverse_broker_refresh_uses_persisted_transport_after_store_reopen() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
-            false,
-        )
-        .expect("persist runner");
-        let job = terminal_runner_job();
-        let events = vec![JobEvent {
-            sequence: 1,
-            job_id: job.id,
-            kind: JobEventKind::Result,
-            timestamp_ms: job.finished_at_ms.expect("terminal timestamp"),
-            message: None,
-            data: Some(json!({ "exit_code": 0 })),
-        }];
-        let (broker_url, shutdown, broker) = reverse_broker_fixture(job.clone(), events.clone());
-        let mirrored = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &["homeboy".to_string(), "bench".to_string()],
-                &job,
-                &events,
-                &json!({ "exit_code": 0 }),
-                None,
-                None,
-            ),
-            broker_url: &broker_url,
-        })
-        .expect("persist reverse mirror")
-        .expect("reverse mirror");
-
-        // Refresh opens a new observation store and must recover its transport
-        // choice from persisted provenance, not a live daemon session.
-        let refreshed = refresh_mirrored_daemon_evidence(&mirrored.run.id)
-            .expect("refresh via persisted reverse broker")
-            .expect("refreshed evidence");
-        assert_eq!(refreshed[0].id, mirrored.run.id);
-        assert_eq!(
-            refreshed[0].metadata_json["lab"]["reverse_broker"]["broker_url"],
-            broker_url
-        );
-        assert_eq!(
-            {
-                shutdown.send(()).expect("stop broker");
-                broker.join().expect("broker requests")
-            },
-            vec![
-                format!("/jobs/{}", job.id),
-                format!("/jobs/{}/events", job.id),
-                "/runner/jobs/reconcile".to_string(),
-            ]
-        );
-    });
-}
-
-#[test]
-fn reverse_result_refresh_treats_preterminal_absence_as_pending_then_projects_terminal_once() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        job.status = JobStatus::Queued;
-        job.finished_at_ms = None;
-        let command = vec!["homeboy".to_string(), "bench".to_string()];
-
-        for status in [JobStatus::Queued, JobStatus::Running] {
-            job.status = status;
-            let evidence = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-                request: MirrorEvidenceRequest::new(
-                    &ssh_runner(),
-                    "/runner/project",
-                    &command,
-                    &job,
-                    &[],
-                    &json!({}),
-                    None,
-                    None,
-                ),
-                broker_url: "http://broker.invalid",
-            })
-            .expect("preterminal result is pending")
-            .expect("pending evidence");
-            assert_eq!(
-                evidence.run.metadata_json["lab"]["result_availability"]["state"],
-                "pending"
-            );
-            assert_eq!(
-                evidence.run.metadata_json["lab"]["result_availability"]["last_observed_phase"],
-                serde_json::to_value(status).expect("status JSON"),
-            );
-            assert_eq!(
-                evidence.run.metadata_json["lab"]["result_availability"]["next_poll_action"],
-                "refresh_mirrored_daemon_evidence"
-            );
-        }
-
-        job.status = JobStatus::Succeeded;
-        job.finished_at_ms = Some(job.updated_at_ms);
-        let terminal = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &command,
-                &job,
-                &[],
-                &json!({ "exit_code": 0 }),
-                None,
-                None,
-            ),
-            broker_url: "http://broker.invalid",
-        })
-        .expect("valid terminal result")
-        .expect("terminal evidence");
-        assert_eq!(
-            terminal.run.metadata_json["lab"]["result_availability"]["state"],
-            "terminal"
-        );
-        assert_eq!(store.list_runs(Default::default()).expect("runs").len(), 1);
-    });
-}
-
-#[test]
 fn direct_result_refresh_treats_preterminal_absence_as_pending() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut job = terminal_runner_job();
@@ -2459,33 +2138,6 @@ fn direct_result_refresh_treats_preterminal_absence_as_pending() {
             evidence.run.metadata_json["lab"]["result_availability"]["last_observed_phase"],
             "running"
         );
-    });
-}
-
-#[test]
-fn malformed_terminal_reverse_result_keeps_transport_and_payload_diagnostics() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let job = terminal_runner_job();
-        let error = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &ssh_runner(),
-                "/runner/project",
-                &["homeboy".to_string(), "bench".to_string()],
-                &job,
-                &[],
-                &json!({ "stdout": "missing exit code" }),
-                None,
-                None,
-            ),
-            broker_url: "http://broker.invalid",
-        })
-        .expect_err("malformed terminal result is actionable");
-
-        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        assert!(error.message.contains(&job.id.to_string()));
-        assert!(error.message.contains("reverse-broker"));
-        assert!(error.message.contains("RemoteRunnerJobResult"));
-        assert!(error.message.contains("missing exit code"));
     });
 }
 

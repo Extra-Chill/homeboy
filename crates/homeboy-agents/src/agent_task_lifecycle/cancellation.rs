@@ -336,9 +336,8 @@ pub(crate) fn cancel_exact_run_in_store(
     let run_id = sanitize_run_id(run_id);
     let mut rooted_record = lifecycle_store.read_record(&run_id)?;
     ensure_rooted_exact_cancellation_supported(&rooted_record)?;
-    // Admission may advance a preparing intent to pending while cancellation
-    // waits for this lock. Re-read and classify only after owning the same
-    // rooted fence that protects the irreversible runner POST.
+    // Re-read and classify only after owning the same rooted fence that
+    // protects the irreversible runner admission.
     let mut pending_handoff_lock = Some(LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?);
     rooted_record = lifecycle_store.read_record(&run_id)?;
     ensure_rooted_exact_cancellation_supported(&rooted_record)?;
@@ -347,9 +346,7 @@ pub(crate) fn cancel_exact_run_in_store(
         .pointer("/runner_submission_intent/state")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let pending_submission = submission_state.as_deref() == Some("pending");
-    let submission_handoff_open =
-        matches!(submission_state.as_deref(), Some("preparing" | "pending"));
+    let submission_handoff_open = submission_state.as_deref() == Some("preparing");
     if submission_handoff_open {
         let requested_at = now_timestamp();
         lifecycle_store.mutate_record(&run_id, |record| {
@@ -367,43 +364,7 @@ pub(crate) fn cancel_exact_run_in_store(
             );
             true
         })?;
-        if pending_submission {
-            if let Err(error) = super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_locked_in_store(
-                lifecycle_store,
-                &run_id,
-            ) {
-                if error.retryable.unwrap_or(false) {
-                    rooted_record = lifecycle_store.read_record(&run_id)?;
-                    if rooted_record
-                        .metadata
-                        .get("lab_staging_controller_job_id")
-                        .and_then(Value::as_str)
-                        .filter(|id| !id.trim().is_empty())
-                        .is_none()
-                    {
-                        return Ok(rooted_record);
-                    }
-                } else {
-                    return Err(error);
-                }
-            }
-        }
         rooted_record = lifecycle_store.read_record(&run_id)?;
-        if pending_submission
-            && rooted_record
-                .metadata
-                .pointer("/runner_submission_intent/last_lookup_error")
-                .is_some()
-            && !rooted_record.state.is_terminal()
-            && rooted_record
-                .metadata
-                .get("lab_staging_controller_job_id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.trim().is_empty())
-                .is_none()
-        {
-            return Ok(rooted_record);
-        }
     }
     let mut controller_cancelled = false;
     let mut cancelled_controller_job_id = None;
@@ -742,8 +703,8 @@ fn cancel_resolved_run_in_store(
     // materialized attempt once one exists; before then the handoff parent is
     // the direct record and remains cancellable.
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    // Do not use the pre-lock submission state: a provider may complete the
-    // preparing-to-pending transition while cancellation is queued here.
+    // Do not use the pre-lock submission state: admission may resolve the
+    // preparing intent while cancellation is queued here.
     let mut pending_handoff_lock = Some(LabHandoffLock::lock_in_store(
         lifecycle_store,
         &record.run_id,
@@ -754,9 +715,7 @@ fn cancel_resolved_run_in_store(
         .pointer("/runner_submission_intent/state")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let pending_submission = submission_state.as_deref() == Some("pending");
-    let submission_handoff_open =
-        matches!(submission_state.as_deref(), Some("preparing" | "pending"));
+    let submission_handoff_open = submission_state.as_deref() == Some("preparing");
     if submission_handoff_open && !record.state.is_terminal() {
         let requested_at = now_timestamp();
         let record_run_id = record.run_id.clone();
@@ -917,50 +876,6 @@ fn cancel_resolved_run_in_store(
             stored.updated_at = Some(now);
         })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
-    }
-    // A pending POST may have been accepted despite a lost response. Resolve
-    // its key before cancellation so the original job is cancelled rather than
-    // left running on the runner. Preparing intents have no replay request and
-    // deliberately do not reach this lookup.
-    let mut pending_submission_lookup_error = false;
-    let bound_pending_submission = if pending_submission
-        && matches!(
-            record.state,
-            AgentTaskRunState::Queued | AgentTaskRunState::Running
-        ) {
-        match super::lab_handoff_reconciliation::bind_pending_runner_submission_if_accepted_locked_in_store(
-            lifecycle_store,
-            &record.run_id,
-        ) {
-            Ok(bound) => bound,
-            Err(error) if pending_submission && error.retryable.unwrap_or(false) => {
-                pending_submission_lookup_error = true;
-                false
-            }
-            Err(error) => return Err(error),
-        }
-    } else {
-        false
-    };
-    if bound_pending_submission {
-        record = lifecycle_store.read_record(&record.run_id)?;
-    }
-    if pending_submission_lookup_error
-        || (pending_submission
-            && record
-                .metadata
-                .pointer("/runner_submission_intent/last_lookup_error")
-                .is_some()
-            && !record.state.is_terminal())
-    {
-        let has_staging_owner = record
-            .metadata
-            .get("lab_staging_controller_job_id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-        if !has_staging_owner {
-            return Ok(CancelResolvedOutcome::Cancelled(record));
-        }
     }
     if record.state == AgentTaskRunState::Cancelled {
         let cancelled_at = record

@@ -103,21 +103,21 @@ pub(super) fn release_gate_lab_command(label: &'static str) -> LabOffloadCommand
     command
 }
 
-pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
+pub(super) fn connected_status(runner_id: &str) -> RunnerStatusReport {
     RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected: true,
         state: RunnerSessionState::Connected,
         session: Some(RunnerSession {
             runner_id: runner_id.to_string(),
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
             role: super::super::super::RunnerSessionRole::Controller,
             server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: Some("http://127.0.0.1:9876".to_string()),
+            controller_id: None,
+            broker_url: None,
             remote_daemon_address: None,
             local_port: None,
-            local_url: None,
+            local_url: Some("http://127.0.0.1:9877".to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
             proxy_forward: None,
@@ -140,15 +140,15 @@ pub(super) fn reverse_status(runner_id: &str) -> RunnerStatusReport {
         stale_runner_jobs: Vec::new(),
         stale_runner_job_count: 0,
         active_job_state: RunnerActiveJobState::Available,
-        active_job_source: Some(RunnerActiveJobSource::ReverseBroker),
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
         session_path: "/tmp/lab.json".to_string(),
     }
 }
 
-pub(super) fn stale_reverse_status(runner_id: &str) -> RunnerStatusReport {
-    let mut status = reverse_status(runner_id);
+pub(super) fn stale_connected_status(runner_id: &str) -> RunnerStatusReport {
+    let mut status = connected_status(runner_id);
     status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
         runner_id,
         "homeboy 0.228.0".to_string(),

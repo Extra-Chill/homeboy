@@ -9,11 +9,10 @@ use crate::RunnerLifecycleOwner;
 #[serde(rename_all = "snake_case")]
 pub enum RunnerTunnelMode {
     DirectSsh,
-    Reverse,
 }
 
 impl RunnerTunnelMode {
-    /// This mode rendered for humans: `direct SSH`, `reverse-connected`.
+    /// This mode rendered for humans: `direct SSH`.
     ///
     /// This deliberately differs from the persisted metadata vocabulary.
     pub fn label(&self) -> &'static str {
@@ -29,7 +28,6 @@ impl RunnerTunnelMode {
     fn labels(&self) -> (&'static str, &'static str) {
         match self {
             RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
-            RunnerTunnelMode::Reverse => ("reverse-connected", "reverse"),
         }
     }
 }
@@ -187,7 +185,7 @@ mod tests {
     fn complete_session_keeps_nested_identity_and_recovery_data() {
         let value = serde_json::json!({
             "runner_id": "runner-1",
-            "mode": "reverse",
+            "mode": "direct_ssh",
             "role": "runner",
             "server_id": "server-1",
             "controller_id": "controller-1",
@@ -227,10 +225,7 @@ mod tests {
 
     #[test]
     fn session_enum_vocabulary_stays_canonical() {
-        for (mode, wire, label) in [
-            (RunnerTunnelMode::DirectSsh, "direct_ssh", "direct SSH"),
-            (RunnerTunnelMode::Reverse, "reverse", "reverse-connected"),
-        ] {
+        for (mode, wire, label) in [(RunnerTunnelMode::DirectSsh, "direct_ssh", "direct SSH")] {
             assert_eq!(serde_json::to_value(&mode).expect("serialize"), wire);
             assert_eq!(mode.metadata_value(), wire);
             assert_eq!(mode.label(), label);

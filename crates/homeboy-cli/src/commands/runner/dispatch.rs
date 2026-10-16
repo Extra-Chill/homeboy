@@ -160,9 +160,6 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         )),
         RunnerCommand::Connect {
             id,
-            reverse,
-            reverse_runner,
-            broker_url,
             adopt_orphan_lease,
             adopt_live_lease,
             expected_live_pid,
@@ -175,9 +172,6 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         } => map_registry(connect(
             &id,
             registry::RunnerConnectInput {
-                reverse,
-                runner_id: reverse_runner,
-                broker_url,
                 adopt_orphan_lease,
                 adopt_live_lease,
                 expected_live_pid,
@@ -915,9 +909,6 @@ fn map_job(result: CmdResult<RunnerJobCommandOutput>) -> CmdResult<RunnerCommand
     result.map(|(output, exit_code)| match output {
         RunnerJobCommandOutput::List(output) => (RunnerCommandOutput::JobList(output), exit_code),
         RunnerJobCommandOutput::Daemon(output) => (RunnerCommandOutput::Job(output), exit_code),
-        RunnerJobCommandOutput::Broker(output) => {
-            (RunnerCommandOutput::BrokerJob(Box::new(output)), exit_code)
-        }
     })
 }
 

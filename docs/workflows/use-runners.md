@@ -83,5 +83,4 @@ Use the release-gate runbook for the stricter proof boundary: [Release-gate proo
 
 - [runner command](../commands/runner.md)
 - [Release-gate proof path](../operations/release-gate-proof-path.md)
-- [Controller to runner reverse-runner setup](../operations/controller-runner-reverse-runner.md)
 - [Capture evidence](capture-evidence.md)

@@ -237,7 +237,6 @@ pub(super) fn exec_via_daemon(
             detach_after_handoff,
             mirror_evidence,
             print_handoff_output,
-            handoff_endpoint: None,
         },
         job,
         |job| {
@@ -1623,10 +1622,7 @@ pub(super) fn detached_handoff_output(
         job_timestamp_ms_to_rfc3339(job.updated_at_ms),
     );
     let stdout = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "{}".to_string());
-    let transport = match mode {
-        RunnerExecMode::ReverseBroker => "reverse_broker",
-        _ => "daemon",
-    };
+    let transport = "daemon";
     let runner_job = RunnerJob::from_job(&runner.id, transport, &command, Some(cwd.clone()), &job);
     let run_location_index_path = run_location_index_path(&cwd);
     let mut runner_result =
@@ -1756,23 +1752,6 @@ fn daemon_terminal_wait_deadline_error(job_id: &str, waited: Duration, budget: D
     error.with_hint(format!(
         "The remote job is probably still running. Inspect it with `homeboy runner job logs <runner-id> {job_id}`."
     ))
-}
-
-/// Poll a daemon job, tolerating transient failures within the grace window.
-///
-/// The job store is durable across daemon restarts, so a connection error or a
-/// `null` envelope during the restart window is recoverable: the daemon comes
-/// back and serves the persisted (and possibly already-terminal) job. Only after
-/// the grace window elapses without a successful read do we surface the error,
-/// and we annotate it so the caller knows the remote job may still be in flight
-/// rather than reporting a misleading hard failure.
-pub(super) fn fetch_daemon_job_resilient(
-    client: &Client,
-    local_url: &str,
-    job_id: &str,
-) -> Result<Job> {
-    fetch_daemon_job_resilient_with_endpoint_reload(client, local_url, job_id, || Ok(None))
-        .map(|(job, _)| job)
 }
 
 /// Authoritative terminal state for a known daemon job. This observer never
@@ -2538,8 +2517,7 @@ pub(super) struct RunnerJobResultFields {
 }
 
 /// Extract the terminal result payload from a runner job's events and derive
-/// the redacted streams, metrics, and exit code. Shared by the reverse-broker
-/// and daemon execution paths to keep their result handling identical (#5067).
+/// the redacted streams, metrics, and exit code (#5067).
 pub(super) fn runner_job_result_fields(
     events: &[JobEvent],
     job_status: JobStatus,

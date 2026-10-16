@@ -119,7 +119,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
                 .expect("daemon response");
         }
     });
-    let mut stale_projection = connected_reverse_status("lab", None);
+    let mut stale_projection = connected_direct_status("lab", None);
     stale_projection.connected = false;
     stale_projection.state = super::super::RunnerSessionState::Disconnected;
     stale_projection.session = Some(connected_direct_session(
@@ -280,7 +280,7 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
     });
     let tunnel = Arc::new(Mutex::new(None));
     let session = Arc::new(Mutex::new(None));
-    let mut connected = connected_reverse_status("lab", None);
+    let mut connected = connected_direct_status("lab", None);
     connected.connected = true;
     connected.state = super::super::RunnerSessionState::Connected;
     connected.daemon_freshness = Some(DaemonFreshnessReport {
@@ -478,7 +478,7 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"adoption_command\":null,\"binary_hash\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
             .expect("health response");
     });
-    let mut status = connected_reverse_status("lab", None);
+    let mut status = connected_direct_status("lab", None);
     status.connected = false;
     status.state = super::super::RunnerSessionState::Disconnected;
     status.session = Some(connected_direct_session(
@@ -559,7 +559,7 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
             assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{health}").as_bytes()).expect("health response");
         });
-        let mut status = connected_reverse_status("lab", None);
+        let mut status = connected_direct_status("lab", None);
         status.connected = false;
         status.state = super::super::RunnerSessionState::Disconnected;
         status.session = Some(connected_direct_session(
@@ -674,88 +674,6 @@ fn lab_runner_preparation_uses_already_connected_runner() {
     .expect("prepared");
 
     assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
-}
-
-#[test]
-fn lab_runner_preparation_accepts_explicit_connected_reverse_runner_with_unavailable_verification()
-{
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::Reverse,
-    };
-
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(connected_reverse_status(
-                runner_id,
-                Some(RunnerStaleDaemonWarning::verification_unavailable(
-                    runner_id,
-                    "homeboy 0.0.0".to_string(),
-                    Some("homeboy 0.0.0+test".to_string()),
-                    "reverse_runner_identity_unavailable",
-                    "reverse runner identity cannot be verified".to_string(),
-                )),
-            ))
-        },
-        |_| panic!("connected reverse runner should not reconnect"),
-    )
-    .expect("prepared");
-
-    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
-}
-
-#[test]
-fn lab_runner_preparation_accepts_default_connected_reverse_runner_with_unavailable_verification() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::Reverse,
-    };
-
-    let prepared = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(connected_reverse_status(
-                runner_id,
-                Some(RunnerStaleDaemonWarning::verification_unavailable(
-                    runner_id,
-                    "homeboy 0.0.0".to_string(),
-                    Some("homeboy 0.0.0+test".to_string()),
-                    "reverse_runner_identity_unavailable",
-                    "reverse runner identity cannot be verified".to_string(),
-                )),
-            ))
-        },
-        |_| panic!("connected reverse runner should not reconnect"),
-    )
-    .expect("prepared");
-
-    assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
-}
-
-#[test]
-fn lab_runner_preparation_blocks_connected_reverse_runner_with_compared_mismatch() {
-    let selection = LabRunnerSelection {
-        runner_id: "lab".to_string(),
-        source: LabRunnerSelectionSource::Explicit,
-        mode: RunnerTunnelMode::Reverse,
-    };
-
-    let error = prepare_lab_runner_for_offload_with(
-        &selection,
-        |runner_id| {
-            Ok(connected_reverse_status(
-                runner_id,
-                Some(stale_daemon_warning(runner_id)),
-            ))
-        },
-        |_| panic!("stale reverse runner should not reconnect"),
-    )
-    .expect_err("compared daemon mismatch should remain blocked");
-
-    assert!(error.message.contains("daemon is stale"));
 }
 
 #[test]
@@ -1472,7 +1390,7 @@ fn connected_direct_session(
     }
 }
 
-fn connected_reverse_status(
+fn connected_direct_status(
     runner_id: &str,
     stale_daemon: Option<RunnerStaleDaemonWarning>,
 ) -> RunnerStatusReport {
@@ -1482,14 +1400,14 @@ fn connected_reverse_status(
         state: super::super::RunnerSessionState::Connected,
         session: Some(super::super::RunnerSession {
             runner_id: runner_id.to_string(),
-            mode: RunnerTunnelMode::Reverse,
+            mode: RunnerTunnelMode::DirectSsh,
             role: super::super::RunnerSessionRole::Controller,
             server_id: None,
-            controller_id: Some("controller".to_string()),
-            broker_url: Some("http://127.0.0.1:9876".to_string()),
+            controller_id: None,
+            broker_url: None,
             remote_daemon_address: None,
             local_port: None,
-            local_url: None,
+            local_url: Some("http://127.0.0.1:9877".to_string()),
             tunnel_pid: None,
             tunnel_process_start_identity: None,
             proxy_forward: None,

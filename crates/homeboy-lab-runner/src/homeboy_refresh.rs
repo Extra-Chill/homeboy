@@ -1916,9 +1916,8 @@ pub(crate) fn probe_reconnected_admission_readiness_in_roots(
         .session
         .filter(|session| session.mode == super::RunnerTunnelMode::DirectSsh);
     let Some(session) = session else {
-        // A reverse-broker session admits through the broker, not a direct
-        // loopback `/admissions` endpoint, so there is no local readiness probe
-        // to run. Identity verification already gated this reconnect.
+        // Without a direct session there is no loopback `/admissions` endpoint
+        // to probe. Identity verification already gated this reconnect.
         return Ok(());
     };
     let (Some(local_url), Some(expected_lease_id)) = (

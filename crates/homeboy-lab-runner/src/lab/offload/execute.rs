@@ -304,14 +304,10 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     prepare_timer.finish();
     let runner_status = match preparation {
         LabRunnerPreparation::Ready { connect_authority } => {
-            // Only a detached, controller-owned agent-task plan has a durable
-            // continuation and canonical workload suitable for broker queueing.
-            // A full runner is otherwise still a readiness failure.
+            // A full runner is a readiness failure.
             let runner_status = match preflight_lab_runner_availability(
                 &contract,
                 &selection,
-                request.detach_after_handoff,
-                request.durable_agent_task_plan.is_some(),
                 connect_authority.as_ref(),
             ) {
                 Ok(status) => status,

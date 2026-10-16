@@ -2754,8 +2754,7 @@ where
         | ("GET", "/files/upload-chunk")
         | ("GET", "/files/upload-chunk/abort")
         | ("GET", "/files/download") => method_not_allowed(),
-        ("POST", "/runner/sessions")
-        | ("POST", "/runner/jobs/reconcile")
+        ("POST", "/runner/jobs/reconcile")
         | ("POST", "/runner/workspace-claims/acquire")
         | ("POST", "/runner/workspace-claims/validate")
         | ("POST", "/runner/workspace-claims/release")
@@ -2774,8 +2773,7 @@ where
         ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
-        ("GET", "/runner/sessions")
-        | ("GET", "/runner/jobs")
+        ("GET", "/runner/jobs")
         | ("GET", "/runner/jobs/reconcile")
         | ("GET", "/runner/jobs/claim") => method_not_allowed(),
         ("GET", "/runner/workspace-claims/capabilities") => {

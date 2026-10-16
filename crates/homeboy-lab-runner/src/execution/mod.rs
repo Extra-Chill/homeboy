@@ -51,8 +51,6 @@ pub use homeboy_runner_contract::{
 pub(crate) use homeboy_runner_contract::is_internal_control_env;
 
 mod artifact_promotion;
-mod broker;
-pub(crate) use broker::reverse_broker_submission_key;
 mod daemon;
 mod daemon_api;
 mod extension_parity;
@@ -83,7 +81,6 @@ use policy::{preflight_remote_argv, remote_execution_preflight};
 // Cross-submodule visibility: re-export each submodule's `pub(super)` surface so
 // siblings reach one another through `use super::*` without widening the public
 // API. `use` re-exports are not counted as structural items.
-use broker::*;
 use daemon::*;
 use daemon_api::*;
 pub(crate) use daemon_api::{
@@ -357,7 +354,6 @@ impl RunnerExecOptions {
 pub enum RunnerExecMode {
     Daemon,
     Local,
-    ReverseBroker,
     DiagnosticSsh,
 }
 
@@ -1210,7 +1206,7 @@ fn exec_with_status_snapshot_attempt(
     if options.read_only_artifact_access
         && !matches!(
             select_runner_transport(&runner, Some(&connected), false),
-            RunnerTransport::DirectDaemon(_) | RunnerTransport::ReverseBroker(_)
+            RunnerTransport::DirectDaemon(_)
         )
     {
         return Err(read_only_artifact_access_unresolved_error(
@@ -1254,38 +1250,6 @@ fn exec_with_status_snapshot_attempt(
                     .session
                     .as_ref()
                     .and_then(|session| session.homeboy_build_identity.clone()),
-            )
-        }
-        RunnerTransport::ReverseBroker(handle) => {
-            if !controller_proxy_projection.is_empty() {
-                return Err(Error::validation_invalid_argument(
-                    "controller_proxy",
-                    "controller proxy projection requires a direct SSH runner session",
-                    Some(runner_id.to_string()),
-                    None,
-                ));
-            }
-            run_capability_preflight(&runner)?;
-            exec_via_reverse_broker(
-                &runner,
-                handle.endpoint_url(),
-                cwd,
-                options.project_id,
-                options.command,
-                request_env,
-                secret_env_names,
-                secret_env_plan,
-                options.capture_patch,
-                Some(plan.source_snapshot),
-                options.path_materialization_plan,
-                options.require_paths,
-                options.extension_env_providers,
-                options.lab_runner_workload,
-                options.run_id,
-                options.run_id_owns_generic_exec,
-                options.detach_after_handoff,
-                options.mirror_evidence,
-                options.print_handoff,
             )
         }
         RunnerTransport::Local => exec_local(plan),

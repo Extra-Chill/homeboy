@@ -27,7 +27,6 @@ use super::super::{load, Runner};
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
-use super::tokens::RemoteArtifactToken;
 use super::util::{
     job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary,
     runner_exec_run_label, runner_metadata, source_snapshot_from_result,
@@ -100,26 +99,6 @@ impl<'a> MirrorEvidenceRequest<'a> {
         self.run_ownership = MirrorRunOwnership::GenericRunnerExec;
         self
     }
-}
-
-pub(crate) struct ReverseBrokerEvidenceContext<'a> {
-    pub(crate) request: MirrorEvidenceRequest<'a>,
-    pub(crate) broker_url: &'a str,
-}
-
-struct ReverseBrokerMetadataContext<'a> {
-    store: &'a ObservationStore,
-    runner: &'a Runner,
-    broker_url: &'a str,
-    job: &'a Job,
-    events: &'a [JobEvent],
-    result: &'a Value,
-}
-
-#[derive(Debug)]
-enum TerminalResultAvailability {
-    Pending,
-    Present(Box<homeboy_core::api_jobs::RemoteRunnerJobResult>),
 }
 
 #[derive(Debug, Clone)]
@@ -282,7 +261,7 @@ pub(crate) fn mirror_daemon_evidence(
     request: MirrorEvidenceRequest<'_>,
     roots: &homeboy_core::paths::PathRoots,
 ) -> Result<Option<MirroredDaemonEvidence>> {
-    classify_terminal_result(request.job, request.result, "direct-daemon")?;
+    validate_terminal_result(request.job, request.result, "direct-daemon")?;
     let store = ObservationStore::open_initialized_in_roots(roots)?;
     let local_job_run = mirror_job_run_request(&store, request)?;
     let result = (|| {
@@ -335,282 +314,6 @@ pub(crate) fn mirror_daemon_evidence(
     result
 }
 
-pub(crate) fn mirror_reverse_broker_evidence(
-    context: ReverseBrokerEvidenceContext<'_>,
-) -> Result<Option<MirroredDaemonEvidence>> {
-    let request = context.request;
-    let store = ObservationStore::open_initialized()?;
-    let local_job_run = mirror_job_run_request(&store, request)?;
-    let result = (|| {
-        let terminal_result =
-            classify_terminal_result(request.job, request.result, "reverse-broker")?;
-        if matches!(&terminal_result, TerminalResultAvailability::Pending) {
-            let run = record_reverse_broker_metadata(
-                local_job_run.run.clone(),
-                ReverseBrokerMetadataContext {
-                    store: &store,
-                    runner: request.runner,
-                    broker_url: context.broker_url,
-                    job: request.job,
-                    events: request.events,
-                    result: request.result,
-                },
-                Vec::new(),
-                None,
-            )?;
-            return Ok(Some(MirroredDaemonEvidence {
-                run: run.clone(),
-                runs: vec![run],
-                patch: None,
-            }));
-        }
-        let TerminalResultAvailability::Present(terminal_result) = terminal_result else {
-            unreachable!("pending result returned above");
-        };
-        let declared_run_ids = explicit_observation_run_ids(request.result, request.job)
-            .into_iter()
-            .filter(|run_id| Some(run_id.as_str()) != controller_owned_run_id(request))
-            .collect::<Vec<_>>();
-        let runs;
-        let local_artifacts = if request.job.status == JobStatus::Failed {
-            Some(mirror_reverse_terminal_artifacts(
-                &store,
-                request.runner,
-                context.broker_url,
-                request.job,
-                &local_job_run,
-            )?)
-        } else {
-            None
-        };
-        if declared_run_ids.is_empty() {
-            let artifacts = local_artifacts.unwrap_or(mirror_reverse_terminal_artifacts(
-                &store,
-                request.runner,
-                context.broker_url,
-                request.job,
-                &local_job_run,
-            )?);
-            runs = vec![record_reverse_broker_metadata(
-                local_job_run.run.clone(),
-                ReverseBrokerMetadataContext {
-                    store: &store,
-                    runner: request.runner,
-                    broker_url: context.broker_url,
-                    job: request.job,
-                    events: request.events,
-                    result: request.result,
-                },
-                artifacts,
-                None,
-            )?];
-        } else if terminal_result.observation_run_details.is_empty() {
-            // Older workers declared remote run identities without retaining
-            // typed details. Their job artifacts remain durable controller
-            // evidence, while the declared identities are explicitly retained
-            // as unresolved provenance rather than fabricated run records.
-            let artifacts = local_artifacts.unwrap_or(mirror_reverse_terminal_artifacts(
-                &store,
-                request.runner,
-                context.broker_url,
-                request.job,
-                &local_job_run,
-            )?);
-            runs = vec![record_reverse_broker_metadata(
-                local_job_run.run.clone(),
-                ReverseBrokerMetadataContext {
-                    store: &store,
-                    runner: request.runner,
-                    broker_url: context.broker_url,
-                    job: request.job,
-                    events: request.events,
-                    result: request.result,
-                },
-                artifacts,
-                Some(&declared_run_ids),
-            )?];
-        } else {
-            terminal_result.validate_observation_run_details()?;
-            runs = mirror_remote_observation_runs_by_id_with_downloader(
-                &store,
-                request.runner,
-                request.job,
-                &declared_run_ids,
-                request.notification_route,
-                |declared_run_id| {
-                    terminal_result
-                        .observation_run_details
-                        .iter()
-                        .find(|detail| detail.run.id == declared_run_id)
-                        .map(|detail| {
-                            let mut run =
-                                serde_json::to_value(&detail.run).expect("run record serializes");
-                            run["artifacts"] = serde_json::to_value(&detail.artifacts)
-                                .expect("artifact records serialize");
-                            run
-                        })
-                        .map(Some)
-                        .ok_or_else(|| {
-                            missing_required_run_projection(
-                                request.runner,
-                                request.job,
-                                declared_run_id,
-                                None,
-                            )
-                        })
-                },
-                |artifact_path| {
-                    let token = RemoteArtifactToken::parse(artifact_path).map_err(|_| {
-                        Error::validation_invalid_argument(
-                            "artifact.path",
-                            "reverse declared artifact is not a runner artifact token",
-                            Some(artifact_path.to_string()),
-                            None,
-                        )
-                    })?;
-                    if token.runner_id != request.runner.id
-                        || token.run_id != request.job.id.to_string()
-                    {
-                        return Err(Error::validation_invalid_argument(
-                            "artifact.path",
-                            "reverse declared artifact token is not bound to this runner job",
-                            Some(artifact_path.to_string()),
-                            None,
-                        ));
-                    }
-                    let bytes = terminal_artifact_bytes(
-                        crate::connection::reverse_broker_artifact_content_at(
-                            context.broker_url,
-                            &request.runner.id,
-                            &request.job.id.to_string(),
-                            &token.artifact_id,
-                        )?,
-                        &token.artifact_id,
-                    )?;
-                    let mut file = tempfile::NamedTempFile::new().map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("stage reverse artifact".to_string()),
-                        )
-                    })?;
-                    file.write_all(&bytes).map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("write reverse artifact".to_string()),
-                        )
-                    })?;
-                    let (_, path) = file.keep().map_err(|error| {
-                        Error::internal_io(
-                            error.error.to_string(),
-                            Some("persist reverse artifact stage".to_string()),
-                        )
-                    })?;
-                    Ok(path)
-                },
-            )?;
-        }
-        let mut runs = runs
-            .into_iter()
-            .map(|run| attach_controller_failure_artifact_refs(&store, run))
-            .collect::<Result<Vec<_>>>()?;
-        let patch = mirrored_patch_result(
-            &store,
-            request.runner,
-            request.job,
-            request
-                .result
-                .get("patch")
-                .or_else(|| request.result.pointer("/data/patch")),
-        )?;
-        if request.job.status == JobStatus::Failed
-            && !runs.iter().any(|run| run.id == local_job_run.run.id)
-        {
-            runs.push(local_job_run.run.clone());
-        }
-        let runs = runs
-            .into_iter()
-            .map(|run| {
-                record_reverse_broker_metadata(
-                    run,
-                    ReverseBrokerMetadataContext {
-                        store: &store,
-                        runner: request.runner,
-                        broker_url: context.broker_url,
-                        job: request.job,
-                        events: request.events,
-                        result: request.result,
-                    },
-                    Vec::new(),
-                    None,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(|run| attach_controller_failure_artifact_refs(&store, run))
-            .collect::<Result<Vec<_>>>()?;
-        let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
-        Ok(Some(MirroredDaemonEvidence {
-            run: primary_run,
-            runs,
-            patch,
-        }))
-    })();
-    if result.is_err() {
-        discard_owned_synthetic_run(&store, &local_job_run);
-    }
-    result
-}
-
-fn mirror_reverse_terminal_artifacts(
-    store: &ObservationStore,
-    runner: &Runner,
-    broker_url: &str,
-    job: &Job,
-    run: &RunRecord,
-) -> Result<Vec<ArtifactRecord>> {
-    mirror_terminal_job_artifacts_with(store, runner, job, run, |artifact_id| {
-        terminal_artifact_bytes(
-            crate::connection::reverse_broker_artifact_content_at(
-                broker_url,
-                &runner.id,
-                &job.id.to_string(),
-                artifact_id,
-            )?,
-            artifact_id,
-        )
-    })
-}
-
-fn record_reverse_broker_metadata(
-    run: RunRecord,
-    context: ReverseBrokerMetadataContext<'_>,
-    artifacts: Vec<ArtifactRecord>,
-    unresolved_run_refs: Option<&[String]>,
-) -> Result<RunRecord> {
-    let mut metadata = run.metadata_json.clone();
-    let unresolved_run_refs = unresolved_run_refs.map(|refs| refs.to_vec()).or_else(|| {
-        metadata
-            .pointer("/lab/reverse_broker/unresolved_run_refs")
-            .and_then(Value::as_array)
-            .map(|refs| {
-                refs.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|refs| !refs.is_empty())
-    });
-    metadata["lab"]["reverse_broker"] = json!({
-        "runner_id": context.runner.id.clone(), "job_id": context.job.id.to_string(), "broker_url": context.broker_url,
-        "status": context.job.status, "events": bounded_remote_events(context.events), "event_count": context.events.len(),
-        "result_summary": result_summary(context.result), "artifacts": artifacts,
-        "result_availability": result_availability_metadata(context.job),
-        "observation_run_details": if unresolved_run_refs.is_some() { json!("unavailable_legacy") } else { Value::Null },
-        "unresolved_run_refs": unresolved_run_refs,
-    });
-    context.store.update_run_metadata(&run.id, metadata)
-}
-
 pub(crate) fn mirror_daemon_job_progress_with_ownership(
     runner: &Runner,
     cwd: &str,
@@ -626,36 +329,6 @@ pub(crate) fn mirror_daemon_job_progress_with_ownership(
         MirrorEvidenceRequest::new(runner, cwd, command, job, events, &result, run_id, None);
     request.run_ownership = run_ownership;
     mirror_job_run_request(&store, request).map(|run| run.run)
-}
-
-pub(crate) fn mirror_reverse_broker_job_progress_with_ownership(
-    runner: &Runner,
-    broker_url: &str,
-    cwd: &str,
-    command: &[String],
-    job: &Job,
-    run_id: Option<&str>,
-    run_ownership: MirrorRunOwnership,
-) -> Result<RunRecord> {
-    let store = ObservationStore::open_initialized()?;
-    let result = json!({});
-    let mut request =
-        MirrorEvidenceRequest::new(runner, cwd, command, job, &[], &result, run_id, None);
-    request.run_ownership = run_ownership;
-    let run = mirror_job_run_request(&store, request)?.run;
-    record_reverse_broker_metadata(
-        run,
-        ReverseBrokerMetadataContext {
-            store: &store,
-            runner,
-            broker_url,
-            job,
-            events: &[],
-            result: &json!({}),
-        },
-        Vec::new(),
-        None,
-    )
 }
 
 /// Records that the controller can no longer observe an accepted runner job.
@@ -707,17 +380,8 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         return Ok(Some(vec![run]));
     }
     let runner = load(&runner_id)?;
-    let reverse_broker_url = run
-        .metadata_json
-        .pointer("/lab/reverse_broker/broker_url")
-        .and_then(Value::as_str);
-    let (job, events) = match reverse_broker_url {
-        Some(broker_url) => {
-            crate::connection::reverse_broker_job_snapshot_at(broker_url, &runner_id, &job_id)?
-        }
-        None => runner_job_log_snapshot_with_owner_recovery(&runner_id, &job_id)
-            .map(|snapshot| (snapshot.job, snapshot.events))?,
-    };
+    let RunnerJobLogSnapshot { job, events } =
+        runner_job_log_snapshot_with_owner_recovery(&runner_id, &job_id)?;
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let cwd = run.cwd.as_deref().unwrap_or("");
     let command = run
@@ -725,28 +389,6 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    if let Some(broker_url) = reverse_broker_url {
-        let mirrored = mirror_reverse_broker_evidence(ReverseBrokerEvidenceContext {
-            request: MirrorEvidenceRequest::new(
-                &runner,
-                cwd,
-                &command,
-                &job,
-                &events,
-                &result,
-                (run.kind == "runner-exec").then_some(run_id),
-                None,
-            ),
-            broker_url,
-        })?;
-        if matches!(
-            job.status,
-            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-        ) {
-            crate::connection::reverse_broker_reconcile_at(&runner_id, broker_url)?;
-        }
-        return Ok(mirrored.map(|evidence| evidence.runs));
-    }
     refresh_mirrored_daemon_evidence_with(
         &store,
         MirrorEvidenceRequest::new(
@@ -1308,17 +950,12 @@ pub(super) fn mirror_job_run(
     )
 }
 
-fn classify_terminal_result(
-    job: &Job,
-    result: &Value,
-    transport: &str,
-) -> Result<TerminalResultAvailability> {
+fn validate_terminal_result(job: &Job, result: &Value, transport: &str) -> Result<()> {
     if !job.status.is_terminal() {
-        return Ok(TerminalResultAvailability::Pending);
+        return Ok(());
     }
-    serde_json::from_value(result.clone())
-        .map(Box::new)
-        .map(TerminalResultAvailability::Present)
+    serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerJobResult>(result.clone())
+        .map(|_| ())
         .map_err(|error| {
             Error::validation_invalid_argument(
                 "result",

@@ -1,11 +1,9 @@
 use super::*;
-use base64::Engine;
 use homeboy_core::api_jobs::JobEventKind;
 use homeboy_core::observation::{NewRunRecord, ObservationStore};
 use homeboy_runner_contract::RunnerSessionRole;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[test]
@@ -296,8 +294,7 @@ fn cancelled_terminal_snapshot_overrides_a_preexisting_success_result() {
         None,
     );
 
-    // This shared projection is used by both direct-daemon and reverse-broker
-    // terminal paths. The worker result remains evidence, while cancellation
+    // This shared projection is used by direct-daemon terminal paths. The worker result remains evidence, while cancellation
     // controls the reported command and lifecycle outcomes.
     assert_eq!(events.len(), 1);
     assert_eq!(fields.result, result);
@@ -342,7 +339,6 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
             &job,
             None,
             false,
-            None,
         )
         .expect("persist handoff run");
 
@@ -357,39 +353,6 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
         assert_eq!(
             run.metadata_json["lab"]["remote_job"]["id"].as_str(),
             Some(job_id.to_string().as_str())
-        );
-    });
-}
-
-#[test]
-fn reverse_handoff_persists_broker_transport_for_post_disconnect_refresh() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let runner = ssh_runner();
-        let job = running_job();
-        let command = vec!["homeboy".to_string(), "trace".to_string()];
-        let run_id = persist_lab_offload_handoff_run(
-            &runner,
-            "/srv/homeboy/project",
-            &command,
-            &job,
-            None,
-            false,
-            Some("http://127.0.0.1:4321"),
-        )
-        .expect("persist reverse handoff run");
-
-        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
-        let run = store
-            .get_run(&run_id)
-            .expect("get run")
-            .expect("persisted reverse handoff run");
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["broker_url"],
-            "http://127.0.0.1:4321"
-        );
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["job_id"],
-            job.id.to_string()
         );
     });
 }
@@ -412,7 +375,6 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
             &job,
             None,
             false,
-            None,
         )
         .expect("accepted handoff mirror");
 
@@ -489,7 +451,6 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
             &job,
             None,
             false,
-            None,
         )
         .expect("accepted handoff mirror");
 
@@ -563,117 +524,6 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
         "homeboy 0.283.1+a5b333e9f905"
     );
     assert!(super::super::daemon::daemon_identity_transition(Some("same"), Some("same")).is_none());
-}
-
-#[test]
-fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        allow_unauthenticated_loopback_broker();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let addr = listener.local_addr().expect("addr");
-        std::thread::spawn(move || {
-            let _ = homeboy_core::daemon::serve_listener(listener);
-        });
-        let broker_url = format!("http://{addr}");
-
-        let stable_run_id = "agent-task-run-123";
-        // The reverse-broker submission records a submission request against the
-        // controller's durable run, so materialize that controller proxy record
-        // first (mirroring the controller submitting the plan before the runner
-        // handoff) rather than leaving the submission to fail on a missing record.
-        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
-            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
-                run_id: stable_run_id,
-                runner_id: "lab",
-                remote_workspace: "/srv/homeboy/project",
-                remote_command: &["homeboy".to_string(), "test".to_string()],
-                durable_plan: None,
-            },
-        )
-        .expect("controller proxy run recorded before reverse-broker handoff");
-        let (output, exit_code) = exec_via_reverse_broker(
-            &ssh_runner(),
-            &broker_url,
-            "/srv/homeboy/project".to_string(),
-            Some("extrachill".to_string()),
-            vec!["homeboy".to_string(), "test".to_string()],
-            Default::default(),
-            Vec::new(),
-            Default::default(),
-            false,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(stable_run_id.to_string()),
-            false,
-            true,
-            true,
-            true,
-        )
-        .expect("reverse broker detached exec");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
-        let job_id = output.job_id.as_deref().expect("job id");
-        let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert_eq!(mirror_run_id, stable_run_id);
-        assert_eq!(
-            output
-                .runner_result
-                .as_ref()
-                .and_then(|result| result.mirror_run_id.as_deref()),
-            Some(mirror_run_id)
-        );
-        assert_eq!(
-            output
-                .handoff
-                .as_ref()
-                .and_then(|handoff| handoff.result.as_ref())
-                .and_then(|result| result.mirror_run_id.as_deref()),
-            Some(mirror_run_id)
-        );
-
-        let stdout: Value = serde_json::from_str(&output.stdout).expect("handoff stdout json");
-        assert_eq!(stdout["persisted_run_id"].as_str(), Some(mirror_run_id));
-        assert_eq!(stdout["mirror_run_id"].as_str(), Some(mirror_run_id));
-        assert_eq!(stdout["job_id"].as_str(), Some(job_id));
-
-        let jobs: Value = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("client")
-            .get(format!("{broker_url}/jobs"))
-            .send()
-            .expect("jobs response")
-            .json()
-            .expect("jobs json");
-        assert_eq!(
-            jobs["data"]["body"]["active_runner_jobs"][0]["durable_run_id"].as_str(),
-            Some(stable_run_id)
-        );
-
-        let store = homeboy_core::observation::ObservationStore::open_initialized()
-            .expect("observation store");
-        let run = store
-            .get_run(mirror_run_id)
-            .expect("read mirror run")
-            .expect("mirror run");
-        assert_eq!(
-            run.metadata_json["lab"]["remote_job"]["id"].as_str(),
-            Some(job_id)
-        );
-        let controller_record =
-            homeboy_agents::agent_task_lifecycle::reconcile_status(stable_run_id)
-                .expect("accepted reverse-broker handoff remains durable");
-        assert!(controller_record.lab_handoff.is_some_and(|handoff| {
-            handoff.state
-                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                && handoff.runner_id == "lab"
-                && handoff.runner_job_id.as_deref() == Some(job_id)
-        }));
-    });
 }
 
 #[test]
@@ -932,50 +782,6 @@ fn persist_direct_daemon_cancel_session(daemon_url: &str) {
     .expect("persist session");
 }
 
-fn persist_reverse_broker_cancel_session(broker_url: &str) {
-    let runner_dir = homeboy_core::paths::homeboy()
-        .expect("homeboy directory")
-        .join("runners");
-    std::fs::create_dir_all(&runner_dir).expect("create runner directory");
-    std::fs::write(
-        runner_dir.join("lab.json"),
-        r#"{"id":"lab","kind":"local","workspace_root":"/srv/homeboy"}"#,
-    )
-    .expect("persist runner config");
-    let session = RunnerSession {
-        runner_id: "lab".to_string(),
-        mode: RunnerTunnelMode::Reverse,
-        role: RunnerSessionRole::Controller,
-        server_id: Some("srv".to_string()),
-        controller_id: Some("handoff-cancel-test".to_string()),
-        broker_url: Some(broker_url.to_string()),
-        remote_daemon_address: None,
-        local_port: None,
-        local_url: None,
-        tunnel_pid: None,
-        tunnel_process_start_identity: None,
-        proxy_forward: None,
-        remote_daemon_pid: None,
-        remote_daemon_lease_id: None,
-        homeboy_version: "test".to_string(),
-        homeboy_build_identity: None,
-        connected_at: chrono::Utc::now().to_rfc3339(),
-        worker_identity: None,
-        worker_pid: None,
-        last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
-        leaseless_recovery_evidence: None,
-    };
-    let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
-        .expect("session path");
-    std::fs::create_dir_all(path.parent().expect("session directory"))
-        .expect("create session directory");
-    std::fs::write(
-        path,
-        serde_json::to_vec(&session).expect("serialize session"),
-    )
-    .expect("persist session");
-}
-
 fn wait_for_cancelled_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -990,106 +796,6 @@ fn wait_for_cancelled_daemon_job(client: &Client, daemon_url: &str, job_id: &str
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-#[test]
-fn zero_wait_reverse_broker_preserves_accepted_running_handoff() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        allow_unauthenticated_loopback_broker();
-        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
-        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
-        std::thread::spawn(move || {
-            let _ = homeboy_core::daemon::serve_listener(listener);
-        });
-
-        let (output, exit_code) = exec_via_reverse_broker(
-            &ssh_runner(),
-            &broker_url,
-            "/srv/homeboy/project".to_string(),
-            None,
-            vec!["homeboy".to_string(), "test".to_string()],
-            Default::default(),
-            Vec::new(),
-            Default::default(),
-            false,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .expect("zero-wait reverse broker handoff");
-
-        assert_zero_wait_handoff(&output, exit_code);
-        let job_id = output.job_id.as_deref().expect("accepted job id");
-        let client = Client::builder().build().expect("broker client");
-        let job = fetch_daemon_job(&client, &broker_url, job_id).expect("accepted broker job");
-        assert!(matches!(job.status, JobStatus::Queued | JobStatus::Running));
-    });
-}
-
-#[test]
-fn zero_wait_reverse_broker_cancels_unset_agent_task_workload() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        allow_unauthenticated_loopback_broker();
-        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
-        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
-        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let broker_url = format!("http://{}", listener.local_addr().expect("address"));
-        std::thread::spawn(move || {
-            let _ = homeboy_core::daemon::serve_listener(listener);
-        });
-        persist_reverse_broker_cancel_session(&broker_url);
-
-        let (output, exit_code) = exec_via_reverse_broker(
-            &ssh_runner(),
-            &broker_url,
-            "/srv/homeboy/project".to_string(),
-            None,
-            vec!["homeboy".to_string(), "test".to_string()],
-            Default::default(),
-            Vec::new(),
-            Default::default(),
-            false,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Some(agent_task_workload()),
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .expect("zero-wait reverse broker cancellation result");
-
-        assert_eq!(exit_code, 1);
-        assert!(!output.is_in_flight());
-        let job_id = output.job_id.as_deref().expect("accepted job id");
-        assert_eq!(
-            output.job.as_ref().map(|job| job.status),
-            Some(JobStatus::Cancelled)
-        );
-        assert_eq!(
-            output
-                .execution_record
-                .as_ref()
-                .map(|record| record.status.as_str()),
-            Some("failed")
-        );
-        assert!(!output.stderr.contains("still in flight"));
-        let client = Client::builder().build().expect("broker client");
-        wait_for_cancelled_daemon_job(&client, &broker_url, job_id);
-    });
 }
 
 fn blocked_workload_command(started: &std::path::Path, release: &std::path::Path) -> Vec<String> {
@@ -1132,58 +838,6 @@ fn assert_zero_wait_handoff(output: &RunnerExecOutput, exit_code: i32) {
             .status,
         "running"
     );
-}
-
-#[test]
-fn reverse_broker_rejects_inline_secret_before_detached_intent_persistence() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "agent-task-inline-secret-rejected";
-        homeboy_agents::agent_task_lifecycle::record_lab_offload_planned(
-            homeboy_agents::agent_task_lifecycle::LabOffloadProxyPlan {
-                run_id,
-                runner_id: "lab",
-                remote_workspace: "/srv/homeboy/project",
-                remote_command: &["homeboy".to_string(), "test".to_string()],
-                durable_plan: None,
-            },
-        )
-        .expect("controller proxy run recorded");
-        let error = exec_via_reverse_broker(
-            &ssh_runner(),
-            "http://127.0.0.1:1",
-            "/srv/homeboy/project".to_string(),
-            None,
-            vec!["homeboy".to_string(), "test".to_string()],
-            [("DECLARED_TOKEN".to_string(), "must-not-persist".to_string())]
-                .into_iter()
-                .collect(),
-            vec!["DECLARED_TOKEN".to_string()],
-            Default::default(),
-            false,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(run_id.to_string()),
-            false,
-            true,
-            true,
-            true,
-        )
-        .expect_err("inline declared secret is rejected before handoff");
-        assert_eq!(
-            error.code,
-            homeboy_core::error::ErrorCode::ValidationInvalidArgument
-        );
-        let record = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle store")
-            .read_record(run_id)
-            .expect("persisted record");
-        assert!(!serde_json::to_string(&record)
-            .expect("record JSON")
-            .contains("must-not-persist"));
-    });
 }
 
 #[test]
@@ -1768,216 +1422,6 @@ fn lab_runner_handoff_envelope_omits_agent_task_followups_without_run_id() {
     assert!(json["follow_commands"].get("status").is_none());
     assert!(json["follow_commands"].get("logs").is_none());
     assert!(json["follow_commands"].get("artifacts").is_none());
-}
-
-#[test]
-fn reverse_broker_exec_submits_job_and_polls_result() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        allow_unauthenticated_loopback_broker();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let addr = listener.local_addr().expect("addr");
-        std::thread::spawn(move || {
-            let _ = homeboy_core::daemon::serve_listener(listener);
-        });
-        let broker_url = format!("http://{addr}");
-        let worker_broker_url = broker_url.clone();
-        let worker = std::thread::spawn(move || {
-            let artifact_bytes = b"reverse patch";
-            let client = Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("client");
-            let claim = loop {
-                let response: Value = client
-                    .post(format!("{}/runner/jobs/claim", worker_broker_url))
-                    .json(&json!({
-                        "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
-                        "api_version": { "major": 1 },
-                        "runner_id": "lab",
-                        "lease_ms": 30_000,
-                        "execution_protocol":
-                            homeboy_runner_contract::RunnerJobExecutionProtocol::current(),
-                    }))
-                    .send()
-                    .expect("claim response")
-                    .json()
-                    .expect("claim json");
-                let outcome = &response["data"]["body"]["response"]["outcome"];
-                assert!(outcome.is_object(), "claim response: {response}");
-                if outcome["status"] == "claimed" {
-                    break outcome["claim"].clone();
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            };
-            let job_id = claim["job_id"].as_str().expect("job id").to_string();
-            let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
-            client
-                .post(format!(
-                    "{}/runner/jobs/{job_id}/consume",
-                    worker_broker_url
-                ))
-                .json(&json!({
-                    "runner_id": "lab",
-                    "claim_id": claim_id.clone(),
-                    "context_id": claim["execution_context"]["id"],
-                }))
-                .send()
-                .expect("consume response")
-                .error_for_status()
-                .expect("consume execution receipt");
-            client
-                .post(format!("{}/runner/jobs/{job_id}/events", worker_broker_url))
-                .json(&json!({
-                    "runner_id": "lab",
-                    "claim_id": claim_id.clone(),
-                    "kind": "progress",
-                    "message": "running test worker"
-                }))
-                .send()
-                .expect("event response");
-            client
-                .post(format!("{}/runner/jobs/{job_id}/finish", worker_broker_url))
-                .json(&json!({
-                    "runner_id": "lab",
-                    "claim_id": claim_id,
-                    "result": {
-                        "exit_code": 0,
-                        "stdout": "reverse ok",
-                        "stderr": "",
-                        "data": {
-                            "patch": {
-                                "patch_artifact_id": "reverse-patch"
-                            }
-                        },
-                        "artifacts": [{
-                            "id": "reverse-patch",
-                            "name": "reverse.patch",
-                            "path": "/srv/homeboy/.homeboy/artifacts/reverse.patch",
-                            "mime": "text/x-diff",
-                            "size_bytes": artifact_bytes.len(),
-                            "sha256": format!("{:x}", Sha256::digest(artifact_bytes)),
-                            "content_base64": base64::engine::general_purpose::STANDARD.encode(artifact_bytes),
-                            "metadata": { "kind": "lab_fix_patch" }
-                        }]
-                    }
-                }))
-                .send()
-                .expect("finish response");
-        });
-
-        let (output, exit_code) = exec_via_reverse_broker(
-            &ssh_runner(),
-            &broker_url,
-            "/srv/homeboy/project".to_string(),
-            Some("extrachill".to_string()),
-            vec!["homeboy".to_string(), "test".to_string()],
-            Default::default(),
-            Vec::new(),
-            Default::default(),
-            false,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            false,
-            true,
-            true,
-        )
-        .expect("reverse broker exec");
-        worker.join().expect("worker joins");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(output.mode, RunnerExecMode::ReverseBroker);
-        assert_eq!(output.stdout, "reverse ok");
-        assert_eq!(output.runner_id, "lab");
-        assert!(output.job_id.is_some());
-        let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
-        assert!(mirror_run_id.starts_with("runner-exec-test-lab-"));
-        let patch_path = output
-            .patch
-            .as_ref()
-            .and_then(|patch| patch.get("patch_artifact_path").and_then(Value::as_str))
-            .expect("controller patch path");
-        assert!(!patch_path.starts_with("metadata-only:"));
-        assert_eq!(
-            output
-                .mutation_artifacts
-                .as_ref()
-                .and_then(|artifacts| artifacts.patch_ref.as_ref())
-                .map(|artifact| artifact.artifact_id.as_str()),
-            Some("reverse-patch")
-        );
-        assert_eq!(
-            output
-                .runner_result
-                .as_ref()
-                .and_then(|result| result.mutation_artifacts.as_ref())
-                .and_then(|artifacts| artifacts.patch_ref.as_ref())
-                .map(|artifact| artifact.artifact_id.as_str()),
-            Some("reverse-patch")
-        );
-        assert!(output
-            .job_events
-            .expect("events")
-            .iter()
-            .any(|event| { event.kind == homeboy_core::api_jobs::JobEventKind::Progress }));
-
-        let store = homeboy_core::observation::ObservationStore::open_initialized()
-            .expect("observation store");
-        let run = store
-            .get_run(mirror_run_id)
-            .expect("read mirror run")
-            .expect("mirror run");
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["runner_id"].as_str(),
-            Some("lab")
-        );
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["broker_url"].as_str(),
-            Some(broker_url.as_str())
-        );
-        // The mirrored reverse-broker metadata carries a bounded result summary
-        // (exit code / status) rather than raw stdout; the captured result is
-        // proven by exit_code 0. Raw stdout is surfaced on the exec output, not
-        // duplicated into the durable run metadata.
-        assert_eq!(
-            run.metadata_json["lab"]["reverse_broker"]["result_summary"]["exit_code"].as_i64(),
-            Some(0)
-        );
-        let artifact = store
-            .get_artifact("reverse-patch")
-            .expect("read reverse artifact")
-            .expect("reverse artifact");
-        assert_eq!(artifact.run_id, mirror_run_id);
-        assert_eq!(artifact.path, patch_path);
-        assert_eq!(
-            std::fs::read(&artifact.path).expect("controller patch bytes"),
-            b"reverse patch"
-        );
-    });
-}
-
-fn allow_unauthenticated_loopback_broker() {
-    // The in-process daemon's /exec endpoint drives runner processes through the
-    // RunnerExecDriver hook; register the runner-side driver so these end-to-end
-    // handoff tests can run the child (production wires this at CLI startup).
-    crate::register_runner_daemon_exec_driver();
-    // Skip hashing the (multi-hundred-MB debug) test binary during in-process
-    // daemon startup, which otherwise blocks `serve_listener` past the client's
-    // connect timeout and makes the mock broker appear unreachable.
-    std::env::set_var(
-        homeboy_core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
-        "sha256:test-fixed-daemon-binary",
-    );
-    homeboy_core::broker_auth::BrokerAuthStore {
-        allow_unauthenticated_loopback: true,
-        ..Default::default()
-    }
-    .save()
-    .expect("save loopback broker auth opt-in");
 }
 
 #[test]

@@ -11,7 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::api_jobs::{
-    ActiveRunnerJobSummary, Job, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
+    ActiveRunnerJobSummary, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
     RunnerJobSource,
 };
 use homeboy_core::daemon::{
@@ -24,14 +24,12 @@ use homeboy_core::http_api::RunSummary;
 use homeboy_core::paths;
 use homeboy_core::server::{self, Server, SshClient};
 
-use super::broker_http;
 use super::session::{
-    ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
-    RunnerActiveJobsSnapshot, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDisconnectReport, RunnerFailureKind, RunnerLeaselessRecoveryContract,
-    RunnerLeaselessRecoveryEvidence, RunnerProxyForward, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, REVERSE_UNVERIFIED_REASON,
+    RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerProxyForward,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
 };
 use super::{load, load_in_roots, remote_runner_homeboy_path, Runner, RunnerKind};
 
@@ -51,9 +49,6 @@ pub(super) fn controller_scope_segment(controller_id: &str) -> String {
     format!("{prefix}-{digest}")
 }
 
-use homeboy_core::broker_auth;
-
-const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
@@ -220,14 +215,6 @@ pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String
                 )]),
             )
         })?;
-        if session.mode != RunnerTunnelMode::DirectSsh {
-            return Err(Error::validation_invalid_argument(
-                "controller_proxy",
-                "controller proxy access is available only to direct SSH runner jobs",
-                Some(runner_id.to_string()),
-                None,
-            ));
-        }
         if let Some(forward) = session.proxy_forward.as_ref() {
             if proxy_forward_is_owned(forward, homeboy_core::process::process_start_identity) {
                 return Ok(forward.runner_url.clone());
@@ -2043,132 +2030,6 @@ fn fenced_remote_mutation(
     }
 }
 
-pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerConnectReport, i32)> {
-    if options.runner_id.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "Reverse runner connect requires --reverse-runner <runner-id>",
-            None,
-            None,
-        ));
-    }
-    if options.controller_id.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "controller",
-            "Reverse runner connect requires a controller or broker ID",
-            None,
-            None,
-        ));
-    }
-
-    let runner = load(&options.runner_id)?;
-    let session_path = session_path(&runner.id)?;
-    let homeboy_identity = homeboy_product_identity::build_identity();
-    let homeboy_version = homeboy_identity.version.clone();
-    let now = Utc::now().to_rfc3339();
-    let session = RunnerSession {
-        runner_id: runner.id.clone(),
-        mode: RunnerTunnelMode::Reverse,
-        role: RunnerSessionRole::Runner,
-        server_id: runner.server_id.clone(),
-        controller_id: Some(options.controller_id.clone()),
-        broker_url: options.broker_url.clone(),
-        remote_daemon_address: None,
-        local_port: None,
-        local_url: None,
-        tunnel_pid: None,
-        tunnel_process_start_identity: None,
-        proxy_forward: None,
-        remote_daemon_pid: None,
-        remote_daemon_lease_id: None,
-        homeboy_version,
-        homeboy_build_identity: Some(homeboy_identity.display),
-        connected_at: now.clone(),
-        worker_identity: Some(format!("{}@{}", std::process::id(), hostname_fallback())),
-        worker_pid: Some(std::process::id()),
-        last_seen_at: Some(now),
-        leaseless_recovery_evidence: None,
-    };
-    write_session(&session)?;
-    let broker_registered = match session.broker_url.as_deref() {
-        Some(broker_url) => register_reverse_session_with_broker(broker_url, &session)?,
-        None => false,
-    };
-
-    Ok((
-        RunnerConnectReport {
-            runner_id: runner.id,
-            mode: Some(RunnerTunnelMode::Reverse),
-            role: Some(RunnerSessionRole::Runner),
-            connected: broker_registered,
-            recorded: Some(true),
-            local_url: None,
-            broker_url: options.broker_url,
-            controller_id: Some(options.controller_id),
-            remote_daemon_address: None,
-            tunnel_pid: None,
-            remote_daemon_pid: None,
-            connection_warning: None,
-            homeboy_version: Some(session.homeboy_version),
-            homeboy_build_identity: session.homeboy_build_identity,
-            session_path: Some(session_path.display().to_string()),
-            leaseless_recovery: None,
-            state_loss_recovery: None,
-            leaseless_recovery_evidence: None,
-            failure_kind: None,
-            failure_message: None,
-            failure_evidence: None,
-        },
-        0,
-    ))
-}
-
-fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSession) -> Result<bool> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|err| Error::internal_unexpected(format!("build broker HTTP client: {err}")))?;
-    let broker_token =
-        homeboy_core::broker_auth::broker_submit_token_for_runner(&session.runner_id)?;
-    let request = client
-        .post(format!(
-            "{}/runner/sessions",
-            broker_url.trim_end_matches('/')
-        ))
-        .json(&serde_json::json!({
-            "runner_id": session.runner_id,
-            "controller_id": session.controller_id,
-            "broker_url": session.broker_url,
-            "homeboy_version": session.homeboy_version,
-            "homeboy_build_identity": session.homeboy_build_identity,
-            "worker_identity": session.worker_identity,
-            "worker_pid": session.worker_pid,
-            "last_seen_at": session.last_seen_at,
-        }));
-    let request = if let Some(token) = broker_token.as_deref() {
-        request.header(homeboy_core::broker_auth::BROKER_TOKEN_HEADER, token)
-    } else {
-        request
-    };
-    let response = request.send().map_err(|err| {
-        Error::internal_unexpected(format!("register reverse runner session: {err}"))
-    })?;
-    let status_code = response.status().as_u16();
-    let envelope: CliEnvelope = response.json().map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse reverse runner session registration response".to_string()),
-        )
-    })?;
-    if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "reverse runner session registration failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
-    }
-    Ok(true)
-}
-
 pub(crate) fn session_store_read_session_or_live_peer_in_root(
     config_root: &std::path::Path,
     runner_id: &str,
@@ -2617,14 +2478,6 @@ fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
         Some(runner_id.to_string()),
         None,
     ))?;
-    if owner.mode != RunnerTunnelMode::DirectSsh {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "job log recovery requires a direct SSH daemon generation",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
     let Some((_server_id, server, _client)) = resolve_ssh_runner(&runner)? else {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -2960,12 +2813,7 @@ where
     Reconnect: FnMut(&str) -> Result<()>,
 {
     let status = status_fn(runner_id)?;
-    if status.connected
-        || status
-            .session
-            .as_ref()
-            .is_some_and(|session| session.mode != RunnerTunnelMode::DirectSsh)
-    {
+    if status.connected {
         return Ok(status);
     }
 
@@ -3128,8 +2976,6 @@ fn remote_daemon_recovery_freshness_until(
 fn active_runner_job_source(session: &RunnerSession) -> Option<RunnerActiveJobSource> {
     if session.local_url.is_some() {
         Some(RunnerActiveJobSource::DirectDaemon)
-    } else if session.mode == RunnerTunnelMode::Reverse && session.broker_url.is_some() {
-        Some(RunnerActiveJobSource::ReverseBroker)
     } else {
         None
     }
@@ -3361,7 +3207,7 @@ pub(crate) fn probe_verified_direct_daemon_jobs(
     runner_id: &str,
     session: &RunnerSession,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
-    if session.mode != RunnerTunnelMode::DirectSsh || session.local_url.is_none() {
+    if session.local_url.is_none() {
         return Err(Error::validation_invalid_argument(
             "runner",
             "verified runner connect has no direct daemon endpoint for typed job admission",
@@ -3427,22 +3273,6 @@ fn runner_jobs_with_client(
                     Error::internal_unexpected("daemon jobs response missing data.body")
                 })?,
                 RunnerJobSource::Daemon,
-            )
-        } else if session.mode == RunnerTunnelMode::Reverse {
-            let broker_url = session.broker_url.as_deref().ok_or_else(|| {
-                Error::internal_unexpected(format!(
-                    "reverse runner `{runner_id}` is connected but has no broker URL for active-job status"
-                ))
-            })?;
-            (
-                broker_http::get_json(
-                    client,
-                    broker_url,
-                    "/jobs",
-                    "list reverse runner broker jobs",
-                    None,
-                )?,
-                RunnerJobSource::Broker,
             )
         } else {
             return Err(Error::internal_unexpected(format!(
@@ -3653,83 +3483,6 @@ fn parse_runner_jobs(
         .collect())
 }
 
-pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
-    let broker_url = reverse_broker_url(runner_id)?;
-    reverse_broker_reconcile_at(runner_id, &broker_url)
-}
-
-/// Reconcile through a persisted reverse broker endpoint without consulting a
-/// live controller-side session.
-pub(crate) fn reverse_broker_reconcile_at(runner_id: &str, broker_url: &str) -> Result<Value> {
-    let client = broker_client("build broker reconcile client")?;
-    broker_http::post_json(
-        &client,
-        broker_url,
-        "/runner/jobs/reconcile",
-        serde_json::json!({ "runner_id": runner_id }),
-        "reconcile reverse runner broker jobs",
-        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
-    )
-}
-
-/// Read a reverse runner job from its persisted broker endpoint. This remains
-/// available after a controller restart because it does not require a live
-/// controller-side runner session.
-pub(crate) fn reverse_broker_job_snapshot_at(
-    broker_url: &str,
-    runner_id: &str,
-    job_id: &str,
-) -> Result<(Job, Vec<homeboy_core::api_jobs::JobEvent>)> {
-    let client = broker_client("build reverse broker job snapshot client")?;
-    let token = broker_auth::broker_submit_token_for_runner(runner_id)?;
-    let job_data = broker_http::get_json(
-        &client,
-        broker_url,
-        &format!("/jobs/{job_id}"),
-        "fetch reverse runner broker job",
-        token.as_deref(),
-    )?;
-    let events_data = broker_http::get_json(
-        &client,
-        broker_url,
-        &format!("/jobs/{job_id}/events"),
-        "fetch reverse runner broker job events",
-        token.as_deref(),
-    )?;
-    let job: Job = serde_json::from_value(job_data["job"].clone()).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse reverse broker job".to_string()),
-        )
-    })?;
-    if job.id.to_string() != job_id {
-        return Err(Error::internal_unexpected(format!(
-            "reverse broker returned job `{}` while polling requested job `{job_id}`",
-            job.id
-        )));
-    }
-    let events = serde_json::from_value(events_data["events"].clone()).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse reverse broker job events".to_string()),
-        )
-    })?;
-    Ok((job, events))
-}
-
-/// Return the current controller's persisted reverse-broker endpoint without a
-/// liveness/status probe. A controller job may outlive the reverse worker, but
-/// the broker remains the durable authority for its accepted job.
-pub(crate) fn recorded_reverse_broker_url(runner_id: &str) -> Result<Option<String>> {
-    let Some(session) = read_session(runner_id)? else {
-        return Ok(None);
-    };
-    if session.mode != RunnerTunnelMode::Reverse || session.local_url.is_some() {
-        return Ok(None);
-    }
-    Ok(session.broker_url.filter(|url| !url.trim().is_empty()))
-}
-
 /// Reconcile terminal runner jobs through the session's authoritative transport.
 /// The returned body is transport-neutral so callers retain one command contract.
 pub fn reconcile_terminal_jobs(runner_id: &str) -> Result<Value> {
@@ -3742,30 +3495,19 @@ pub fn reconcile_terminal_jobs(runner_id: &str) -> Result<Value> {
             None,
         ));
     };
-    reconcile_terminal_jobs_for_session(
-        &session,
-        |_| {
-            let data = crate::execution::daemon_api_post_for_session(
-                &session,
-                "/jobs/reconcile-terminal",
-            )?;
-            crate::execution::canonical_daemon_body(&data, "direct daemon reconcile response")
-                .cloned()
-        },
-        || reverse_broker_reconcile(runner_id),
-    )
+    reconcile_terminal_jobs_for_session(&session, |_| {
+        let data =
+            crate::execution::daemon_api_post_for_session(&session, "/jobs/reconcile-terminal")?;
+        crate::execution::canonical_daemon_body(&data, "direct daemon reconcile response").cloned()
+    })
 }
 
 fn reconcile_terminal_jobs_for_session<T>(
     session: &RunnerSession,
     direct: impl FnOnce(&str) -> Result<T>,
-    reverse: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if let Some(local_url) = session.local_url.as_deref() {
         return direct(local_url);
-    }
-    if session.mode == RunnerTunnelMode::Reverse {
-        return reverse();
     }
     Err(Error::validation_invalid_argument(
         "runner_id",
@@ -3778,157 +3520,8 @@ fn reconcile_terminal_jobs_for_session<T>(
     ))
 }
 
-/// Submit a redacted, replayable request to a connected reverse broker. Secret
-/// values are intentionally absent: the worker resolves named references when
-/// it prepares the claimed process.
-pub fn submit_runner_api_request(
-    runner_id: &str,
-    submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-) -> Result<Job> {
-    let submitted_runner_id = submission
-        .envelope
-        .dispatch
-        .as_ref()
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "envelope.dispatch",
-                "runner submission envelope requires dispatch",
-                None,
-                None,
-            )
-        })?
-        .runner_id
-        .as_str();
-    if submitted_runner_id != runner_id {
-        return Err(Error::validation_invalid_argument(
-            "runner_id",
-            "reverse broker submission runner does not match submitted runner",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
-    let broker_url = reverse_broker_url(runner_id)?;
-    let client = broker_client("build reverse broker submission client")?;
-    let body = serde_json::to_value(&submission).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize reverse runner submission".to_string()),
-        )
-    })?;
-    let response = broker_http::post_json(
-        &client,
-        &broker_url,
-        "/runner/jobs",
-        body,
-        "replay reverse runner submission",
-        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
-    )?;
-    let submit_response: homeboy_runner_contract::RunnerApiSubmitResponse = serde_json::from_value(
-        response.get("response").cloned().unwrap_or(Value::Null),
-    )
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse replayed envelope runner submit response".to_string()),
-        )
-    })?;
-    if let homeboy_runner_contract::RunnerApiSubmitOutcome::Rejected { failure } =
-        submit_response.outcome
-    {
-        return Err(Error::validation_invalid_argument(
-            "runner_submission",
-            failure.message,
-            None,
-            None,
-        ));
-    }
-    serde_json::from_value(
-        response.get("job").cloned().ok_or_else(|| {
-            Error::internal_unexpected("reverse broker submission returned no job")
-        })?,
-    )
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse replayed reverse runner job".to_string()),
-        )
-    })
-}
-
-pub fn lookup_reverse_broker_submission(
-    runner_id: &str,
-    submission_key: &str,
-) -> Result<homeboy_core::api_jobs::RemoteRunnerSubmissionLookup> {
-    let broker_url = reverse_broker_url(runner_id)?;
-    let client = broker_client("build reverse broker lookup client")?;
-    let response = broker_http::post_json(
-        &client,
-        &broker_url,
-        "/runner/jobs/submissions/lookup",
-        serde_json::json!({ "runner_id": runner_id, "submission_key": submission_key }),
-        "look up reverse runner submission",
-        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
-    )?;
-    serde_json::from_value(
-        response.get("result").cloned().ok_or_else(|| {
-            Error::internal_unexpected("reverse broker lookup returned no result")
-        })?,
-    )
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse reverse broker submission lookup".to_string()),
-        )
-    })
-}
-
-pub fn reverse_broker_artifact(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
-    let broker_url = reverse_broker_url(runner_id)?;
-    let artifact_id = homeboy_core::execution_contract::encode_uri_component(artifact_id);
-    let client = broker_client("build broker artifact client")?;
-    broker_http::get_json(
-        &client,
-        &broker_url,
-        &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}"),
-        "lookup reverse runner broker artifact",
-        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
-    )
-}
-
-/// Fetch bytes that a reverse runner mirrored into its terminal job result.
-/// Callers must still validate the returned content against durable metadata.
-pub fn reverse_broker_artifact_content(
-    runner_id: &str,
-    job_id: &str,
-    artifact_id: &str,
-) -> Result<Value> {
-    let broker_url = reverse_broker_url(runner_id)?;
-    reverse_broker_artifact_content_at(&broker_url, runner_id, job_id, artifact_id)
-}
-
-/// Fetch terminal artifact bytes from an already-authorized reverse broker.
-/// Terminal reconciliation receives this endpoint directly, so it must not
-/// depend on a still-live runner session lookup.
-pub(crate) fn reverse_broker_artifact_content_at(
-    broker_url: &str,
-    runner_id: &str,
-    job_id: &str,
-    artifact_id: &str,
-) -> Result<Value> {
-    let artifact_id = homeboy_core::execution_contract::encode_uri_component(artifact_id);
-    let client = broker_client("build broker artifact content client")?;
-    broker_http::get_json(
-        &client,
-        broker_url,
-        &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
-        "fetch reverse runner broker artifact content",
-        broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
-    )
-}
-
 /// Retrieve terminal job artifact bytes through the runner's active managed
-/// transport. Direct sessions read the daemon's persisted job result; reverse
-/// sessions use the broker content endpoint.
+/// transport. Direct sessions read the daemon's persisted job result.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
     if super::generation_store::job_session(runner_id, job_id)?.is_none()
         && super::generation_store::has_retired_evidence_owner(runner_id, None, Some(artifact_id))?
@@ -3967,31 +3560,15 @@ pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str)
         Some(artifact_id),
     )?
     .unwrap_or(current_session);
-    match artifact_content_transport(&session)? {
-        RunnerArtifactContentTransport::DirectDaemon => {
-            direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)
-        }
-        RunnerArtifactContentTransport::ReverseBroker => {
-            reverse_broker_artifact_content(runner_id, job_id, artifact_id)
-        }
+    ensure_artifact_content_endpoint(&session)?;
+    direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)
+}
+
+fn ensure_artifact_content_endpoint(session: &RunnerSession) -> Result<()> {
+    if session.local_url.is_some() {
+        return Ok(());
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RunnerArtifactContentTransport {
-    DirectDaemon,
-    ReverseBroker,
-}
-
-fn artifact_content_transport(session: &RunnerSession) -> Result<RunnerArtifactContentTransport> {
-    match session.mode {
-        RunnerTunnelMode::DirectSsh if session.local_url.is_some() => {
-            Ok(RunnerArtifactContentTransport::DirectDaemon)
-        }
-        RunnerTunnelMode::Reverse if session.broker_url.is_some() => {
-            Ok(RunnerArtifactContentTransport::ReverseBroker)
-        }
-        RunnerTunnelMode::DirectSsh => Err(Error::validation_invalid_argument(
+    Err(Error::validation_invalid_argument(
             "runner_id",
             format!(
                 "direct runner `{}` has no managed daemon endpoint for artifact retrieval",
@@ -4002,20 +3579,7 @@ fn artifact_content_transport(session: &RunnerSession) -> Result<RunnerArtifactC
                 "Reconnect the direct runner so its local daemon URL is available, then retry the review or promotion."
                     .to_string(),
             ]),
-        )),
-        RunnerTunnelMode::Reverse => Err(Error::validation_invalid_argument(
-            "runner_id",
-            format!(
-                "reverse runner `{}` has no broker endpoint for artifact retrieval",
-                session.runner_id
-            ),
-            Some(session.runner_id.clone()),
-            Some(vec![
-                "Reconnect the reverse runner with its broker URL, then retry the review or promotion."
-                    .to_string(),
-            ]),
-        )),
-    }
+        ))
 }
 
 fn direct_daemon_job_artifact_content(
@@ -4082,83 +3646,8 @@ fn direct_daemon_job_artifact_content(
     }))
 }
 
-fn reverse_broker_url(runner_id: &str) -> Result<String> {
-    let report = status(runner_id)?;
-    let Some(session) = report.session.filter(|_| report.connected) else {
-        return Err(Error::validation_invalid_argument(
-            "runner_id",
-            format!("runner `{runner_id}` is not connected"),
-            Some(runner_id.to_string()),
-            None,
-        ));
-    };
-    if session.mode != RunnerTunnelMode::Reverse {
-        return Err(Error::validation_invalid_argument(
-            "runner_id",
-            format!("runner `{runner_id}` is not reverse-connected"),
-            Some(runner_id.to_string()),
-            Some(vec![
-                "Broker job wrappers require a reverse runner session.".to_string(),
-            ]),
-        ));
-    }
-    session.broker_url.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner_id",
-            format!("reverse runner `{runner_id}` has no broker URL"),
-            Some(runner_id.to_string()),
-            Some(vec![
-                "Reconnect with `homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>`.".to_string(),
-            ]),
-        )
-    })
-}
-
-fn broker_client(action: &str) -> Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|err| Error::internal_unexpected(format!("{action}: {err}")))
-}
-
 pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<String, String> {
     daemon_http_identity(local_url)
-}
-
-/// A connected reverse session has no controller-side identity probe.
-///
-/// The direct-SSH path reads the runner's configured binary over SSH; a reverse
-/// runner is reached only through the broker, which exposes no equivalent
-/// identity endpoint today. Reporting `None` here meant "no warning", which
-/// every consumer reads as healthy — so a reverse lab running an arbitrarily
-/// old binary stayed fully eligible with nothing ever checked (#11106).
-///
-/// This names the gap instead. It performs no probing: the verdict is derived
-/// entirely from the session record already in hand, so it adds no request to
-/// the probe budget (#11080). When the broker grows an identity endpoint, this
-/// becomes a real comparison and the `Unavailable` verdict disappears on its
-/// own.
-fn tunnel_verification_gap(
-    runner: &Runner,
-    session: &RunnerSession,
-) -> Option<RunnerStaleDaemonWarning> {
-    if session.mode != RunnerTunnelMode::Reverse {
-        return None;
-    }
-    let reported = session
-        .homeboy_build_identity
-        .as_deref()
-        .unwrap_or(&session.homeboy_version);
-    Some(RunnerStaleDaemonWarning::verification_unavailable(
-        &runner.id,
-        session.homeboy_version.clone(),
-        session.homeboy_build_identity.clone(),
-        REVERSE_UNVERIFIED_REASON,
-        format!(
-            "reverse-connected runner `{}` reports `{reported}`, but this controller has no path to verify it: the identity probe runs over SSH and a reverse session is reached through the broker. Its daemon compatibility is UNVERIFIED — not proven fresh and not proven stale. Confirm it out of band with `homeboy runner doctor {} --scope lab-offload`.",
-            runner.id, runner.id,
-        ),
-    ))
 }
 
 fn stale_daemon_warning_until(
@@ -4173,12 +3662,7 @@ fn stale_daemon_warning_until(
     let Some(session) = session else {
         return Ok((None, None));
     };
-    // The verification gap is a property of the tunnel, not of the runner
-    // transport kind, so it is decided before the SSH-only probe path below.
-    if let Some(gap) = tunnel_verification_gap(runner, session) {
-        return Ok((Some(gap), None));
-    }
-    if runner.kind != RunnerKind::Ssh || session.mode != RunnerTunnelMode::DirectSsh {
+    if runner.kind != RunnerKind::Ssh {
         return Ok((None, None));
     }
     let homeboy = remote_runner_homeboy_path(runner, "runner status stale-daemon diagnostics")?;
@@ -4302,9 +3786,6 @@ fn reconcile_session_metadata_with_observed_daemon(
     let Some(current_session) = session.as_mut() else {
         return Ok(());
     };
-    if current_session.mode != RunnerTunnelMode::DirectSsh {
-        return Ok(());
-    }
     let Some(local_url) = current_session.local_url.as_deref() else {
         return Ok(());
     };

@@ -529,14 +529,12 @@ impl AgentTaskRunRecord {
     /// ownership or producing durable work. A leftover `runner_job_id` is not
     /// ownership once the runner's live-job view is authoritatively idle.
     pub(crate) fn is_ownerless_zero_artifact_queued_runner_record(&self) -> bool {
-        let now = chrono::Utc::now();
         self.state == AgentTaskRunState::Queued
             && self.runner_id().is_some()
             && self.runner_job_id().is_some()
             && self.lab_handoff.is_none()
             && self.local_owner_liveness() == LocalOwnerLiveness::Absent
             && !self.has_planned_runner_execution()
-            && !super::has_live_pending_runner_submission_intent(self, now)
             && !self.has_live_execution_step_owner()
             && self.aggregate_path.is_none()
             && self.totals.is_none()
@@ -655,15 +653,6 @@ impl AgentTaskRunRecord {
         // arrives later, so do not classify that intentional interval as an
         // ownerless runner.
         if self.has_live_execution_step_owner() {
-            return;
-        }
-
-        // A reverse-broker job may begin before the daemon's accepted job/PID
-        // projection arrives. Its complete, unexpired submission intent remains
-        // the authoritative owner during that narrow handoff window.
-        // Its PID belongs to the runner host, so this controller cannot use a
-        // local PID probe to disprove that ownership.
-        if super::has_live_pending_runner_submission_intent(self, chrono::Utc::now()) {
             return;
         }
 

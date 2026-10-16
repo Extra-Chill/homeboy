@@ -106,7 +106,7 @@ mod tests {
         Arc,
     };
 
-    use homeboy_core::api_jobs::{Job, RunnerJobLogSnapshot};
+    use homeboy_core::api_jobs::RunnerJobLogSnapshot;
     use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
     use serde_json::json;
 
@@ -144,14 +144,6 @@ mod tests {
             _command: &[String],
             _run_id: &str,
         ) -> homeboy_core::Result<i32> {
-            Err(homeboy_core::Error::internal_unexpected("not used"))
-        }
-
-        fn submit_runner_api_request(
-            &self,
-            _runner_id: &str,
-            _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-        ) -> homeboy_core::Result<Job> {
             Err(homeboy_core::Error::internal_unexpected("not used"))
         }
     }

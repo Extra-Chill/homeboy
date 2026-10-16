@@ -10,12 +10,10 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
-use homeboy_core::api_jobs::{
-    Job, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup,
-};
+use homeboy_core::api_jobs::{JobEventKind, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::Once;
 
 /// Register the runner-continuation provider reset as a hermetic-home cache-reset
 /// hook exactly once. Every `with_isolated_home` setup then clears any provider a
@@ -54,75 +52,7 @@ pub(super) fn fake_controller_artifact(
     )
 }
 
-#[derive(Clone)]
-pub(super) struct IntentReplayProvider {
-    store: JobStore,
-    submitted: Arc<Mutex<Vec<uuid::Uuid>>>,
-    lookups: Arc<Mutex<Vec<String>>>,
-    fail_after_accept_once: Arc<Mutex<bool>>,
-}
-
-impl RunnerContinuationProvider for IntentReplayProvider {
-    fn runner_job_log_snapshot(
-        &self,
-        _runner_id: &str,
-        _job_id: &str,
-    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
-        Err(Error::internal_unexpected(
-            "not used by submission reconciliation",
-        ))
-    }
-
-    fn is_runner_connected(&self, _runner_id: &str) -> bool {
-        true
-    }
-    fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
-        RunnerAuthority::Configured
-    }
-
-    fn run_continuation_exec(
-        &self,
-        _runner_id: &str,
-        _cwd: &str,
-        _command: &[String],
-        _run_id: &str,
-    ) -> Result<i32> {
-        Err(Error::internal_unexpected(
-            "not used by submission reconciliation",
-        ))
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        let job = self.store.submit_runner_api_request(submission)?;
-        self.submitted.lock().expect("submission log").push(job.id);
-        let mut fail = self.fail_after_accept_once.lock().expect("fault flag");
-        if std::mem::take(&mut *fail) {
-            return Err(Error::internal_unexpected(
-                "injected post-accept pre-ack crash",
-            ));
-        }
-        Ok(job)
-    }
-
-    fn lookup_reverse_broker_submission(
-        &self,
-        _runner_id: &str,
-        submission_key: &str,
-    ) -> Result<RemoteRunnerSubmissionLookup> {
-        self.lookups
-            .lock()
-            .expect("lookup log")
-            .push(submission_key.to_string());
-        Ok(self.store.lookup_remote_runner_submission(submission_key))
-    }
-}
-
-/// The exact Runner API request a detached handoff persists as its replay
-/// input (`replay_envelope_request`) before it crosses the broker.
+/// Runner API submission fixture for an accepted runner job.
 pub(crate) fn runner_api_submission(
     request: RemoteRunnerJobRequest,
 ) -> homeboy_runner_contract::RunnerApiSubmitRequest {
@@ -199,14 +129,6 @@ impl RunnerContinuationProvider for ConnectedRunnerProvider {
         Err(Error::internal_unexpected(
             "no runner continuation exec in test",
         ))
-    }
-
-    fn submit_runner_api_request(
-        &self,
-        _runner_id: &str,
-        _submission: homeboy_runner_contract::RunnerApiSubmitRequest,
-    ) -> Result<Job> {
-        Err(Error::internal_unexpected("no reverse broker job in test"))
     }
 }
 

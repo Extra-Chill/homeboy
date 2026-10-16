@@ -9,8 +9,7 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerActiveJobState, RunnerSession, RunnerStatusReport,
-    RunnerTunnelMode, RuntimeMaterializationStatus,
+    self as runner, Runner, RunnerActiveJobState, RunnerStatusReport, RuntimeMaterializationStatus,
 };
 use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::RunnerKind;
@@ -1949,9 +1948,9 @@ fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFol
 }
 
 pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
-    let Some(session) = report.session.as_ref().filter(|_| report.connected) else {
+    if report.session.is_none() || !report.connected {
         return Vec::new();
-    };
+    }
     let mut hints = Vec::new();
     if report.active_job_state == RunnerActiveJobState::Unavailable {
         let reason = report
@@ -2005,56 +2004,13 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             ));
         }
     }
-    match session.mode {
-        RunnerTunnelMode::DirectSsh => {
-            if report.active_job_count > 0 {
-                hints.push(format!(
-                    "Active daemon jobs block recovery for `{}`. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active` before inspecting or cancelling a known job.",
-                    report.runner_id, report.runner_id
-                ));
-            }
-        }
-        RunnerTunnelMode::Reverse => reverse_runner_status_hints(report, session, &mut hints),
-    }
-    hints
-}
-
-fn reverse_runner_status_hints(
-    report: &RunnerStatusReport,
-    session: &RunnerSession,
-    hints: &mut Vec<String>,
-) {
-    if terminal_daemon_ownership_blocks_mutation(report) {
-        if session.broker_url.is_none() {
-            hints.push(format!(
-                "Reverse runner `{}` has no broker URL. Inspect the persisted session and daemon ownership evidence before any lifecycle action.",
-                report.runner_id
-            ));
-        } else {
-            hints.push(format!(
-                "Reverse runner `{}` has a broker-backed job view. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active`.",
-                report.runner_id, report.runner_id
-            ));
-        }
-        return;
-    }
-    if session.broker_url.is_none() {
-        hints.push(format!(
-            "Reverse runner `{}` has no broker URL; active-job listing, logs, and cancel require reconnecting with `homeboy runner connect <controller-id> --reverse --reverse-runner {} --broker-url <url>`.",
-            report.runner_id, report.runner_id
-        ));
-        return;
-    }
-    hints.push(format!(
-        "Reverse runner `{}` has a broker-backed job view. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active`.",
-        report.runner_id, report.runner_id
-    ));
     if report.active_job_count > 0 {
         hints.push(format!(
-            "Cancel known reverse broker jobs with `homeboy runner job cancel {} <job-id>`; if a claim lease expires, reconcile broker state with `homeboy runner job reconcile {}` instead of mutating the job store manually.",
+            "Active daemon jobs block recovery for `{}`. List authoritative live jobs and retained durable projections with `homeboy runner job list {} --active` before inspecting or cancelling a known job.",
             report.runner_id, report.runner_id
         ));
     }
+    hints
 }
 
 pub(super) fn runner_status_operator_commands(
@@ -2070,9 +2026,9 @@ fn runner_status_operator_commands_with_recovery_guidance(
     report: &RunnerStatusReport,
     guidance: RecoveryRefreshGuidance,
 ) -> Vec<RunnerOperatorCommand> {
-    let Some(session) = report.session.as_ref() else {
+    if report.session.is_none() {
         return Vec::new();
-    };
+    }
 
     if authoritative_idle_active_job_projection(report) && report.stale_daemon.is_some() {
         if let Some(command) =
@@ -2179,35 +2135,7 @@ fn runner_status_operator_commands_with_recovery_guidance(
         }
     }
 
-    if session.mode == RunnerTunnelMode::Reverse && session.broker_url.is_some() {
-        commands.push(RunnerOperatorCommand {
-            scope: "broker_reconcile",
-            runner_id: report.runner_id.clone(),
-            job_id: None,
-            command: format!(
-                "homeboy runner job reconcile {}",
-                shell_arg(&report.runner_id)
-            ),
-            description:
-                "Fail expired reverse-runner claims through the broker-owned lifecycle path."
-                    .to_string(),
-        });
-        for job in &report.active_runner_jobs {
-            commands.push(RunnerOperatorCommand {
-                scope: "broker_artifact_lookup",
-                runner_id: report.runner_id.clone(),
-                job_id: Some(job.job_id.clone()),
-                command: format!(
-                    "homeboy runner job artifacts {} {} <artifact-id>",
-                    shell_arg(&report.runner_id),
-                    shell_arg(&job.job_id)
-                ),
-                description: "Inspect broker-held reverse-runner artifact metadata.".to_string(),
-            });
-        }
-    }
-
-    if session.mode == RunnerTunnelMode::DirectSsh && report.connected {
+    if report.connected {
         commands.push(RunnerOperatorCommand {
             scope: "generation_reconcile",
             runner_id: report.runner_id.clone(),
@@ -2278,7 +2206,6 @@ fn is_terminal_ownership_mutating_command(command: &RunnerOperatorCommand) -> bo
         "unknown_owner_reconcile"
             | "agent_task_retry"
             | "job_cancel"
-            | "broker_reconcile"
             | "generation_reconcile"
             | "daemon_refresh"
             | "daemon_reconcile_split_view"
@@ -2289,7 +2216,7 @@ fn is_terminal_ownership_mutating_command(command: &RunnerOperatorCommand) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::runner::runners::{RunnerSessionState, RunnerTunnelMode};
+    use homeboy::runner::runners::{RunnerSession, RunnerSessionState, RunnerTunnelMode};
     use homeboy::runner::{RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning};
 
     #[test]

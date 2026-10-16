@@ -23,7 +23,6 @@ The daemon owns a loopback-only HTTP contract for:
 
 Reverse runner broker routes add a private controller/runner job exchange:
 
-- `POST /runner/sessions` for runner-initiated session registration
 - `POST /runner/jobs` for the controller to enqueue work
 - `POST /runner/jobs/claim` for a reverse runner to claim queued work
 - `POST /runner/jobs/:id/events` for runner progress events
@@ -71,7 +70,6 @@ VPS systemd service
 private tunnel / private network only
           |
 Runner machine
-  POST /runner/sessions
   POST /runner/jobs/claim
   POST /runner/jobs/:id/events
   POST /runner/jobs/:id/finish

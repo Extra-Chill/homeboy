@@ -23,7 +23,7 @@ pub(crate) struct LabAtFileSpec {
 
 impl LabAtFileSpec {
     /// Attempt plans can contain provider inputs and must remain owner-readable
-    /// while waiting in the durable reverse queue.
+    /// while waiting for durable runner admission.
     pub(crate) fn require_private(&mut self) {
         self.private = true;
         let filename = self

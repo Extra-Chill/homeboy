@@ -544,8 +544,7 @@ fn runtime_version_is_newer(candidate: &str, current: &str) -> bool {
 /// The command binary is authoritative: it must positively match `requested`,
 /// so a stale/mismatched binary fails closed (the intent of #9626). The daemon
 /// identity is advisory — it is legitimately unreported (`None`) when a
-/// controller-owned handoff runs before any daemon has attached (e.g. the
-/// in-process reverse-cook path). An absent daemon identity must NOT block
+/// controller-owned handoff runs before any daemon has attached. An absent daemon identity must NOT block
 /// admission; only a daemon that is present AND positively disagrees with
 /// `requested` indicates a stale runtime worth refusing.
 fn handoff_identities_match(
@@ -1775,8 +1774,6 @@ struct DurableLabDispatchReceipt {
     daemon_lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reservation_job_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reverse_submission_key: Option<String>,
     runner_job_id: String,
     remote_workspace: String,
     remote_command: Vec<String>,
@@ -1822,43 +1819,28 @@ impl DurableLabDispatchReceipt {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
-        let authority_valid = match request.recipe.tunnel_mode {
-            crate::RunnerTunnelMode::DirectSsh => {
-                let live_admission = self
-                    .daemon_lease_id
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-                    && self
-                        .reservation_job_id
-                        .as_deref()
-                        .is_some_and(|value| !value.is_empty());
-                let recovered_admission =
-                    if self.daemon_lease_id.is_none() && self.reservation_job_id.is_none() {
-                        homeboy_agents::agent_task_lifecycle::accepted_lab_runner_job_identity(
-                            &request.recipe.run_id,
-                        )?
-                        .is_some_and(|identity| {
-                            identity.run_id == request.recipe.run_id
-                                && identity.runner_id == request.recipe.runner_id
-                                && identity.runner_job_id == self.runner_job_id
-                        })
-                    } else {
-                        false
-                    };
-                (live_admission || recovered_admission) && self.reverse_submission_key.is_none()
-            }
-            crate::RunnerTunnelMode::Reverse => {
-                self.daemon_lease_id.is_none()
-                    && self.reservation_job_id.is_none()
-                    && self.reverse_submission_key.as_deref().is_some_and(|value| {
-                        value
-                            == crate::execution::reverse_broker_submission_key(
-                                &request.recipe.runner_id,
-                                &request.recipe.run_id,
-                            )
-                    })
-            }
-        };
+        let live_admission = self
+            .daemon_lease_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && self
+                .reservation_job_id
+                .as_deref()
+                .is_some_and(|value| !value.is_empty());
+        let recovered_admission =
+            if self.daemon_lease_id.is_none() && self.reservation_job_id.is_none() {
+                homeboy_agents::agent_task_lifecycle::accepted_lab_runner_job_identity(
+                    &request.recipe.run_id,
+                )?
+                .is_some_and(|identity| {
+                    identity.run_id == request.recipe.run_id
+                        && identity.runner_id == request.recipe.runner_id
+                        && identity.runner_job_id == self.runner_job_id
+                })
+            } else {
+                false
+            };
+        let authority_valid = live_admission || recovered_admission;
         if self.schema != "homeboy/durable-lab-dispatch-receipt/v1"
             || self.run_id != request.recipe.run_id
             || self.runner_id != request.recipe.runner_id
@@ -3082,14 +3064,6 @@ impl ProductionLabStagingOperations {
             // accepted lifecycle identity is the recovery authority.
             daemon_lease_id: None,
             reservation_job_id: None,
-            reverse_submission_key: (request.recipe.tunnel_mode
-                == crate::RunnerTunnelMode::Reverse)
-                .then(|| {
-                    crate::execution::reverse_broker_submission_key(
-                        &request.recipe.runner_id,
-                        &request.recipe.run_id,
-                    )
-                }),
             runner_job_id: identity.runner_job_id,
             remote_workspace: workspace.payload.remote_cwd,
             remote_command,
@@ -3139,14 +3113,6 @@ impl ProductionLabStagingOperations {
                 None,
             ));
         }
-        if session.mode == crate::RunnerTunnelMode::Reverse && session.broker_url.is_none() {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "durable reverse Lab staging requires its accepted broker endpoint",
-                Some(request.recipe.runner_id.clone()),
-                None,
-            ));
-        }
         Ok(status)
     }
 
@@ -3155,78 +3121,18 @@ impl ProductionLabStagingOperations {
         runner_job_id: &str,
         cancellation: Option<&LabStagingCancellationToken>,
     ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
-        if request.recipe.tunnel_mode == crate::RunnerTunnelMode::DirectSsh {
-            // Same plan-derived budget and the same cancellation token as the
-            // reverse-broker branch below, so neither transport can outlive the
-            // agent-task lifecycle it is observing on behalf of.
-            let cancelled = || cancellation.is_some_and(LabStagingCancellationToken::is_cancelled);
-            let observed = crate::execution::observe_daemon_job_until_terminal(
-                &request.recipe.runner_id,
-                runner_job_id,
-                None,
-                staging_poll_budget(request),
-                &cancelled,
-            )?;
-            return Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                job: observed.job,
-                events: observed.events,
-            });
-        }
-        let broker_url = Self::status_for_recipe_transport(request)?
-            .session
-            .and_then(|session| session.broker_url)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "runner",
-                    "durable reverse Lab staging requires its accepted broker endpoint",
-                    Some(request.recipe.runner_id.clone()),
-                    None,
-                )
-            })?;
-        // A non-terminal job is polled until it settles, but never past the
-        // plan's own execution budget: a remote job that never reaches a
-        // terminal status would otherwise pin this controller worker forever.
-        let budget = staging_poll_budget(request);
-        let started = Instant::now();
-        let deadline = started + budget;
-        let mut backoff = LAB_STAGING_POLL_INITIAL_BACKOFF;
-        loop {
-            if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
-                return Err(Self::cancellation_error());
-            }
-            match crate::connection::reverse_broker_job_snapshot_at(
-                &broker_url,
-                &request.recipe.runner_id,
-                runner_job_id,
-            )
-            .map(|(job, events)| homeboy_core::api_jobs::RunnerJobLogSnapshot { job, events })
-            {
-                Ok(snapshot) if snapshot.job.status.is_terminal() => return Ok(snapshot),
-                Ok(_) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(staging_poll_deadline_error(
-                            "a terminal runner job status",
-                            runner_job_id,
-                            started.elapsed(),
-                            budget,
-                            None,
-                        ));
-                    }
-                    // Never sleep past the deadline, so the budget is honoured
-                    // to within one poll rather than one backoff interval.
-                    let interval = backoff.min(deadline - now);
-                    if sleep_unless_cancelled(interval, cancellation) {
-                        return Err(Self::cancellation_error());
-                    }
-                    backoff = next_staging_poll_backoff(backoff);
-                }
-                Err(mut error) => {
-                    error.retryable = error.retryable.or(Some(true));
-                    return Err(error);
-                }
-            }
-        }
+        let cancelled = || cancellation.is_some_and(LabStagingCancellationToken::is_cancelled);
+        let observed = crate::execution::observe_daemon_job_until_terminal(
+            &request.recipe.runner_id,
+            runner_job_id,
+            None,
+            staging_poll_budget(request),
+            &cancelled,
+        )?;
+        Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
+            job: observed.job,
+            events: observed.events,
+        })
     }
 
     fn ambiguous_intent(stage: &str) -> Error {
@@ -3899,37 +3805,24 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             )
         })?;
         Self::check_cancelled(cancellation)?;
-        let (admission, daemon_authority, reverse_submission_key) = match session.mode {
-            crate::RunnerTunnelMode::DirectSsh => {
-                let local_url = session.local_url.as_deref().ok_or_else(|| {
-                    Error::internal_unexpected("durable Lab dispatch has no daemon endpoint")
-                })?;
-                let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-                    Error::internal_unexpected("durable Lab dispatch has no daemon lease")
-                })?;
-                let admission = crate::execution::reserve_daemon_admission(
-                    &request.recipe.runner_id,
-                    local_url,
-                    "lab.staging-dispatch",
-                    lease_id,
-                    Some(&request.recipe.run_id),
-                    homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present(
-                        &request.recipe.run_id,
-                    )?,
-                )?;
-                let authority = admission.authority();
-                authority.prove_server_owned_expiry_or_cancellation_authority()?;
-                (Some(admission), Some(authority), None)
-            }
-            crate::RunnerTunnelMode::Reverse => (
-                None,
-                None,
-                Some(crate::execution::reverse_broker_submission_key(
-                    &request.recipe.runner_id,
-                    &request.recipe.run_id,
-                )),
-            ),
-        };
+        let local_url = session.local_url.as_deref().ok_or_else(|| {
+            Error::internal_unexpected("durable Lab dispatch has no daemon endpoint")
+        })?;
+        let lease_id = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+            Error::internal_unexpected("durable Lab dispatch has no daemon lease")
+        })?;
+        let admission = crate::execution::reserve_daemon_admission(
+            &request.recipe.runner_id,
+            local_url,
+            "lab.staging-dispatch",
+            lease_id,
+            Some(&request.recipe.run_id),
+            homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present(
+                &request.recipe.run_id,
+            )?,
+        )?;
+        let daemon_authority = admission.authority();
+        daemon_authority.prove_server_owned_expiry_or_cancellation_authority()?;
         // The immutable execution bundle exists only once admission is known,
         // and must precede env derivation so oversized provenance can be
         // staged by reference instead of failing in `child_provenance_env`.
@@ -3961,9 +3854,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 verified_build_identity: verified_build_identity.as_deref(),
                 dispatch_command: &dispatch_command,
             },
-            daemon_authority
-                .as_ref()
-                .map(|authority| (authority.daemon_lease_id(), authority.reservation_job_id())),
+            (
+                daemon_authority.daemon_lease_id(),
+                daemon_authority.reservation_job_id(),
+            ),
         );
         lab_metadata["execution_bundle"] = execution_bundle;
         let (secret_handoff, env) =
@@ -4018,8 +3912,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             },
             Some(runner_status),
         );
-        // Both daemon and broker submissions are idempotent on the immutable run
-        // id. A dropped response is reconciled from active durable-job state.
+        // Daemon submissions are idempotent on the immutable run id. A dropped response is reconciled from active durable-job state.
         let (runner_job_id, handoff_execution_evidence) = match submitted {
             Ok((output, _)) => {
                 let runner_job_id = output.job_id.clone().ok_or_else(|| {
@@ -4042,13 +3935,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 .map(|runner_job_id| (runner_job_id, None))
                 .ok_or(error)?,
         };
-        // Direct-daemon authority can expire while `/exec` is in flight. Reverse
-        // authority is the broker's durable submission-key record itself.
-        if let Some(authority) = daemon_authority.as_ref() {
-            if let Err(error) = authority.prove_server_owned_expiry_or_cancellation_authority() {
-                self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
-                return Err(error);
-            }
+        // Direct-daemon authority can expire while `/exec` is in flight.
+        if let Err(error) = daemon_authority.prove_server_owned_expiry_or_cancellation_authority() {
+            self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
+            return Err(error);
         }
         if cancellation.is_cancelled() {
             self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
@@ -4073,13 +3963,8 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             workspace_attachment_digest: workspace.payload_digest,
             runtime_attachment_digest: runtime.payload_digest,
             hydration_attachment_digest: hydration.payload_digest,
-            daemon_lease_id: daemon_authority
-                .as_ref()
-                .map(|authority| authority.daemon_lease_id().to_string()),
-            reservation_job_id: daemon_authority
-                .as_ref()
-                .map(|authority| authority.reservation_job_id().to_string()),
-            reverse_submission_key,
+            daemon_lease_id: Some(daemon_authority.daemon_lease_id().to_string()),
+            reservation_job_id: Some(daemon_authority.reservation_job_id().to_string()),
             runner_job_id: runner_job_id.clone(),
             remote_workspace: workspace.payload.remote_cwd,
             remote_command: command,
@@ -4266,14 +4151,14 @@ struct DurableBundleExecutable<'a> {
 }
 
 /// Build the immutable execution bundle from durable stage facts and the
-/// resolved admission. `daemon` is `None` for reverse-broker authority.
+/// resolved direct-daemon admission `(daemon_lease_id, reservation_job_id)`.
 fn durable_execution_bundle(
     request: &LabStagingExecutionRequest,
     remote_cwd: &str,
     runtime_output: &Value,
     lab_metadata: &Value,
     executable: DurableBundleExecutable<'_>,
-    daemon: Option<(&str, &str)>,
+    daemon: (&str, &str),
 ) -> Value {
     let runtime_field = |name: &str| runtime_output.get(name).cloned().unwrap_or(Value::Null);
     let runtime_str = |name: &str| {
@@ -4286,8 +4171,8 @@ fn durable_execution_bundle(
         homeboy_path: executable.homeboy_path,
         verified_build_identity: executable.verified_build_identity,
         remote_cwd,
-        daemon_lease_id: daemon.map(|(lease_id, _)| lease_id),
-        reservation_job_id: daemon.map(|(_, job_id)| job_id),
+        daemon_lease_id: daemon.0,
+        reservation_job_id: daemon.1,
         rig_registry_root: runtime_str("rig_registry_root"),
         rigs: runtime_field("synced_rigs"),
         extensions: runtime_field("extension_overlays"),
@@ -6322,7 +6207,6 @@ mod tests {
                     hydration_attachment_digest: "hydration".to_string(),
                     daemon_lease_id: Some("fixture-lease".to_string()),
                     reservation_job_id: Some("fixture-reservation".to_string()),
-                    reverse_submission_key: None,
                     runner_job_id: "terminal-job".to_string(),
                     remote_workspace: "/runner/fixture".to_string(),
                     remote_command: vec!["homeboy".to_string()],
@@ -7014,8 +6898,8 @@ mod tests {
 
     #[test]
     fn handoff_admitted_when_command_matches_and_daemon_identity_unavailable() {
-        // Regression for #9626: a controller-owned handoff (e.g. the in-process
-        // reverse-cook path) runs before any daemon has attached, so the daemon
+        // Regression for #9626: a controller-owned handoff can run before any
+        // daemon has attached, so the daemon
         // build identity is legitimately unreported. Admission must still proceed
         // as long as the command binary positively matches the required build.
         assert!(handoff_identities_match(
@@ -8202,7 +8086,6 @@ mod tests {
             hydration_attachment_digest: "sha256:hydration".to_string(),
             daemon_lease_id: Some("lease-1".to_string()),
             reservation_job_id: Some("reservation-1".to_string()),
-            reverse_submission_key: None,
             runner_job_id: "runner-job-1".to_string(),
             remote_workspace: "/runner/workspace".to_string(),
             remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
@@ -8331,47 +8214,7 @@ mod tests {
             assert_eq!(receipt.payload.runner_job_id, "runner-job-accepted");
             assert!(receipt.payload.daemon_lease_id.is_none());
             assert!(receipt.payload.reservation_job_id.is_none());
-            assert!(receipt.payload.reverse_submission_key.is_none());
         });
-    }
-
-    #[test]
-    fn reverse_dispatch_receipt_requires_the_bound_broker_submission_key() {
-        let mut request = execution_request();
-        request.recipe.tunnel_mode = crate::RunnerTunnelMode::Reverse;
-        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-        checkpoint.phase = LabStagingPhase::ObserveRunner;
-        checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
-        checkpoint.workspace_id = Some("workspace-1".to_string());
-        checkpoint.runtime_id = Some("runtime-1".to_string());
-        checkpoint.hydration_id = Some("hydration-1".to_string());
-        checkpoint.final_runner_job_id = Some("runner-job-1".to_string());
-        let mut receipt = DurableLabDispatchReceipt {
-            schema: "homeboy/durable-lab-dispatch-receipt/v1".to_string(),
-            run_id: request.recipe.run_id.clone(),
-            runner_id: request.recipe.runner_id.clone(),
-            recipe_digest: canonical_digest(&request.recipe).expect("digest"),
-            workspace_attachment_digest: "sha256:workspace".to_string(),
-            runtime_attachment_digest: "sha256:runtime".to_string(),
-            hydration_attachment_digest: "sha256:hydration".to_string(),
-            daemon_lease_id: None,
-            reservation_job_id: None,
-            reverse_submission_key: Some(crate::execution::reverse_broker_submission_key(
-                &request.recipe.runner_id,
-                &request.recipe.run_id,
-            )),
-            runner_job_id: "runner-job-1".to_string(),
-            remote_workspace: "/runner/workspace".to_string(),
-            remote_command: vec!["homeboy".to_string(), "agent-task".to_string()],
-            workload_identity: "sha256:workload".to_string(),
-            homeboy_handoff_execution_evidence: None,
-        };
-
-        receipt
-            .validate(&request, &checkpoint)
-            .expect("reverse receipt");
-        receipt.reverse_submission_key = Some("wrong-key".to_string());
-        assert!(receipt.validate(&request, &checkpoint).is_err());
     }
 
     #[test]
@@ -8843,7 +8686,7 @@ mod tests {
     /// pushes `HOMEBOY_LAB_OFFLOAD_METADATA` past the inline env budget.
     fn oversized_durable_dispatch_inputs(
         remote_cwd: &str,
-        lease: Option<(&str, &str)>,
+        lease: (&str, &str),
         build_identity: Option<&str>,
     ) -> (LabStagingExecutionRequest, Value, Vec<String>) {
         let request = execution_request();
@@ -8894,7 +8737,7 @@ mod tests {
             let identity = homeboy_core::build_identity::current().display;
             let (request, lab_metadata, dispatch_command) = oversized_durable_dispatch_inputs(
                 &remote_cwd,
-                Some(("lease-1", "reservation-1")),
+                ("lease-1", "reservation-1"),
                 Some(&identity),
             );
 
@@ -8922,7 +8765,7 @@ mod tests {
         let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let (request, mut lab_metadata, _) =
-                oversized_durable_dispatch_inputs("/runner/ws", None, None);
+                oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
             // The pre-fix durable dispatch never published a bundle.
             lab_metadata
                 .as_object_mut()
@@ -8945,14 +8788,10 @@ mod tests {
         let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
             let (request, lab_metadata, _) =
-                oversized_durable_dispatch_inputs("/runner/ws", None, None);
+                oversized_durable_dispatch_inputs("/runner/ws", ("lease-1", "reservation-1"), None);
             let (_, env) = durable_dispatch_env(&request, &lab_metadata, Vec::new(), &json!({}))
                 .expect("durable env");
 
-            assert_eq!(
-                lab_metadata["execution_bundle"]["admission"]["authority"],
-                "reverse_broker"
-            );
             let error = crate::execution::child_provenance_env(env, "{}".to_string())
                 .expect_err("an identity must never be invented");
             assert!(error
@@ -8965,8 +8804,11 @@ mod tests {
     fn durable_dispatch_bundle_beats_job_override_authority() {
         let _serial = global_state_lock().lock().expect("lock");
         homeboy_core::test_support::with_isolated_home(|_| {
-            let (mut request, lab_metadata, _) =
-                oversized_durable_dispatch_inputs("/runner/ws", None, Some("homeboy 1.0.0"));
+            let (mut request, lab_metadata, _) = oversized_durable_dispatch_inputs(
+                "/runner/ws",
+                ("lease-1", "reservation-1"),
+                Some("homeboy 1.0.0"),
+            );
             request.recipe.job_override_env = HashMap::from([
                 ("HOMEBOY_COMMAND".to_string(), "/tmp/evil".to_string()),
                 (

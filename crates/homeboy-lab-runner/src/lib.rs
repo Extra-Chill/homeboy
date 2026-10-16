@@ -42,7 +42,6 @@ pub use cli_resolver::{
 mod command_path;
 mod connection;
 mod continuation_provider;
-mod control_plane_client;
 pub mod controller_fallback_projection;
 mod controller_identity;
 mod daemon_exec_driver;
@@ -352,16 +351,14 @@ pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::set_homeboy_command_selection;
 pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
-    close_reconnected_job_log_owner, connect, connect_reverse, connect_with_live_lease_adoption,
+    close_reconnected_job_log_owner, connect, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
     diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_outcome, reconcile_status_with_outcome_with_policy,
     reconcile_status_with_outcome_with_remote_attestation, reconcile_terminal_jobs,
-    reconnect_job_log_owner, remote_lifecycle_plan, reverse_broker_artifact,
-    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content, status,
-    statuses, statuses_indexed, submit_runner_api_request, PeerSessionMaintenanceReport,
-    RunnerReconcileWithAttestationOutcome,
+    reconnect_job_log_owner, remote_lifecycle_plan, runner_artifact_content, status, statuses,
+    statuses_indexed, PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
@@ -458,16 +455,16 @@ pub use runner_staging_store::{
 };
 pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializationStatus};
 pub use session::{
-    LabRunnerHandoff, ReverseRunnerConnectOptions, RunnerActiveJobError, RunnerActiveJobSource,
-    RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef,
-    RunnerAvailability, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDaemonLeaseVerdict, RunnerDaemonVerification,
-    RunnerDisconnectReport, RunnerFailureKind, RunnerGenerationJobOwners, RunnerJob,
-    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
-    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
-    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
-    RunnerUnresolvedJobOwner, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
+    LabRunnerHandoff, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
+    RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef, RunnerAvailability,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDaemonGenerationStatus,
+    RunnerDaemonLeaseVerdict, RunnerDaemonVerification, RunnerDisconnectReport, RunnerFailureKind,
+    RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
+    RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
+    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
 pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
@@ -947,13 +944,8 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
             let status = status(&runner.id).ok()?;
             let capabilities_ready = runner_capability_inventory(&runner.id)
                 .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-            let mode = status
-                .session
-                .as_ref()
-                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
             Some(lab_runner_admission_candidate(
                 &runner.id,
-                mode,
                 runner.settings.concurrency_limit,
                 &status,
                 capabilities_ready,
@@ -973,13 +965,8 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
 pub fn runner_readiness_repair_admitted(runner_id: &str) -> Result<bool> {
     let runner = load(runner_id)?;
     let status = status(runner_id)?;
-    let mode = status
-        .session
-        .as_ref()
-        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
     let candidate = lab_runner_admission_candidate(
         runner_id,
-        mode,
         runner.settings.concurrency_limit,
         &status,
         false,
@@ -1022,13 +1009,8 @@ pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerRe
     let capabilities_ready = !runner_capability_inventory(runner_id)?
         .runtime_ids
         .is_empty();
-    let mode = status
-        .session
-        .as_ref()
-        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
     let candidate = lab_runner_admission_candidate(
         runner_id,
-        mode,
         runner.settings.concurrency_limit,
         &status,
         capabilities_ready,
@@ -1050,13 +1032,8 @@ fn observe_lab_runner_admission_candidate(
     let capabilities_ready = !runner_capability_inventory_until(runner_id, deadline)?
         .runtime_ids
         .is_empty();
-    let mode = status
-        .session
-        .as_ref()
-        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
     Ok(lab_runner_admission_candidate(
         runner_id,
-        mode,
         runner.settings.concurrency_limit,
         &status,
         capabilities_ready,
@@ -1066,40 +1043,17 @@ fn observe_lab_runner_admission_candidate(
 
 fn lab_runner_admission_candidate(
     runner_id: &str,
-    mode: RunnerTunnelMode,
     capacity: Option<usize>,
     status: &RunnerStatusReport,
     capabilities_ready: bool,
     exact_version: bool,
-) -> DefaultLabRunnerCandidate {
-    let submit_credential_ready =
-        mode != RunnerTunnelMode::Reverse || controller_has_submit_credential(runner_id);
-    lab_runner_admission_candidate_with_credential(
-        runner_id,
-        mode,
-        capacity,
-        status,
-        capabilities_ready,
-        exact_version,
-        submit_credential_ready,
-    )
-}
-
-fn lab_runner_admission_candidate_with_credential(
-    runner_id: &str,
-    mode: RunnerTunnelMode,
-    capacity: Option<usize>,
-    status: &RunnerStatusReport,
-    capabilities_ready: bool,
-    exact_version: bool,
-    submit_credential_ready: bool,
 ) -> DefaultLabRunnerCandidate {
     let lease_verdict = status.daemon_lease_verdict(None);
     // A freshness observation without a published generation identity cannot
     // prove that the observed daemon is the session's current generation. Keep
     // it unverified (not stale); `admission_fresh` still fences all work until
     // the lease is published and matched.
-    let unverified_daemon = !lease_verdict.lease_published || status.unverified_daemon().is_some();
+    let unverified_daemon = !lease_verdict.lease_published;
     let version_blocked = status.stale_daemon.is_none()
         && lab::offload::metadata::session_reported_version_blocks_admission(status);
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
@@ -1107,7 +1061,6 @@ fn lab_runner_admission_candidate_with_credential(
     });
     DefaultLabRunnerCandidate {
         id: runner_id.to_string(),
-        mode,
         connected: status.connected,
         capacity,
         stale_daemon: admission_warning.is_some() || version_blocked,
@@ -1128,16 +1081,7 @@ fn lab_runner_admission_candidate_with_credential(
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
         capabilities_ready,
-        submit_credential_ready,
     }
-}
-
-/// Whether this controller can authenticate submissions to `runner_id`'s
-/// reverse broker: an explicit `HOMEBOY_BROKER_TOKEN` or a paired, active
-/// submit credential with its controller-local token.
-fn controller_has_submit_credential(runner_id: &str) -> bool {
-    homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)
-        .is_ok_and(|token| token.is_some())
 }
 
 fn lab_runner_readiness_from_refresh_observations(
@@ -1180,86 +1124,6 @@ fn lab_runner_readiness_from_refresh_observations(
     ))
 }
 
-/// Reconcile the configured Lab inventory before admitting a detached Cook to a
-/// reverse runner's durable capacity queue. This is deliberately narrower than
-/// default selection: only a connected, healthy reverse runner at capacity can
-/// accept a broker-queued job without choosing controller-local execution.
-///
-/// `reconcile_status` owns bounded remote status reads and terminal-job
-/// settlement. Refreshing here prevents a stale controller projection from
-/// refusing work that a just-freed runner can accept.
-pub fn refresh_detached_queue_runner() -> Result<Option<String>> {
-    let mut runner_ids = configured_lab_runner_ids()?;
-    runner_ids.sort();
-
-    for runner_id in runner_ids.into_iter().take(DETACHED_QUEUE_REFRESH_LIMIT) {
-        let runner = load(&runner_id)?;
-        let status = connection::reconcile_status(&runner_id)?;
-        let mode = status
-            .session
-            .as_ref()
-            .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-        let capabilities_ready = runner_capability_inventory(&runner_id)
-            .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-        let candidate = lab_runner_admission_candidate(
-            &runner_id,
-            mode,
-            runner.settings.concurrency_limit,
-            &status,
-            capabilities_ready,
-            lab::offload::metadata::require_exact_runner_version(&runner.settings),
-        );
-        if let Some(runner_id) = detached_queue_runner_from_candidates([candidate]) {
-            return Ok(Some(runner_id));
-        }
-    }
-
-    Ok(None)
-}
-
-/// Reconcile and classify one explicitly pinned reverse runner for detached
-/// capacity admission. This never substitutes another configured runner.
-pub fn refresh_explicit_detached_queue_runner(runner_id: &str) -> Result<bool> {
-    let runner = load(runner_id)?;
-    let status = connection::reconcile_status(runner_id)?;
-    let mode = status
-        .session
-        .as_ref()
-        .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
-    let capabilities_ready = runner_capability_inventory(runner_id)
-        .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-    Ok(
-        detached_queue_runner_from_candidates([lab_runner_admission_candidate(
-            runner_id,
-            mode,
-            runner.settings.concurrency_limit,
-            &status,
-            capabilities_ready,
-            lab::offload::metadata::require_exact_runner_version(&runner.settings),
-        )])
-        .as_deref()
-            == Some(runner_id),
-    )
-}
-
-fn detached_queue_runner_from_candidates(
-    candidates: impl IntoIterator<Item = DefaultLabRunnerCandidate>,
-) -> Option<String> {
-    candidates.into_iter().find_map(|candidate| {
-        let at_capacity = candidate
-            .capacity
-            .is_some_and(|capacity| candidate.active_jobs >= capacity);
-        (candidate.mode == RunnerTunnelMode::Reverse
-            && candidate.connected
-            && !candidate.stale_daemon
-            && candidate.admission_fresh
-            && candidate.active_jobs_available
-            && candidate.capabilities_ready
-            && at_capacity)
-            .then_some(candidate.id)
-    })
-}
-
 fn lab_runner_readiness_from_candidates(
     preferred: Option<&str>,
     candidates: Vec<DefaultLabRunnerCandidate>,
@@ -1300,17 +1164,7 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::ConnectedIneligible | LabRunnerReadinessState::CapacityBlocked => {
             candidates
                 .iter()
-                .map(|candidate| {
-                    if candidate.submit_credential_ready {
-                        format!("homeboy runner status {}", candidate.id)
-                    } else {
-                        // Merges into the runner's store; see `runner broker pair`.
-                        format!(
-                            "homeboy runner broker pair <credential-id> --runner-id {} --submit",
-                            candidate.id
-                        )
-                    }
-                })
+                .map(|candidate| format!("homeboy runner status {}", candidate.id))
                 .collect()
         }
         LabRunnerReadinessState::Stale => candidates
@@ -1342,7 +1196,6 @@ fn lab_runner_readiness_from_candidates(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DefaultLabRunnerCandidate {
     id: String,
-    mode: RunnerTunnelMode,
     connected: bool,
     capacity: Option<usize>,
     /// A *proven* compatibility mismatch, or a probe that failed on a runner
@@ -1358,10 +1211,6 @@ struct DefaultLabRunnerCandidate {
     active_jobs: usize,
     active_jobs_available: bool,
     capabilities_ready: bool,
-    /// Reverse-tunnel brokers require a paired submit token on every
-    /// controller request. Without one, every staging/submit call is
-    /// rejected, so the runner cannot accept this controller's work (#15368).
-    submit_credential_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1415,12 +1264,6 @@ impl DefaultLabRunnerCandidate {
                 .push("required_capabilities_unavailable".to_string());
             availability.accepts_jobs = false;
         }
-        if !self.submit_credential_ready {
-            availability
-                .reasons
-                .push("broker_submit_credential_missing".to_string());
-            availability.accepts_jobs = false;
-        }
         // Name missing evidence separately from proven stale state. Admission
         // still stays closed above whenever freshness/lease proof is absent.
         if self.unverified_daemon {
@@ -1435,13 +1278,10 @@ impl DefaultLabRunnerCandidate {
         // still a valid default target because auto-offload connects it on
         // demand. So gate on the hard, non-connectivity reasons only
         // (capabilities, a failed/absent active-job poll, and capacity), and
-        // score connectivity below rather than excluding it. The one
-        // connectivity gate that IS hard is a disconnected reverse tunnel,
-        // which cannot be woken on demand — handled explicitly below.
+        // score connectivity below rather than excluding it.
         let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
         let capacity_unknown = self.capacity.is_none() && self.active_jobs > 0;
         if !self.capabilities_ready
-            || !self.submit_credential_ready
             || !self.active_jobs_available
             || self.stale_daemon
             || !self.admission_fresh
@@ -1454,19 +1294,9 @@ impl DefaultLabRunnerCandidate {
             };
         }
 
-        if self.mode == RunnerTunnelMode::Reverse && !self.connected {
-            return DefaultLabRunnerReadiness {
-                eligible: false,
-                score: 0,
-            };
-        }
-
         let mut score = 10;
         if self.connected {
             score += 100;
-        }
-        if self.mode == RunnerTunnelMode::DirectSsh {
-            score += 5;
         }
         // A non-blocking identity warning ranks below every verified peer. A
         // missing lease still cannot pass the `admission_fresh` gate above.
@@ -1492,13 +1322,8 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
             let status = status(&runner.id).ok()?;
             let capabilities_ready = runner_capability_inventory(&runner.id)
                 .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
-            let mode = status
-                .session
-                .as_ref()
-                .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone());
             let candidate = lab_runner_admission_candidate(
                 &runner.id,
-                mode,
                 runner.settings.concurrency_limit,
                 &status,
                 capabilities_ready,
@@ -2297,14 +2122,9 @@ mod tests {
         );
     }
 
-    fn default_lab_candidate(
-        id: &str,
-        mode: RunnerTunnelMode,
-        connected: bool,
-    ) -> DefaultLabRunnerCandidate {
+    fn default_lab_candidate(id: &str, connected: bool) -> DefaultLabRunnerCandidate {
         DefaultLabRunnerCandidate {
             id: id.to_string(),
-            mode,
             connected,
             capacity: None,
             stale_daemon: false,
@@ -2315,35 +2135,7 @@ mod tests {
             active_jobs: 0,
             active_jobs_available: true,
             capabilities_ready: true,
-            submit_credential_ready: true,
         }
-    }
-
-    /// #15368: a reverse runner this controller cannot authenticate to is
-    /// connected but must not be reported (or selected) as ready.
-    #[test]
-    fn reverse_runner_without_submit_credential_is_not_ready() {
-        let mut candidate = default_lab_candidate("homeboy-lab", RunnerTunnelMode::Reverse, true);
-        candidate.submit_credential_ready = false;
-        let availability = candidate.availability();
-        assert!(!availability.accepts_jobs);
-        assert!(availability
-            .reasons
-            .iter()
-            .any(|reason| reason == "broker_submit_credential_missing"));
-        assert!(!candidate.readiness().eligible);
-
-        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
-        assert_eq!(
-            readiness.state,
-            LabRunnerReadinessState::ConnectedIneligible
-        );
-        assert!(readiness.available_runner_ids.is_empty());
-        assert!(readiness.remediation_commands[0].contains("runner broker pair"));
-        assert!(readiness.remediation_commands[0].contains("--runner-id homeboy-lab --submit"));
-
-        let ready = default_lab_candidate("homeboy-lab", RunnerTunnelMode::Reverse, true);
-        assert!(ready.availability().accepts_jobs);
     }
 
     fn skewed_runner_status(version: String) -> RunnerStatusReport {
@@ -2371,11 +2163,11 @@ mod tests {
             state: RunnerSessionState::Connected,
             session: Some(RunnerSession {
                 runner_id: "homeboy-lab".to_string(),
-                mode: RunnerTunnelMode::Reverse,
-                role: RunnerSessionRole::Runner,
+                mode: RunnerTunnelMode::DirectSsh,
+                role: RunnerSessionRole::Controller,
                 server_id: None,
                 controller_id: Some("controller".to_string()),
-                broker_url: Some("http://broker.invalid".to_string()),
+                broker_url: None,
                 remote_daemon_address: None,
                 local_port: None,
                 local_url: None,
@@ -2446,20 +2238,14 @@ mod tests {
 
     #[test]
     fn refreshed_stale_inventory_selects_a_newly_ready_runner() {
-        let mut stale = default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, true);
+        let mut stale = default_lab_candidate("lab-a", true);
         stale.stale_daemon = true;
         let cached = lab_runner_readiness_from_candidates(None, vec![stale]);
         assert_eq!(cached.state, LabRunnerReadinessState::Stale);
         assert!(cached.selected_runner_id.is_none());
 
-        let refreshed = lab_runner_readiness_from_candidates(
-            None,
-            vec![default_lab_candidate(
-                "lab-a",
-                RunnerTunnelMode::Reverse,
-                true,
-            )],
-        );
+        let refreshed =
+            lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("lab-a", true)]);
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
     }
@@ -2467,15 +2253,8 @@ mod tests {
     #[test]
     fn current_release_refresh_selects_provider_ready_compatible_skewed_runner() {
         let status = skewed_runner_status(patch_drift_version());
-        let candidate = lab_runner_admission_candidate_with_credential(
-            "homeboy-lab",
-            RunnerTunnelMode::Reverse,
-            Some(1),
-            &status,
-            true,
-            false,
-            true,
-        );
+        let candidate =
+            lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
         assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
@@ -2486,15 +2265,7 @@ mod tests {
     #[test]
     fn current_release_refresh_respects_exact_version_admission() {
         let status = skewed_runner_status(patch_drift_version());
-        let candidate = lab_runner_admission_candidate_with_credential(
-            "homeboy-lab",
-            RunnerTunnelMode::Reverse,
-            Some(1),
-            &status,
-            true,
-            true,
-            true,
-        );
+        let candidate = lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, true);
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
         assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
@@ -2518,15 +2289,8 @@ mod tests {
         let freshness = status.daemon_freshness.as_mut().expect("fixture freshness");
         freshness.fresh = true;
         freshness.stale_reason_code = None;
-        let candidate = lab_runner_admission_candidate_with_credential(
-            "homeboy-lab",
-            RunnerTunnelMode::Reverse,
-            Some(1),
-            &status,
-            true,
-            false,
-            true,
-        );
+        let candidate =
+            lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
         assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
@@ -2553,11 +2317,7 @@ mod tests {
                     "lab-a timed out",
                     serde_json::Value::Null,
                 )),
-                Ok(default_lab_candidate(
-                    "lab-b",
-                    RunnerTunnelMode::Reverse,
-                    true,
-                )),
+                Ok(default_lab_candidate("lab-b", true)),
             ],
         )
         .expect("a later ready runner must win admission");
@@ -2568,7 +2328,7 @@ mod tests {
 
     #[test]
     fn admission_refresh_preserves_authoritative_blocked_observation() {
-        let mut full = default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true);
+        let mut full = default_lab_candidate("lab-b", true);
         full.capacity = Some(1);
         full.active_jobs = 1;
         let readiness = lab_runner_readiness_from_refresh_observations(
@@ -2612,28 +2372,22 @@ mod tests {
 
     #[test]
     fn hot_controller_admission_refresh_routes_ready_runner_after_stale_cache() {
-        let mut stale = default_lab_candidate("lab", RunnerTunnelMode::Reverse, true);
+        let mut stale = default_lab_candidate("lab", true);
         stale.stale_daemon = true;
         assert_eq!(
             lab_runner_readiness_from_candidates(None, vec![stale]).state,
             LabRunnerReadinessState::Stale
         );
 
-        let ready = lab_runner_readiness_from_candidates(
-            None,
-            vec![default_lab_candidate(
-                "lab",
-                RunnerTunnelMode::Reverse,
-                true,
-            )],
-        );
+        let ready =
+            lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("lab", true)]);
         assert_eq!(ready.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(ready.available_runner_ids, ["lab"]);
     }
 
     #[test]
     fn hot_controller_admission_refresh_reports_connected_blocked_runner() {
-        let mut blocked = default_lab_candidate("lab", RunnerTunnelMode::Reverse, true);
+        let mut blocked = default_lab_candidate("lab", true);
         blocked.active_jobs_available = false;
         let blocked = lab_runner_readiness_from_candidates(None, vec![blocked]);
         assert_eq!(blocked.state, LabRunnerReadinessState::ConnectedIneligible);
@@ -2657,17 +2411,13 @@ mod tests {
     fn admission_refresh_classifies_fresh_stale_absent_and_unavailable_evidence() {
         let fresh = lab_runner_readiness_from_refresh_observations(
             None,
-            vec![Ok(default_lab_candidate(
-                "fresh",
-                RunnerTunnelMode::Reverse,
-                true,
-            ))],
+            vec![Ok(default_lab_candidate("fresh", true))],
         )
         .expect("fresh bounded evidence is admitted");
         assert_eq!(fresh.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(fresh.selected_runner_id.as_deref(), Some("fresh"));
 
-        let mut stale_candidate = default_lab_candidate("stale", RunnerTunnelMode::Reverse, true);
+        let mut stale_candidate = default_lab_candidate("stale", true);
         stale_candidate.admission_fresh = false;
         let stale = lab_runner_readiness_from_refresh_observations(None, vec![Ok(stale_candidate)])
             .expect("stale bounded evidence remains classified");
@@ -2679,8 +2429,7 @@ mod tests {
         assert_eq!(absent.state, LabRunnerReadinessState::Absent);
         assert!(absent.selected_runner_id.is_none());
 
-        let mut unavailable_candidate =
-            default_lab_candidate("unavailable", RunnerTunnelMode::Reverse, true);
+        let mut unavailable_candidate = default_lab_candidate("unavailable", true);
         unavailable_candidate.active_jobs_available = false;
         let unavailable =
             lab_runner_readiness_from_refresh_observations(None, vec![Ok(unavailable_candidate)])
@@ -2692,14 +2441,12 @@ mod tests {
         assert!(unavailable.selected_runner_id.is_none());
     }
 
-    /// #11106's counter-property. Reverse runners now report an `unverified`
-    /// daemon where they previously reported nothing at all. That must rank
-    /// them below a verified peer without fencing them, because fencing every
-    /// reverse lab is #11101's failure mode wearing this fix's clothes.
+    /// #11106's counter-property. An `unverified` daemon must rank below a
+    /// verified peer without fencing it: unverified is missing evidence, not
+    /// proof of staleness (#11101).
     #[test]
     fn unverified_runner_ranks_below_verified_without_dropping_out() {
-        let mut unverified =
-            default_lab_candidate("lab-unverified", RunnerTunnelMode::Reverse, true);
+        let mut unverified = default_lab_candidate("lab-unverified", true);
         unverified.unverified_daemon = true;
 
         let readiness = unverified.readiness();
@@ -2707,7 +2454,7 @@ mod tests {
             readiness.eligible,
             "an unverified runner is not a stale runner and must stay selectable"
         );
-        let verified = default_lab_candidate("lab-verified", RunnerTunnelMode::Reverse, true);
+        let verified = default_lab_candidate("lab-verified", true);
         assert!(
             readiness.score < verified.readiness().score,
             "unverified must rank strictly below an otherwise identical verified runner"
@@ -2734,26 +2481,9 @@ mod tests {
         assert_eq!(readiness.available_runner_ids, ["lab-unverified"]);
 
         // A *proven* mismatch still fences, so the two states never converge.
-        let mut stale = default_lab_candidate("lab-stale", RunnerTunnelMode::Reverse, true);
+        let mut stale = default_lab_candidate("lab-stale", true);
         stale.stale_daemon = true;
         assert!(!stale.readiness().eligible);
-    }
-
-    #[test]
-    fn delayed_reverse_runner_is_selected_only_for_durable_capacity_queueing() {
-        let mut full_reverse = default_lab_candidate("lab-queue", RunnerTunnelMode::Reverse, true);
-        full_reverse.capacity = Some(1);
-        full_reverse.active_jobs = 1;
-        assert_eq!(
-            detached_queue_runner_from_candidates(vec![full_reverse.clone()]).as_deref(),
-            Some("lab-queue")
-        );
-
-        full_reverse.mode = RunnerTunnelMode::DirectSsh;
-        assert_eq!(
-            detached_queue_runner_from_candidates(vec![full_reverse]),
-            None
-        );
     }
 
     #[test]
@@ -2761,19 +2491,13 @@ mod tests {
         let absent = lab_runner_readiness_from_candidates(None, Vec::new());
         assert_eq!(absent.state, LabRunnerReadinessState::Absent);
 
-        let ready = lab_runner_readiness_from_candidates(
-            None,
-            vec![default_lab_candidate(
-                "ready",
-                RunnerTunnelMode::DirectSsh,
-                true,
-            )],
-        );
+        let ready =
+            lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("ready", true)]);
         assert_eq!(ready.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(ready.selected_runner_id.as_deref(), Some("ready"));
         assert_eq!(ready.available_runner_ids, ["ready"]);
 
-        let mut ineligible = default_lab_candidate("ineligible", RunnerTunnelMode::DirectSsh, true);
+        let mut ineligible = default_lab_candidate("ineligible", true);
         ineligible.active_jobs = 1;
         let ineligible = lab_runner_readiness_from_candidates(None, vec![ineligible]);
         assert_eq!(
@@ -2786,7 +2510,7 @@ mod tests {
             ["homeboy runner status ineligible"]
         );
 
-        let mut stale = default_lab_candidate("stale", RunnerTunnelMode::DirectSsh, true);
+        let mut stale = default_lab_candidate("stale", true);
         stale.stale_daemon = true;
         let stale = lab_runner_readiness_from_candidates(None, vec![stale]);
         assert_eq!(stale.state, LabRunnerReadinessState::Stale);
@@ -2795,8 +2519,7 @@ mod tests {
             ["homeboy runner doctor stale --scope lab-offload"]
         );
 
-        let mut version_mismatch =
-            default_lab_candidate("version-mismatch", RunnerTunnelMode::DirectSsh, true);
+        let mut version_mismatch = default_lab_candidate("version-mismatch", true);
         version_mismatch.admission_fresh = false;
         version_mismatch.admission_remediation =
             Some("homeboy runner refresh-homeboy version-mismatch --reconnect".to_string());
@@ -2807,8 +2530,7 @@ mod tests {
             ["homeboy runner refresh-homeboy version-mismatch --reconnect"]
         );
 
-        let mut lease_missing =
-            default_lab_candidate("lease-missing", RunnerTunnelMode::DirectSsh, true);
+        let mut lease_missing = default_lab_candidate("lease-missing", true);
         lease_missing.admission_fresh = false;
         lease_missing.unverified_daemon = true;
         let lease_missing = lab_runner_readiness_from_candidates(None, vec![lease_missing]);
@@ -2825,7 +2547,7 @@ mod tests {
             ["homeboy runner status lease-missing"]
         );
 
-        let mut full = default_lab_candidate("full", RunnerTunnelMode::DirectSsh, true);
+        let mut full = default_lab_candidate("full", true);
         full.capacity = Some(1);
         full.active_jobs = 1;
         let full = lab_runner_readiness_from_candidates(None, vec![full]);
@@ -3507,8 +3229,8 @@ mod tests {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-b"),
             vec![
-                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true),
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+                default_lab_candidate("lab-a", true),
+                default_lab_candidate("lab-b", true),
             ],
         );
 
@@ -3520,8 +3242,8 @@ mod tests {
         let selected = resolve_default_lab_runner_from_candidates(
             None,
             vec![
-                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, false),
-                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
+                default_lab_candidate("lab-a", false),
+                default_lab_candidate("lab-b", true),
             ],
         );
 
@@ -3529,49 +3251,17 @@ mod tests {
 
         let disconnected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![default_lab_candidate(
-                "lab-a",
-                RunnerTunnelMode::DirectSsh,
-                false,
-            )],
+            vec![default_lab_candidate("lab-a", false)],
         );
 
         assert_eq!(disconnected.as_deref(), Some("lab-a"));
     }
 
     #[test]
-    fn default_lab_runner_uses_readiness_when_connected_state_is_not_unique() {
-        let none_connected_with_multiple_candidates = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![
-                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, false),
-                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, false),
-            ],
-        );
-        let multiple_connected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![
-                default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true),
-                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
-            ],
-        );
-
-        assert_eq!(
-            none_connected_with_multiple_candidates.as_deref(),
-            Some("lab-a")
-        );
-        assert_eq!(multiple_connected.as_deref(), Some("lab-a"));
-    }
-
-    #[test]
     fn default_lab_runner_uses_available_preferred_runner() {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
-            vec![default_lab_candidate(
-                "lab-a",
-                RunnerTunnelMode::DirectSsh,
-                false,
-            )],
+            vec![default_lab_candidate("lab-a", false)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-a"));
@@ -3579,14 +3269,11 @@ mod tests {
 
     #[test]
     fn default_lab_runner_does_not_pin_busy_preferred_runner() {
-        let mut preferred = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut preferred = default_lab_candidate("lab-a", true);
         preferred.active_jobs = 4;
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
-            vec![
-                preferred,
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
-            ],
+            vec![preferred, default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
@@ -3594,7 +3281,7 @@ mod tests {
 
     #[test]
     fn default_lab_runner_excludes_runner_at_capacity() {
-        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut busy = default_lab_candidate("lab-a", true);
         busy.capacity = Some(1);
         busy.active_jobs = 1;
 
@@ -3605,14 +3292,11 @@ mod tests {
 
     #[test]
     fn default_lab_runner_does_not_pin_unknown_preferred_runner() {
-        let mut preferred = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut preferred = default_lab_candidate("lab-a", true);
         preferred.active_jobs_available = false;
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
-            vec![
-                preferred,
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
-            ],
+            vec![preferred, default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
@@ -3622,11 +3306,7 @@ mod tests {
     fn default_lab_runner_falls_back_when_preferred_is_missing() {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-missing"),
-            vec![default_lab_candidate(
-                "lab-b",
-                RunnerTunnelMode::DirectSsh,
-                true,
-            )],
+            vec![default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
@@ -3637,8 +3317,12 @@ mod tests {
         let selected = resolve_default_lab_runner_from_candidates(
             Some("lab-a"),
             vec![
-                default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, false),
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
+                {
+                    let mut ineligible = default_lab_candidate("lab-a", true);
+                    ineligible.capabilities_ready = false;
+                    ineligible
+                },
+                default_lab_candidate("lab-b", true),
             ],
         );
 
@@ -3646,29 +3330,12 @@ mod tests {
     }
 
     #[test]
-    fn default_lab_runner_can_select_connected_reverse_runner() {
-        let selected = resolve_default_lab_runner_from_candidates(
-            None,
-            vec![default_lab_candidate(
-                "homeboy-lab",
-                RunnerTunnelMode::Reverse,
-                true,
-            )],
-        );
-
-        assert_eq!(selected.as_deref(), Some("homeboy-lab"));
-    }
-
-    #[test]
     fn default_lab_runner_prefers_less_busy_ready_runner() {
-        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut busy = default_lab_candidate("lab-a", true);
         busy.active_jobs = 3;
         let selected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![
-                busy,
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
-            ],
+            vec![busy, default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
@@ -3676,14 +3343,11 @@ mod tests {
 
     #[test]
     fn default_lab_runner_prefers_known_active_job_state() {
-        let mut unknown = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut unknown = default_lab_candidate("lab-a", true);
         unknown.active_jobs_available = false;
         let selected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![
-                unknown,
-                default_lab_candidate("lab-b", RunnerTunnelMode::DirectSsh, true),
-            ],
+            vec![unknown, default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
@@ -3691,7 +3355,7 @@ mod tests {
 
     #[test]
     fn runner_availability_reports_unavailable_runner_reasons() {
-        let mut unavailable = default_lab_candidate("lab-a", RunnerTunnelMode::Reverse, false);
+        let mut unavailable = default_lab_candidate("lab-a", false);
         unavailable.active_jobs_available = false;
 
         assert_eq!(
@@ -3712,7 +3376,7 @@ mod tests {
 
     #[test]
     fn runner_availability_reports_busy_runner_at_capacity() {
-        let mut busy = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut busy = default_lab_candidate("lab-a", true);
         busy.capacity = Some(2);
         busy.active_jobs = 2;
 
@@ -3754,7 +3418,7 @@ mod tests {
 
     #[test]
     fn runner_availability_reports_ambiguous_unknown_capacity() {
-        let mut ambiguous = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut ambiguous = default_lab_candidate("lab-a", true);
         ambiguous.active_jobs = 1;
 
         assert_eq!(
@@ -3880,14 +3544,11 @@ mod tests {
 
     #[test]
     fn default_lab_runner_skips_stale_daemon_runner() {
-        let mut stale = default_lab_candidate("lab-a", RunnerTunnelMode::DirectSsh, true);
+        let mut stale = default_lab_candidate("lab-a", true);
         stale.stale_daemon = true;
         let selected = resolve_default_lab_runner_from_candidates(
             None,
-            vec![
-                stale,
-                default_lab_candidate("lab-b", RunnerTunnelMode::Reverse, true),
-            ],
+            vec![stale, default_lab_candidate("lab-b", true)],
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));

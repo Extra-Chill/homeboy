@@ -61,11 +61,11 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
             None,
         )
         .expect("record controller proxy before daemon acceptance");
-        let mut status = reverse_status("homeboy-lab");
+        let mut status = connected_status("homeboy-lab");
         status
             .session
             .as_mut()
-            .expect("reverse session")
+            .expect("connected session")
             .remote_daemon_lease_id = Some("generation-8525".to_string());
         status.active_runner_jobs.push(crate::RunnerJob {
             runner_id: "homeboy-lab".to_string(),
@@ -371,9 +371,9 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
     let selection = LabRunnerSelection {
         runner_id: "homeboy-lab".to_string(),
         source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::Reverse,
+        mode: RunnerTunnelMode::DirectSsh,
     };
-    let status = reverse_status("homeboy-lab");
+    let status = connected_status("homeboy-lab");
 
     let overhead = LabOffloadOverhead::start();
     let request = LabOffloadRequest::for_test(&[]);
@@ -411,12 +411,12 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
     let selection = LabRunnerSelection {
         runner_id: "homeboy-lab".to_string(),
         source: LabRunnerSelectionSource::Default,
-        mode: RunnerTunnelMode::Reverse,
+        mode: RunnerTunnelMode::DirectSsh,
     };
-    let status = reverse_status("homeboy-lab");
+    let status = connected_status("homeboy-lab");
 
     let mut overhead = LabOffloadOverhead::start();
-    overhead.set_attempted("homeboy-lab", "default", Some("reverse_tunnel"));
+    overhead.set_attempted("homeboy-lab", "default", Some("direct_ssh"));
     overhead.record(
         LabOffloadPhase::Preflight,
         std::time::Duration::from_millis(8),
@@ -540,7 +540,7 @@ fn capability_fallback_persists_the_verified_local_outcome() {
             &request,
             base_lab_plan(Some(&portable_lab_command("trace"))),
             "homeboy-lab",
-            &reverse_status("homeboy-lab"),
+            &connected_status("homeboy-lab"),
             "runner capability preflight failed".to_string(),
             &LabOffloadOverhead::start(),
         )
