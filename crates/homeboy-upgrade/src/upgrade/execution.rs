@@ -192,10 +192,11 @@ pub(crate) fn execute_upgrade(
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
-    // The binary installer replaces `command -v homeboy`. Capture that path
-    // before its shell runs so verification proves the intended PATH target was
-    // replaced rather than merely finding some other Homeboy afterward.
-    let release_binary = matches!(method, InstallMethod::Binary | InstallMethod::Secondary);
+    // The release installer only writes an isolated stage; Rust verifies,
+    // admits, and promotes the staged candidate over `command -v homeboy`.
+    // Capture that destination before the installer runs so verification
+    // proves the intended PATH target was replaced.
+    let release_binary = method == InstallMethod::Binary;
     let binary_destination = release_binary.then(active_binary_path).transpose()?;
     if release_binary {
         promotion_lease
@@ -260,26 +261,20 @@ pub(crate) fn execute_upgrade(
                 |_| {},
             )?
         }
-        InstallMethod::Secondary | InstallMethod::Binary => {
-            // Legacy cargo-installed binaries use the same pinned release asset,
-            // replacement checkpoints, and read-back contract as binary installs.
-            let cmd = &defaults.install_methods.binary.upgrade_command;
+        InstallMethod::Binary => {
             match run_installer_shell_command(
-                cmd,
+                RELEASE_INSTALLER_SCRIPT,
                 promotion_lease,
                 INSTALLER_UPGRADE_TIMEOUT,
                 "run release binary upgrade",
                 |command| {
-                    command.env(
-                        "HOMEBOY_INSTALL_PATH",
+                    configure_release_installer(
+                        command,
                         staged_release_binary
                             .as_deref()
                             .expect("release upgrades have an isolated stage"),
-                    );
-                    if let Some(release) = selected_release {
-                        command.env(RELEASE_TAG_ENV, &release.tag);
-                        command.env(RELEASE_VERSION_ENV, &release.version);
-                    }
+                        selected_release,
+                    )
                 },
             ) {
                 Ok(output) => output,
@@ -387,31 +382,33 @@ pub(crate) fn execute_upgrade(
         let destination = binary_destination
             .as_deref()
             .expect("release upgrades capture a destination");
-        let probed = post_install_controller_candidates(staged, Some(destination));
-        let (candidate, _) = match verify_post_install_controller_version(selected_version, &probed)
-        {
-            Ok(verified) => verified,
-            Err(error) => {
-                replacement_checkpoint(
-                    &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-                )?;
-                return Err(error);
-            }
-        };
-        run_verified_target_admission(
-            &candidate,
-            selected_version,
-            &candidate_legacy_identity(destination)?,
-            &selected_release
-                .expect("release upgrades select a release")
-                .tag,
-        )?;
+        // The stage is the only candidate: an installer that exits 0 without
+        // staging anything has proven nothing, and the live destination must
+        // not stand in for the candidate it is about to be replaced by.
+        // The controller is the single admission point for the staged
+        // candidate; the installer runs in stage-only mode and skips its own.
+        let admitted = verify_staged_release_candidate(selected_version, staged).and_then(|()| {
+            run_verified_target_admission(
+                staged,
+                selected_version,
+                &candidate_legacy_identity(destination)?,
+                &selected_release
+                    .expect("release upgrades select a release")
+                    .tag,
+            )
+        });
+        if let Err(error) = admitted {
+            replacement_checkpoint(
+                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+            )?;
+            return Err(error);
+        }
         promotion_lease
             .expect("release replacement requires promotion ownership")
             .assert_generation()?;
         finalize_release_replacement(
             checkpoint,
-            &candidate,
+            staged,
             destination,
             selected_version,
             replacement_checkpoint,
@@ -471,6 +468,30 @@ pub(crate) fn execute_upgrade(
     // believe the roll-forward succeeded. Fail loudly with an actionable reason
     // so urgent source fixes are not silently dropped (#5772).
     Ok((success, new_version, new_build_identity, None, false))
+}
+
+/// The canonical installer published as the `homeboy-installer.sh` release
+/// asset. Bootstrap (`curl | sh`) and `homeboy upgrade` share this one source
+/// for the platform asset mapping, checksum, and archive-member checks.
+pub(crate) const RELEASE_INSTALLER_SCRIPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/homeboy-installer.sh"
+));
+
+/// Point the release installer at the isolated stage and the selected release.
+/// Stage-only mode places the verified candidate at the stage path and leaves
+/// admission and promotion into the live destination to the controller.
+fn configure_release_installer(
+    command: &mut Command,
+    staged_release_binary: &Path,
+    selected_release: Option<&SelectedRelease>,
+) {
+    command.env("HOMEBOY_INSTALL_STAGE_ONLY", "1");
+    command.env("HOMEBOY_INSTALL_PATH", staged_release_binary);
+    if let Some(release) = selected_release {
+        command.env(RELEASE_TAG_ENV, &release.tag);
+        command.env(RELEASE_VERSION_ENV, &release.version);
+    }
 }
 
 fn run_installer_shell_command(
@@ -943,13 +964,12 @@ pub(super) fn bounded_upgrade_cause(detail: &str) -> String {
 /// Promote a verified staged release over the PATH-active destination and
 /// prove the destination now holds it.
 ///
-/// A distinct staged artifact is digest evidence for the selected release, so
-/// its sha256 is recorded as the checkpoint's expected bytes before any
-/// mutation. That makes an already-active exact release (a forced reinstall
-/// whose staged bytes equal the installed bytes) provably applied instead of
-/// an unchanged-bytes "not activated" failure (#15733). A no-op installer that
-/// staged nothing still resolves its candidate to the destination itself,
-/// carries no expected digest, and keeps failing as not applied (#11152).
+/// The staged artifact is digest evidence for the selected release, so its
+/// sha256 is recorded as the checkpoint's expected bytes before any mutation.
+/// That makes an already-active exact release (a forced reinstall whose staged
+/// bytes equal the installed bytes) provably applied instead of an
+/// unchanged-bytes "not activated" failure (#15733). An installer that staged
+/// nothing never reaches this point: verification of the missing stage fails.
 fn finalize_release_replacement(
     checkpoint: &ReplacementCheckpoint,
     candidate: &Path,
@@ -957,22 +977,12 @@ fn finalize_release_replacement(
     selected_version: &str,
     replacement_checkpoint: &mut dyn FnMut(&ReplacementCheckpoint) -> Result<()>,
 ) -> Result<()> {
-    let staged = !paths_identify_same_binary(candidate, destination);
-    let checkpoint = if staged {
-        let mut evidenced = checkpoint.clone();
-        evidenced.expected_sha256 = Some(sha256_file(candidate)?);
-        replacement_checkpoint(&evidenced)?;
-        evidenced
-    } else {
-        checkpoint.clone()
-    };
-    if staged {
-        if let Err(error) = install_source_built_binary(candidate, destination) {
-            replacement_checkpoint(
-                &checkpoint.with_state(replacement_observed_state(&checkpoint)?),
-            )?;
-            return Err(error);
-        }
+    let mut checkpoint = checkpoint.clone();
+    checkpoint.expected_sha256 = Some(sha256_file(candidate)?);
+    replacement_checkpoint(&checkpoint)?;
+    if let Err(error) = install_source_built_binary(candidate, destination) {
+        replacement_checkpoint(&checkpoint.with_state(replacement_observed_state(&checkpoint)?))?;
+        return Err(error);
     }
     if !replacement_was_applied(&checkpoint)? {
         replacement_checkpoint(&checkpoint.with_state(replacement_observed_state(&checkpoint)?))?;
@@ -985,7 +995,6 @@ fn finalize_release_replacement(
                 .as_ref(),
         );
         error.details["staged_candidate"] = serde_json::json!(candidate.display().to_string());
-        error.details["staged_candidate_distinct"] = serde_json::json!(staged);
         error.details["expected_sha256"] = serde_json::json!(checkpoint.expected_sha256);
         error.details["previous_sha256"] = serde_json::json!(checkpoint.previous_sha256);
         error.details["observed_sha256"] = serde_json::json!(sha256_file(&checkpoint.target).ok());
@@ -1928,9 +1937,7 @@ fn upgrade_failure_error(
     error.details["phase"] = serde_json::json!("candidate_execution");
     error.details["cause"] = serde_json::json!(error.message);
 
-    if matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
-        && error_detail.contains("404")
-    {
+    if method == InstallMethod::Binary && error_detail.contains("404") {
         error = error.with_hint("No release asset was found for this Homeboy version.");
 
         if let Some(release) = selected_release {
@@ -1956,12 +1963,6 @@ fn upgrade_failure_error(
                 "Pin a release that has this target's asset with: homeboy upgrade --version <TAG>",
             )
             .with_hint("Try: homeboy upgrade --method source --source-path <PATH>");
-    } else if method == InstallMethod::Secondary && error_detail.contains("not found") {
-        error = error
-            .with_hint("Required executable is not installed or is not on PATH.")
-            .with_hint(
-                "Install the required toolchain, or use: homeboy upgrade --method source --source-path <PATH>",
-            );
     }
 
     error
@@ -2271,103 +2272,49 @@ fn verify_active_binary_io_error(program: &Path, error: impl std::fmt::Display) 
     )
 }
 
-/// Candidates for post-install verification, in preference order:
-/// managed/staged prefix, PATH-resolved `homeboy`, captured destination,
-/// then `current_exe()`. A cargo-installed controller has no managed prefix;
-/// PATH / `current_exe` is what the operator's shell runs (#14769).
-fn post_install_controller_candidates(
-    managed_prefix: &Path,
-    destination: Option<&Path>,
-) -> Vec<PathBuf> {
-    let mut probed = Vec::new();
-    let mut push = |path: PathBuf| {
-        if !probed.iter().any(|existing| existing == &path) {
-            probed.push(path);
-        }
-    };
-    push(managed_prefix.to_path_buf());
-    if let Some(path) = resolve_binary_on_path() {
-        push(path);
-    }
-    if let Some(path) = destination {
-        push(path.to_path_buf());
-    }
-    if let Ok(path) = std::env::current_exe() {
-        push(path);
-    }
-    probed
+/// Verify the candidate the release installer placed in the isolated stage
+/// before it is admitted or promoted over the live destination.
+fn verify_staged_release_candidate(expected_version: &str, staged: &Path) -> Result<()> {
+    verify_staged_release_candidate_with(expected_version, staged, active_binary_info_at)
 }
 
-fn verify_post_install_controller_version(
+fn verify_staged_release_candidate_with<R>(
     expected_version: &str,
-    probed: &[PathBuf],
-) -> Result<(PathBuf, ActiveBinaryInfo)> {
-    verify_post_install_controller_version_with(expected_version, probed, active_binary_info_at)
-}
-
-fn verify_post_install_controller_version_with<R>(
-    expected_version: &str,
-    probed: &[PathBuf],
+    staged: &Path,
     mut read_info: R,
-) -> Result<(PathBuf, ActiveBinaryInfo)>
+) -> Result<()>
 where
     R: FnMut(&Path) -> Result<Option<ActiveBinaryInfo>>,
 {
-    let Some(path) = probed.iter().find(|path| path.is_file()) else {
-        return Err(missing_controller_binary_error(probed));
-    };
-    let info =
-        read_info(path)?.ok_or_else(|| unverifiable_controller_binary_error(path, probed))?;
+    if !staged.is_file() {
+        return Err(staged_candidate_error(
+            "release installer exited without staging a candidate",
+            staged,
+        ));
+    }
+    let info = read_info(staged)?.ok_or_else(|| {
+        staged_candidate_error(
+            "staged release candidate did not report a verifiable version",
+            staged,
+        )
+    })?;
     if info.version.as_deref() != Some(expected_version) {
         return Err(binary_swap_failure(
             expected_version,
-            Some(path.as_path()),
+            Some(staged),
             Some(&info),
         ));
     }
-    Ok((path.clone(), info))
+    Ok(())
 }
 
-fn probed_path_details(probed: &[PathBuf]) -> serde_json::Value {
-    serde_json::json!({
-        "context": "verify active binary version",
-        "probed_paths": probed.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
-    })
-}
-
-fn missing_controller_binary_error(probed: &[PathBuf]) -> Error {
-    let listed = display_probed_paths(probed);
-    let mut error = Error::internal_unexpected(format!(
-        "could not locate a controller binary to verify (probed {listed})"
-    ))
-    .with_hint(
-        "The installer may have replaced a PATH-visible binary that is not under a managed install prefix.",
-    )
-    .with_hint("Inspect PATH with: type -a homeboy");
-    error.details = probed_path_details(probed);
+fn staged_candidate_error(summary: &str, staged: &Path) -> Error {
+    let mut error = Error::internal_unexpected(format!("{summary} at {}", staged.display()));
+    error.details = serde_json::json!({
+        "context": "verify staged release candidate",
+        "staged_candidate": staged.display().to_string(),
+    });
     error
-}
-
-fn unverifiable_controller_binary_error(path: &Path, probed: &[PathBuf]) -> Error {
-    let mut error = Error::internal_unexpected(format!(
-        "controller at {} did not report a verifiable version (probed {})",
-        path.display(),
-        display_probed_paths(probed)
-    ));
-    error.details = probed_path_details(probed);
-    error
-}
-
-fn display_probed_paths(probed: &[PathBuf]) -> String {
-    if probed.is_empty() {
-        "<none>".to_string()
-    } else {
-        probed
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 pub(crate) fn active_binary_path() -> Result<PathBuf> {

@@ -100,10 +100,7 @@ pub fn continue_detached_upgrade(id: &str) -> Result<()> {
         serde_json::from_value(operation.detached_request().clone())
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
     if request.schema != REQUEST_SCHEMA
-        || !matches!(
-            request.method,
-            InstallMethod::Binary | InstallMethod::Secondary
-        )
+        || request.method != InstallMethod::Binary
         || !request.skip_extensions
         || !request.skip_runners
     {

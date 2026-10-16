@@ -711,59 +711,14 @@ impl Default for Defaults {
 }
 
 /// Configuration for install method detection and upgrade commands
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallMethodsConfig {
+    #[serde(default = "builtins::default_homebrew_config")]
     pub homebrew: InstallMethodConfig,
-    pub secondary: InstallMethodConfig,
+    #[serde(default = "builtins::default_source_config")]
     pub source: InstallMethodConfig,
-    pub binary: InstallMethodConfig,
-}
-
-/// Known ecosystem key used as a secondary install-method discriminant in
-/// extension-provided defaults. Pending externalization into the defaults asset.
-pub fn secondary_install_method_key() -> String {
-    "cargo".to_string()
-}
-
-impl Serialize for InstallMethodsConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-
-        let mut map = serializer.serialize_map(Some(4))?;
-        map.serialize_entry("homebrew", &self.homebrew)?;
-        map.serialize_entry(&secondary_install_method_key(), &self.secondary)?;
-        map.serialize_entry("source", &self.source)?;
-        map.serialize_entry("binary", &self.binary)?;
-        map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for InstallMethodsConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut values = HashMap::<String, InstallMethodConfig>::deserialize(deserializer)?;
-        let secondary_key = secondary_install_method_key();
-
-        Ok(Self {
-            homebrew: values
-                .remove("homebrew")
-                .unwrap_or_else(builtins::default_homebrew_config),
-            secondary: values
-                .remove(&secondary_key)
-                .unwrap_or_else(builtins::default_secondary_install_config),
-            source: values
-                .remove("source")
-                .unwrap_or_else(builtins::default_source_config),
-            binary: values
-                .remove("binary")
-                .unwrap_or_else(builtins::default_binary_config),
-        })
-    }
+    #[serde(default = "builtins::default_binary_config")]
+    pub binary: InstallMethodDetectionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,6 +727,16 @@ pub struct InstallMethodConfig {
     pub upgrade_command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_command: Option<String>,
+}
+
+/// Detection-only configuration for the release-binary install method.
+///
+/// Release upgrades always run the canonical `scripts/homeboy-installer.sh`
+/// embedded in the upgrade crate, so there is no configurable upgrade command;
+/// an override document's `binary.upgrade_command` is ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallMethodDetectionConfig {
+    pub path_patterns: Vec<String>,
 }
 
 /// Configuration for version file detection

@@ -40,7 +40,7 @@ pub struct UpgradeArgs {
     #[arg(long, requires = "runners")]
     pub runner_only: bool,
 
-    /// Override install method detection (homebrew|cargo|source|binary)
+    /// Override install method detection (homebrew|source|binary)
     #[arg(long)]
     pub method: Option<String>,
 
@@ -103,19 +103,14 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
         .method
         .as_deref()
         .map(|m| {
-            let secondary = homeboy::core::defaults::secondary_install_method_key();
-            match m {
-                "homebrew" => Ok(upgrade::InstallMethod::Homebrew),
-                "source" => Ok(upgrade::InstallMethod::Source),
-                "binary" => Ok(upgrade::InstallMethod::Binary),
-                other if other == secondary => Ok(upgrade::InstallMethod::Secondary),
-                other => Err(homeboy::core::Error::validation_invalid_argument(
+            upgrade::InstallMethod::from_method_name(m).ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
                     "method",
-                    format!("Unknown method: {}", other),
-                    Some(other.to_string()),
+                    format!("Unknown method: {}", m),
+                    Some(m.to_string()),
                     None,
-                )),
-            }
+                )
+            })
         })
         .transpose()?;
 
@@ -128,10 +123,7 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
                 upgrade::detect_install_method()
             }
         });
-        if matches!(
-            method,
-            upgrade::InstallMethod::Binary | upgrade::InstallMethod::Secondary
-        ) {
+        if method == upgrade::InstallMethod::Binary {
             let admission = upgrade::start_detached_upgrade(
                 args.force,
                 method,
@@ -268,10 +260,7 @@ mod tests {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
             runner_id: "homeboy-lab".to_string(),
-            homeboy_path: format!(
-                "/home/user/.{}/bin/homeboy",
-                homeboy::core::defaults::secondary_install_method_key()
-            ),
+            homeboy_path: "/home/user/.cargo/bin/homeboy".to_string(),
             success: false,
             upgraded: true,
             previous_version: Some("0.228.6".to_string()),
@@ -444,7 +433,7 @@ mod tests {
     fn base_upgrade_result() -> upgrade::UpgradeResult {
         upgrade::UpgradeResult {
             command: "upgrade".to_string(),
-            install_method: upgrade::InstallMethod::Secondary,
+            install_method: upgrade::InstallMethod::Binary,
             previous_version: "0.228.6".to_string(),
             new_version: Some("0.228.7".to_string()),
             previous_build_identity: None,

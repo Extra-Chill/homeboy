@@ -8,7 +8,7 @@ homeboy upgrade [OPTIONS]
 
 ## Description
 
-Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, Cargo, source build, or downloaded release binary) and runs the appropriate upgrade process.
+Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, source build, or downloaded release binary) and runs the appropriate upgrade process.
 
 By default, after a successful local upgrade, Homeboy also checks configured SSH runners and runs their configured Homeboy binary through the same upgrade path. This keeps lab runners from drifting behind the local CLI.
 
@@ -36,7 +36,7 @@ controller upgrade.
 - `--skip-runners`: Upgrade the controller only; cannot be combined with `--upgrade-runner`.
 - `--upgrade-runner`: Select configured runners to converge with the controller upgrade. Repeat to target multiple runners.
 - `--runner-only`: With `--upgrade-runner`, preserve the controller and refresh only the selected runners. The response explicitly reports this partial scope and the exact controller-plus-runner convergence command.
-- `--method`: Override install method detection (`homebrew|cargo|source|binary`).
+- `--method`: Override install method detection (`homebrew|source|binary`; `cargo` is accepted as an alias for `binary`).
 - `--version <TAG>`: Pin the published release to install (`v0.332.0` or `0.332.0`). When `--method` is omitted, this infers `--method binary` and reports that choice before mutation. An explicit incompatible method is rejected. A pin also implies `--force` at the release gate so a deliberate downgrade is not discarded as "already at latest".
 
 ## Release selection for binary installs
@@ -49,7 +49,7 @@ Binary installs download a release asset named `homeboy-<target triple>.tar.xz`,
 - **The target triple is detected honestly.** An OS/architecture pair Homeboy publishes no assets for is reported as undetermined; asset availability is then explicitly *not verified* rather than guessed.
 - **A 404 names the resolved asset URL and the target triple** it looked for, so diagnosing a missing asset does not require listing release assets by hand.
 
-The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
+Binary upgrades run the same `homeboy-installer.sh` that is published as a release asset, with `HOMEBOY_INSTALL_STAGE_ONLY=1` and `HOMEBOY_INSTALL_PATH` pointing into an isolated stage. In that mode the installer only downloads, checksum- and version-verifies, and places the candidate in the stage; Homeboy then verifies the staged candidate, runs its upgrade admission against the installed controller's identity, and atomically promotes it over the active binary. The installer honors `HOMEBOY_UPGRADE_RELEASE_TAG` to download from a specific tag instead of `releases/latest/download`; `upgrade` sets it from the release it selected.
 
 Controllers released before the bootstrap admission contract can recover without
 running their legacy `upgrade` command by invoking the pinned release installer:
@@ -69,9 +69,8 @@ Homeboy detects how it was installed and uses the appropriate upgrade method:
 | Method | Detection | Upgrade Command |
 |--------|-----------|-----------------|
 | Homebrew | Binary path contains `/Cellar/` or `/homebrew/`, or `brew list homeboy` succeeds | `brew update && brew upgrade homeboy` |
-| Cargo (legacy) | Binary path contains `/.cargo/bin/` | Downloads the latest GitHub Release binary |
 | Source | Binary path contains `/target/release/` or `/target/debug/` | `git pull && cargo build --release` |
-| Binary | Binary path contains `/bin/homeboy` (covers `~/bin/homeboy` and `/usr/local/bin/homeboy`) | Downloads latest release asset and replaces the current binary |
+| Binary | Binary path contains `/bin/homeboy` (covers `~/bin/homeboy`, `/usr/local/bin/homeboy`, and `~/.cargo/bin/homeboy`) | Runs `homeboy-installer.sh` in stage-only mode, then verifies, admits, and promotes the staged release over the current binary |
 
 If the installation method cannot be detected, an error is returned with manual upgrade instructions. You can also override detection:
 
@@ -127,7 +126,7 @@ homeboy upgrade --skip-runners
 - `current_version`: Current installed version
 - `latest_version`: The release an upgrade would install. For asset-installed methods this is the newest release carrying an artifact for `target`. Null when the network check failed, or when no published release ships this target's artifact
 - `update_available`: Boolean indicating if an installable update is available
-- `install_method`: Detected installation method (`homebrew`, `cargo`, `source`, or `unknown`)
+- `install_method`: Detected installation method (`homebrew`, `binary`, `source`, or `unknown`)
 - `target`: Running target triple. Omitted when the OS/architecture pair could not be identified, which means asset availability was *not verified*
 - `newest_version`: Newest published release, whatever its asset inventory. Equal to `latest_version` on a healthy release train
 - `uninstallable_versions`: Releases newer than `latest_version` passed over for want of a `target` asset, newest first

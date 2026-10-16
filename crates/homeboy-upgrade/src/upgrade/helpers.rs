@@ -147,11 +147,6 @@ where
         }
     }
 
-    for pattern in &defaults.install_methods.secondary.path_patterns {
-        if exe_path.contains(pattern) {
-            return InstallMethod::Secondary;
-        }
-    }
     for pattern in &defaults.install_methods.source.path_patterns {
         if exe_path.contains(pattern) {
             return InstallMethod::Source;
@@ -295,7 +290,7 @@ pub(super) fn select_durable_release_tag(
     method: InstallMethod,
     pinned_version: Option<&str>,
 ) -> Result<String> {
-    if !matches!(method, InstallMethod::Binary | InstallMethod::Secondary) {
+    if method != InstallMethod::Binary {
         return Err(Error::validation_invalid_argument(
             "install_method",
             "detached upgrade requires a published binary release",
@@ -333,18 +328,14 @@ fn run_controller_upgrade_with_operation(
             None,
         )
         .with_hint("Try: homeboy upgrade --method binary")
-        .with_hint("Or reinstall using: brew install homeboy")
-        .with_hint(format!(
-            "Or: {} install homeboy",
-            defaults::secondary_install_method_key()
-        )));
+        .with_hint("Or reinstall using: brew install homeboy"));
     }
     // Packaged and source candidates are verified before they run their own
     // target admission. Legacy admission cannot classify provenance added by a
     // selected candidate, so it must not prevent building or staging it.
     if !matches!(
         install_method,
-        InstallMethod::Binary | InstallMethod::Secondary | InstallMethod::Source
+        InstallMethod::Binary | InstallMethod::Source
     ) {
         operation.set_phase_durable("running_candidate_admission")?;
         ensure_controller_upgrade_admission()?;
@@ -1452,7 +1443,7 @@ fn validate_pinned_version(pinned_version: Option<&str>, method: InstallMethod) 
     let Some(requested) = pinned_version else {
         return Ok(());
     };
-    if matches!(method, InstallMethod::Binary | InstallMethod::Secondary) {
+    if method == InstallMethod::Binary {
         return Ok(());
     }
 
@@ -3784,7 +3775,6 @@ mod runner_source_upgrade_tests {
     fn every_install_method_discovers_versions_from_github_releases() {
         for method in [
             InstallMethod::Homebrew,
-            InstallMethod::Secondary,
             InstallMethod::Source,
             InstallMethod::Binary,
             InstallMethod::Unknown,
@@ -4199,18 +4189,10 @@ mod runner_source_upgrade_tests {
             Some(InstallMethod::Source)
         );
         assert_eq!(
-            runner_method_override_for_method(None, InstallMethod::Secondary),
-            None
-        );
-        assert_eq!(
             runner_method_override_for_method(Some(InstallMethod::Binary), InstallMethod::Source),
             Some(InstallMethod::Binary)
         );
-        for method in [
-            InstallMethod::Homebrew,
-            InstallMethod::Secondary,
-            InstallMethod::Binary,
-        ] {
+        for method in [InstallMethod::Homebrew, InstallMethod::Binary] {
             assert_eq!(runner_method_override_for_method(None, method), None);
             assert_eq!(
                 runner_method_override_for_method(Some(method), method),
@@ -5229,7 +5211,6 @@ mod pinned_release_tests {
     #[test]
     fn a_pin_is_refused_for_install_methods_that_download_no_release_asset() {
         assert!(validate_pinned_version(Some("v0.332.0"), InstallMethod::Binary).is_ok());
-        assert!(validate_pinned_version(Some("v0.332.0"), InstallMethod::Secondary).is_ok());
         assert!(validate_pinned_version(None, InstallMethod::Source).is_ok());
 
         for method in [InstallMethod::Source, InstallMethod::Homebrew] {
@@ -5259,9 +5240,9 @@ mod pinned_release_tests {
 
     #[test]
     fn omitted_method_without_a_pin_uses_detection() {
-        let (method, inferred) = resolve_install_method(None, None, || InstallMethod::Secondary);
+        let (method, inferred) = resolve_install_method(None, None, || InstallMethod::Homebrew);
 
-        assert_eq!(method, InstallMethod::Secondary);
+        assert_eq!(method, InstallMethod::Homebrew);
         assert!(!inferred);
     }
 

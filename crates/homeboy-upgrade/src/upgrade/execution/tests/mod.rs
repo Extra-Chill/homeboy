@@ -247,65 +247,39 @@ fn staged_newer_release_replaces_the_destination() {
     );
 }
 
-/// #11152 stays fixed: a successful installer that staged nothing resolves
-/// its candidate to the destination itself, so there is no digest evidence
-/// and an unchanged older controller still fails loudly, naming the observed
-/// identity rather than silently exiting 0.
+/// A successful installer that staged nothing has proven nothing: the release
+/// path verifies the stage only, so a missing stage fails loudly instead of
+/// letting the unchanged live destination stand in for the candidate.
 #[cfg(unix)]
 #[test]
-fn no_op_installer_without_a_staged_artifact_still_fails() {
-    let directory = tempfile::tempdir().expect("target directory");
-    let destination = directory.path().join("homeboy");
-    write_executable_fixture(
-        &destination,
-        "#!/bin/sh\necho 'homeboy 0.326.0+dff9eb75eaf6'\n",
-    );
-    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.326.1"), None, None)
-        .expect("capture replacement baseline");
-    let mut states = Vec::new();
+fn installer_that_staged_nothing_fails_verification() {
+    let directory = tempfile::tempdir().expect("stage directory");
+    let staged = directory.path().join("homeboy");
 
-    let error = finalize_release_replacement(
-        &checkpoint,
-        &destination,
-        &destination,
-        "0.326.1",
-        &mut |checkpoint| {
-            states.push(checkpoint.state.clone());
-            Ok(())
-        },
-    )
-    .expect_err("no-op installer must not report activation");
+    let error = verify_staged_release_candidate("0.326.1", &staged)
+        .expect_err("a missing stage must not verify");
 
     assert!(error
         .message
-        .contains("did not activate the selected release 0.326.1"));
-    assert!(error.message.contains("observed 0.326.0"));
+        .contains("release installer exited without staging a candidate"));
     assert_eq!(
-        error.details["observed_build_identity"],
-        "homeboy 0.326.0+dff9eb75eaf6"
+        error.details["staged_candidate"],
+        staged.display().to_string()
     );
-    assert_eq!(states.last().map(String::as_str), Some("not_applied"));
 }
 
-/// Even a same-version no-op without a staged artifact fails, but the error
-/// no longer reads as the self-contradictory `selected X (observed X)`.
-#[cfg(unix)]
+/// A same-version byte discrepancy does not read as the self-contradictory
+/// `selected X (observed X)`.
 #[test]
 fn same_version_failure_names_the_byte_discrepancy() {
-    let directory = tempfile::tempdir().expect("target directory");
-    let destination = directory.path().join("homeboy");
-    write_executable_fixture(&destination, "#!/bin/sh\necho 'homeboy 0.417.15+aaaaaaa'\n");
-    let checkpoint = ReplacementCheckpoint::pending(&destination, Some("0.417.15"), None, None)
-        .expect("capture replacement baseline");
-
-    let error = finalize_release_replacement(
-        &checkpoint,
-        &destination,
-        &destination,
+    let error = binary_swap_failure(
         "0.417.15",
-        &mut |_| Ok(()),
-    )
-    .expect_err("no staged artifact means no activation proof");
+        Some(Path::new("/usr/local/bin/homeboy")),
+        Some(&ActiveBinaryInfo {
+            version: Some("0.417.15".to_string()),
+            build_identity: Some("homeboy 0.417.15+aaaaaaa".to_string()),
+        }),
+    );
 
     assert!(
         error
@@ -315,6 +289,79 @@ fn same_version_failure_names_the_byte_discrepancy() {
         error.message
     );
     assert!(error.message.contains("homeboy 0.417.15+aaaaaaa"));
+}
+
+/// The release installer writes only the isolated stage. Verification,
+/// admission, and promotion into the PATH-active destination belong to Rust
+/// (`finalize_release_replacement`), so the installer must never touch the
+/// live binary — otherwise a candidate that fails verification is already
+/// live before anything checked it.
+#[cfg(unix)]
+#[test]
+fn release_installer_writes_only_the_stage_and_never_the_live_binary() {
+    const TARGET: &str = "homeboy-x86_64-unknown-linux-gnu";
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tools = temp.path().join("tools");
+    let live_dir = temp.path().join("live-bin");
+    let stage_dir = temp.path().join("stage");
+    let archive_root = temp.path().join("archive-root");
+    let archive = temp.path().join("homeboy.tar.xz");
+    for dir in [&tools, &live_dir, &stage_dir, &archive_root.join(TARGET)] {
+        std::fs::create_dir_all(dir).expect("fixture directory");
+    }
+
+    let live = live_dir.join("homeboy");
+    let live_bytes = "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then echo 'homeboy 0.417.14+live'; exit 0; fi\necho 'homeboy 0.417.14+live'\n";
+    write_executable_fixture(&live, live_bytes);
+    let candidate_bytes = "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'homeboy 0.417.15+candidate'; exit 0; fi\nif [ \"$1\" = self ]; then exit 0; fi\nexit 64\n";
+    write_executable_fixture(&archive_root.join(TARGET).join("homeboy"), candidate_bytes);
+    assert!(std::process::Command::new("tar")
+        .arg("-cJf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&archive_root)
+        .arg(TARGET)
+        .status()
+        .expect("create release archive")
+        .success());
+
+    write_executable_fixture(
+        &tools.join("curl"),
+        &format!(
+            "#!/bin/sh\nout=\nfor arg in \"$@\"; do [ \"$previous\" = -o ] && out=\"$arg\"; previous=\"$arg\"; done\ncase \"$out\" in *.sha256) printf 'unused  {TARGET}.tar.xz\\n' > \"$out\" ;; *) cp '{}' \"$out\" ;; esac\n",
+            archive.display()
+        ),
+    );
+    write_executable_fixture(&tools.join("sha256sum"), "#!/bin/sh\necho 'OK'\n");
+    write_executable_fixture(
+        &tools.join("uname"),
+        "#!/bin/sh\ncase \"$1\" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n",
+    );
+
+    let staged = stage_dir.join("homeboy");
+    let release = SelectedRelease {
+        tag: "v0.417.15".to_string(),
+        version: "0.417.15".to_string(),
+        target: Some("x86_64-unknown-linux-gnu".to_string()),
+    };
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg(RELEASE_INSTALLER_SCRIPT).env(
+        "PATH",
+        format!("{}:{}:/usr/bin:/bin", tools.display(), live_dir.display()),
+    );
+    configure_release_installer(&mut command, &staged, Some(&release));
+    let output = command.output().expect("run release installer");
+
+    assert_eq!(
+        std::fs::read_to_string(&live).expect("live binary"),
+        live_bytes,
+        "the release installer replaced the live binary before Rust verified the candidate: {output:?}"
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&staged).expect("staged candidate"),
+        candidate_bytes
+    );
 }
 
 pub(super) fn git_stdout(path: &Path, args: &[&str]) -> String {

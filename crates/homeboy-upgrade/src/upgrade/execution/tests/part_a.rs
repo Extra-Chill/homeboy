@@ -947,7 +947,7 @@ fn test_execute_upgrade() {
 #[test]
 fn test_upgrade_verification_result() {
     assert!(upgrade_verification_result(
-        InstallMethod::Secondary,
+        InstallMethod::Binary,
         false,
         "0.157.1",
         Some("0.158.0"),
@@ -955,7 +955,7 @@ fn test_upgrade_verification_result() {
         None,
     ));
     assert!(!upgrade_verification_result(
-        InstallMethod::Secondary,
+        InstallMethod::Binary,
         false,
         "0.157.1",
         Some("0.157.1"),
@@ -985,9 +985,9 @@ fn forced_source_upgrade_rejects_unchanged_same_version_build_identity() {
 }
 
 #[test]
-fn forced_secondary_upgrade_accepts_same_version_active_binary() {
+fn forced_binary_upgrade_accepts_same_version_active_binary() {
     assert!(upgrade_verification_result(
-        InstallMethod::Secondary,
+        InstallMethod::Binary,
         true,
         "0.157.1",
         Some("0.157.1"),
@@ -999,7 +999,7 @@ fn forced_secondary_upgrade_accepts_same_version_active_binary() {
 #[test]
 fn verification_accepts_newer_active_binary() {
     assert!(upgrade_verification_result(
-        InstallMethod::Secondary,
+        InstallMethod::Binary,
         false,
         "0.157.1",
         Some("0.158.0"),
