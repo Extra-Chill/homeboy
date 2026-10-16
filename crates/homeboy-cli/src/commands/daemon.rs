@@ -7,10 +7,9 @@ use uuid::Uuid;
 
 use homeboy::core::api_jobs::{DaemonJobInspection, JobEvent, JobStatus, JobStore};
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonCandidateReconciliationResult,
-    DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult,
-    DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
-    ServiceIdentity,
+    self, DaemonCandidateReconciliationResult, DaemonExactOrphanRecoveryResult,
+    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult,
+    DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 use homeboy::core::Error;
@@ -189,24 +188,6 @@ enum DaemonCommand {
         #[arg(long)]
         full: bool,
     },
-    /// Render deployable reverse-runner broker service configuration
-    BrokerConfig {
-        /// Stable loopback address for the VPS service.
-        #[arg(long, default_value = "127.0.0.1:7421")]
-        listen_addr: String,
-        /// Homeboy binary path used by the service unit.
-        #[arg(long, default_value = "/usr/local/bin/homeboy")]
-        binary_path: String,
-        /// System user that runs the broker service.
-        #[arg(long, default_value = "homeboy")]
-        user: String,
-        /// System group that runs the broker service.
-        #[arg(long, default_value = "homeboy")]
-        group: String,
-        /// Optional public hostname to render disabled Nginx/Caddy examples.
-        #[arg(long)]
-        domain: Option<String>,
-    },
     /// Fetch artifact bytes through the local daemon byte endpoint
     ArtifactGet(DaemonArtifactGetArgs),
     /// Inspect durable daemon jobs without reading the internal store directly
@@ -320,7 +301,6 @@ pub enum DaemonOutput {
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
     Status(Value),
-    BrokerConfig(BrokerConfig),
     ArtifactGet(DaemonArtifactGetOutput),
     JobsList(DaemonJobsListOutput),
     JobsShow(DaemonJobsShowOutput),
@@ -607,24 +587,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             let status = daemon::read_status()?;
             Ok((DaemonOutput::Status(status_output(status, full)), 0))
         }
-        DaemonCommand::BrokerConfig {
-            listen_addr,
-            binary_path,
-            user,
-            group,
-            domain,
-        } => Ok((
-            DaemonOutput::BrokerConfig(daemon::render_broker_config(BrokerConfigOptions {
-                listen_addr,
-                binary_path,
-                identity: ServiceIdentity {
-                    service_user: user,
-                    service_group: group,
-                },
-                domain,
-            })?),
-            0,
-        )),
         DaemonCommand::ArtifactGet(args) => artifact_get(args),
         DaemonCommand::Jobs(args) => jobs(args),
     }

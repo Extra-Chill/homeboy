@@ -1,13 +1,9 @@
 //! The transport-neutral Runner API v1 `watch` service (#13881 step 2).
 //!
-//! One authority serves the watch operation on both surfaces: the broker
-//! `POST /runner/jobs/watch` route (credential-authorized) and the local
-//! read-only `GET /jobs/:id/watch` route (the SSH tunnel is the trust
-//! boundary). Request parsing and authorization stay at each route; this
-//! module owns everything after them: job resolution, runner-bound ownership,
-//! cursor paging, and terminal projection. Both routes therefore return
-//! identical `homeboy/runner-api-watch-response/v1` bodies for the same job
-//! and cursor.
+//! The local read-only `GET /jobs/:id/watch` route (the SSH tunnel is the
+//! trust boundary) parses the request; this module owns everything after it:
+//! job resolution, cursor paging, and terminal projection, returning
+//! `homeboy/runner-api-watch-response/v1` bodies.
 
 use uuid::Uuid;
 
@@ -21,21 +17,12 @@ use homeboy_runner_contract::{
 
 /// Serve one watch read against the durable job store.
 ///
-/// `watching_runner` is the identity the route resolved for the reader:
-/// `Some(runner_id)` for a credential-bound broker read (the credential's
-/// paired runner, or the runner the request names), and `None` for a trusted
-/// local read through the tunnel, which carries no broker credential and owns
-/// no runner-bound restriction — the same trust rule the neighbouring local
-/// job reads use.
-///
-/// Operation-level conditions (unknown job, a runner without standing on the
-/// job) are typed `RunnerApiOperationFailure` values in the versioned
-/// response; store failures are `Err` and remain an HTTP concern at each
-/// route.
+/// An unknown job is a typed `RunnerApiOperationFailure` value in the
+/// versioned response; store failures are `Err` and remain an HTTP concern at
+/// the route.
 pub(crate) fn watch_job(
     job_store: &JobStore,
     request: &RunnerApiWatchRequest,
-    watching_runner: Option<&str>,
 ) -> Result<RunnerApiWatchResponse> {
     let job_id_not_found = |request: &RunnerApiWatchRequest, job_id: String| {
         watch_failure(
@@ -50,20 +37,6 @@ pub(crate) fn watch_job(
     let Ok(job) = job_store.get(job_id) else {
         return Ok(job_id_not_found(request, job_id.to_string()));
     };
-    if let Some(watching_runner) = watching_runner {
-        if job
-            .target_runner_id
-            .as_deref()
-            .is_some_and(|target| target != watching_runner)
-        {
-            return Ok(watch_failure(
-                request,
-                RunnerApiOperationFailureCode::RunnerNotAuthorized,
-                format!("remote runner job is not owned by runner {watching_runner}"),
-            ));
-        }
-    }
-
     // Exclusive lower bound: only events with `sequence > after_sequence` are
     // returned, ascending, so a resume sees every later event exactly once.
     let mut later_events = job_store
@@ -124,7 +97,7 @@ pub(crate) fn watch_job(
 
 /// The failure value of the watch operation: the versioned response envelope
 /// with an empty event page and the typed operation failure carried in-band.
-pub(crate) fn watch_failure(
+fn watch_failure(
     request: &RunnerApiWatchRequest,
     code: RunnerApiOperationFailureCode,
     message: impl Into<String>,
@@ -148,24 +121,12 @@ pub(crate) fn watch_failure(
 mod tests {
     use super::*;
     use crate::api_jobs::JobEventKind;
-    use crate::daemon::remote_runner;
-    use crate::daemon::remote_runner::BrokerAuthContext;
     use crate::test_support::HomeGuard;
     use homeboy_runner_contract::{
         RunnerApiOperationFailureCode, RUNNER_API_V1, RUNNER_API_WATCH_REQUEST_SCHEMA,
         RUNNER_API_WATCH_RESPONSE_SCHEMA,
     };
     use serde_json::json;
-
-    fn submit_body() -> serde_json::Value {
-        let request: crate::api_jobs::RemoteRunnerJobRequest = serde_json::from_value(json!({
-            "runner_id": "homeboy-lab",
-            "command": ["homeboy", "test"],
-            "cwd": "/tmp/x"
-        }))
-        .expect("dispatch fixture");
-        serde_json::to_value(request.into_runner_api_fixture()).expect("Runner API submit JSON")
-    }
 
     fn watch_request(job_id: &str, after_sequence: u64) -> RunnerApiWatchRequest {
         RunnerApiWatchRequest {
@@ -209,92 +170,9 @@ mod tests {
             .collect()
     }
 
-    fn query_cursor(query: &str) -> u64 {
-        query
-            .split("after_sequence=")
-            .nth(1)
-            .and_then(|value| value.split('&').next())
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0)
-    }
-
     fn failure_code(response: &RunnerApiWatchResponse) -> serde_json::Value {
         let failure = response.failure.as_ref().expect("typed watch failure");
         serde_json::to_value(failure.code).expect("failure code")
-    }
-
-    /// Route parity (#13881 step 2): the broker route and the read-only local
-    /// route return identical watch bodies for the same job and cursor, both
-    /// from cursor 0 and from a middle cursor.
-    #[test]
-    fn broker_and_read_only_routes_return_identical_watch_bodies() {
-        use crate::http_api::{handle_with_jobs, HttpApiRequest, HttpMethod};
-
-        let _home = HomeGuard::new();
-        let store = JobStore::default();
-        let submit = remote_runner::route(
-            "POST",
-            "/runner/jobs",
-            Some(submit_body()),
-            &store,
-            &BrokerAuthContext::trusted_local(),
-        );
-        assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
-        let job_id = submit.body["body"]["job"]["id"]
-            .as_str()
-            .expect("job id")
-            .to_string();
-        append(&store, &job_id, JobEventKind::Progress, "one");
-        let second = append(&store, &job_id, JobEventKind::Stdout, "two");
-        append(&store, &job_id, JobEventKind::Progress, "three");
-
-        let body_for = |query: &str| {
-            let read_only = handle_with_jobs(
-                HttpApiRequest {
-                    method: HttpMethod::Get,
-                    path: format!("/jobs/{job_id}/watch{query}"),
-                    body: None,
-                },
-                &store,
-            )
-            .expect("read-only watch");
-            assert_eq!(read_only.status, 200);
-            let broker = remote_runner::route(
-                "POST",
-                "/runner/jobs/watch",
-                Some(json!({
-                    "schema": RUNNER_API_WATCH_REQUEST_SCHEMA,
-                    "api_version": { "major": 1 },
-                    "runner_id": "homeboy-lab",
-                    "job_id": job_id,
-                    "after_sequence": query_cursor(query),
-                })),
-                &store,
-                &BrokerAuthContext::trusted_local(),
-            );
-            assert_eq!(broker.status_code, 200, "broker body: {}", broker.body);
-            (
-                read_only.body["response"].clone(),
-                broker.body["body"]["response"].clone(),
-            )
-        };
-
-        let (from_zero_read_only, from_zero_broker) = body_for("");
-        assert_eq!(from_zero_read_only, from_zero_broker);
-        assert_eq!(
-            from_zero_read_only["events"]
-                .as_array()
-                .expect("events")
-                .len(),
-            store_log_sequences(&store, &job_id).len()
-        );
-        let middle = format!("?after_sequence={second}");
-        let (from_middle_read_only, from_middle_broker) = body_for(&middle);
-        assert_eq!(from_middle_read_only, from_middle_broker);
-        assert_eq!(
-            from_middle_read_only["next_sequence"],
-            from_zero_broker["next_sequence"]
-        );
     }
 
     #[test]
@@ -306,8 +184,8 @@ mod tests {
         let second = append(&store, &job_id, JobEventKind::Stdout, "two");
         append(&store, &job_id, JobEventKind::Progress, "three");
 
-        let from_zero = watch_job(&store, &watch_request(&job_id, 0), None).expect("watch");
-        let from_middle = watch_job(&store, &watch_request(&job_id, second), None).expect("watch");
+        let from_zero = watch_job(&store, &watch_request(&job_id, 0)).expect("watch");
+        let from_middle = watch_job(&store, &watch_request(&job_id, second)).expect("watch");
         assert_eq!(
             page_sequences(&from_zero),
             store_log_sequences(&store, &job_id)
@@ -336,7 +214,6 @@ mod tests {
                 limit: Some(1),
                 ..watch_request(&job_id, 0)
             },
-            None,
         )
         .expect("watch");
         assert_eq!(
@@ -346,7 +223,7 @@ mod tests {
         assert!(!paged.terminal);
         assert!(paged.terminal_outcome.is_none());
 
-        let caught_up = watch_job(&store, &watch_request(&job_id, first), None).expect("watch");
+        let caught_up = watch_job(&store, &watch_request(&job_id, first)).expect("watch");
         assert!(caught_up.terminal);
         assert_eq!(
             caught_up.terminal_outcome,
@@ -355,33 +232,11 @@ mod tests {
     }
 
     #[test]
-    fn watch_rejects_a_foreign_runner_and_an_unknown_job_in_band() {
+    fn watch_reports_an_unknown_job_in_band() {
         let _home = HomeGuard::new();
         let store = JobStore::default();
-        let submit = remote_runner::route(
-            "POST",
-            "/runner/jobs",
-            Some(submit_body()),
-            &store,
-            &BrokerAuthContext::trusted_local(),
-        );
-        assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
-        let job_id = submit.body["body"]["job"]["id"]
-            .as_str()
-            .expect("job id")
-            .to_string();
-        append(&store, &job_id, JobEventKind::Progress, "one");
-
-        let foreign =
-            watch_job(&store, &watch_request(&job_id, 0), Some("other-runner")).expect("watch");
-        assert_eq!(
-            failure_code(&foreign),
-            serde_json::to_value(RunnerApiOperationFailureCode::RunnerNotAuthorized)
-                .expect("unauthorized code")
-        );
-
         let missing =
-            watch_job(&store, &watch_request(&Uuid::new_v4().to_string(), 0), None).expect("watch");
+            watch_job(&store, &watch_request(&Uuid::new_v4().to_string(), 0)).expect("watch");
         assert_eq!(
             failure_code(&missing),
             serde_json::to_value(RunnerApiOperationFailureCode::JobNotFound).expect("missing code")

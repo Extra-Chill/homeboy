@@ -29,7 +29,6 @@ use homeboy_runner_contract::{
 const VERSION: &str = homeboy_product_identity::product_version();
 
 mod artifact_download;
-mod broker_config;
 mod completion_tracker;
 mod control;
 #[doc(hidden)]
@@ -70,7 +69,6 @@ use stop::stop_with_force_for_lease;
 pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
 pub mod runner_workspace_root;
 pub use artifact_download::ArtifactDownload;
-pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
     ensure_running_with_replacement_operation, fetch_artifact_to_path,
@@ -1331,7 +1329,6 @@ impl DirectDaemonExecSubmitRequest {
                 envelope: request.execution_envelope(),
                 workspace_claim_binding: None,
                 workspace_owner_lease: None,
-                credential_delivery: None,
             },
             runner: None,
             raw_exec: false,
@@ -2754,35 +2751,7 @@ where
         | ("GET", "/files/upload-chunk")
         | ("GET", "/files/upload-chunk/abort")
         | ("GET", "/files/download") => method_not_allowed(),
-        ("POST", "/runner/jobs/reconcile")
-        | ("POST", "/runner/workspace-claims/acquire")
-        | ("POST", "/runner/workspace-claims/validate")
-        | ("POST", "/runner/workspace-claims/release")
-        | ("POST", "/runner/workspace-claims/authority")
-        | ("POST", "/runner/workspace-owners/register")
-        | ("POST", "/runner/workspace-owners/validate")
-        | ("POST", "/runner/workspace-owners/renew")
-        | ("POST", "/runner/workspace-owners/release") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("POST", "/runner/staging")
-        | ("POST", "/runner/staging/direct")
-        | ("POST", "/runner/staging/capabilities") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("GET", "/runner/jobs")
-        | ("GET", "/runner/jobs/reconcile")
-        | ("GET", "/runner/jobs/claim") => method_not_allowed(),
-        ("GET", "/runner/workspace-claims/capabilities") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("GET", path) if path.starts_with("/runner/jobs/") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("POST", path) if path.starts_with("/runner/jobs/") => {
+        ("POST", "/runner/staging/direct") | ("POST", "/runner/staging/capabilities") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("POST", "/v1/control-plane/runs") => {
@@ -3913,14 +3882,6 @@ pub fn enqueue_staged_direct_exec(
         }
         None => {
             let job = job_store.get(job_id)?;
-            if job.status == JobStatus::Running && job.claim_id.is_some() {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "staged execution is claimed by a reverse runner",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
             return Ok(serde_json::json!({
                 "command": "api.runner.exec.enqueue",
                 "job": job,
@@ -4032,7 +3993,7 @@ fn enqueue_exec_request(
     if !inline_secret_names.is_empty() {
         return Err(Error::validation_invalid_argument(
             "env",
-            "durable reverse-runner jobs cannot accept inline secret env values",
+            "durable runner jobs cannot accept inline secret env values",
             Some("durable_reverse_runner_inline_secret_env".to_string()),
             Some(vec![format!(
                 "Inline secret variables: {}",
@@ -5207,7 +5168,6 @@ mod tests {
                     envelope: envelope.clone(),
                     workspace_claim_binding: None,
                     workspace_owner_lease: None,
-                    credential_delivery: None,
                 })
                 .unwrap();
             old.select_staged_direct_execution(job.id, "lab").unwrap();
@@ -6360,41 +6320,6 @@ mod tests {
                 .pending_owner_release_recoveries()
                 .expect("consumed evidence")
                 .is_empty());
-        });
-    }
-
-    #[test]
-    fn top_level_router_handles_reverse_owner_lifecycle() {
-        with_isolated_home(|_| {
-            let store = JobStore::default();
-            let registered = route_with_job_store_and_body(
-                "POST",
-                "/runner/workspace-owners/register",
-                Some(json!({
-                    "workspace": direct_owner_workspace(),
-                    "owner_id": "reverse-router-owner",
-                    "ttl_ms": 1_000,
-                })),
-                &store,
-            );
-            assert_eq!(registered.status_code, 200, "{:#?}", registered.body);
-            let lease = registered.body["body"]["workspace_owner_lease"].clone();
-            let renewed = route_with_job_store_and_body(
-                "POST",
-                "/runner/workspace-owners/renew",
-                Some(json!({ "workspace_owner_lease": lease, "ttl_ms": 1_000 })),
-                &store,
-            );
-            assert_eq!(renewed.status_code, 200, "{:#?}", renewed.body);
-            let replacement = renewed.body["body"]["workspace_owner_lease"].clone();
-            let released = route_with_job_store_and_body(
-                "POST",
-                "/runner/workspace-owners/release",
-                Some(json!({ "workspace_owner_lease": replacement })),
-                &store,
-            );
-            assert_eq!(released.status_code, 200, "{:#?}", released.body);
-            assert_eq!(released.body["body"]["released"], true);
         });
     }
 
@@ -8234,16 +8159,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Test-support network entry point for the production reverse-broker routes.
-/// Authentication and route handling remain identical to a daemon connection.
-#[cfg(any(test, feature = "test-support"))]
-pub fn handle_reverse_broker_test_connection(
-    stream: TcpStream,
-    job_store: &JobStore,
-) -> std::io::Result<()> {
-    handle_connection(stream, job_store, UnsupportedAnalysisJobRunner, false)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

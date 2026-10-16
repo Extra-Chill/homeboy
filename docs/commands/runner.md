@@ -494,21 +494,22 @@ or ambiguous probes abort without changing the store.
 
 #### Broker authentication and pairing
 
-Every `/runner/*` broker route requires an authenticated, scoped bearer token
-(#2990). The trust model is:
+Every authenticated `/runner/*` daemon route (`/runner/staging/capabilities`,
+`/runner/staging/direct`, and runner file transfer) requires a scoped bearer
+token (#2990). The trust model is:
 
-- **Pairing.** On the broker host, mint a credential with
-  `homeboy runner broker pair <id> --runner-id <runner-id> [--work] [--submit]`.
+- **Pairing.** On the controller, mint a credential with
+  `homeboy runner broker pair <id> --runner-id <runner-id>`. Unless
+  `--no-install` is given, the hash-only store is installed on the SSH runner
+  host.
   Pairing prints a one-time bearer token and stores only its SHA-256 hash in
   `~/.config/homeboy/broker_auth.json` (`0600`). The plaintext token is shown
   once and never re-displayed or logged.
-- **Scopes.** `--work` authorizes worker routes (register, claim, events,
-  finish, heartbeat); `--submit` authorizes controller job submission and
-  cancellation (`POST /runner/jobs`, `POST /runner/jobs/<id>/cancel`). A
-  credential may carry both. When neither flag is given, `--work` is assumed.
-- **Runner-id binding.** Worker routes carry a `runner_id`; the presented token
-  must belong to a credential paired to that exact `runner_id`, so a paired
-  runner can never claim, progress, or finish another runner's jobs.
+- **Scope.** Pairing grants the `submit` scope, which authorizes staged
+  submission and runner file transfer. Credentials stored with the retired
+  `work` scope still load but grant no route.
+- **Runner-id binding.** Requests carry a `runner_id`; the presented token
+  must belong to a credential paired to that exact `runner_id`.
 - **Revocation.** `homeboy runner broker revoke <id>` disables a credential.
   `homeboy runner broker list` shows non-secret credential metadata (never
   tokens or hashes).
@@ -518,9 +519,8 @@ Every `/runner/*` broker route requires an authenticated, scoped bearer token
   `"allow_unauthenticated_loopback": true` in `broker_auth.json`; this is only
   honored when the broker is bound to loopback.
 
-Workers send the token via `--broker-token <token>` or the
-`HOMEBOY_BROKER_TOKEN` environment variable; controllers read their submit token
-from `HOMEBOY_BROKER_TOKEN`. Tokens travel as both `X-Homeboy-Broker-Token` and
+Controllers read their submit token from `HOMEBOY_BROKER_TOKEN`, falling back
+to the newest active submit credential for the runner in `broker_auth.json`. Tokens travel as both `X-Homeboy-Broker-Token` and
 `Authorization: Bearer <token>` so they survive proxies that strip one form.
 Unauthenticated, mismatched-runner, or wrong-scope requests are rejected with a
 structured `broker.auth_denied` error and never expose the stored secret.
@@ -628,14 +628,14 @@ Homeboy reports the two states separately:
 ### `broker`
 
 ```sh
-homeboy runner broker pair lab-1 --runner-id homeboy-lab --work
-homeboy runner broker pair ctrl-1 --runner-id homeboy-lab --submit
+homeboy runner broker pair ctrl-1 --runner-id homeboy-lab
+homeboy runner broker pair ctrl-2 --runner-id homeboy-lab --no-install
 homeboy runner broker revoke lab-1
 homeboy runner broker list
 ```
 
-Manage broker authentication and pairing on the broker host.
-`pair` mints a one-time scoped bearer token (printed once; only its SHA-256 hash
+Manage broker authentication and pairing from the controller.
+`pair` mints a one-time submit-scoped bearer token (printed once; only its SHA-256 hash
 is stored under `~/.config/homeboy/broker_auth.json`). `revoke` disables a
 credential by id, and `list` reports non-secret credential metadata. See
 [Broker authentication and pairing](#broker-authentication-and-pairing) for the

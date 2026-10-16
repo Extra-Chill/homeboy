@@ -12,7 +12,7 @@ use homeboy_tunnel::preview_client::{
 use homeboy_tunnel::preview_consumer;
 use homeboy_tunnel::preview_ingress::{
     self, PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
-    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
+    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus, ServiceIdentity,
 };
 use homeboy_tunnel::{
     self as tunnel, ExposeServiceTunnelSpec, ServiceTunnel, ServiceTunnelAuth,
@@ -449,7 +449,7 @@ impl PreviewIngressInstallArgs {
             bind: self.bind,
             binary_path: self.binary_path,
             service_name: self.service_name,
-            identity: homeboy::core::daemon::ServiceIdentity {
+            identity: ServiceIdentity {
                 service_user: self.user,
                 service_group: self.group,
             },

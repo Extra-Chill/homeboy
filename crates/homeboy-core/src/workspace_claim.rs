@@ -773,7 +773,7 @@ mod tests {
             .register_owner(identity(), "local:one", 100, 10)
             .unwrap();
         let two = store
-            .register_owner(identity(), "reverse:two", 100, 10)
+            .register_owner(identity(), "remote:two", 100, 10)
             .unwrap();
         assert_ne!(one.token, two.token);
         assert!(store

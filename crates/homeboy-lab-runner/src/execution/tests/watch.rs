@@ -1,7 +1,6 @@
 //! End-to-end coverage for the controller following Lab jobs with the Runner
-//! API v1 watch cursor (#13881 step 2): route parity between the broker and
-//! read-only watch surfaces, cursor-follow event-log equality, and resume
-//! after a dropped connection.
+//! API v1 watch cursor (#13881 step 2): cursor-follow event-log equality and
+//! resume after a dropped connection.
 
 use super::super::daemon::{
     fetch_daemon_events, fetch_daemon_watch_resilient_with_endpoint_reload, DaemonWatchFollow,
@@ -9,7 +8,7 @@ use super::super::daemon::{
 use super::handoff::wait_for_path;
 use super::*;
 use reqwest::blocking::Client;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -48,131 +47,68 @@ fn daemon_client() -> Client {
         .build()
         .expect("daemon client")
 }
-fn post_broker(client: &Client, daemon_url: &str, path: &str, body: Value) -> Value {
-    let response = client
-        .post(format!("{daemon_url}{path}"))
-        .json(&body)
-        .send()
-        .expect("broker POST");
-    let status = response.status();
-    let envelope: Value = response.json().expect("broker envelope");
-    assert_eq!(
-        envelope["success"], true,
-        "broker POST {path} returned {status}: {envelope}"
-    );
-    envelope["data"]["body"].clone()
-}
-
-/// Submit a queued runner job through the broker surface and claim it, so the
-/// test can stream events into the daemon's durable log over HTTP.
-fn submit_claimed_broker_job(client: &Client, daemon_url: &str) -> (String, String) {
-    let submitted = post_broker(
-        client,
-        daemon_url,
-        "/runner/jobs",
-        serde_json::to_value(
-            serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerJobRequest>(json!({
-                "runner_id": "lab",
-                "command": ["homeboy", "test"],
-                "cwd": "/tmp/watch-parity"
-            }))
-            .expect("dispatch fixture")
-            .into_runner_api_fixture(),
-        )
-        .expect("Runner API submit JSON"),
-    );
-    let job_id = submitted["job"]["id"]
-        .as_str()
-        .expect("submitted job id")
-        .to_string();
-    let claim = post_broker(
-        client,
-        daemon_url,
-        "/runner/jobs/claim",
-        json!({
-            "schema": homeboy_runner_contract::RUNNER_API_CLAIM_REQUEST_SCHEMA,
-            "api_version": { "major": 1 },
-            "runner_id": "lab",
-            "lease_ms": 60_000,
-            "execution_protocol": homeboy_runner_contract::RunnerJobExecutionProtocol::current(),
-        }),
-    );
-    let claim_id = claim["response"]["outcome"]["claim"]["claim_id"]
-        .as_str()
-        .expect("claim id")
-        .to_string();
-    // A worker consumes its execution receipt before it may finish the job.
-    post_broker(
-        client,
-        daemon_url,
-        &format!("/runner/jobs/{job_id}/consume"),
-        json!({
-            "runner_id": "lab",
-            "claim_id": claim_id,
-            "context_id": claim["response"]["outcome"]["claim"]["execution_context"]["id"],
-        }),
-    );
-    (job_id, claim_id)
-}
-
-fn append_broker_event(
-    client: &Client,
+/// Start a direct-daemon handoff that returns as soon as the daemon accepts
+/// the job, leaving the workload running.
+fn start_direct_daemon_job(
     daemon_url: &str,
-    job_id: &str,
-    claim_id: &str,
-    kind: &str,
-    message: &str,
-) -> u64 {
-    let appended = post_broker(
-        client,
+    cwd: &std::path::Path,
+    command: Vec<String>,
+) -> String {
+    let (output, _) = exec_via_daemon(
+        &ssh_runner(),
         daemon_url,
-        &format!("/runner/jobs/{job_id}/events"),
-        json!({
-            "runner_id": "lab",
-            "claim_id": claim_id,
-            "kind": kind,
-            "message": message,
-        }),
-    );
-    appended["event"]["sequence"]
-        .as_u64()
-        .expect("event sequence")
+        None,
+        cwd.display().to_string(),
+        None,
+        command,
+        Default::default(),
+        Default::default(),
+        false,
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        false,
+        false,
+        true,
+        false,
+        None,
+    )
+    .expect("zero-wait direct daemon handoff");
+    output.job_id.expect("accepted job id")
 }
 
-fn read_only_watch(client: &Client, daemon_url: &str, job_id: &str, query: &str) -> Value {
-    let response: Value = client
-        .get(format!("{daemon_url}/jobs/{job_id}/watch{query}"))
-        .send()
-        .expect("read-only watch request")
-        .json()
-        .expect("read-only watch envelope");
-    assert_eq!(
-        response["success"], true,
-        "read-only watch envelope: {response}"
-    );
-    response["data"]["body"]["response"].clone()
+/// A workload line the daemon records as one live progress event.
+fn progress_frame(item: &str) -> String {
+    format!(
+        "printf 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"current_item\":\"{item}\"}}\\n'"
+    )
 }
 
-fn broker_watch(
-    client: &Client,
-    daemon_url: &str,
-    job_id: &str,
-    runner_id: &str,
-    after_sequence: u64,
-) -> Value {
-    let body = post_broker(
-        client,
-        daemon_url,
-        "/runner/jobs/watch",
-        json!({
-            "schema": homeboy_runner_contract::RUNNER_API_WATCH_REQUEST_SCHEMA,
-            "api_version": { "major": 1 },
-            "runner_id": runner_id,
-            "job_id": job_id,
-            "after_sequence": after_sequence,
-        }),
-    );
-    body["response"].clone()
+/// Wait until the daemon's durable log holds the progress event for `item`,
+/// returning its sequence.
+fn wait_for_progress_event(client: &Client, daemon_url: &str, job_id: &str, item: &str) -> u64 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let events = fetch_daemon_events(client, daemon_url, job_id).expect("daemon events");
+        if let Some(event) = events.iter().find(|event| {
+            event
+                .data
+                .as_ref()
+                .and_then(|data| data.get("current_item"))
+                .and_then(Value::as_str)
+                == Some(item)
+        }) {
+            return event.sequence;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "progress event {item} never reached the daemon log"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn event_sequences(events: &[homeboy_core::api_jobs::JobEvent]) -> Vec<u64> {
@@ -186,48 +122,6 @@ impl Drop for ReleaseBlockedWorkload {
     fn drop(&mut self) {
         let _ = std::fs::write(&self.0, "release");
     }
-}
-
-#[test]
-fn watch_routes_return_identical_bodies_from_zero_and_middle_cursors() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        allow_unauthenticated_loopback_broker();
-        let daemon_url = loopback_broker_daemon();
-        let client = daemon_client();
-        let (job_id, claim_id) = submit_claimed_broker_job(&client, &daemon_url);
-        append_broker_event(&client, &daemon_url, &job_id, &claim_id, "progress", "one");
-        let second = append_broker_event(&client, &daemon_url, &job_id, &claim_id, "stdout", "two");
-        append_broker_event(
-            &client,
-            &daemon_url,
-            &job_id,
-            &claim_id,
-            "progress",
-            "three",
-        );
-
-        let full_log = fetch_daemon_events(&client, &daemon_url, &job_id).expect("full log");
-        for (query, cursor) in [
-            ("", 0),
-            (format!("?after_sequence={second}").as_str(), second),
-        ] {
-            let local = read_only_watch(&client, &daemon_url, &job_id, query);
-            let broker = broker_watch(&client, &daemon_url, &job_id, "lab", cursor);
-            assert_eq!(local, broker, "watch routes must agree for cursor {cursor}");
-            let seen = local["events"]
-                .as_array()
-                .expect("watched events")
-                .iter()
-                .map(|event| event["sequence"].as_u64().expect("sequence"))
-                .collect::<Vec<_>>();
-            let expected: Vec<u64> = event_sequences(&full_log)
-                .into_iter()
-                .filter(|sequence| *sequence > cursor)
-                .collect();
-            assert_eq!(seen, expected, "cursor {cursor}");
-            assert_eq!(local["next_sequence"], broker["next_sequence"]);
-        }
-    });
 }
 
 #[test]
@@ -353,10 +247,33 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
 fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
     homeboy_core::test_support::with_isolated_home(|_| {
         allow_unauthenticated_loopback_broker();
+        let _timeout = EnvVarGuard::set(RUNNER_EXEC_WAIT_TIMEOUT_ENV, "0");
+        let _cancel = EnvVarGuard::unset(RUNNER_CANCEL_ON_WAIT_TIMEOUT_ENV);
+        let workspace = tempfile::tempdir().expect("workspace");
+        let resume = workspace.path().join("resume");
+        let release = workspace.path().join("release");
+        let _resume_on_drop = ReleaseBlockedWorkload(resume.clone());
+        let _release_on_drop = ReleaseBlockedWorkload(release.clone());
         let daemon_url = loopback_broker_daemon();
         let client = daemon_client();
-        let (job_id, claim_id) = submit_claimed_broker_job(&client, &daemon_url);
-        append_broker_event(&client, &daemon_url, &job_id, &claim_id, "progress", "one");
+        let job_id = start_direct_daemon_job(
+            &daemon_url,
+            workspace.path(),
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "{}; while [ ! -e \"$1\" ]; do sleep 0.01; done; {}; {}; while [ ! -e \"$2\" ]; do sleep 0.01; done",
+                    progress_frame("one"),
+                    progress_frame("three"),
+                    progress_frame("four"),
+                ),
+                "sh".to_string(),
+                resume.display().to_string(),
+                release.display().to_string(),
+            ],
+        );
+        wait_for_progress_event(&client, &daemon_url, &job_id, "one");
         let job_uuid = uuid::Uuid::parse_str(&job_id).expect("valid job id");
 
         // Read the first page, then lose the endpoint.
@@ -375,16 +292,8 @@ fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
         // Events land while the connection is down. The retry goes through a
         // dead endpoint and recover over the reloaded one, repeating the read
         // from the same cursor.
-        append_broker_event(
-            &client,
-            &daemon_url,
-            &job_id,
-            &claim_id,
-            "progress",
-            "three",
-        );
-        let fourth =
-            append_broker_event(&client, &daemon_url, &job_id, &claim_id, "stdout", "four");
+        std::fs::write(&resume, "resume").expect("resume workload");
+        let fourth = wait_for_progress_event(&client, &daemon_url, &job_id, "four");
         let unavailable = std::net::TcpListener::bind("127.0.0.1:0").expect("dead listener");
         let dead_endpoint = format!("http://{}", unavailable.local_addr().expect("dead address"));
         drop(unavailable);
@@ -407,16 +316,7 @@ fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
             .expect("absorb resumed page");
 
         // Finish the job, then assemble the terminal log from the cursor.
-        post_broker(
-            &client,
-            &daemon_url,
-            &format!("/runner/jobs/{job_id}/finish"),
-            json!({
-                "runner_id": "lab",
-                "claim_id": claim_id,
-                "result": { "exit_code": 0 }
-            }),
-        );
+        std::fs::write(&release, "release").expect("release workload");
         follow
             .drain_to_end(&client, &daemon_url, &job_id, || Ok(None))
             .expect("terminal event log");

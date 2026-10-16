@@ -615,7 +615,7 @@ where
         // Deliberately does NOT federate runner-resident records. The daemon
         // serves this on a single-threaded accept loop, so a bounded runner
         // probe -- 15s per connected runner -- would stall `/health`, `daemon
-        // status`, and the reverse-broker routes remote runners depend on.
+        // status`, and the job routes direct controllers depend on.
         // The CLI federates by default because it can afford to wait; the
         // daemon cannot. `homeboy activity` remains the federated surface.
         HttpEndpoint::Activity => json!({
@@ -691,10 +691,9 @@ where
         }),
         HttpEndpoint::JobWatch { id, request } => {
             // The SSH tunnel is this surface's trust boundary, so the local
-            // reader resolves through the shared watch service with no
-            // runner-bound ownership restriction — the same rule the
-            // neighbouring job reads use (#13881 step 2).
-            let response = crate::daemon::runner_watch::watch_job(job_store, request, None)?;
+            // reader has no runner-bound ownership restriction — the same
+            // rule the neighbouring job reads use (#13881 step 2).
+            let response = crate::daemon::runner_watch::watch_job(job_store, request)?;
             json!({
                 "command": "api.jobs.watch",
                 "job_id": id,

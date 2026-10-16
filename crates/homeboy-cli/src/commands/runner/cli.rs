@@ -553,22 +553,14 @@ pub(super) enum RunnerServiceCommand {
 
 #[derive(Subcommand)]
 pub(super) enum RunnerBrokerCommand {
-    /// Pair a runner with the broker, minting a one-time scoped bearer token
+    /// Pair a controller with a runner, minting a one-time submit-scoped bearer token
     Pair {
         /// Stable credential id used for later revocation
         id: String,
 
-        /// Runner id this credential authorizes (worker routes must match it)
+        /// Runner id this credential authorizes (requests must match it)
         #[arg(long)]
         runner_id: String,
-
-        /// Grant the controller submit scope (POST /runner/jobs)
-        #[arg(long)]
-        submit: bool,
-
-        /// Grant the worker scope (register/claim/event/finish/heartbeat)
-        #[arg(long)]
-        work: bool,
 
         /// Store only on this controller; skip installing broker_auth.json on an SSH runner host
         #[arg(long)]

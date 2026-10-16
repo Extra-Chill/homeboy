@@ -6,11 +6,9 @@
 
 mod artifact;
 mod capability;
-mod claim;
 mod discovery;
 pub mod env_materialization_plan;
 mod execution_context;
-mod heartbeat;
 mod lifecycle;
 pub mod path_materialization;
 mod resource;
@@ -25,11 +23,6 @@ pub use artifact::{RunnerArtifactRef, RunnerMutationArtifacts};
 pub use capability::{
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
     RunnerToolchainReadinessProbe,
-};
-pub use claim::{
-    RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
-    RunnerApiClaimedExecution, RunnerCredentialDeliveryDescriptor, RUNNER_API_CLAIM_REQUEST_SCHEMA,
-    RUNNER_API_CLAIM_RESPONSE_SCHEMA,
 };
 pub use discovery::{
     RunnerApiCapabilitiesRequest, RunnerApiCapabilitiesResponse, RunnerApiCompatibility,
@@ -48,14 +41,9 @@ pub use discovery::{
     RUNNER_READINESS_SCHEMA, RUNNER_SERVICE_OBSERVATION_SCHEMA,
 };
 pub use execution_context::{
-    is_internal_control_env, RunnerJobExecutionContextAssertion, RunnerJobExecutionProtocol,
-    RunnerJobExecutionVerification, RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV,
-    RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY, RUNNER_JOB_EXECUTION_CONTEXT_CAPABILITY_VERSION,
-    RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA, RUNNER_PLACEMENT_RESOLVED_ENV,
-};
-pub use heartbeat::{
-    RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
-    RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
+    is_internal_control_env, RunnerJobExecutionContextAssertion, RunnerJobExecutionVerification,
+    RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_JOB_EXECUTION_CONTEXT_SCHEMA,
+    RUNNER_PLACEMENT_RESOLVED_ENV,
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
@@ -67,10 +55,7 @@ pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     RunnerTunnelProcessStartIdentity,
 };
-pub use submission::{
-    RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
-    RunnerCredentialDelivery, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
-};
+pub use submission::{RunnerApiSubmitRequest, RUNNER_API_SUBMIT_REQUEST_SCHEMA};
 pub use watch::{
     RunnerApiWatchCapability, RunnerApiWatchRequest, RunnerApiWatchResponse,
     RunnerApiWatchTerminalOutcome, RunnerApiWatchedEvent, RUNNER_API_WATCH_CAPABILITY,

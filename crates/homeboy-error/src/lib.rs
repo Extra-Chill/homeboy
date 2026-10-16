@@ -1253,7 +1253,7 @@ impl Error {
         )
     }
 
-    /// Reverse runner broker authentication/authorization rejection.
+    /// Runner broker authentication/authorization rejection.
     ///
     /// Secrets (tokens) are never embedded in the message or details; only the
     /// non-sensitive reason and any matched runner id are surfaced so the broker
@@ -1270,7 +1270,7 @@ impl Error {
         });
         let mut error = Self::new(
             ErrorCode::BrokerAuthDenied,
-            format!("Reverse runner broker rejected request: {reason_str}"),
+            format!("Runner broker rejected request: {reason_str}"),
             details,
         );
         for hint in hints {

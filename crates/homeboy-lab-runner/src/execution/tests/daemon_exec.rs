@@ -132,7 +132,7 @@ fn direct_submission(command: Vec<&str>, submission_key: &str) -> serde_json::Va
 }
 
 #[test]
-fn direct_staging_recovers_the_original_queue_entry_and_replays_one_execution() {
+fn direct_staging_replays_one_execution() {
     register_driver();
     crate::runner_staging_store::register_runner_staging_provider();
     let _home = create_lab_local_runner();
@@ -153,16 +153,6 @@ fn direct_staging_recovers_the_original_queue_entry_and_replays_one_execution() 
         crate::runner_staging_store::RemoteRunnerStagingRequest::new(envelope),
     )
     .expect("staging request");
-    let queued = route_with_body("POST", "/runner/staging", Some(payload.clone()), &store);
-    assert_eq!(queued.status_code, 200, "{}", queued.body);
-    let receipt = queued.body["body"]["receipt"].clone();
-    let id = receipt["handoff"]["runner_job_id"]
-        .as_str()
-        .expect("job ID");
-    let job_id = uuid::Uuid::parse_str(id).unwrap();
-    assert_eq!(store.get(job_id).unwrap().status, JobStatus::Queued);
-    assert!(!marker_path.exists());
-
     let accepted = route_with_body(
         "POST",
         "/runner/staging/direct",
@@ -170,7 +160,11 @@ fn direct_staging_recovers_the_original_queue_entry_and_replays_one_execution() 
         &store,
     );
     assert_eq!(accepted.status_code, 200, "{}", accepted.body);
-    assert_eq!(accepted.body["body"]["receipt"], receipt);
+    let receipt = accepted.body["body"]["receipt"].clone();
+    let id = receipt["handoff"]["runner_job_id"]
+        .as_str()
+        .expect("job ID");
+    let job_id = uuid::Uuid::parse_str(id).unwrap();
     let terminal = wait_for_job(&store, id);
     let events = store.events(job_id).unwrap();
     assert_eq!(terminal.status, JobStatus::Succeeded, "{events:?}");
@@ -316,17 +310,6 @@ fn direct_staging_concurrent_replays_preserve_source_mutations_and_environment()
         .insert("STAGED_PUBLIC".to_string(), "preserved".to_string());
     let store = JobStore::default();
 
-    let queued = stage_request(&store, "/runner/staging", &envelope);
-    let job_id = staged_job_id(&queued);
-    assert_eq!(
-        store
-            .get(uuid::Uuid::parse_str(&job_id).expect("uuid"))
-            .expect("job")
-            .status,
-        JobStatus::Queued
-    );
-    assert!(!marker.exists(), "reverse staging must remain queue-only");
-
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let submissions = (0..2)
         .map(|_| {
@@ -345,11 +328,7 @@ fn direct_staging_concurrent_replays_preserve_source_mutations_and_environment()
         .collect::<Vec<_>>();
     assert_eq!(responses[0]["receipt"], responses[1]["receipt"]);
     let direct = &responses[0];
-    assert_eq!(
-        staged_job_id(&direct),
-        job_id,
-        "direct adoption retains the staged UUID"
-    );
+    let job_id = staged_job_id(direct);
     let terminal = wait_for_job(&store, &job_id);
     assert_eq!(terminal.status, JobStatus::Succeeded);
     let result = store
@@ -405,7 +384,7 @@ fn direct_staging_preserves_nonzero_child_failure() {
 
 #[test]
 #[cfg(unix)]
-fn direct_staging_retains_the_original_cancel_endpoint_and_reaps_the_child() {
+fn direct_staging_cancels_through_the_job_endpoint_and_reaps_the_child() {
     register_driver();
     crate::register_runner_staging_provider();
     let _home = create_lab_local_runner();
@@ -443,7 +422,7 @@ fn direct_staging_retains_the_original_cancel_endpoint_and_reaps_the_child() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let pid = pid.expect("child started and recorded its PID");
-    let cancelled = route_with_body("POST", &format!("/runner/jobs/{id}/cancel"), None, &store);
+    let cancelled = route_with_body("POST", &format!("/jobs/{id}/cancel"), None, &store);
     assert_eq!(cancelled.status_code, 200, "{}", cancelled.body);
     assert_eq!(wait_for_job(&store, &id).status, JobStatus::Cancelled);
     for _ in 0..100 {

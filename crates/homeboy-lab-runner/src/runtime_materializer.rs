@@ -38,7 +38,7 @@ pub struct ResolvedAgentRuntimeGeneration {
 
 /// Serializable, versioned proof of the runtime identity at each handoff.
 /// `executed` is derived from the rewritten dispatch argument, never from the
-/// original controller declaration, so it proves direct and reverse paths use
+/// original controller declaration, so it proves every dispatch path uses
 /// the same immutable generation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeExecutionEvidence {
@@ -131,7 +131,7 @@ pub(crate) fn resolve_lab_agent_runtime(
             _ => return Ok(None),
         };
     // Runtime sources are controller-owned immutable inputs, not workspace
-    // aliases. In particular, a reverse runner must not receive a controller
+    // aliases. In particular, a runner must not receive a controller
     // path merely because the normal command workspace was synchronized.
     let _ = workspace_remaps;
     let generation =
@@ -162,7 +162,7 @@ pub(crate) fn resolve_lab_agent_runtime(
     })?;
     plan.runtime_path = Some(generation.runtime_path.clone());
     // The policy crosses the runner boundary after this point. Replace every
-    // controller locator with its published runner generation path so reverse
+    // controller locator with its published runner generation path so runner
     // submission can neither observe nor accidentally reuse controller paths.
     for source in &mut plan.runtime_sources {
         source.locator = AgentRuntimeSourceLocator::LocalPath {

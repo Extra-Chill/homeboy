@@ -27,8 +27,7 @@ use homeboy_lab_contract::lab::execution_envelope::{
     lab_runner_workload_from_execution_envelope, runner_execution_envelope_from_workload,
 };
 use homeboy_runner_contract::{
-    is_internal_control_env, RunnerApiClaimedExecution, RunnerApiSubmitRequest,
-    RunnerCredentialDelivery, RunnerCredentialDeliveryDescriptor, RunnerMutationArtifacts,
+    is_internal_control_env, RunnerApiSubmitRequest, RunnerMutationArtifacts,
     RunnerResourceMetrics, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1,
 };
 
@@ -37,47 +36,6 @@ use homeboy_runner_contract::{
 const MAX_COMMAND_ASSET_COUNT: usize = 16;
 const MAX_COMMAND_ASSET_BASE64_BYTES: usize = 1_400_000;
 const MAX_COMMAND_ASSETS_BASE64_BYTES: usize = 4_200_000;
-const MAX_CREDENTIAL_DELIVERY_BYTES: usize = 65_536;
-const CREDENTIAL_DELIVERY_TTL_MS: u64 = 60_000;
-
-fn controller_owned_secret_env_names(plan: &SecretEnvPlan) -> std::collections::BTreeSet<String> {
-    plan.env_materialization
-        .as_ref()
-        .map(|plan| {
-            plan.secret_refs
-                .iter()
-                .filter(|secret| secret.owner.as_deref() == Some("controller"))
-                .map(|secret| secret.name.clone())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Plaintext is accepted only over the authenticated submission transport and
-/// retained in process memory until the matching live claim consumes it.
-#[derive(Clone)]
-pub(super) struct EphemeralCredentialDelivery {
-    id: String,
-    env: std::collections::BTreeMap<String, String>,
-    claim_id: Option<String>,
-    // Queued work has no delivery expiry. The short lifetime starts only once a
-    // live claim binds the value to its intended runner.
-    expires_at_ms: Option<u64>,
-    consumed: bool,
-}
-
-impl std::fmt::Debug for EphemeralCredentialDelivery {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("EphemeralCredentialDelivery")
-            .field("id", &self.id)
-            .field("env_names", &self.env.keys().collect::<Vec<_>>())
-            .field("claim_id", &self.claim_id)
-            .field("expires_at_ms", &self.expires_at_ms)
-            .field("consumed", &self.consumed)
-            .finish()
-    }
-}
 
 pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLifecycleMetadata};
 
@@ -87,21 +45,6 @@ pub use homeboy_api_jobs_contract::metadata::{JobArtifactMetadata, RunnerJobLife
 pub struct RunnerJobProjectionCancelRequest {
     pub expected_runner_id: String,
     pub expected_durable_run_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RemoteRunnerSubmissionLookup {
-    Accepted { job: Box<Job> },
-    Expired { job_id: Uuid },
-    Absent,
-}
-
-/// Protocol capabilities advertised by a remote runner before it claims work.
-pub struct RemoteRunnerClaimProtocols<'a> {
-    pub execution: &'a crate::runner_job_execution_context::RunnerJobExecutionProtocol,
-    pub workspace_claim: Option<&'a crate::workspace_claim::WorkspaceClaimProtocol>,
-    pub workspace_owner_lease: Option<&'a crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,14 +96,6 @@ pub struct RemoteRunnerJobRequest {
 }
 
 impl RemoteRunnerJobRequest {
-    pub fn requires_workspace_claim_protocol(&self) -> bool {
-        self.workspace_claim_binding.is_some()
-    }
-
-    pub fn requires_workspace_owner_lease_protocol(&self) -> bool {
-        self.workspace_owner_lease.is_some()
-    }
-
     /// A caller-owned identity makes a retried POST safe across a lost response.
     /// It deliberately lives in metadata so older clients can continue submitting
     /// anonymous jobs while durable handoffs opt into replayable ownership.
@@ -216,7 +151,6 @@ impl RemoteRunnerJobRequest {
             envelope: self.execution_envelope(),
             workspace_claim_binding: self.workspace_claim_binding,
             workspace_owner_lease: self.workspace_owner_lease,
-            credential_delivery: None,
         }
     }
 
@@ -414,52 +348,6 @@ fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
     metadata
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteRunnerJobClaim {
-    pub job: Job,
-    pub envelope: RunnerExecutionEnvelope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    /// Authenticated execution authority derived from this durable claim.
-    /// Workers verify it before materializing inputs or invoking a provider.
-    pub execution_context: crate::runner_job_execution_context::RunnerJobExecutionContext,
-    /// The protocol the worker advertised, echoed for the worker to verify.
-    pub execution_protocol: crate::runner_job_execution_context::RunnerJobExecutionProtocol,
-    /// Echoed only for workspace-owning jobs. A worker must reject a missing or
-    /// malformed value before it materializes the claimed workspace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_claim_protocol: Option<crate::workspace_claim::WorkspaceClaimProtocol>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_owner_lease_protocol: Option<crate::workspace_claim::WorkspaceOwnerLeaseProtocol>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_delivery: Option<RunnerCredentialDeliveryDescriptor>,
-}
-
-impl RemoteRunnerJobClaim {
-    /// Project durable core claim state into the transport-neutral runner API.
-    pub fn runner_api_claimed_execution(&self) -> Result<RunnerApiClaimedExecution> {
-        Ok(RunnerApiClaimedExecution {
-            job_id: self.job.id.to_string(),
-            claim_id: self.job.claim_id.clone().ok_or_else(|| {
-                Error::internal_unexpected("claimed remote runner job is missing a claim id")
-            })?,
-            claim_expires_at_ms: self.job.claim_expires_at_ms.ok_or_else(|| {
-                Error::internal_unexpected("claimed remote runner job is missing an expiry")
-            })?,
-            envelope: self.envelope.clone(),
-            workspace_claim_binding: self.workspace_claim_binding.clone(),
-            workspace_owner_lease: self.workspace_owner_lease.clone(),
-            execution_context: self.execution_context.assertion(),
-            execution_protocol: self.execution_protocol.clone(),
-            workspace_claim_protocol: self.workspace_claim_protocol.clone(),
-            workspace_owner_lease_protocol: self.workspace_owner_lease_protocol.clone(),
-            credential_delivery: self.credential_delivery.clone(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteRunnerJobResult {
     pub exit_code: i32,
@@ -475,7 +363,7 @@ pub struct RemoteRunnerJobResult {
     pub data: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observation_run_ids: Vec<String>,
-    /// Durable terminal observations retained by a reverse worker. Each record
+    /// Durable terminal observations retained by the runner. Each record
     /// carries its complete artifact metadata so disconnected reconciliation
     /// never needs a live runner endpoint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -517,74 +405,7 @@ impl RemoteRunnerObservationRunDetail {
     }
 }
 
-impl RemoteRunnerJobResult {
-    pub fn validate_observation_run_details(&self) -> Result<()> {
-        let declared = self
-            .observation_run_ids
-            .iter()
-            .map(|id| id.trim())
-            .collect::<HashSet<_>>();
-        if declared.len() != self.observation_run_ids.len()
-            || declared.iter().any(|id| id.is_empty())
-        {
-            return Err(Error::validation_invalid_argument(
-                "observation_run_ids",
-                "declared observation run ids must be unique non-empty strings",
-                None,
-                None,
-            ));
-        }
-
-        let mut detail_ids = HashSet::new();
-        for detail in &self.observation_run_details {
-            if detail.schema != RemoteRunnerObservationRunDetail::SCHEMA_V1 {
-                return Err(Error::validation_invalid_argument(
-                    "observation_run_details.schema",
-                    "unsupported observation run detail schema",
-                    Some(detail.schema.clone()),
-                    None,
-                ));
-            }
-            if detail.run.id.trim().is_empty() || !detail_ids.insert(detail.run.id.clone()) {
-                return Err(Error::validation_invalid_argument(
-                    "observation_run_details",
-                    "observation run detail records must have unique non-empty run ids",
-                    None,
-                    None,
-                ));
-            }
-            if detail
-                .artifacts
-                .iter()
-                .any(|artifact| artifact.run_id != detail.run.id)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "observation_run_details.artifacts",
-                    "observation run detail artifacts must belong to their embedded run",
-                    Some(detail.run.id.clone()),
-                    None,
-                ));
-            }
-        }
-        // Legacy workers only published identities. Keep accepting that wire
-        // shape so the controller can use its durable artifact fallback.
-        if self.observation_run_details.is_empty() {
-            return Ok(());
-        }
-        if declared.len() != detail_ids.len() || declared.iter().any(|id| !detail_ids.contains(*id))
-        {
-            return Err(Error::validation_invalid_argument(
-                "observation_run_details",
-                "every declared observation run id requires one matching detail record",
-                None,
-                None,
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// The only persisted shape of a reverse-runner job. Unknown fields are
+/// The only persisted shape of a remote runner job. Unknown fields are
 /// refused, so a record written in an older shape (for example the
 /// request-only representation) fails the store load with a typed JSON error
 /// naming the field instead of being reinterpreted.
@@ -596,12 +417,12 @@ pub(super) struct StoredRemoteRunnerJob {
     pub(super) workspace_claim_binding: Option<crate::workspace_claim::WorkspaceClaimBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    /// The authenticated execution context minted when the job was claimed.
-    /// Absent only while the job is unclaimed.
+    /// Execution context recorded when a worker claimed the job. Records that
+    /// carry one are never selected or adopted for direct execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) execution_context_id: Option<String>,
-    /// One-time durable execution receipt. This is consumed only at the
-    /// provider boundary after the worker has materialized its inputs.
+    /// Execution receipt recorded when a worker consumed a claimed job. Records
+    /// that carry one are never selected or adopted for direct execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) execution_receipt: Option<RemoteRunnerExecutionReceipt>,
     /// Durable direction fence set before runner-side staged-source work starts.
@@ -611,7 +432,6 @@ pub(super) struct StoredRemoteRunnerJob {
 }
 
 struct RemoteRunnerAdmission {
-    job_id: Option<Uuid>,
     operation: String,
     runner_id: String,
     project_id: Option<String>,
@@ -634,23 +454,6 @@ impl StoredRemoteRunnerJob {
         &self,
     ) -> Option<crate::workspace_claim::WorkspaceClaimBinding> {
         self.workspace_claim_binding.clone()
-    }
-
-    pub(super) fn replace_workspace_owner_lease(
-        &mut self,
-        expected: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
-        renewed: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    ) -> Result<()> {
-        if self.workspace_owner_lease.as_ref() != expected {
-            return Err(Error::validation_invalid_argument(
-                "workspace_owner_lease",
-                "heartbeat owner lease does not match the durable job",
-                None,
-                None,
-            ));
-        }
-        self.workspace_owner_lease = renewed;
-        Ok(())
     }
 }
 
@@ -702,8 +505,8 @@ pub(super) struct RemoteRunnerExecutionReceipt {
     pub(super) consumed_at_ms: u64,
 }
 
-/// Only the sealed staging pipeline may convert a reverse submission into a
-/// direct daemon child. Ordinary remote runner jobs remain reverse-only.
+/// Only the sealed staging pipeline may convert a remote runner submission
+/// into a direct daemon child.
 fn is_runner_staged_execution(stored: &StoredJob) -> bool {
     stored.job.operation == "runner_staged_execution"
         && stored.remote_runner.as_ref().is_some_and(|remote| {
@@ -721,9 +524,9 @@ fn is_runner_staged_execution(stored: &StoredJob) -> bool {
 }
 
 impl JobStore {
-    /// Return the immutable, redacted envelope of one still-queued reverse job.
+    /// Return the immutable, redacted envelope of one still-queued staged job.
     /// This is intentionally unavailable after direct adoption or terminalization
-    /// so callers cannot treat historical reverse input as new admission work.
+    /// so callers cannot treat historical staged input as new admission work.
     pub fn queued_staged_execution(
         &self,
         job_id: Uuid,
@@ -754,7 +557,7 @@ impl JobStore {
         )
     }
 
-    /// Read the sealed staged envelope for either its queued reverse record or
+    /// Read the sealed staged envelope for either its queued staged record or
     /// a previously adopted direct record. Adoption retains this provenance so
     /// a replacement daemon can replay the exact UUID.
     pub fn staged_direct_execution_envelope(
@@ -791,26 +594,14 @@ impl JobStore {
     }
 
     /// Select direct execution before any runner-side source preparation. This
-    /// durable direction fence and reverse claiming share the same transaction,
-    /// so exactly one execution path can win for a staged job.
+    /// durable direction fence runs in one transaction, so concurrent direct
+    /// replays of a staged job converge on one execution.
     pub fn select_staged_direct_execution(
         &self,
         job_id: Uuid,
         runner_id: &str,
     ) -> Result<Option<RunnerExecutionEnvelope>> {
-        let deliveries = self
-            .credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned");
-        if deliveries.contains_key(&job_id) {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "staged execution has reverse credential authority and cannot be selected directly",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        let selection = self.durable_transaction(|inner| {
+        self.durable_transaction(|inner| {
             let stored = inner.jobs.get_mut(&job_id).ok_or_else(|| job_not_found(job_id))?;
             if stored.job.target_runner_id.as_deref() != Some(runner_id) {
                 return Err(Error::validation_invalid_argument(
@@ -823,10 +614,10 @@ impl JobStore {
             if stored.local_runner.is_some() || stored.job.status.is_terminal() {
                 return Ok(None);
             }
-            if stored.job.status != JobStatus::Queued || stored.job.claim_id.is_some() {
+            if stored.job.status != JobStatus::Queued {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    "staged execution is already claimed or is not queued",
+                    "staged execution is not queued",
                     Some(job_id.to_string()),
                     None,
                 ));
@@ -851,7 +642,7 @@ impl JobStore {
                 {
                     return Err(Error::validation_invalid_argument(
                         "job_id",
-                        "staged execution requires reverse-runner authority and cannot be selected directly",
+                        "staged execution carries workspace authority and cannot be selected directly",
                         Some(job_id.to_string()),
                         None,
                     ));
@@ -872,15 +663,13 @@ impl JobStore {
                 )?;
             }
             Ok(Some(envelope))
-        });
-        drop(deliveries);
-        selection
+        })
     }
 
-    /// Atomically turn one exact queued reverse submission into the existing
+    /// Atomically turn one exact queued staged submission into the existing
     /// daemon-local execution lifecycle. The submission index and event history
-    /// remain attached to the same UUID; clearing `remote_runner` prevents any
-    /// reverse worker from subsequently claiming it.
+    /// remain attached to the same UUID; clearing `remote_runner` makes the
+    /// adoption final.
     pub(crate) fn adopt_queued_staged_execution_for_local_runner(
         &self,
         job_id: Uuid,
@@ -890,33 +679,21 @@ impl JobStore {
         metadata: Value,
         path_materialization_plan: Option<PathMaterializationPlan>,
     ) -> Result<(Job, bool)> {
-        // Reverse claiming holds this mutex before taking the durable store
-        // lock. Keep this guard through the durable conversion so credential
-        // delivery cannot appear between the rejection check and commit.
-        let deliveries = self
-            .credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned");
-        if deliveries.contains_key(&job_id) {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "staged execution has an unconsumed reverse credential delivery",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        let adoption = self.durable_transaction(|inner| {
-            let stored = inner.jobs.get_mut(&job_id).ok_or_else(|| job_not_found(job_id))?;
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
             if stored.local_runner.is_some() {
                 return Ok((stored.job.clone(), false));
             }
             if stored.job.status.is_terminal() {
                 return Ok((stored.job.clone(), false));
             }
-            if stored.job.status != JobStatus::Queued || stored.job.claim_id.is_some() {
+            if stored.job.status != JobStatus::Queued {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    "staged execution is already claimed or is not queued",
+                    "staged execution is not queued",
                     Some(job_id.to_string()),
                     None,
                 ));
@@ -932,7 +709,7 @@ impl JobStore {
             let remote = stored.remote_runner.as_ref().ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "job_id",
-                    "job is not a queued staged reverse execution",
+                    "job is not a queued staged execution",
                     Some(job_id.to_string()),
                     None,
                 )
@@ -968,7 +745,7 @@ impl JobStore {
             {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    "staged execution requires reverse-runner authority and cannot be directly adopted",
+                    "staged execution carries workspace authority and cannot be directly adopted",
                     Some(job_id.to_string()),
                     None,
                 ));
@@ -995,12 +772,15 @@ impl JobStore {
                 })),
             )?;
             Ok((
-                inner.jobs.get(&job_id).expect("adopted job exists").job.clone(),
+                inner
+                    .jobs
+                    .get(&job_id)
+                    .expect("adopted job exists")
+                    .job
+                    .clone(),
                 true,
             ))
-        });
-        drop(deliveries);
-        adoption
+        })
     }
 
     /// Take over a queued adopted job only after the daemon lifecycle has
@@ -1067,56 +847,6 @@ impl JobStore {
         })
     }
 
-    pub fn remote_runner_workspace_claim_binding(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<crate::workspace_claim::WorkspaceClaimBinding>> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        Ok(stored
-            .remote_runner
-            .as_ref()
-            .and_then(|remote| remote.workspace_claim_binding.clone()))
-    }
-
-    pub fn remote_runner_workspace_owner_lease(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<crate::workspace_claim::WorkspaceOwnerLease>> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        Ok(stored
-            .remote_runner
-            .as_ref()
-            .and_then(|remote| remote.workspace_owner_lease()))
-    }
-
-    pub fn lookup_remote_runner_submission(
-        &self,
-        submission_key: &str,
-    ) -> RemoteRunnerSubmissionLookup {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        if let Some(submission) = inner.submission_keys.get(submission_key) {
-            if let Some(stored) = inner.jobs.get(&submission.job_id) {
-                return RemoteRunnerSubmissionLookup::Accepted {
-                    job: Box::new(stored.job.clone()),
-                };
-            }
-        }
-        if let Some(submission) = inner.expired_submission_keys.get(submission_key) {
-            return RemoteRunnerSubmissionLookup::Expired {
-                job_id: submission.job_id,
-            };
-        }
-        RemoteRunnerSubmissionLookup::Absent
-    }
-
     /// Submits existing request fixtures through the canonical Runner API.
     #[cfg(any(test, feature = "test-support"))]
     pub fn submit_runner_api_fixture(&self, request: RemoteRunnerJobRequest) -> Result<Job> {
@@ -1143,7 +873,6 @@ impl JobStore {
             ));
         }
         let fingerprint = runner_api_submission_payload_fingerprint(&submission)?;
-        let credential_delivery = submission.credential_delivery.clone();
         let envelope = redacted_envelope_for_durable_replay(submission.envelope);
         let dispatch = envelope.dispatch.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -1179,9 +908,6 @@ impl JobStore {
             lease.verify_shape(timestamp_ms())?;
         }
         let secret_env_plan = envelope.secret_env.clone().unwrap_or_default();
-        if let Some(delivery) = credential_delivery.as_ref() {
-            Self::validate_ephemeral_credential_delivery(delivery, &secret_env_plan)?;
-        }
         reject_inline_durable_secret_env(&dispatch.env, &secret_env_plan)?;
         let lab_runner_workload = lab_runner_workload_from_execution_envelope(&envelope)?;
         super::with_runner_job_preparation(|preparation| {
@@ -1206,17 +932,8 @@ impl JobStore {
                     Some("decode envelope path materialization plan".to_string()),
                 )
             })?;
-        let provisional_delivery = credential_delivery
-            .map(|delivery| {
-                let job_id = Uuid::new_v4();
-                self.attach_ephemeral_credential_delivery(job_id, delivery, &secret_env_plan)?;
-                Ok::<_, Error>(job_id)
-            })
-            .transpose()?;
-        let now = timestamp_ms();
-        let job = self.admit_remote_runner_job(
+        self.admit_remote_runner_job(
             RemoteRunnerAdmission {
-                job_id: provisional_delivery,
                 operation: dispatch.operation.clone(),
                 runner_id: dispatch.runner_id.clone(),
                 project_id: dispatch.project_id.clone(),
@@ -1237,119 +954,8 @@ impl JobStore {
                     direct_execution_selected: false,
                 },
             },
-            now,
-        );
-        if let Some(provisional_delivery) = provisional_delivery {
-            if job
-                .as_ref()
-                .map(|job| job.id != provisional_delivery)
-                .unwrap_or(true)
-            {
-                self.discard_ephemeral_credential_delivery(provisional_delivery);
-            }
-        }
-        job
-    }
-
-    fn attach_ephemeral_credential_delivery(
-        &self,
-        job_id: Uuid,
-        delivery: RunnerCredentialDelivery,
-        plan: &SecretEnvPlan,
-    ) -> Result<()> {
-        Self::validate_ephemeral_credential_delivery(&delivery, plan)?;
-        let mut deliveries = self
-            .credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned");
-        deliveries
-            .entry(job_id)
-            .or_insert_with(|| EphemeralCredentialDelivery {
-                id: Uuid::new_v4().to_string(),
-                env: delivery.env,
-                claim_id: None,
-                expires_at_ms: None,
-                consumed: false,
-            });
-        Ok(())
-    }
-
-    fn validate_ephemeral_credential_delivery(
-        delivery: &RunnerCredentialDelivery,
-        plan: &SecretEnvPlan,
-    ) -> Result<()> {
-        let names = plan.secret_env_names();
-        let controller_owned = controller_owned_secret_env_names(plan);
-        if delivery.env.is_empty()
-            || delivery.env.keys().any(|name| !names.contains(name))
-            || delivery
-                .env
-                .keys()
-                .any(|name| !controller_owned.contains(name))
-            || delivery
-                .env
-                .iter()
-                .any(|(name, value)| name.trim().is_empty() || value.is_empty())
-            || delivery
-                .env
-                .iter()
-                .map(|(name, value)| name.len() + value.len())
-                .sum::<usize>()
-                > MAX_CREDENTIAL_DELIVERY_BYTES
-        {
-            return Err(Error::validation_invalid_argument(
-                "credential_delivery",
-                "credential delivery must contain only controller-owned planned, bounded non-empty secret values",
-                None,
-                None,
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn consume_ephemeral_credential_delivery(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        delivery_id: &str,
-    ) -> Result<std::collections::BTreeMap<String, String>> {
-        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
-        let mut deliveries = self
-            .credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned");
-        let delivery = deliveries.get_mut(&job_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "credential_delivery",
-                "controller credential delivery is unavailable",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if delivery.id != delivery_id
-            || delivery.claim_id.as_deref() != Some(claim_id)
-            || delivery.consumed
-            || delivery
-                .expires_at_ms
-                .is_some_and(|expires_at_ms| expires_at_ms <= timestamp_ms())
-        {
-            return Err(Error::validation_invalid_argument(
-                "credential_delivery",
-                "controller credential delivery is expired, revoked, or already consumed",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        delivery.consumed = true;
-        Ok(std::mem::take(&mut delivery.env))
-    }
-
-    pub fn discard_ephemeral_credential_delivery(&self, job_id: Uuid) {
-        self.credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned")
-            .remove(&job_id);
+            timestamp_ms(),
+        )
     }
 
     fn admit_remote_runner_job(&self, admission: RemoteRunnerAdmission, now: u64) -> Result<Job> {
@@ -1363,7 +969,6 @@ impl JobStore {
             submission_key,
             submission_fingerprint,
             stored_remote_runner,
-            job_id,
         } = admission;
         self.durable_transaction(|inner| {
         if let Some(submission_key) = submission_key.as_deref() {
@@ -1452,7 +1057,7 @@ impl JobStore {
             }
         }
         let mut job = Job {
-            id: job_id.unwrap_or_else(Uuid::new_v4),
+            id: Uuid::new_v4(),
             operation,
             status: JobStatus::Queued,
             created_at_ms: now,
@@ -1529,546 +1134,6 @@ impl JobStore {
         // recovery and daemon restart replay.
         Ok(job)
         })
-    }
-
-    pub fn claim_remote_runner_job(
-        &self,
-        runner_id: &str,
-        project_id: Option<&str>,
-        lease_ms: u64,
-        concurrency_limit: Option<usize>,
-    ) -> Result<Option<RemoteRunnerJobClaim>> {
-        self.claim_remote_runner_job_with_protocols(
-            runner_id,
-            project_id,
-            lease_ms,
-            concurrency_limit,
-            RemoteRunnerClaimProtocols {
-                execution:
-                    &crate::runner_job_execution_context::RunnerJobExecutionProtocol::current(),
-                workspace_claim: Some(&crate::workspace_claim::WorkspaceClaimProtocol::current()),
-                workspace_owner_lease: Some(
-                    &crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
-                ),
-            },
-        )
-    }
-
-    /// Claim a reverse-runner job only when every optional authority carried by
-    /// the job was explicitly negotiated by the worker.
-    pub fn claim_remote_runner_job_with_protocols(
-        &self,
-        runner_id: &str,
-        project_id: Option<&str>,
-        lease_ms: u64,
-        concurrency_limit: Option<usize>,
-        protocols: RemoteRunnerClaimProtocols<'_>,
-    ) -> Result<Option<RemoteRunnerJobClaim>> {
-        let RemoteRunnerClaimProtocols {
-            execution: execution_protocol,
-            workspace_claim: workspace_claim_protocol,
-            workspace_owner_lease: workspace_owner_lease_protocol,
-        } = protocols;
-        if runner_id.trim().is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "runner_id",
-                "remote runner claim requires a runner id",
-                None,
-                None,
-            ));
-        }
-        if concurrency_limit == Some(0) {
-            return Err(Error::validation_invalid_argument(
-                "concurrency_limit",
-                "remote runner claim concurrency_limit must be greater than zero",
-                Some(runner_id.to_string()),
-                None,
-            ));
-        }
-        // Every claim mints an authenticated execution context, so a worker
-        // that does not speak the current protocol is refused before any job
-        // is selected or its state touched.
-        if !execution_protocol.is_supported() {
-            return Err(crate::runner_job_execution_context::rejected(
-                "worker does not advertise the required execution-context protocol",
-            ));
-        }
-
-        let now = timestamp_ms();
-        let lease_ms = lease_ms.max(1);
-        // Hold the sidecar registry lock through durable claim admission. A
-        // controller installs the entry before publishing the job, so a worker
-        // observes either a complete claim or no claim, never a claim missing
-        // its controller-owned capability.
-        let mut deliveries = self
-            .credential_deliveries
-            .lock()
-            .expect("credential delivery mutex poisoned");
-        let claimed = self.durable_transaction(|inner| {
-            if let Some(limit) = concurrency_limit {
-                let running = inner
-                    .jobs
-                    .values()
-                    .filter(|stored| {
-                        stored.remote_runner.is_some()
-                            && stored.job.status == JobStatus::Running
-                            && stored.job.claimed_by_runner_id.as_deref() == Some(runner_id)
-                    })
-                    .count();
-                if running >= limit {
-                    return Ok(None);
-                }
-            }
-            let mut candidates: Vec<_> = inner
-                .jobs
-                .values()
-                .filter(|stored| {
-                    stored.remote_runner.is_some()
-                        && !stored
-                            .remote_runner
-                            .as_ref()
-                            .expect("filtered remote runner job has request")
-                            .direct_execution_selected
-                        && stored.job.status == JobStatus::Queued
-                        && stored.job.target_runner_id.as_deref() == Some(runner_id)
-                        && project_matches(stored.job.target_project_id.as_deref(), project_id)
-                })
-                .collect();
-            candidates.sort_by_key(|stored| {
-                (
-                    queued_event_sequence(stored),
-                    stored.job.created_at_ms,
-                    stored.job.id,
-                )
-            });
-            if let Some(job_id) = candidates
-                .into_iter()
-                .next()
-                .map(|candidate| candidate.job.id)
-            {
-                let (envelope, workspace_claim_binding, workspace_owner_lease) = {
-                    let stored = inner.jobs.get(&job_id).expect("candidate exists");
-                    let remote_runner = stored
-                        .remote_runner
-                        .as_ref()
-                        .expect("filtered remote runner job has request");
-                    (
-                        remote_runner.envelope.clone(),
-                        remote_runner.workspace_claim_binding(),
-                        remote_runner.workspace_owner_lease(),
-                    )
-                };
-                let controller_owned = envelope
-                    .secret_env
-                    .as_ref()
-                    .map(controller_owned_secret_env_names)
-                    .unwrap_or_default();
-                if !controller_owned.is_empty() && !deliveries.contains_key(&job_id) {
-                    Self::append_event_already_locked(
-                        self,
-                        inner,
-                        job_id,
-                        JobEventKind::Error,
-                        Some(
-                            "controller credential delivery is unavailable after broker restart or revocation"
-                                .to_string(),
-                        ),
-                        Some(serde_json::json!({
-                            "status": JobStatus::Failed,
-                            "reason": "controller_credential_delivery_unavailable",
-                            "controller_owned_env_names": controller_owned,
-                        })),
-                    )?;
-                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
-                    stored.job.status = JobStatus::Failed;
-                    stored.job.updated_at_ms = now;
-                    stored.job.finished_at_ms = Some(now);
-                    // A lost sidecar is terminal for this job, but must not
-                    // poison later independent work for the same runner.
-                    return Ok(None);
-                }
-                if workspace_claim_binding.is_some() {
-                    workspace_claim_protocol
-                        .ok_or_else(|| {
-                            crate::runner_job_execution_context::rejected(
-                                "worker did not advertise the required workspace-claim protocol",
-                            )
-                        })?
-                        .verify()?;
-                }
-                if workspace_owner_lease.is_some() {
-                    workspace_owner_lease_protocol
-                        .ok_or_else(|| {
-                            crate::runner_job_execution_context::rejected(
-                            "worker did not advertise the required workspace-owner-lease protocol",
-                        )
-                        })?
-                        .verify()?;
-                }
-                let job = {
-                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
-                    stored.job.status = JobStatus::Running;
-                    stored.job.updated_at_ms = now;
-                    stored.job.started_at_ms = Some(now);
-                    stored.job.claim_id = Some(Uuid::new_v4().to_string());
-                    stored.job.claimed_by_runner_id = Some(runner_id.to_string());
-                    stored.job.claimed_at_ms = Some(now);
-                    stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
-                    stored.job.clone()
-                };
-                let execution_context =
-                    crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
-                        &job, &envelope,
-                    )?;
-                inner
-                    .jobs
-                    .get_mut(&job_id)
-                    .expect("candidate exists")
-                    .remote_runner
-                    .as_mut()
-                    .expect("filtered remote runner job has request")
-                    .execution_context_id = Some(execution_context.id().to_string());
-                Self::append_event_already_locked(
-                    self,
-                    inner,
-                    job_id,
-                    JobEventKind::Status,
-                    Some("remote runner job claimed".to_string()),
-                    Some(serde_json::json!({
-                        "status": JobStatus::Running,
-                        "runner_job_execution_context": execution_context.evidence_record()?,
-                    })),
-                )?;
-                return Ok(Some((
-                    job,
-                    envelope,
-                    workspace_claim_binding,
-                    workspace_owner_lease,
-                    execution_context,
-                )));
-            }
-            Ok(None)
-        })?;
-
-        let Some((
-            job,
-            envelope,
-            workspace_claim_binding,
-            workspace_owner_lease,
-            execution_context,
-        )) = claimed
-        else {
-            return Ok(None);
-        };
-        let execution_protocol = execution_protocol.clone();
-        let workspace_claim_protocol = workspace_claim_binding
-            .is_some()
-            .then(crate::workspace_claim::WorkspaceClaimProtocol::current);
-        let workspace_owner_lease_protocol = workspace_owner_lease
-            .is_some()
-            .then(crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current);
-        let credential_delivery = {
-            deliveries.get_mut(&job.id).and_then(|delivery| {
-                if delivery
-                    .expires_at_ms
-                    .is_some_and(|expires_at_ms| expires_at_ms <= timestamp_ms())
-                    || delivery.consumed
-                {
-                    return None;
-                }
-                delivery.claim_id = job.claim_id.clone();
-                let expires_at_ms = timestamp_ms()
-                    .saturating_add(CREDENTIAL_DELIVERY_TTL_MS)
-                    .min(job.claim_expires_at_ms.unwrap_or_default());
-                delivery.expires_at_ms = Some(expires_at_ms);
-                Some(RunnerCredentialDeliveryDescriptor {
-                    delivery_id: delivery.id.clone(),
-                    env_names: delivery.env.keys().cloned().collect(),
-                    expires_at_ms,
-                })
-            })
-        };
-        Ok(Some(RemoteRunnerJobClaim {
-            job,
-            envelope,
-            workspace_claim_binding,
-            workspace_owner_lease,
-            execution_context,
-            execution_protocol,
-            workspace_claim_protocol,
-            workspace_owner_lease_protocol,
-            credential_delivery,
-        }))
-    }
-
-    pub fn append_remote_runner_event(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        kind: JobEventKind,
-        message: Option<String>,
-        data: Option<Value>,
-    ) -> Result<JobEvent> {
-        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
-        self.append_event(job_id, kind, message, data)
-    }
-
-    pub fn finish_remote_runner_job(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        mut result: RemoteRunnerJobResult,
-    ) -> Result<Job> {
-        self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
-        self.ensure_remote_runner_execution_receipt(job_id)?;
-        result.validate_observation_run_details()?;
-        result.observation_run_details_compatibility_degraded =
-            !result.observation_run_ids.is_empty() && result.observation_run_details.is_empty();
-        let status = if result.exit_code == 0 {
-            JobStatus::Succeeded
-        } else {
-            JobStatus::Failed
-        };
-        self.ensure_transition(job_id, status)?;
-
-        // Runner output is bounded and redacted before it becomes a remote
-        // result. Project it into the event stream as well so job logs do not
-        // have to wait for or decode the terminal result to show child stdio.
-        if let Some(stdout) = result.stdout.as_deref().filter(|stdout| !stdout.is_empty()) {
-            self.append_event(job_id, JobEventKind::Stdout, Some(stdout.to_string()), None)?;
-        }
-        if let Some(stderr) = result.stderr.as_deref().filter(|stderr| !stderr.is_empty()) {
-            self.append_event(job_id, JobEventKind::Stderr, Some(stderr.to_string()), None)?;
-        }
-
-        let result_data = serde_json::to_value(&result).map_err(|err| {
-            Error::internal_json(
-                err.to_string(),
-                Some("serialize remote runner job result".to_string()),
-            )
-        })?;
-        self.append_event(job_id, JobEventKind::Result, None, Some(result_data))?;
-        if result.exit_code != 0 {
-            self.append_event(
-                job_id,
-                JobEventKind::Error,
-                Some(format!(
-                    "remote runner job exited with code {}",
-                    result.exit_code
-                )),
-                Some(json_exit_code(result.exit_code)),
-            )?;
-        }
-
-        self.durable_transaction(|inner| {
-            let stored = inner
-                .jobs
-                .get_mut(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            stored.job.artifacts = result
-                .artifacts
-                .into_iter()
-                .map(|mut artifact| {
-                    artifact.content_base64 = None;
-                    artifact
-                })
-                .collect();
-            Ok(())
-        })?;
-
-        self.transition(
-            job_id,
-            status,
-            if status == JobStatus::Succeeded {
-                "remote runner job succeeded".to_string()
-            } else {
-                format!(
-                    "remote runner job failed with exit code {}",
-                    result.exit_code
-                )
-            },
-        )
-    }
-
-    fn ensure_remote_runner_execution_receipt(&self, job_id: Uuid) -> Result<()> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let remote_runner = stored
-            .remote_runner
-            .as_ref()
-            .expect("finish only follows a validated remote runner claim");
-        // Every claim records its execution context. A claimed record without
-        // one was not written by this broker and cannot prove its receipt.
-        let Some(context_id) = remote_runner.execution_context_id.as_deref() else {
-            return Err(crate::runner_job_execution_context::rejected(
-                "durable runner claim has no execution context",
-            ));
-        };
-        let Some(receipt) = remote_runner.execution_receipt.as_ref() else {
-            return Err(crate::runner_job_execution_context::rejected(
-                "runner execution receipt has not been consumed for this claim",
-            ));
-        };
-        if receipt.context_id != context_id {
-            return Err(crate::runner_job_execution_context::rejected(
-                "runner execution receipt does not match the claimed execution context",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Commit a broker claim renewal and the owner epoch returned by the
-    /// authority store together. Callers renew the authority first; this
-    /// replacement prevents a stale worker token from being accepted later.
-    pub(crate) fn renew_remote_runner_claim_with_workspace_owner_lease(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        lease_ms: u64,
-        expected_owner_lease: Option<&crate::workspace_claim::WorkspaceOwnerLease>,
-        renewed_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
-    ) -> Result<Job> {
-        let now = timestamp_ms();
-        self.durable_transaction(|inner| {
-            let stored = inner
-                .jobs
-                .get_mut(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id)
-                || stored.job.claim_id.as_deref() != Some(claim_id)
-                || stored.job.status != JobStatus::Running
-                || stored
-                    .job
-                    .claim_expires_at_ms
-                    .is_none_or(|expires| expires <= now)
-            {
-                return Err(crate::runner_job_execution_context::rejected(
-                    "durable runner claim is no longer live",
-                ));
-            }
-            let remote = stored
-                .remote_runner
-                .as_mut()
-                .expect("checked remote runner");
-            remote.replace_workspace_owner_lease(expected_owner_lease, renewed_owner_lease)?;
-            stored.job.updated_at_ms = now;
-            stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
-            Ok(stored.job.clone())
-        })
-    }
-
-    /// Atomically revalidate and consume a claim immediately before provider
-    /// invocation. A receipt can only be consumed once, preventing a restarted
-    /// worker from replaying a materialized handoff.
-    pub fn consume_remote_runner_execution(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-        context_id: &str,
-    ) -> Result<Job> {
-        self.durable_transaction(|inner| {
-            let now = timestamp_ms();
-            let job = {
-                let stored = inner
-                    .jobs
-                    .get_mut(&job_id)
-                    .ok_or_else(|| job_not_found(job_id))?;
-                if stored.remote_runner.is_none() {
-                    return Err(Error::validation_invalid_argument(
-                        "job_id",
-                        "job is not a remote runner job",
-                        Some(job_id.to_string()),
-                        None,
-                    ));
-                }
-                if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id)
-                    || stored.job.claim_id.as_deref() != Some(claim_id)
-                    || stored.job.status != JobStatus::Running
-                    || stored
-                        .job
-                        .claim_expires_at_ms
-                        .is_none_or(|expires_at| expires_at <= now)
-                {
-                    return Err(crate::runner_job_execution_context::rejected(
-                        "durable runner claim is no longer live",
-                    ));
-                }
-                let remote_runner = stored
-                    .remote_runner
-                    .as_mut()
-                    .expect("checked remote runner");
-                if remote_runner.execution_receipt.is_some() {
-                    return Err(crate::runner_job_execution_context::rejected(
-                        "runner execution receipt was already consumed",
-                    ));
-                }
-                let envelope = remote_runner.envelope.clone();
-                let expected =
-                    crate::runner_job_execution_context::RunnerJobExecutionContext::from_claim(
-                        &stored.job,
-                        &envelope,
-                    )?;
-                if expected.id() != context_id {
-                    return Err(crate::runner_job_execution_context::rejected(
-                        "runner execution context does not match the live claim",
-                    ));
-                }
-                remote_runner.execution_receipt = Some(RemoteRunnerExecutionReceipt {
-                    context_id: context_id.to_string(),
-                    consumed_at_ms: now,
-                });
-                stored.job.updated_at_ms = now;
-                stored.job.clone()
-            };
-            Self::append_event_already_locked(
-                self,
-                inner,
-                job_id,
-                JobEventKind::Progress,
-                Some("remote runner execution receipt consumed".to_string()),
-                Some(serde_json::json!({
-                    "schema": "homeboy/remote-runner-execution-receipt/v1",
-                    "context_id": context_id,
-                    "consumed_at_ms": now,
-                })),
-            )?;
-            Ok(job)
-        })
-    }
-
-    pub(crate) fn cancel_remote_runner_job(
-        &self,
-        job_id: Uuid,
-        reason: impl Into<String>,
-    ) -> Result<Job> {
-        {
-            let inner = self.inner.lock().expect("job store mutex poisoned");
-            let stored = inner
-                .jobs
-                .get(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            let adopted_direct = stored.local_runner.as_ref().is_some_and(|local| {
-                stored.job.target_runner_id.as_deref() == Some(local.runner_id.as_str())
-            });
-            if stored.remote_runner.is_none() && !adopted_direct {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    "job is not a remote runner job",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-        }
-        let job = self.cancel(job_id, reason)?;
-        self.discard_ephemeral_credential_delivery(job_id);
-        Ok(job)
     }
 
     /// Cancel exactly one daemon-local runner job after proving its durable
@@ -2177,114 +1242,6 @@ impl JobStore {
         super::store::reap_cancelled_local_child(child.as_ref())?;
         Ok(job)
     }
-
-    pub fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
-        self.reconcile_expired_remote_runner_claims_for_runner(now_ms, None)
-    }
-
-    pub(crate) fn reconcile_expired_remote_runner_claims_for_runner(
-        &self,
-        now_ms: u64,
-        runner_id: Option<&str>,
-    ) -> Result<Vec<Job>> {
-        let expired_ids = {
-            let inner = self.inner.lock().expect("job store mutex poisoned");
-            inner
-                .jobs
-                .values()
-                .filter(|stored| {
-                    stored.remote_runner.is_some()
-                        && stored.job.status == JobStatus::Running
-                        && runner_id.is_none_or(|runner_id| {
-                            stored.job.target_runner_id.as_deref() == Some(runner_id)
-                        })
-                        && stored
-                            .job
-                            .claim_expires_at_ms
-                            .is_some_and(|expires_at| expires_at <= now_ms)
-                })
-                .map(|stored| stored.job.id)
-                .collect::<Vec<_>>()
-        };
-
-        let mut reconciled = Vec::new();
-        for job_id in expired_ids {
-            reconciled.push(self.fail(job_id, "remote runner claim expired")?);
-            self.discard_ephemeral_credential_delivery(job_id);
-        }
-        Ok(reconciled)
-    }
-
-    pub(crate) fn ensure_remote_runner_claim(
-        &self,
-        job_id: Uuid,
-        runner_id: &str,
-        claim_id: &str,
-    ) -> Result<()> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        if stored.remote_runner.is_none() {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "job is not a remote runner job",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        if stored.job.claimed_by_runner_id.as_deref() != Some(runner_id) {
-            // A runner attempting to act on a job claimed by a *different*
-            // runner is an authorization violation, not a plain validation
-            // error: it must surface as a `broker.auth_denied` (401) so a
-            // second runner with its own valid token cannot finish/heartbeat
-            // another runner's job.
-            return Err(Error::broker_auth_denied(
-                "remote runner job is not claimed by this runner",
-                Some(runner_id.to_string()),
-                Vec::new(),
-            ));
-        }
-        if claim_id.trim().is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "claim_id",
-                "remote runner event or result requires a claim id",
-                None,
-                None,
-            ));
-        }
-        if stored.job.claim_id.as_deref() != Some(claim_id) {
-            return Err(Error::validation_invalid_argument(
-                "claim_id",
-                "remote runner job is not claimed by this claim id",
-                Some(claim_id.to_string()),
-                None,
-            ));
-        }
-        if stored.job.status != JobStatus::Running {
-            return Err(Error::validation_invalid_argument(
-                "status",
-                "remote runner job must be running before events or results are returned",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        let now = timestamp_ms();
-        if match stored.job.claim_expires_at_ms {
-            Some(expires_at) => expires_at <= now,
-            None => true,
-        } {
-            return Err(Error::validation_invalid_argument(
-                "claim_expires_at_ms",
-                "remote runner claim has expired",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-
-        Ok(())
-    }
 }
 
 fn reject_inline_durable_secret_env(
@@ -2301,7 +1258,7 @@ fn reject_inline_durable_secret_env(
     }
     Err(Error::validation_invalid_argument(
         "env",
-        "durable reverse-runner jobs cannot accept inline secret env values",
+        "durable runner jobs cannot accept inline secret env values",
         Some("durable_reverse_runner_inline_secret_env".to_string()),
         Some(vec![
             format!("Inline secret variables: {}", inline_secret_names.join(", ")),
@@ -2312,29 +1269,6 @@ fn reject_inline_durable_secret_env(
 
 fn default_runner_exec_operation() -> String {
     "runner.exec".to_string()
-}
-
-fn project_matches(job_project_id: Option<&str>, claim_project_id: Option<&str>) -> bool {
-    claim_project_id.is_none() || job_project_id == claim_project_id
-}
-
-fn queued_event_sequence(stored: &StoredJob) -> u64 {
-    stored
-        .events
-        .iter()
-        .find(|event| {
-            event.kind == JobEventKind::Status
-                && event
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data["status"] == serde_json::json!("queued"))
-        })
-        .map(|event| event.sequence)
-        .unwrap_or(u64::MAX)
-}
-
-fn json_exit_code(exit_code: i32) -> Value {
-    serde_json::json!({ "exit_code": exit_code })
 }
 
 #[cfg(test)]

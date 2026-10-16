@@ -16,7 +16,6 @@ homeboy daemon <COMMAND>
 - `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
 - `recover` — resolve and run the right recovery from the current status report
 - `plan` — print the one next lifecycle action (read-only; schema `homeboy/daemon-lifecycle-plan/v1`)
-- `broker-config` — render a deployable reverse-runner broker service recipe
 
 ## Daemon lifetime
 
@@ -212,48 +211,13 @@ operator's inspection the sole source of truth. The attestation is written into
 every affected job's durable event data as
 `operator_confirmed_workload_processes_absent`.
 
-## VPS Reverse Runner Broker
+## Endpoints
 
-`homeboy daemon broker-config` renders the code-backed deployment shape for a
-VPS-hosted reverse runner broker. The safe default is a durable `systemd`
-service that keeps the daemon on a stable loopback port:
-
-```sh
-homeboy daemon broker-config --listen-addr 127.0.0.1:7421
-```
-
-The JSON output includes:
-
-- `systemd_unit` for a `homeboy-broker` service running `homeboy daemon serve`
-- `private_tunnel_examples` for SSH, Cloudflare, or tailnet-only access
-- optional `nginx_site` and `caddy_site` snippets when `--domain` is supplied
-- `daemon_state_path` and `daemon_jobs_path` service-owned operational state locations
-- status and log commands for day-two operations
-- restart, retention, and claim caveats
-
-The service config intentionally requires a stable loopback address. Broker
-routes are currently suitable for private loopback or private tunnel access only.
-Public Internet exposure through Nginx or Caddy is blocked until broker
-auth/pairing from [#2990](https://github.com/Extra-Chill/homeboy/issues/2990)
-lands. The rendered proxy snippets include that warning and should stay disabled
-or protected by private network controls until the auth model is available.
-
-Extra Chill-compatible private setup:
-
-1. Install Homeboy on the VPS at the binary path used in `broker-config`.
-2. Create the service user/group named in the generated output.
-3. Install the rendered `systemd_unit` as `/etc/systemd/system/homeboy-broker.service`.
-4. Run `systemctl daemon-reload && systemctl enable --now homeboy-broker`.
-5. Verify with `systemctl status homeboy-broker`, `homeboy daemon status`, and `curl -fsS http://127.0.0.1:7421/health` on the VPS.
-6. Reach the broker from the runner machine through a private SSH tunnel or private network URL.
-
-Operational caveats:
-
-- The systemd service sets `HOME=/var/lib/homeboy`, so daemon state lives under `/var/lib/homeboy/.config/homeboy/daemon/` instead of the service user's login home.
-- Queued reverse-runner jobs survive daemon restart.
-- Broker-owned running jobs are marked failed as stale when the durable store is reopened after restart.
-- Active reverse-runner claims are lease-scoped; runners should retry claim after the lease expires.
-- The job store has bounded per-job event retention and is not a long-term audit archive. Persist important evidence through Homeboy observations/artifacts.
+Restart behavior: queued staged jobs survive daemon restart; running jobs are
+marked failed as stale when the durable store is reopened unless a recorded
+terminal result can be recovered. The job store has bounded per-job event
+retention and is not a long-term audit archive. Persist important evidence
+through Homeboy observations/artifacts.
 
 ### Built-in Endpoints
 
@@ -284,14 +248,13 @@ contract and return the same JSON envelope shape as other daemon responses.
 - `GET /jobs`
 - `GET /jobs/:id`
 - `GET /jobs/:id/events`
+- `GET /jobs/:id/watch?after_sequence=<n>&limit=<n>`
 - `POST /jobs/:id/cancel`
 - `GET /tools`
 - `GET /tools/:id`
 - `POST /tools/:id/run`
-- `POST /runner/jobs`
-- `POST /runner/jobs/claim`
-- `POST /runner/jobs/:id/events`
-- `POST /runner/jobs/:id/finish`
+- `POST /runner/staging/capabilities` (broker `submit` scope)
+- `POST /runner/staging/direct` (broker `submit` scope)
 
 The run readers expose persisted observation-store evidence from previous
 analysis runs. They do not start lint, test, bench, or rig work.

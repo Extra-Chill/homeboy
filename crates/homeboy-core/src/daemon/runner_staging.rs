@@ -1,4 +1,4 @@
-//! Runner-owned sealed staging hook for authenticated daemon/broker routes.
+//! Runner-owned sealed staging hook for authenticated daemon routes.
 
 use serde_json::Value;
 
@@ -9,15 +9,7 @@ pub trait RunnerStagingProvider: Send + Sync {
     fn capabilities(&self, runner_id: &str) -> Result<Vec<String>>;
     /// The daemon-owned queue is passed through this narrow boundary so staging
     /// admits the real execution job instead of inventing a second executor.
-    fn stage(&self, request: Value, jobs: &JobStore) -> Result<Value>;
-    fn stage_direct(&self, _request: Value, _jobs: &JobStore) -> Result<Value> {
-        Err(crate::Error::validation_invalid_argument(
-            "runner_capabilities",
-            "runner does not support direct staged execution",
-            None,
-            None,
-        ))
-    }
+    fn stage_direct(&self, request: Value, jobs: &JobStore) -> Result<Value>;
 }
 
 struct NoopProvider;
@@ -27,10 +19,10 @@ impl RunnerStagingProvider for NoopProvider {
         Ok(Vec::new())
     }
 
-    fn stage(&self, _request: Value, _jobs: &JobStore) -> Result<Value> {
+    fn stage_direct(&self, _request: Value, _jobs: &JobStore) -> Result<Value> {
         Err(crate::Error::validation_invalid_argument(
             "runner_capabilities",
-            "runner does not support sealed staging",
+            "runner does not support direct staged execution",
             None,
             None,
         ))

@@ -1012,8 +1012,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
             receipt.handoff.runner_id.clone(),
             SealedPayloadMaterializer { root },
         )?;
-        // Serialize replay preparation before any source writes. The durable
-        // direct selection separately excludes competing reverse-worker claims.
+        // Serialize replay preparation before any source writes.
         let _preparation = store.admission_lock()?;
         if let Some(envelope) =
             jobs.staged_direct_execution_envelope(job_id, &receipt.handoff.runner_id)?
@@ -1025,13 +1024,6 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                 envelope,
                 None,
             )?;
-        } else if jobs.get(job_id)?.claim_id.is_some() {
-            return Err(Error::validation_invalid_argument(
-                "runner_staging",
-                "staged job is already claimed by a reverse worker",
-                Some(job_id.to_string()),
-                None,
-            ));
         }
         Ok(response)
     }
@@ -1048,7 +1040,9 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
         }
         Ok(capabilities)
     }
+}
 
+impl ProductionStagingProvider {
     fn stage(
         &self,
         request: serde_json::Value,
@@ -1144,7 +1138,6 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                         envelope: execution,
                         workspace_claim_binding: None,
                         workspace_owner_lease: None,
-                        credential_delivery: None,
                     },
                 )?;
                 Ok(job.id.to_string())

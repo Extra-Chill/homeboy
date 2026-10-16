@@ -21,7 +21,7 @@ pub use routes::{list_routes, register_route, remove_route, status_for_host};
 pub use serve::serve;
 pub use types::{
     PreviewIngressInstallOptions, PreviewIngressInstallPlan, PreviewIngressInstallStatusPlan,
-    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus,
+    PreviewIngressRoute, PreviewIngressServeSpec, PreviewIngressStatus, ServiceIdentity,
 };
 
 // Reachable through the public plan/status structs' fields.

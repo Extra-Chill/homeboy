@@ -70,7 +70,7 @@ pub(super) fn runner_api_execution_envelope(
     if !inline_secret_names.is_empty() {
         return Err(Error::validation_invalid_argument(
             "env",
-            "durable reverse-runner jobs cannot accept inline secret env values",
+            "durable runner jobs cannot accept inline secret env values",
             Some("durable_reverse_runner_inline_secret_env".to_string()),
             Some(vec![format!(
                 "Inline secret variables: {}",
@@ -242,8 +242,8 @@ mod tests {
     }
 
     #[test]
-    fn reverse_broker_envelope_carries_provider_credential_plan_without_inline_values() {
-        // Extra-Chill/homeboy#14382: the durable reverse-runner envelope must
+    fn durable_envelope_carries_provider_credential_plan_without_inline_values() {
+        // Extra-Chill/homeboy#14382: the durable runner envelope must
         // persist provider credentials as SecretEnvPlan references — names,
         // requirements, and provider credential provenance, never values.
         let mut plan = SecretEnvPlan::from_secret_env_names([
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn reverse_broker_envelope_rejects_inline_values_for_plan_names() {
+    fn durable_envelope_rejects_inline_values_for_plan_names() {
         let plan = SecretEnvPlan::from_secret_env_names([
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()
         ]);
